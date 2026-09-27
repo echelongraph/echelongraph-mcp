@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test on Node ${{ matrix.node }}, then test the packed tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json engines is ">=18": test the floor it promises and every LTS above it.
+        node: ["18", "20", "22", "24"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      # Testing dist/ is not testing what users install. Pack the package, then run the same
+      # suite against the tarball with only the tarball's own dependencies installed.
+      - name: Pack
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          NAME="$(npm pack --silent --pack-destination "$RUNNER_TEMP/pack" | tail -1)"
+          TARBALL="$RUNNER_TEMP/pack/$NAME"
+          [ -f "$TARBALL" ] || { echo "::error::npm pack produced no tarball"; exit 1; }
+          LIST="$(tar -tzf "$TARBALL")"
+          for f in package/LICENSE package/README.md package/server.json package/package.json package/dist/index.js; do
+            grep -qxF "$f" <<<"$LIST" || { echo "::error::$f is missing from the tarball"; exit 1; }
+          done
+          echo "$NAME  $(stat -c%s "$TARBALL") bytes  sha1=$(sha1sum "$TARBALL" | cut -d' ' -f1)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Unpack the tarball with its own dependencies
+        id: unpack
+        uses: ./.github/actions/unpack-tarball
+        with:
+          tarball: ${{ steps.pack.outputs.tarball }}
+
+      - name: Test the packed tarball
+        working-directory: ${{ steps.unpack.outputs.dir }}
+        # NODE_PATH is the other way an outside package can satisfy an import. Unset it.
+        run: env -u NODE_PATH node --test test/*.test.mjs

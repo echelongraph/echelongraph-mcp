@@ -1,0 +1,55 @@
+{
+  "name": "echelongraph-mcp",
+  "version": "1.0.3",
+  "mcpName": "io.echelongraph/echelongraph-mcp",
+  "description": "EchelonGraph CVE and internet-exposure data as an MCP server: CVEs with EchelonGraph multi-source scores, CISA-KEV and EPSS, plus a per-CVE internet-exposure footprint derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan). Free and keyless, for Claude, Cursor and any MCP client.",
+  "type": "module",
+  "bin": {
+    "echelongraph-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "server.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "smoke": "node test/smoke.mjs",
+    "test": "npm run build && node --test test/tools.test.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cve",
+    "vulnerability",
+    "security",
+    "kev",
+    "epss",
+    "exposure",
+    "echelongraph",
+    "claude",
+    "cursor"
+  ],
+  "author": "EchelonGraph",
+  "license": "MIT",
+  "homepage": "https://echelongraph.io/pulse/mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/echelongraph/echelongraph-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/echelongraph/echelongraph-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.echelongraph/echelongraph-mcp",
+  "title": "EchelonGraph CVE & Exposure",
+  "description": "CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.",
+  "websiteUrl": "https://echelongraph.io/pulse/mcp",
+  "repository": {
+    "url": "https://github.com/echelongraph/echelongraph-mcp",
+    "source": "github"
+  },
+  "version": "1.0.3",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "echelongraph-mcp",
+      "version": "1.0.3",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ECHELONGRAPH_API_BASE",
+          "description": "Override the API base URL (self-host or proxy).",
+          "isRequired": false,
+          "format": "string",
+          "default": "https://app.echelongraph.io"
+        },
+        {
+          "name": "ECHELONGRAPH_API_TIMEOUT_MS",
+          "description": "Per-request timeout in milliseconds. A slower answer is reported as a failed lookup, not as empty data.",
+          "isRequired": false,
+          "format": "number",
+          "default": "15000"
+        }
+      ]
+    }
+  ]
+}

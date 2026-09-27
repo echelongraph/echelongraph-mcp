@@ -1,0 +1,285 @@
+name: Release
+
+# Publishes echelongraph-mcp to npm when a vX.Y.Z tag is pushed, through npm trusted
+# publishing (OIDC): no npm token exists anywhere in this repository or its secrets.
+# https://docs.npmjs.com/trusted-publishers
+#
+# Three jobs, so the one that can mint a publish credential runs no dependency code:
+#   build    builds, tests, packs, and tests the PACKED TARBALL; uploads that tarball.
+#   publish  holds id-token: write. Downloads the tested tarball, checks it is byte for byte
+#            the one build tested, and publishes it with a provenance attestation.
+#   verify   reads the registry until it serves the version, and checks it serves the tested
+#            tarball with a provenance attestation that `npm audit signatures` verifies.
+#
+# npm versions are immutable and cannot be taken back, only superseded. Every check that can
+# refuse a release runs before the publish.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PACKAGE: echelongraph-mcp
+  REGISTRY: https://registry.npmjs.org
+
+jobs:
+  build:
+    name: Build, test, and test the packed tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tarball: ${{ steps.pack.outputs.name }}
+      sha1: ${{ steps.pack.outputs.sha1 }}
+      integrity: ${{ steps.pack.outputs.integrity }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the on-main check below needs main's history
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false # never cache in a release build
+
+      - name: The tag names the version in package.json, server.json and the lockfile
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::tag $TAG is not vMAJOR.MINOR.PATCH; this workflow publishes release versions only"; exit 1; }
+          VERSION="${TAG#v}"
+          # shellcheck disable=SC2016 # ${...} below is a JavaScript template literal
+          node -e '
+            const [want, name] = process.argv.slice(1);
+            const pkg = require("./package.json"), sj = require("./server.json"), lock = require("./package-lock.json");
+            const seen = {
+              "package.json name": [pkg.name, name],
+              "package.json version": [pkg.version, want],
+              "server.json version": [sj.version, want],
+              "server.json packages[0].version": [sj.packages?.[0]?.version, want],
+              "package-lock.json version": [lock.version, want],
+              "package-lock.json packages[\"\"].version": [lock.packages?.[""]?.version, want],
+            };
+            let bad = 0;
+            for (const [where, [got, exp]] of Object.entries(seen)) {
+              if (got === exp) console.log(`${where} = ${got}`);
+              else { console.log(`::error::${where} is ${got}; the tag says ${exp}`); bad++; }
+            }
+            process.exit(bad ? 1 : 0);
+          ' "$VERSION" "$PACKAGE"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: The tagged commit is on main
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$GITHUB_SHA is not on main. Release from a commit that main contains."; exit 1; }
+          echo "$GITHUB_SHA is on main"
+
+      - name: The version is not on npm yet
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$REGISTRY/$PACKAGE/$VERSION" || echo 000)"
+          case "$CODE" in
+            404) echo "$PACKAGE@$VERSION is free (404)" ;;
+            200) echo "::error::$PACKAGE@$VERSION is ALREADY PUBLISHED. npm versions are immutable; bump the version."; exit 1 ;;
+            *)   echo "::error::the registry answered $CODE for $PACKAGE/$VERSION, not a clear 'free'. Not publishing on an unclear answer."; exit 1 ;;
+          esac
+
+      # No dependency declares an install script; --ignore-scripts keeps it that way for the
+      # release build even if one starts to.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+
+      - name: Pack
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          NAME="$(npm pack --silent --pack-destination "$RUNNER_TEMP/pack" | tail -1)"
+          TARBALL="$RUNNER_TEMP/pack/$NAME"
+          [ -f "$TARBALL" ] || { echo "::error::npm pack produced no tarball"; exit 1; }
+          LIST="$(tar -tzf "$TARBALL")"
+          for f in package/LICENSE package/README.md package/server.json package/package.json package/dist/index.js; do
+            grep -qxF "$f" <<<"$LIST" || { echo "::error::$f is missing from the tarball"; exit 1; }
+          done
+          SHA1="$(sha1sum "$TARBALL" | cut -d' ' -f1)"
+          INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | base64 -w0)"
+          echo "$NAME  $(stat -c%s "$TARBALL") bytes  sha1=$SHA1  $INTEGRITY"
+          {
+            echo "name=$NAME"
+            echo "path=$TARBALL"
+            echo "sha1=$SHA1"
+            echo "integrity=$INTEGRITY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Unpack the tarball with its own dependencies
+        id: unpack
+        uses: ./.github/actions/unpack-tarball
+        with:
+          tarball: ${{ steps.pack.outputs.path }}
+
+      - name: Test the packed tarball
+        working-directory: ${{ steps.unpack.outputs.dir }}
+        run: env -u NODE_PATH node --test test/*.test.mjs
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tarball
+          path: ${{ steps.pack.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish the tested tarball with provenance
+    needs: build
+    runs-on: ubuntu-latest # trusted publishing supports GitHub-hosted runners only
+    timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # the OIDC token npm exchanges for a short-lived publish credential
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: The toolchain meets trusted publishing's minimums (Node 22.14.0, npm 11.5.1)
+        run: |
+          set -euo pipefail
+          NPM_VERSION="$(npm --version)"
+          echo "node $(node --version), npm $NPM_VERSION"
+          # shellcheck disable=SC2016 # ${...} below is a JavaScript template literal
+          node -e '
+            const atLeast = (v, min) => { const a = v.split(".").map(Number), b = min.split(".").map(Number);
+              for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]; return true; };
+            const bad = [];
+            if (!atLeast(process.versions.node, "22.14.0")) bad.push(`node ${process.versions.node} < 22.14.0`);
+            if (!atLeast(process.argv[1], "11.5.1")) bad.push(`npm ${process.argv[1]} < 11.5.1`);
+            if (bad.length) { console.log(`::error::trusted publishing needs ${bad.join(" and ")}`); process.exit(1); }
+          ' "$NPM_VERSION"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tarball
+          path: ${{ runner.temp }}/release
+
+      - name: The tarball is the one the build job tested
+        env:
+          NAME: ${{ needs.build.outputs.tarball }}
+          WANT_SHA1: ${{ needs.build.outputs.sha1 }}
+        run: |
+          set -euo pipefail
+          TARBALL="$RUNNER_TEMP/release/$NAME"
+          [ -f "$TARBALL" ] || { echo "::error::no $NAME in the downloaded artifact"; ls -la "$RUNNER_TEMP/release"; exit 1; }
+          GOT="$(sha1sum "$TARBALL" | cut -d' ' -f1)"
+          [ "$GOT" = "$WANT_SHA1" ] || { echo "::error::downloaded tarball sha1 $GOT, tested $WANT_SHA1"; exit 1; }
+          echo "$NAME sha1=$GOT, the tarball the build job tested"
+
+      - name: The version is still not on npm
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$REGISTRY/$PACKAGE/$VERSION" || echo 000)"
+          [ "$CODE" = 404 ] || { echo "::error::the registry answered $CODE for $PACKAGE/$VERSION, not 404. Not publishing."; exit 1; }
+
+      # No NODE_AUTH_TOKEN: npm exchanges this job's GitHub OIDC token for a short-lived
+      # credential scoped to this package. --provenance makes the publish FAIL, rather than
+      # ship without an attestation, if provenance cannot be generated.
+      - name: Publish
+        working-directory: ${{ runner.temp }}/release
+        env:
+          NAME: ${{ needs.build.outputs.tarball }}
+        run: npm publish "./$NAME" --provenance --access public
+
+  verify:
+    name: Verify what the registry serves
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      # The registry lags a publish: `npm publish` has printed success while the version
+      # document answered 404 for about six minutes. Poll for up to 10 minutes, then check
+      # the registry serves the tarball the build job tested, with a provenance attestation.
+      # If this step fails, do NOT re-publish: the version may exist, and versions are immutable.
+      - name: The registry serves the tested tarball with provenance
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          WANT_SHA1: ${{ needs.build.outputs.sha1 }}
+          WANT_INTEGRITY: ${{ needs.build.outputs.integrity }}
+        run: |
+          set -euo pipefail
+          DOC=""
+          for i in $(seq 1 60); do
+            DOC="$(curl -sf --max-time 20 "$REGISTRY/$PACKAGE/$VERSION" || true)"
+            if [ -n "$DOC" ] && [ "$(node -e 'try{process.stdout.write(String(JSON.parse(process.argv[1]).version||""))}catch{}' "$DOC")" = "$VERSION" ]; then
+              echo "registry serves $PACKAGE@$VERSION (attempt $i of 60)"
+              break
+            fi
+            DOC=""
+            sleep 10
+          done
+          [ -n "$DOC" ] || { echo "::error::PUBLISH UNCONFIRMED after 10 min: the registry has not served $PACKAGE@$VERSION. Do NOT re-publish; check npm view first."; exit 1; }
+          # shellcheck disable=SC2016 # ${...} below is a JavaScript template literal
+          node -e '
+            const d = JSON.parse(process.argv[1]);
+            const [sha1, integrity] = process.argv.slice(2);
+            const dist = d.dist || {};
+            const bad = [];
+            if (dist.shasum !== sha1) bad.push(`shasum ${dist.shasum}, tested ${sha1}`);
+            if (dist.integrity !== integrity) bad.push(`integrity ${dist.integrity}, tested ${integrity}`);
+            const pt = dist.attestations?.provenance?.predicateType;
+            if (pt !== "https://slsa.dev/provenance/v1") bad.push(`provenance predicateType ${pt}, want https://slsa.dev/provenance/v1`);
+            if (bad.length) { for (const b of bad) console.log(`::error::REGISTRY SERVES A DIFFERENT TARBALL OR NO PROVENANCE: ${b}`); process.exit(1); }
+            console.log(`OK: shasum ${dist.shasum} and integrity match the tested tarball; provenance ${pt} at ${dist.attestations.url}`);
+          ' "$DOC" "$WANT_SHA1" "$WANT_INTEGRITY"
+
+      # What a user can run to check the package: install it and verify its registry signature
+      # and provenance attestation. The packument can lag the version document, so the install
+      # is retried.
+      - name: npm audit signatures verifies the published package
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          DIR="$(mktemp -d "$RUNNER_TEMP/audit.XXXXXX")"
+          cd "$DIR"
+          printf '{"name":"release-verify","private":true}\n' > package.json
+          for i in $(seq 1 20); do
+            if npm install --ignore-scripts --no-audit --no-fund "$PACKAGE@$VERSION"; then break; fi
+            [ "$i" = 20 ] && { echo "::error::could not install $PACKAGE@$VERSION after 20 tries"; exit 1; }
+            sleep 30
+          done
+          npm audit signatures
+          npm audit signatures --json --include-attestations > audit.json
+          # shellcheck disable=SC2016 # ${...} below is a JavaScript template literal
+          node -e '
+            const r = require(process.argv[1]); const [name, version] = process.argv.slice(2);
+            if ((r.invalid || []).length || (r.missing || []).length) { console.log("::error::invalid or missing signatures: " + JSON.stringify({ invalid: r.invalid, missing: r.missing })); process.exit(1); }
+            const v = (r.verified || []).find((x) => x.name === name && x.version === version);
+            const pt = v?.attestations?.provenance?.predicateType;
+            if (pt !== "https://slsa.dev/provenance/v1") { console.log(`::error::npm audit signatures did not verify a provenance attestation for ${name}@${version}`); process.exit(1); }
+            console.log(`OK: npm audit signatures verified ${name}@${version}: registry signature and provenance attestation (${pt})`);
+          ' "$DIR/audit.json" "$PACKAGE" "$VERSION"

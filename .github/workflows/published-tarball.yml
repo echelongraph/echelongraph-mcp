@@ -1,0 +1,154 @@
+name: Published tarball
+
+# Runs this repository's test suite against what npm actually serves as
+# echelongraph-mcp@latest, installed with only its own dependencies, the way `npx` installs it.
+# A published build once diverged from its source for months because nothing tested the
+# artifact users receive. Daily, this catches that divergence, and a new release of a
+# dependency (resolved fresh from the package's ranges) that breaks the published package.
+#
+# The suite comes from the checked-out ref (main, on the schedule), not from the release's tag.
+# So a test added on main for a change not yet released fails this job until that release
+# ships: that is the divergence it exists to report.
+#
+# On failure it opens an issue titled "Published echelongraph-mcp@latest fails its own test
+# suite", or comments on the open one.
+#
+# Control: run it by hand with `control: true`. The run blanks the Shodan ownership sentence
+# in the unpacked dist/index.js, so the suite MUST fail and the issue MUST be opened or
+# commented on, marked as a control. A control run whose suite passes fails loudly: this job
+# would then be unable to see a broken release. A control that cannot find the sentence to
+# blank fails without alerting: a broken control proves nothing.
+#
+# GitHub disables scheduled workflows in a public repository after 60 days without activity
+# in it; re-enable this one from the Actions tab if that happens.
+
+on:
+  schedule:
+    - cron: "23 6 * * *" # daily, 06:23 UTC
+  workflow_dispatch:
+    inputs:
+      control:
+        description: "Control run: corrupt the unpacked package so the suite must fail and the alert must fire"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: published-tarball
+  cancel-in-progress: false
+
+env:
+  PACKAGE: echelongraph-mcp
+  CONTROL: ${{ github.event_name == 'workflow_dispatch' && inputs.control && 'true' || 'false' }}
+  ISSUE_TITLE: Published echelongraph-mcp@latest fails its own test suite
+
+jobs:
+  published-tarball:
+    name: Test echelongraph-mcp@latest as npm serves it
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "lts/*" # what a user installing Node today gets
+          package-manager-cache: false
+
+      - name: Pack echelongraph-mcp@latest from the registry
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          cd "$RUNNER_TEMP/pack"
+          NAME="$(npm pack "$PACKAGE@latest" --silent | tail -1)"
+          TARBALL="$RUNNER_TEMP/pack/$NAME"
+          [ -f "$TARBALL" ] || { echo "::error::npm pack $PACKAGE@latest produced no tarball"; exit 1; }
+          VERSION="$(tar -xzOf "$TARBALL" package/package.json | node -e 'let r="";process.stdin.on("data",(d)=>r+=d).on("end",()=>process.stdout.write(JSON.parse(r).version))')"
+          echo "$PACKAGE@latest is $VERSION: $NAME  $(stat -c%s "$TARBALL") bytes  sha1=$(sha1sum "$TARBALL" | cut -d' ' -f1)"
+          {
+            echo "path=$TARBALL"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Unpack it with its own dependencies
+        id: unpack
+        uses: ./.github/actions/unpack-tarball
+        with:
+          tarball: ${{ steps.pack.outputs.path }}
+
+      - name: "Control: blank the Shodan ownership sentence in dist/index.js"
+        id: control
+        if: env.CONTROL == 'true'
+        working-directory: ${{ steps.unpack.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016 # ${...} below is a JavaScript template literal
+          node -e '
+            const fs = require("fs");
+            const f = "dist/index.js";
+            const sentence = "Shodan data is owned by Shodan, which holds its copyright (© Shodan).";
+            const src = fs.readFileSync(f, "utf8");
+            const before = src.split(sentence).length - 1;
+            if (before === 0) { console.log(`::error::BROKEN CONTROL: the sentence is not in ${f}, so there is nothing to corrupt and a failure would prove nothing.`); process.exit(1); }
+            fs.writeFileSync(f, src.split(sentence).join(""));
+            const after = fs.readFileSync(f, "utf8").split(sentence).length - 1;
+            if (after !== 0) { console.log(`::error::BROKEN CONTROL: ${after} copies remain after blanking.`); process.exit(1); }
+            console.log(`CONTROL: blanked ${before} copy of the Shodan ownership sentence in ${f}. The suite must now fail.`);
+          '
+
+      - name: Run the test suite against the published package
+        id: test
+        working-directory: ${{ steps.unpack.outputs.dir }}
+        run: env -u NODE_PATH node --test test/*.test.mjs
+
+      # A real run alerts on any failure: a package users cannot pack, install or pass its own
+      # suite with is broken for them too. A control alerts only when the suite itself failed.
+      - name: Open or comment on the alert issue
+        if: failure() && (env.CONTROL != 'true' || steps.test.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.pack.outputs.version }}
+          PACK: ${{ steps.pack.outcome }}
+          UNPACK: ${{ steps.unpack.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BODY="$RUNNER_TEMP/alert.md"
+          {
+            if [ "$CONTROL" = true ]; then
+              echo "**CONTROL RUN. Not a real failure.** This run deliberately blanked the Shodan ownership sentence in the unpacked \`dist/index.js\` to prove this alert fires. Close this issue if it has no other comments."
+              echo
+            fi
+            echo "This run's test of the package npm serves as \`$PACKAGE@latest\` failed."
+            echo
+            echo "- Version tested: \`${VERSION:-unknown}\`"
+            echo "- Test suite from: \`$GITHUB_SHA\` ($GITHUB_REF_NAME)"
+            echo "- Pack from the registry: $PACK"
+            echo "- Unpack and install its dependencies: $UNPACK"
+            echo "- Test suite: ${TEST:-skipped}"
+            echo "- Run: $RUN_URL"
+          } > "$BODY"
+          # Match the exact title among open issues. Not the search API: its index lags a
+          # just-opened issue, and a second alert would open a duplicate.
+          NUMBER="$(gh issue list --state open --limit 1000 --json number,title \
+            | node -e 'let r="";process.stdin.on("data",(d)=>r+=d).on("end",()=>{const m=JSON.parse(r).filter((i)=>i.title===process.env.ISSUE_TITLE).sort((a,b)=>a.number-b.number)[0];process.stdout.write(m?String(m.number):"")})')"
+          if [ -n "$NUMBER" ]; then
+            gh issue comment "$NUMBER" --body-file "$BODY"
+            echo "commented on #$NUMBER"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body-file "$BODY"
+          fi
+
+      - name: "Control: the suite must have failed"
+        if: always() && env.CONTROL == 'true' && steps.test.outcome == 'success'
+        run: |
+          echo "::error::CONTROL FAILED: the suite PASSED against a package with the Shodan ownership sentence blanked. This job cannot detect a broken release."
+          exit 1

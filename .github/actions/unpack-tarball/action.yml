@@ -1,0 +1,69 @@
+name: Unpack an npm tarball the way a user receives it
+description: >-
+  Extracts an npm tarball into a fresh directory, installs only the tarball's own production
+  dependencies, proves the MCP SDK resolves from inside it, and copies the test suite in, so
+  the suite can run against exactly what `npx echelongraph-mcp` installs. Refuses when a
+  node_modules above that directory could satisfy an import the package itself is missing.
+inputs:
+  tarball:
+    description: Path to the .tgz to unpack (from `npm pack`).
+    required: true
+  tests:
+    description: The test directory to copy into the unpacked package.
+    required: false
+    default: test
+outputs:
+  dir:
+    description: The unpacked package directory, holding package.json, dist/, node_modules/ and test/.
+    value: ${{ steps.unpack.outputs.dir }}
+runs:
+  using: composite
+  steps:
+    - id: unpack
+      shell: bash
+      env:
+        TARBALL: ${{ inputs.tarball }}
+        TESTS: ${{ inputs.tests }}
+      run: |
+        set -euo pipefail
+        [ -f "$TARBALL" ] || { echo "::error::no tarball at $TARBALL"; exit 1; }
+        # A release with no test run against its tarball is how a published build once
+        # diverged from its source for months unnoticed. No tests, no pass.
+        [ -d "$TESTS" ] || { echo "::error::no test directory at $TESTS"; exit 1; }
+        TESTS_ABS="$(cd "$TESTS" && pwd)"
+
+        WORK="$(mktemp -d "${RUNNER_TEMP:-/tmp}/tarball.XXXXXX")"
+        # A test that passes on an ancestor's packages is testing the ancestor: Node resolves
+        # a bare import by walking up the directory tree, so a node_modules anywhere above
+        # the unpacked package can supply a dependency the package itself does not declare.
+        _d="$WORK"
+        while :; do
+          if [ -d "$_d/node_modules" ]; then
+            echo "::error::$_d/node_modules exists above the unpacked package; it would mask a dependency missing from the package."
+            exit 1
+          fi
+          [ "$_d" = "/" ] && break
+          _d="$(dirname "$_d")"
+        done
+
+        tar -xzf "$TARBALL" -C "$WORK"
+        PKG="$WORK/package"
+        [ -f "$PKG/package.json" ] || { echo "::error::the tarball has no package/package.json"; exit 1; }
+        echo "tarball contents:"
+        tar -tzf "$TARBALL" | sed 's/^/  /'
+
+        # What a user's `npx echelongraph-mcp` installs: the tarball's own production
+        # dependencies, resolved fresh from its package.json, nothing from this repository.
+        ( cd "$PKG" && npm install --omit=dev --ignore-scripts --no-audit --no-fund --no-package-lock )
+        [ -f "$PKG/node_modules/@modelcontextprotocol/sdk/package.json" ] || {
+          echo "::error::@modelcontextprotocol/sdk did not install inside the unpacked package"; exit 1; }
+        mkdir "$PKG/test"
+        cp -R "$TESTS_ABS/." "$PKG/test/"
+        # Prove the tests' own import of the SDK resolves from inside the package.
+        RESOLVED="$(cd "$PKG/test" && env -u NODE_PATH node -e 'process.stdout.write(require.resolve("@modelcontextprotocol/sdk/client/index.js", { paths: [process.cwd()] }))')"
+        case "$RESOLVED" in
+          "$PKG/node_modules/"*) ;;
+          *) echo "::error::the SDK resolved from $RESOLVED, outside $PKG/node_modules"; exit 1 ;;
+        esac
+        echo "deps installed from the tarball's own package.json (sdk $(node -p "require('$PKG/node_modules/@modelcontextprotocol/sdk/package.json').version"), resolved at $RESOLVED)"
+        echo "dir=$PKG" >> "$GITHUB_OUTPUT"
