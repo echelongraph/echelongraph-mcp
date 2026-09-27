@@ -102,6 +102,113 @@ const PROD_SHADOW_RELAYED = {
   },
   authentication: { observed: 8065, not_determined: 9307 },
 };
+// #2313 items 6 and 7: the other three radars' stats answers, shaped field for field by the
+// Go structs' json tags at HEAD (core-backend/internal):
+//   kev_exposure       kevexposure/store.go Stats, ProductCount, CVECount, CountryCount,
+//                      KEVAddition, TrendPoint (omitempty: severity, cvss_v3_score, epss_score,
+//                      ransomware, vuln_name, added_date)
+//   exposed_databases  exposeddb/store.go Stats, EngineCount, CountryCount
+//   leaked_credentials leakedcreds/store.go Stats, ProviderCount, TypeCount
+// Each also carries last_run_at since #2335 (`json:"last_run_at,omitempty"`): when that radar
+// last COMPLETED a check, read from poller_run_state (pollerlock/published.go). The three are
+// distinct and none equals generated_at (when the 60 s stats cache recomputed the totals), so
+// a reader that relays one radar's stamp, or generated_at, as another's is caught.
+const LAST_RUN = {
+  kev_exposure: "2026-09-27T03:12:44Z",
+  exposed_databases: "2026-09-27T02:18:06Z",
+  leaked_credentials: "2026-09-27T08:41:15Z",
+};
+// newest_kev is the audit's case: of 15 rows, one CVE the radar tracks with 142 services on
+// record (CVE-2026-87902, tracked:true on /kev-exposure/cve/:id), and 14 at exposed_hosts 0,
+// every one tracked:false on that endpoint (CVE-2026-65660, -94127, -76460 and -71362 are the
+// ids the audit measured; the other ten stand in for the rest). A 0 there is the stats query's
+// LEFT JOIN default, COALESCE(e.h, 0), not a measurement.
+const KEV_TRACKED = "CVE-2026-87902";
+const KEV_UNTRACKED = [
+  "CVE-2026-65660", "CVE-2026-94127", "CVE-2026-76460", "CVE-2026-71362", "CVE-2026-60311", "CVE-2026-58002", "CVE-2026-55519",
+  "CVE-2026-52870", "CVE-2026-49133", "CVE-2026-47401", "CVE-2026-44018", "CVE-2026-41276", "CVE-2026-39954", "CVE-2026-36087",
+];
+const NEWEST_KEV = [
+  { cve_id: KEV_TRACKED, added_date: "2026-09-25", severity: "CRITICAL", cvss_v3_score: 9.8, epss_score: 0.912, ransomware: true, vuln_name: "Fortinet FortiOS Out-of-Bounds Write", exposed_hosts: 142 },
+  ...KEV_UNTRACKED.map((cve_id, i) => ({
+    cve_id,
+    added_date: `2026-09-${String(24 - i).padStart(2, "0")}`,
+    // omitempty: a record with no CVSS v3 score or no severity sends neither (store.go KEVAddition).
+    ...(i % 5 === 4 ? {} : { severity: i % 2 ? "HIGH" : "CRITICAL", cvss_v3_score: i % 2 ? 8.1 : 9.1 }),
+    epss_score: Number((0.02 + i / 100).toFixed(2)),
+    vuln_name: `Vendor ${i + 1} product vulnerability`,
+    exposed_hosts: 0,
+  })),
+];
+const KEV_TREND = Array.from({ length: 12 }, (_, i) => ({
+  week: new Date(Date.UTC(2026, 6, 6 + 7 * i)).toISOString().slice(0, 10),
+  new_exposures: 2400 + 13 * i,
+}));
+const PROD_KEV_STATS = {
+  distinct_hosts: 25113,
+  kev_cves_exposed: 54,
+  correlations: 31887,
+  ransomware_cves: 19,
+  ransomware_hosts: 6655,
+  top_products: [
+    { product: "http_server", hosts: 9120 },
+    { product: "exchange_server", hosts: 4410 },
+    { product: "fortios", hosts: 2891 },
+  ],
+  top_cves: [
+    { cve_id: CVE, hosts: 6213, severity: "HIGH", cvss_v3_score: 7.5, epss_score: 0.94 },
+    { cve_id: "CVE-2021-26855", hosts: 3980, severity: "CRITICAL", cvss_v3_score: 9.8, epss_score: 0.97, ransomware: true },
+    { cve_id: "CVE-2024-21762", hosts: 2702, severity: "CRITICAL", cvss_v3_score: 9.8, epss_score: 0.93, ransomware: true },
+  ],
+  top_countries: [
+    { country: "United States", hosts: 7021 },
+    { country: "Germany", hosts: 1893 },
+    { country: "China", hosts: 1655 },
+  ],
+  newest_kev: NEWEST_KEV,
+  trend: KEV_TREND,
+  generated_at: "2026-09-27T09:00:00Z",
+  last_run_at: LAST_RUN.kev_exposure,
+};
+const PROD_EXPOSED_DB_STATS = {
+  distinct_hosts: 7380,
+  engines: 10,
+  pii_likely: 412,
+  pci_likely: 37,
+  top_engines: [
+    { engine: "redis", hosts: 2410 },
+    { engine: "elasticsearch", hosts: 1733 },
+    { engine: "mongodb", hosts: 1250 },
+    { engine: "grafana", hosts: 690 },
+  ],
+  top_countries: [
+    { country: "United States", hosts: 2204 },
+    { country: "China", hosts: 1310 },
+  ],
+  generated_at: "2026-09-27T09:00:00Z",
+  last_run_at: LAST_RUN.exposed_databases,
+};
+const PROD_LEAKED_CREDS_STATS = {
+  distinct_repos: 303,
+  distinct_secrets: 507,
+  total: 531,
+  top_providers: [
+    { provider: "aws", count: 212 },
+    { provider: "github", count: 141 },
+    { provider: "slack", count: 77 },
+  ],
+  top_types: [
+    { secret_type: "AWS Access Key ID", count: 188 },
+    { secret_type: "GitHub Personal Access Token", count: 139 },
+  ],
+  generated_at: "2026-09-27T09:00:00Z",
+  last_run_at: LAST_RUN.leaked_credentials,
+};
+// What exposure_radar must relay for newest_kev: the tracked row with its count, and every
+// untracked row marked not_assessed with no count at all.
+const NEWEST_KEV_RELAYED = NEWEST_KEV.map(({ exposed_hosts, ...r }) =>
+  r.cve_id === KEV_TRACKED ? { ...r, exposure_state: "exposed", exposed_hosts } : { ...r, exposure_state: "not_assessed" },
+);
 // Shodan's terms ask that materials based on Shodan information "clearly indicate Shodan's
 // ownership and copyright" (#2306, reopened). The package's exact sentence, pinned here.
 const SHODAN_OWNERSHIP = "Shodan data is owned by Shodan, which holds its copyright (© Shodan).";
@@ -160,18 +267,31 @@ const BODIES = {
   [`/api/v1/public/kev-exposure/cve/${CVE_REJECTED}`]: {
     ok: { status: 400, body: { error: "invalid CVE id", cve_id: CVE_REJECTED } },
   },
+  // An empty observation table still answers newest_kev: those rows come from the CVE records,
+  // LEFT JOINed to the observations, so every one reads exposed_hosts 0.
   "/api/v1/public/kev-exposure/stats": {
-    ok: { distinct_hosts: 25113, kev_cves_exposed: 54, ransomware_hosts: 6655 },
-    empty: { distinct_hosts: 0, kev_cves_exposed: 0, ransomware_hosts: 0 },
+    ok: PROD_KEV_STATS,
+    empty: { distinct_hosts: 0, kev_cves_exposed: 0, correlations: 0, ransomware_cves: 0, ransomware_hosts: 0, top_products: [], top_cves: [], top_countries: [], newest_kev: NEWEST_KEV.map((r) => ({ ...r, exposed_hosts: 0 })), trend: [], generated_at: "2026-09-27T09:00:00Z" },
   },
   "/api/v1/public/exposed-databases/stats": {
-    ok: { distinct_hosts: 7380, engines: 10 },
-    empty: { distinct_hosts: 0, engines: 0 },
+    ok: PROD_EXPOSED_DB_STATS,
+    empty: { distinct_hosts: 0, engines: 0, pii_likely: 0, pci_likely: 0, top_engines: [], top_countries: [], generated_at: "2026-09-27T09:00:00Z" },
   },
   "/api/v1/public/leaked-credentials/stats": {
-    ok: { distinct_repos: 303, distinct_secrets: 507, total: 531 },
-    empty: { distinct_repos: 0, distinct_secrets: 0, total: 0 },
+    ok: PROD_LEAKED_CREDS_STATS,
+    empty: { distinct_repos: 0, distinct_secrets: 0, total: 0, top_providers: [], top_types: [], generated_at: "2026-09-27T09:00:00Z" },
   },
+  // The per-CVE answers for newest_kev's CVEs, as /kev-exposure/cve/:id gives them: tracked
+  // only where the radar holds services (store.go trackedVerdict), tracked:false elsewhere.
+  [`/api/v1/public/kev-exposure/cve/${KEV_TRACKED}`]: {
+    ok: { cve_id: KEV_TRACKED, exposed_hosts: 142, countries: 17, kev_listed: true, kev_seen_in_observations: true, kev_catalog_listed: true, tracked: true, method: BACKEND_METHOD, ransomware: true, top_countries: [{ country: "United States", hosts: 40 }], top_products: [{ product: "fortios", hosts: 142 }], last_seen: "2026-09-27T03:00:00Z", generated_at: "2026-09-27T09:00:00Z" },
+  },
+  ...Object.fromEntries(
+    KEV_UNTRACKED.map((id) => [
+      `/api/v1/public/kev-exposure/cve/${id}`,
+      { ok: { cve_id: id, exposed_hosts: 0, countries: 0, kev_listed: false, kev_seen_in_observations: false, kev_catalog_listed: true, tracked: false, method: BACKEND_METHOD, ransomware: false, top_countries: [], top_products: [], last_seen: null, generated_at: "2026-09-27T09:00:00Z" } },
+    ]),
+  ),
   // stats.total counts every observation; the confirmed-exposed count is the sum of
   // visible_by_category (2,000 here, as on 2026-09-27 against a total of 36,222).
   "/api/v1/public/shadow-ai-radar/stats": {
@@ -293,7 +413,7 @@ const SHADOW_AI_LABELLED = {
 };
 // The objects whose keys are data (category names), not field names.
 const SHADOW_AI_MAPS = new Set(["observed.by_category", "confirmed_exposed.by_category"]);
-const childPath = (p, k) => (SHADOW_AI_MAPS.has(p) ? `${p}.*` : p ? `${p}.${k}` : k);
+const childPath = (p, k) => (SHADOW_AI_MAPS.has(p) || SHADOW_AI_MAPS.has(p.replace(/^shadow_ai\./, "")) ? `${p}.*` : p ? `${p}.${k}` : k);
 // Every path to a number, and every field-name path, under a relayed value.
 function numericPaths(v, p = "", out = new Set()) {
   if (typeof v === "number") out.add(p);
@@ -301,6 +421,57 @@ function numericPaths(v, p = "", out = new Set()) {
   else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) numericPaths(x, childPath(p, k), out);
   return out;
 }
+
+// #2313 item 7: the same for the whole exposure_radar result, all four radars. Every numeric
+// path, normalised as above, mapped to the name the note, the description and the README label
+// it by. Each label was checked against the Go source at HEAD (core-backend/internal):
+//   kev_exposure.distinct_hosts     kevexposure/store.go:413 COUNT(DISTINCT host), host = "ip:port" (poller.go:355)
+//   kev_exposure.kev_cves_exposed   store.go:413 COUNT(DISTINCT cve_id)
+//   kev_exposure.correlations       store.go:413 COUNT(*): one row per (host, CVE), obsID(host, cve) store.go:171
+//   kev_exposure.ransomware_cves    store.go:414 COUNT(DISTINCT cve_id) FILTER (WHERE ransomware)
+//   kev_exposure.ransomware_hosts   store.go:415 COUNT(DISTINCT host) FILTER (WHERE ransomware): services
+//   kev_exposure.top_products       store.go:420-421 COUNT(DISTINCT host) per product, LIMIT 12
+//   kev_exposure.top_cves           store.go:432-434 COUNT(DISTINCT host), MAX(cvss_v3), MAX(epss_score), LIMIT 12
+//   kev_exposure.top_countries      store.go:452-453 COUNT(DISTINCT host) per country, LIMIT 10
+//   kev_exposure.newest_kev         store.go:465-474 cves rows LEFT JOIN observation counts, COALESCE(e.h,0), LIMIT 15
+//   kev_exposure.trend              store.go:486-489 COUNT(*) per date_trunc('week', first_seen): pairs, 12 weeks
+//   exposed_databases.distinct_hosts / .engines   exposeddb/store.go:406-408, host = "ip:port" (poller.go:557)
+//   exposed_databases.pii_likely / .pci_likely    exposeddb/store.go:410-419, gate = classify.go:75-112, names only classify.go:8-23
+//   exposed_databases.top_engines / .top_countries exposeddb/store.go:421-423, 433-435 (LIMIT 15 / 10)
+//   leaked_credentials.total / .distinct_secrets / .distinct_repos   leakedcreds/store.go:205-207,
+//                                   one row per (repo, secret) store.go:46-50
+//   leaked_credentials.top_providers / .top_types leakedcreds/store.go:209-221 COUNT(*), LIMIT 15
+//   none validated                  leakedcreds/detect.go:29-33 ("verified" = structural, never live)
+const RADAR_LABELLED = {
+  "kev_exposure.distinct_hosts": "kev_exposure.distinct_hosts",
+  "kev_exposure.ransomware_hosts": "kev_exposure.ransomware_hosts",
+  "kev_exposure.kev_cves_exposed": "kev_exposure.kev_cves_exposed",
+  "kev_exposure.ransomware_cves": "kev_exposure.ransomware_cves",
+  "kev_exposure.correlations": "kev_exposure.correlations",
+  "kev_exposure.top_products[].hosts": "kev_exposure.top_products",
+  "kev_exposure.top_countries[].hosts": "kev_exposure.top_countries",
+  "kev_exposure.top_cves[].hosts": "kev_exposure.top_cves",
+  "kev_exposure.top_cves[].cvss_v3_score": "kev_exposure.top_cves[].cvss_v3_score",
+  "kev_exposure.top_cves[].epss_score": "kev_exposure.top_cves[].epss_score",
+  "kev_exposure.trend[].new_exposures": "kev_exposure.trend",
+  "kev_exposure.newest_kev[].exposed_hosts": "kev_exposure.newest_kev[].exposed_hosts",
+  "kev_exposure.newest_kev[].cvss_v3_score": "kev_exposure.newest_kev[].cvss_v3_score",
+  "kev_exposure.newest_kev[].epss_score": "kev_exposure.newest_kev[].epss_score",
+  "exposed_databases.distinct_hosts": "exposed_databases.distinct_hosts",
+  "exposed_databases.engines": "exposed_databases.engines",
+  "exposed_databases.pii_likely": "exposed_databases.pii_likely",
+  "exposed_databases.pci_likely": "exposed_databases.pci_likely",
+  "exposed_databases.top_engines[].hosts": "exposed_databases.top_engines",
+  "exposed_databases.top_countries[].hosts": "exposed_databases.top_countries",
+  "leaked_credentials.total": "leaked_credentials.total",
+  "leaked_credentials.distinct_secrets": "leaked_credentials.distinct_secrets",
+  "leaked_credentials.distinct_repos": "leaked_credentials.distinct_repos",
+  "leaked_credentials.top_providers[].count": "leaked_credentials.top_providers",
+  "leaked_credentials.top_types[].count": "leaked_credentials.top_types",
+  ...Object.fromEntries(Object.entries(SHADOW_AI_LABELLED).map(([p, name]) => [`shadow_ai.${p}`, name])),
+};
+// The numeric paths of a relayed exposure_radar result that carry no label.
+const unlabelledIn = (data) => [...numericPaths(data)].filter((p) => !(p in RADAR_LABELLED)).sort();
 function keyPaths(v, p = "", out = new Set()) {
   if (Array.isArray(v)) for (const x of v) keyPaths(x, `${p}[]`, out);
   else if (v !== null && typeof v === "object") {
@@ -844,12 +1015,14 @@ describe("against a stub API", () => {
       assert.doesNotMatch(d, /exposed AI services/, d);
       assert.match(d, /shadow_ai\.observed counts every Certificate Transparency or Shodan observation on record, whatever its verification state: its numbers are observed, not exposed\./, d);
       assert.match(d, /confirmed_exposed\.total is the sum of confirmed_exposed\.by_category/, d);
-      assert.match(d, /Only confirmed_exposed counts exposed services\./, d);
+      // #2313: the same result now carries kev_exposure and exposed_databases, which do count
+      // exposed services, so the rule is scoped to shadow_ai.
+      assert.match(d, /Of the shadow_ai numbers, only confirmed_exposed counts exposed services\./, d);
     });
     it("the note calls confirmed_exposed.total (the sum of the API's visible_by_category) confirmed exposed", () => {
       assert.match(note, /Shadow AI confirmed exposed: 2000 \(confirmed_exposed\.total, the sum of confirmed_exposed\.by_category: services EchelonGraph's probes found answering without an authentication gate/, note);
       assert.match(note, /, 201 of them first recorded in the last 24 h \(confirmed_exposed\.last_24h\)\./, note);
-      assert.match(note, /Only confirmed_exposed counts exposed services\./, note);
+      assert.match(note, /Of the shadow_ai numbers, only confirmed_exposed counts exposed services\./, note);
       assert.equal(data.shadow_ai.confirmed_exposed.total, 2000);
     });
     it("the note never calls observed.total exposed", () => {
@@ -1050,7 +1223,8 @@ describe("against a stub API", () => {
       assert.deepEqual(unlabelled, [], `numeric fields relayed with no label: ${unlabelled.join(", ")}`);
       assert.deepEqual(found, Object.keys(SHADOW_AI_LABELLED).sort(), "the labelled fields are still all relayed");
       assert.deepEqual(relayed.poller, { running: true, last_run_at: FLEET_RUNNING.last_run_at });
-      assert.match(n, /Left out of shadow_ai because this version of the tool cannot label them: coverage, stats\.exposed_total, stats\.new_count, stats\.visible_by_country\./, n);
+      // #2313: a field added inside a ranked row or the daily series is named too.
+      assert.match(n, /Left out of shadow_ai because this version of the tool cannot label them: coverage, stats\.exposed_total, stats\.new_count, stats\.visible_by_country, stats\.trend_30d\[\]\.visible, stats\.top_products\[\]\.visible\./, n);
       assert.equal(assertNoObservedNumberCalledExposed("note", n, relayed) >= 7, true);
     });
     it("a count in an unexpected shape is left out whole and named, never relayed partly", async () => {
@@ -1078,6 +1252,425 @@ describe("against a stub API", () => {
       assert.match(n, /Shadow AI: the answer carries no usable stats\.visible_by_category, so it does not say how many services are confirmed exposed; confirmed_exposed\.last_24h \(201\) counts confirmed-exposed services first recorded in the last 24 h\./, n);
       assert.match(n, /Shadow AI observed: 36222 \(observed\.total\)/, n);
       assertNoObservedNumberCalledExposed("note", n, relayed);
+    });
+  });
+
+  // #2313 items 6 and 7 (added from the #2307 re-close audit): kev_exposure.newest_kev relayed
+  // 14 of 15 rows as exposed_hosts 0 for CVEs /kev-exposure/cve/:id calls tracked:false, and
+  // 16 numeric paths of the other three radars reached the agent with no label; an injected
+  // candidate_hosts: 99999 went through unnamed.
+  describe("#2313: exposure_radar labels every number of every radar, and relays no not-assessed zero", () => {
+    let tools, res, data, note, description, readme;
+    const KEV_PATH = "/api/v1/public/kev-exposure/stats";
+    const EDB_PATH = "/api/v1/public/exposed-databases/stats";
+    const LC_PATH = "/api/v1/public/leaked-credentials/stats";
+    // Calls exposure_radar with some stats answers replaced (path -> body).
+    const radarWith = async (overrides) => {
+      Object.assign(stub.state.overrides, overrides);
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        assert.notEqual(r.isError, true, brief(r));
+        return { relayed: JSON.parse(r.content[0].text), n: noteOf(r) };
+      } finally {
+        for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+      }
+    };
+    // The sentences of a note that name a given CVE id.
+    const sentencesNaming = (n, id) => sentencesOf(n).filter((s) => s.includes(id));
+    before(async () => {
+      stub.state.mode = "ok";
+      ({ tools } = await client.listTools());
+      res = await client.callTool({ name: "exposure_radar", arguments: {} });
+      data = JSON.parse(res.content[0].text);
+      note = noteOf(res);
+      description = tools.find((t) => t.name === "exposure_radar").description;
+      readme = readPkgFile("README.md");
+    });
+
+    // ── item 7: every numeric path labelled or dropped ──
+    it("every numeric path in the whole result, all four radars, is a labelled one, and every labelled one is there", () => {
+      assert.deepEqual(unlabelledIn(data), [], `numeric fields relayed with no label: ${unlabelledIn(data).join(", ")}`);
+      // Not vacuous: the production-shaped answers reach every labelled path of every radar.
+      assert.deepEqual([...numericPaths(data)].sort(), Object.keys(RADAR_LABELLED).sort());
+      for (const radar of ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"]) {
+        assert.ok([...numericPaths(data)].some((p) => p.startsWith(`${radar}.`)), `no number from ${radar}`);
+      }
+    });
+    it("each label is named in the note, the tool description and the README", () => {
+      for (const name of new Set(Object.values(RADAR_LABELLED))) {
+        assert.ok(note.includes(name), `the note does not label ${name}: ${note}`);
+        assert.ok(description.includes(name), `the description does not label ${name}: ${description}`);
+        assert.ok(readme.includes(name), `the README does not label ${name}`);
+      }
+    });
+    it("the relayed radars are the API's answers cut to the labelled fields, nothing else", () => {
+      const { newest_kev: _n, ...kevRest } = PROD_KEV_STATS;
+      assert.deepEqual(data.kev_exposure, { ...kevRest, newest_kev: NEWEST_KEV_RELAYED });
+      assert.deepEqual(data.exposed_databases, PROD_EXPOSED_DB_STATS);
+      assert.deepEqual(data.leaked_credentials, PROD_LEAKED_CREDS_STATS);
+      assert.deepEqual(data.shadow_ai, PROD_SHADOW_RELAYED);
+    });
+    // Each label below was checked against the Go source; the comment above RADAR_LABELLED
+    // cites the line.
+    it("kev_exposure.correlations and kev_exposure.trend are labelled service×CVE pairs, not services", () => {
+      for (const [where, t] of [["note", note], ["description", description], ["README", readme.replace(/\s+/g, " ")]]) {
+        assert.match(t, /kev_exposure\.correlations(?: \(31887\))?`? (?:\| )?(?:counts )?[Ss]ervice×CVE pairs, not services/, `${where}: correlations`);
+        assert.match(t, /kev_exposure\.trend`? (?:\| )?(?:counts )?[Ss]ervice×CVE pairs/, `${where}: trend`);
+      }
+      assert.match(note, /a service with three KEV CVEs counts three times/);
+      assert.match(note, /only pairs still on record are counted, so earlier weeks read low/);
+    });
+    it("kev_exposure.ransomware_hosts and every ranking count ip:port services, and say so", () => {
+      assert.match(note, /kev_exposure\.distinct_hosts \(25113\) counts distinct ip:port services, not machines/);
+      assert.match(note, /kev_exposure\.ransomware_hosts \(6655\) counts the services among them with at least one ransomware-linked KEV CVE/);
+      assert.match(note, /kev_exposure\.top_products ranks up to 12 products \(first: http_server, 9120 services\), kev_exposure\.top_countries ranks up to 10 countries \(first: United States, 7021 services\) and kev_exposure\.top_cves ranks up to 12 CVEs \(first: CVE-2023-44487, 6213 services\), each by distinct ip:port services/);
+      assert.match(note, /exposed_databases\.top_engines ranks up to 15 engines \(first: redis, 2410 services\) and exposed_databases\.top_countries ranks up to 10 countries \(first: United States, 2204 services\), each by those services/);
+      assert.match(description, /kev_exposure\.ransomware_hosts those with a ransomware-linked one/);
+    });
+    it("the CVSS and EPSS numbers are labelled scores, not counts", () => {
+      assert.match(note, /kev_exposure\.top_cves\[\]\.cvss_v3_score and kev_exposure\.top_cves\[\]\.epss_score are the highest CVSS v3 base score and EPSS probability \(0 to 1\) recorded on that CVE's observations: scores, not counts\./);
+      assert.match(note, /kev_exposure\.newest_kev\[\]\.cvss_v3_score and kev_exposure\.newest_kev\[\]\.epss_score are the CVE record's CVSS v3 base score and EPSS probability \(0 to 1\), absent when the record has none: scores, not counts\./);
+    });
+    it("leaked_credentials.total is labelled (repository, secret) pairs, not distinct secrets, and nothing is called validated", () => {
+      assert.match(note, /leaked_credentials\.total \(531\) counts \(repository, secret\) pairs, not distinct secrets: a secret committed to three repositories counts three times/);
+      assert.match(note, /leaked_credentials\.distinct_secrets \(507\) counts each secret once/);
+      assert.match(note, /None of these is validated: .*never tested against its provider, so none of them is a count of working credentials\./);
+      assert.match(description, /leaked_credentials\.total counts \(repository, secret\) pairs, not distinct secrets/);
+      assert.match(description, /None is validated: .*never tested against its provider/);
+      assert.match(readme.replace(/\s+/g, " "), /None of them is validated/);
+      // "validated", "valid" or "working" said of the credentials only as a denial.
+      let denials = 0;
+      for (const [where, t] of [["note", note], ["description", description], ["README", readme.replace(/\s+/g, " ")]]) {
+        for (const m of t.matchAll(/\b(?:validated|valid|working) (?:credentials|secrets|keys)\b/gi)) {
+          denials++;
+          assert.match(t.slice(Math.max(0, m.index - 40), m.index), /\b(?:not|none|never|no)\b/i, `${where}: "${t.slice(Math.max(0, m.index - 40), m.index + 30)}"`);
+        }
+      }
+      assert.ok(denials >= 1, "the denial itself is gone");
+    });
+    it("exposed_databases.pii_likely/pci_likely are labelled a precision-first schema gate, never 'no PII'", () => {
+      assert.match(note, /exposed_databases\.pii_likely \(412\) counts services whose schema names pass a high-confidence gate for personal data/);
+      assert.match(note, /exposed_databases\.pci_likely \(37\) counts services whose schema names pass a high-confidence gate for payment-card data/);
+      assert.match(note, /never record values/);
+      assert.match(note, /It is precision-first: a service whose names do not pass it is not counted, whatever it holds, so the other services are not shown to hold no personal or card data\./);
+      assert.match(description, /precision-first gate for personal or payment-card data, so a service outside them is not shown to hold no such data/);
+      for (const [where, t] of [["note", note], ["description", description], ["README", readme]]) {
+        assert.doesNotMatch(t, /\bno (?:PII|personal data|card data)\b|free of (?:PII|personal|card)/i, `${where} reads the gate as an absence`);
+      }
+    });
+
+    // What a later backend may add, and what a malformed answer may carry: none of it relayed,
+    // each named. candidate_hosts: 99999 is the audit's own injection.
+    it("an unknown field in any of the three radars, top level or inside a row, is left out and named", async () => {
+      const { relayed, n } = await radarWith({
+        [KEV_PATH]: { ...PROD_KEV_STATS, candidate_hosts: 99999, top_products: PROD_KEV_STATS.top_products.map((r) => ({ ...r, visible: 3 })), newest_kev: NEWEST_KEV.map((r) => ({ ...r, candidate_hosts: 7 })) },
+        [EDB_PATH]: { ...PROD_EXPOSED_DB_STATS, open_now: 55, method: "x", top_engines: PROD_EXPOSED_DB_STATS.top_engines.map((r) => ({ ...r, with_pii: 2 })) },
+        // constructor is a key that a naive `k in spec` would find on Object.prototype.
+        [LC_PATH]: { ...PROD_LEAKED_CREDS_STATS, validated: 12, top_types: PROD_LEAKED_CREDS_STATS.top_types.map((r) => ({ ...r, repos: 4, constructor: 1 })) },
+      });
+      assert.deepEqual(unlabelledIn(relayed), [], `numeric fields relayed with no label: ${unlabelledIn(relayed).join(", ")}`);
+      assert.deepEqual([...numericPaths(relayed)].sort(), Object.keys(RADAR_LABELLED).sort(), "the labelled fields are still all relayed");
+      assert.doesNotMatch(JSON.stringify(relayed), /99999|candidate_hosts|open_now|with_pii|validated|"repos"|"visible"|"constructor"/);
+      assert.match(n, /Left out of kev_exposure because this version of the tool cannot label them: candidate_hosts, top_products\[\]\.visible, newest_kev\[\]\.candidate_hosts\./, n);
+      assert.match(n, /Left out of exposed_databases because this version of the tool cannot label them: open_now, method, top_engines\[\]\.with_pii\./, n);
+      assert.match(n, /Left out of leaked_credentials because this version of the tool cannot label them: validated, top_types\[\]\.repos, top_types\[\]\.constructor\./, n);
+    });
+    it("a known field in an unexpected shape is left out whole and named, never relayed partly", async () => {
+      const { relayed, n } = await radarWith({
+        [KEV_PATH]: { ...PROD_KEV_STATS, correlations: "31887", top_cves: [...PROD_KEV_STATS.top_cves, { cve_id: "CVE-2024-3400", severity: "CRITICAL" }], generated_at: 0 },
+        [EDB_PATH]: { ...PROD_EXPOSED_DB_STATS, pii_likely: null, top_countries: { "United States": 2204 } },
+        [LC_PATH]: { ...PROD_LEAKED_CREDS_STATS, top_providers: [...PROD_LEAKED_CREDS_STATS.top_providers, { provider: "gcp", count: "9" }] },
+      });
+      assert.equal(relayed.kev_exposure.correlations, undefined);
+      assert.equal(relayed.kev_exposure.top_cves, undefined, "a ranking with one malformed row reads as a complete one if relayed partly");
+      assert.equal(relayed.exposed_databases.top_countries, undefined);
+      assert.equal(relayed.exposed_databases.pii_likely, undefined);
+      assert.equal(relayed.leaked_credentials.top_providers, undefined);
+      assert.match(n, /Left out of kev_exposure because they were not in the expected shape: correlations, top_cves, generated_at\./, n);
+      assert.match(n, /Left out of exposed_databases because they were not in the expected shape: top_countries\./, n);
+      assert.match(n, /Left out of leaked_credentials because they were not in the expected shape: top_providers\./, n);
+      assert.doesNotMatch(n, /kev_exposure\.correlations \(|kev_exposure\.top_cves ranks|exposed_databases\.pii_likely \(|leaked_credentials\.top_providers ranks/, n);
+      assert.deepEqual(unlabelledIn(relayed), []);
+    });
+    it("the genuine-empty answers still carry only labelled numbers", async () => {
+      stub.state.mode = "empty";
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        const relayed = JSON.parse(r.content[0].text);
+        assert.deepEqual(unlabelledIn(relayed), []);
+        assert.equal(relayed.kev_exposure.distinct_hosts, 0);
+        assert.equal(relayed.leaked_credentials.total, 0);
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+
+    // ── item 6: a newest_kev zero is not a measurement ──
+    it("newest_kev: the tracked CVE keeps its count as exposed; every untracked one is not_assessed and carries no count", () => {
+      assert.deepEqual(data.kev_exposure.newest_kev, NEWEST_KEV_RELAYED);
+      const rows = data.kev_exposure.newest_kev;
+      assert.equal(rows.length, 15);
+      const tracked = rows.find((r) => r.cve_id === KEV_TRACKED);
+      assert.equal(tracked.exposure_state, "exposed");
+      assert.equal(tracked.exposed_hosts, 142);
+      for (const id of KEV_UNTRACKED) {
+        const r = rows.find((x) => x.cve_id === id);
+        assert.equal(r.exposure_state, "not_assessed", id);
+        assert.ok(!("exposed_hosts" in r), `${id} still carries a count: ${JSON.stringify(r)}`);
+      }
+      assert.ok(!rows.some((r) => r.exposed_hosts === 0), "a newest_kev zero reached the agent");
+    });
+    it("newest_kev: the note calls every untracked CVE NOT ASSESSED and never a zero, and gives the tracked one its count", () => {
+      assert.match(note, /kev_exposure\.newest_kev lists the 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed \(by added_date\), each with an exposure_state\./);
+      assert.match(note, new RegExp(`1 of them is exposed \\(exposure_state exposed\\): kev_exposure\\.newest_kev\\[\\]\\.exposed_hosts counts distinct ip:port services on record with that CVE \\(${KEV_TRACKED}: 142\\)\\.`));
+      assert.match(note, new RegExp(`14 are NOT ASSESSED \\(exposure_state not_assessed\\): ${KEV_UNTRACKED.join(", ")}\\. The API answers 0 for each, and that 0 is not a measurement`));
+      for (const id of KEV_UNTRACKED) {
+        const said = sentencesNaming(note, id);
+        assert.ok(said.length >= 1, `the note does not name ${id}`);
+        for (const s of said) {
+          assert.match(s, /NOT ASSESSED/, s);
+          assert.doesNotMatch(s, /\bexposed\b|measured zero|found nothing/, s);
+        }
+      }
+      assert.doesNotMatch(note, /\b0 (?:exposed|services)\b|exposed_hosts:? 0\b/, note);
+      assert.match(description, /or not_assessed, where the API's answer holds no measurement for that CVE \(its 0 is not one\) and no count is relayed/);
+    });
+    // The done-means as written: a row whose CVE reads tracked:false on /kev-exposure/cve/:id
+    // reaches the agent as not assessed. Asked of the stub's per-CVE endpoint, row by row.
+    it("newest_kev agrees with cve_exposure row by row: tracked:false there is not_assessed here", async () => {
+      let untracked = 0;
+      for (const row of data.kev_exposure.newest_kev) {
+        const n = noteOf(await client.callTool({ name: "cve_exposure", arguments: { cve_id: row.cve_id } }));
+        if (/state: not_assessed/.test(n)) {
+          untracked++;
+          assert.equal(row.exposure_state, "not_assessed", `${row.cve_id}: cve_exposure says NOT ASSESSED, exposure_radar says ${row.exposure_state}`);
+        } else {
+          assert.match(n, /state: exposed/, `${row.cve_id}: ${n}`);
+          assert.equal(row.exposure_state, "exposed", row.cve_id);
+        }
+      }
+      assert.equal(untracked, 14, "the stub's per-CVE endpoint marks the 14 audit-shaped rows tracked:false");
+    });
+    it("an all-zero newest_kev (an empty observation table) is all not_assessed, with no zero relayed", async () => {
+      stub.state.mode = "empty";
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        const relayed = JSON.parse(r.content[0].text);
+        assert.equal(relayed.kev_exposure.newest_kev.length, 15);
+        for (const row of relayed.kev_exposure.newest_kev) {
+          assert.equal(row.exposure_state, "not_assessed", row.cve_id);
+          assert.ok(!("exposed_hosts" in row), row.cve_id);
+        }
+        assert.match(noteOf(r), /15 are NOT ASSESSED \(exposure_state not_assessed\)/);
+        assert.doesNotMatch(noteOf(r), /are exposed \(exposure_state exposed\)/);
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+    // The contract proposed on #2313: the stats answer sends each newest_kev row's `tracked`,
+    // decided by the per-CVE endpoint's trackedVerdict. Read the way cve_exposure reads it.
+    it("with a per-row tracked (the proposed contract): false is not_assessed whatever the count, true with 0 is a measured zero", async () => {
+      const rows = [
+        { cve_id: "CVE-2026-11111", added_date: "2026-09-26", exposed_hosts: 0, tracked: false },
+        { cve_id: "CVE-2026-22222", added_date: "2026-09-26", exposed_hosts: 3, tracked: false },
+        { cve_id: "CVE-2026-33333", added_date: "2026-09-26", exposed_hosts: 0, tracked: true },
+        { cve_id: "CVE-2026-44444", added_date: "2026-09-26", exposed_hosts: 0 },
+        { cve_id: "CVE-2026-55555", added_date: "2026-09-26", exposed_hosts: 9, tracked: true },
+      ];
+      const { relayed, n } = await radarWith({ [KEV_PATH]: { ...PROD_KEV_STATS, newest_kev: rows } });
+      const byId = Object.fromEntries(relayed.kev_exposure.newest_kev.map((r) => [r.cve_id, r]));
+      assert.deepEqual(byId["CVE-2026-11111"], { cve_id: "CVE-2026-11111", added_date: "2026-09-26", exposure_state: "not_assessed" });
+      assert.deepEqual(byId["CVE-2026-22222"], { cve_id: "CVE-2026-22222", added_date: "2026-09-26", exposure_state: "not_assessed" });
+      assert.deepEqual(byId["CVE-2026-33333"], { cve_id: "CVE-2026-33333", added_date: "2026-09-26", exposure_state: "measured_zero", exposed_hosts: 0 });
+      assert.deepEqual(byId["CVE-2026-44444"], { cve_id: "CVE-2026-44444", added_date: "2026-09-26", exposure_state: "not_assessed" });
+      assert.deepEqual(byId["CVE-2026-55555"], { cve_id: "CVE-2026-55555", added_date: "2026-09-26", exposure_state: "exposed", exposed_hosts: 9 });
+      assert.ok(!JSON.stringify(relayed.kev_exposure.newest_kev).includes('"tracked"'), "tracked is read, not relayed: exposure_state says it");
+      assert.match(n, /2 are NOT ASSESSED \(exposure_state not_assessed\) because the API says they are outside the radar's tracked set, so no count is relayed for them: CVE-2026-11111, CVE-2026-22222\./, n);
+      assert.match(n, /1 is a measured zero in the radar's sample \(exposure_state measured_zero, exposed_hosts 0\): .*not an internet-wide zero: CVE-2026-33333\./, n);
+      assert.match(n, /1 is NOT ASSESSED \(exposure_state not_assessed\): CVE-2026-44444\. The API answers 0 for each/, n);
+      assert.match(n, /1 of them is exposed \(exposure_state exposed\): .*\(CVE-2026-55555: 9\)\./, n);
+    });
+    it("a newest_kev row without a count or a CVE id leaves the list out whole, named", async () => {
+      const { relayed, n } = await radarWith({ [KEV_PATH]: { ...PROD_KEV_STATS, newest_kev: [...NEWEST_KEV, { cve_id: "CVE-2026-99999" }] } });
+      assert.equal(relayed.kev_exposure.newest_kev, undefined);
+      assert.match(n, /Left out of kev_exposure because they were not in the expected shape: newest_kev\./, n);
+      assert.doesNotMatch(n, /NOT ASSESSED|newest_kev lists/, n);
+    });
+  });
+
+  // #2335: kev_exposure, exposed_databases and leaked_credentials each answer last_run_at: when
+  // that radar last COMPLETED a check, read from poller_run_state (core-backend
+  // pollerlock/published.go), UTC and truncated to the second, omitted when unknown and never
+  // the Go zero time. The row moves only at the end of a cycle whose reads succeeded (each
+  // radar's poller.go checkCompleted / recordCheck). 1.0.4 as first written could not label it,
+  // so it named last_run_at as left out. A timestamp is a string, so the numeric enumerator
+  // above does not see it; the tests below enumerate the radars' timestamps instead.
+  describe("#2335: exposure_radar relays and labels each radar's last completed check (last_run_at)", () => {
+    const FLAT = ["kev_exposure", "exposed_databases", "leaked_credentials"];
+    const PATHS = {
+      kev_exposure: "/api/v1/public/kev-exposure/stats",
+      exposed_databases: "/api/v1/public/exposed-databases/stats",
+      leaked_credentials: "/api/v1/public/leaked-credentials/stats",
+    };
+    const PROD = { kev_exposure: PROD_KEV_STATS, exposed_databases: PROD_EXPOSED_DB_STATS, leaked_credentials: PROD_LEAKED_CREDS_STATS };
+    const GENERATED_AT = "2026-09-27T09:00:00Z";
+    // What each radar's poller.go counts as a completed check, as the note must word it:
+    //   kevexposure  checkCompleted = searched && answered > 0 && staleErr == nil
+    //   exposeddb    the same, over Shodan or the LeakIX fallback, && gated.unknown == 0
+    //   leakedcreds  fetchErr == nil (the public event stream was read)
+    const MEANS = {
+      kev_exposure: /its Shodan search answered at least one query \(others may have failed\) and its list of services due for a re-check was read; a cycle that skipped the search for want of Shodan query credits, or whose reads failed, does not move it\./,
+      exposed_databases: /its Shodan search, or the LeakIX fallback, answered at least one query \(others may have failed\), its list of services due for a re-check was read, and the scan opt-out register could be consulted; a cycle that searched nothing, or whose reads failed, does not move it\./,
+      leaked_credentials: /it read the public GitHub event stream \(fetches of some of the commits it lists may have failed\); a cycle whose read of that stream failed does not move it\./,
+    };
+    // #2313's timestamp twin of RADAR_LABELLED: every string at the top level of the three flat
+    // radars, mapped to the name the description and the README label it by.
+    const RADAR_INSTANTS = {
+      "kev_exposure.generated_at": "generated_at",
+      "kev_exposure.last_run_at": "kev_exposure.last_run_at",
+      "exposed_databases.generated_at": "generated_at",
+      "exposed_databases.last_run_at": "exposed_databases.last_run_at",
+      "leaked_credentials.generated_at": "generated_at",
+      "leaked_credentials.last_run_at": "leaked_credentials.last_run_at",
+    };
+    const topLevelStrings = (relayed) =>
+      FLAT.flatMap((r) => Object.entries(relayed[r] ?? {}).filter(([, v]) => typeof v === "string").map(([k]) => `${r}.${k}`)).sort();
+    // The note's sentences about one radar's last completed check.
+    const lastCheckSaid = (n, radar) => sentencesOf(n).filter((s) => s.includes(`${radar}.last_run_at`) || s.includes(`${radar} last completed check`));
+    // Wording that would present the stamp as freshness it is not.
+    const NOT_A_STAMP = /\b(?:live|real-?time|currently|up[ -]to[ -]date|as of|right now)\b/i;
+    let tools, description, readme, data, note;
+    const radarWith = async (overrides) => {
+      Object.assign(stub.state.overrides, overrides);
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        assert.notEqual(r.isError, true, brief(r));
+        return { relayed: JSON.parse(r.content[0].text), n: noteOf(r) };
+      } finally {
+        for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+      }
+    };
+    before(async () => {
+      stub.state.mode = "ok";
+      ({ tools } = await client.listTools());
+      description = tools.find((t) => t.name === "exposure_radar").description;
+      readme = readPkgFile("README.md");
+      const res = await client.callTool({ name: "exposure_radar", arguments: {} });
+      data = JSON.parse(res.content[0].text);
+      note = noteOf(res);
+    });
+
+    it("each radar's last_run_at is relayed as the API sent it, beside generated_at, and is not a count", () => {
+      for (const r of FLAT) {
+        assert.equal(data[r].last_run_at, LAST_RUN[r], `${r}.last_run_at`);
+        assert.equal(data[r].generated_at, GENERATED_AT, `${r}.generated_at`);
+        assert.notEqual(data[r].last_run_at, data[r].generated_at, `${r}: the stamp is not the time the totals were computed`);
+      }
+      // A string: the numeric enumerator neither sees it nor needs a label for it.
+      assert.deepEqual([...numericPaths(data)].filter((p) => /last_run_at|generated_at/.test(p)), []);
+      assert.deepEqual(unlabelledIn(data), []);
+      assert.doesNotMatch(note, /cannot label them: [^.]*last_run_at/, note);
+    });
+    it("every timestamp at a radar's top level is a labelled one, and every labelled one is there", () => {
+      const found = topLevelStrings(data);
+      assert.deepEqual(found.filter((p) => !(p in RADAR_INSTANTS)), [], `timestamps relayed with no label: ${found.join(", ")}`);
+      assert.deepEqual(found, Object.keys(RADAR_INSTANTS).sort());
+      for (const name of new Set(Object.values(RADAR_INSTANTS))) {
+        assert.ok(description.includes(name), `the description does not label ${name}`);
+        assert.ok(readme.includes(name), `the README does not label ${name}`);
+      }
+    });
+    it("the note labels each radar's last_run_at as its last completed check: a timestamp, not a count", () => {
+      for (const r of FLAT) {
+        // Exactly three sentences, each anchored, so a clause added to any of them fails.
+        const said = lastCheckSaid(note, r);
+        assert.equal(said.length, 3, `${r}: expected three sentences about ${r}.last_run_at: ${said.join(" | ")}`);
+        const [stamp, means, notEvery] = said;
+        assert.equal(stamp, `${r} last completed check: ${LAST_RUN[r]} (${r}.last_run_at, a timestamp, not a count).`);
+        assert.match(means, new RegExp(`^${r}\\.last_run_at is when the radar last finished a cycle whose reads succeeded: ${MEANS[r].source}$`), means);
+        // Not the time of every record: the totals cover everything still on record.
+        assert.equal(
+          notEvery,
+          `${r}.last_run_at is not the time of every record the ${r} numbers count, which cover everything still on record, not only what that check found; nor is it ${r}.generated_at, when the API computed those numbers.`,
+        );
+        for (const s of said) assert.doesNotMatch(s, NOT_A_STAMP, `${r}: ${s}`);
+        // The stamp is printed once, in its labelled sentence: no other sentence of the note may
+        // carry it (as, say, "every number was measured at …").
+        assert.deepEqual(sentencesOf(note).filter((s) => s.includes(LAST_RUN[r])), [stamp], `${r}: the stamp is printed outside its label`);
+        // Only this radar's own stamp: never another radar's, never generated_at's time.
+        for (const other of [...Object.values(LAST_RUN), GENERATED_AT].filter((t) => t !== LAST_RUN[r])) {
+          assert.ok(!said.join(" ").includes(other), `${r}'s sentences print ${other}`);
+        }
+      }
+    });
+    it("the description and the README label each last_run_at as a timestamp, not a count, and say what completed means", () => {
+      for (const r of FLAT) {
+        assert.ok(description.includes(`${r}.last_run_at`), `description: ${r}.last_run_at`);
+        assert.ok(readme.includes(`| \`${r}.last_run_at\` | A timestamp, not a count: when the radar last completed a check`), `README row: ${r}.last_run_at`);
+      }
+      assert.match(description, /kev_exposure\.last_run_at, exposed_databases\.last_run_at and leaked_credentials\.last_run_at are timestamps, not counts: each is when that radar last completed a check, a cycle whose reads succeeded/, description);
+      assert.match(description, /A cycle that read nothing does not move it, and it is not the time of every record a radar's numbers count, which cover everything still on record, not only what the last check found\./, description);
+      assert.match(description, /A radar whose answer carries no last_run_at has none in the result, and the note says nothing about it\./, description);
+      const flatReadme = readme.replace(/\s+/g, " ");
+      assert.match(flatReadme, /`last_run_at` is a timestamp, not a count\./);
+      assert.match(flatReadme, /It moves only at the end of a cycle whose reads succeeded, so a cycle that read nothing leaves it where it was\./);
+      assert.match(flatReadme, /It is not the time of every record a radar's numbers count: those cover everything still on record, not only what the last check found\./);
+      for (const [where, t] of [["description", description], ["README", flatReadme]]) {
+        for (const s of sentencesOf(t).filter((x) => x.includes("last_run_at") && !x.includes("poller"))) {
+          assert.doesNotMatch(s, NOT_A_STAMP, `${where}: ${s}`);
+        }
+      }
+    });
+
+    // Absent means the API could not tell. The result then carries none and the note says
+    // nothing at all about it: not "never", not a zero, not "unknown". Proved by difference:
+    // the note without the stamp is the note with it, minus that radar's sentences about it.
+    // The Go zero time, null, "" and a word that is not a date are read the same way.
+    for (const [label, value] of [
+      ["omitted (the API's omitempty)", undefined],
+      ["the Go zero time", "0001-01-01T00:00:00Z"],
+      ["null", null],
+      ["an empty string", ""],
+      ["a word, not a date", "never"],
+    ]) {
+      it(`last_run_at ${label}: not relayed, and the note says nothing in its place, radar by radar`, async () => {
+        for (const r of FLAT) {
+          const { last_run_at: _dropped, ...rest } = PROD[r];
+          const body = value === undefined ? rest : { ...rest, last_run_at: value };
+          const { relayed, n } = await radarWith({ [PATHS[r]]: body });
+          assert.ok(!("last_run_at" in relayed[r]), `${r}: ${JSON.stringify(relayed[r].last_run_at)} was relayed`);
+          const { last_run_at: _kept, ...expected } = data[r];
+          assert.deepEqual(relayed[r], expected, `${r}: the rest of the answer is relayed as before`);
+          for (const other of FLAT.filter((x) => x !== r)) assert.equal(relayed[other].last_run_at, LAST_RUN[other], `${other} lost its stamp`);
+          assert.deepEqual(lastCheckSaid(n, r), [], `${r}: the note still speaks of its last completed check: ${n}`);
+          const without = sentencesOf(note).filter((s) => !lastCheckSaid(note, r).includes(s));
+          assert.deepEqual(sentencesOf(n), without, `${r}: the note says something in place of the missing stamp`);
+          assert.doesNotMatch(n, /0001-01-01|never (?:completed|ran|run|checked)|no (?:completed )?check|not yet (?:run|checked)/i, `${r}: ${n}`);
+        }
+      });
+    }
+    it("a last_run_at that is not a string is left out and named, never relayed", async () => {
+      for (const r of FLAT) {
+        const { relayed, n } = await radarWith({ [PATHS[r]]: { ...PROD[r], last_run_at: 0 } });
+        assert.ok(!("last_run_at" in relayed[r]), `${r}: ${JSON.stringify(relayed[r])}`);
+        assert.match(n, new RegExp(`Left out of ${r} because they were not in the expected shape: last_run_at\\.`), n);
+        assert.deepEqual(lastCheckSaid(n, r), [], n);
+      }
+    });
+    it("an API from before #2335 (the empty fixtures send no last_run_at) gets no stamp and no sentence", async () => {
+      stub.state.mode = "empty";
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        const relayed = JSON.parse(r.content[0].text);
+        const n = noteOf(r);
+        for (const radar of FLAT) {
+          assert.ok(!("last_run_at" in relayed[radar]), radar);
+          assert.deepEqual(lastCheckSaid(n, radar), [], n);
+        }
+        assert.doesNotMatch(n, /last completed check/, n);
+      } finally {
+        stub.state.mode = "ok";
+      }
     });
   });
 
