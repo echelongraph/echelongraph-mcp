@@ -45,7 +45,40 @@ const METHOD = "Shodan banner match on tracked products; up to 100 ip:port servi
 // The note quotes it word for word, so the #2306 guard below must see THIS string, not an
 // example. core-backend's TestExposureMethod_IsTheStringTheMCPServerTestsGuard fails until
 // this literal is updated whenever that sentence changes.
-const BACKEND_METHOD = "Shodan banner match over the radar's 22 tracked product queries, reading at most 100 ip:port services per query (the first results page); a service counts only when its banner version falls in the CVE's vulnerable CPE range and the CVE is CISA-KEV-listed or has EPSS >= 0.50. Searched every 12 h when Shodan query credits allow. last_seen is when a service was last seen listening on its port, not when its vulnerable version was last confirmed: a re-check that finds the port still listed by Shodan InternetDB refreshes it without re-reading the banner, so a patched service can stay counted while its port stays open. A service not seen on its port for 21 days is dropped.";
+const BACKEND_METHOD = "Shodan banner match over the radar's 22 tracked product queries, reading at most 100 ip:port services per query (the first results page); a service counts only when its banner version falls in the CVE's vulnerable CPE range and the CVE is CISA-KEV-listed or has EPSS >= 0.50. Searched every 12 h when Shodan query credits allow. last_seen is when EchelonGraph last wrote or refreshed a service's row, not when the service was observed: it is set to the time of the write when a search matches the banner, and again when a re-check finds the port still listed by Shodan InternetDB, without re-reading the banner, so a patched service can stay counted while its port stays open. A service whose row has not been written or refreshed for 21 days is dropped.";
+// #2439: production's per-CVE answer for CVE-2026-87902, recorded through probe-prod.sh on
+// 2026-09-27 at 22:05Z and replayed here (the method is the backend's current sentence). Its
+// last_seen, 21:52:34.976885Z, is the poller's write time, not an observation: the KEV radar's
+// last_run_at in the same capture was 21:53:39Z, and the 50 newest /kev-exposure/feed rows all
+// carried last_seen between 21:53:07.85Z and 21:53:08.63Z, a 0.78 s batch write (core-backend
+// kevexposure store.go Upsert and Touch set last_seen to now()). The answer serves no other time
+// but generated_at, when the API built it.
+const CVE_PROD_WRITE_STAMPED = "CVE-2026-87902";
+const PROD_WRITE_STAMPED = {
+  cve_id: CVE_PROD_WRITE_STAMPED,
+  exposed_hosts: 229,
+  countries: 32,
+  kev_listed: true,
+  kev_seen_in_observations: true,
+  kev_catalog_listed: true,
+  tracked: true,
+  method: BACKEND_METHOD,
+  ransomware: false,
+  top_countries: [
+    { country: "United States", hosts: 130 },
+    { country: "United Kingdom", hosts: 15 },
+    { country: "Germany", hosts: 14 },
+    { country: "France", hosts: 8 },
+    { country: "India", hosts: 7 },
+    { country: "Canada", hosts: 6 },
+  ],
+  top_products: [{ product: "wordpress", hosts: 229 }],
+  last_seen: "2026-09-27T21:52:34.976885Z",
+  generated_at: "2026-09-27T22:06:13.516192827Z",
+};
+// Write times from the same capture: the stamp above, the feed's burst, and the KEV radar's
+// completed check. Each is a time EchelonGraph wrote something, and none may become measured_at.
+const PROD_WRITE_TIMES = ["2026-09-27T21:52:34.976885Z", "2026-09-27T21:53:07.85Z", "2026-09-27T21:53:08.628614Z", "2026-09-27T21:53:39Z"];
 // A follower instance's poller block from an API older than fleet freshness: what the
 // shadow-AI stats answer carried when the request landed on an instance not running the
 // poller (#2307).
@@ -57,6 +90,9 @@ const FOLLOWER_POLLER = { running: false, interval_seconds: 3600, last_run_at: "
 const FLEET_RUNNING = { running: true, interval_seconds: 60, last_run_at: "2026-09-26T10:00:00Z", shodan_enabled: true };
 const FLEET_STOPPED = { running: false, interval_seconds: 60, last_run_at: "2026-09-26T08:15:00Z", shodan_enabled: true };
 const FLEET_UNKNOWN = { interval_seconds: 60, shodan_enabled: true };
+// Every key the poller block can carry: the json tags of core-backend shadowctlog poller.go
+// Status. Any other key is unknown to this version and must be named when left out (#2440).
+const SHADOW_AI_POLLER_KNOWN = ["running", "interval_seconds", "last_run_at", "last_new_inserts", "last_error", "skipped_as_follower", "source_health", "consecutive_fails", "shodan_enabled", "shodan_last_new"];
 // The shadow-AI stats answer shaped as production sent it on 2026-09-27 (#2307, reopened):
 // total 36,222 against 2,000 confirmed exposed (the sum of visible_by_category); top_products
 // ranking LiteLLM at 6,813 observations while 1,395 LLM-PROXY services are confirmed exposed;
@@ -408,9 +444,54 @@ async function callAll(client) {
 }
 
 const textOf = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-// The server's own words: every block of an error, every block after the API's JSON otherwise.
-const noteOf = (res) => (res.content ?? []).filter((c) => c.type === "text").slice(res.isError ? 0 : 1).map((c) => c.text).join("\n");
+const textBlocks = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
+// The server's own words: the failure message of an error, the note after the API's JSON
+// otherwise. The envelope block after either (#2440) is read by envelopeOf, not here.
+const noteOf = (res) => textBlocks(res)[res.isError ? 0 : 1] ?? "";
+// #2440: the last text block, which is structuredContent without data, as JSON.
+const envelopeOf = (res) => JSON.parse(textBlocks(res).at(-1));
+// Every string an envelope carries, one after another: what a model reads in it, for the
+// wording guards (they read prose sentence by sentence, and a JSON array of sentences, or a
+// method string beside a notes array, is not split the way prose is).
+const stringsIn = (v, out = []) => {
+  if (typeof v === "string") out.push(v);
+  else if (v !== null && typeof v === "object") for (const x of Object.values(v)) stringsIn(x, out);
+  return out;
+};
+const envelopeWords = (res) => stringsIn(envelopeOf(res)).join(" ");
 const brief = (res) => JSON.stringify(res).replace(/\s+/g, " ").slice(0, 300);
+
+// #2440: a result's text carries its envelope. A success is three text blocks (the API's JSON,
+// the note, the envelope) and a failure two (the message, the envelope). The envelope block
+// parses to structuredContent without data, key for key, so state, measured_at, method, coverage
+// and freshness in the text are the structured ones; a success's first block parses to data;
+// and a "(state: …)" or "(exposure_state: …)" tag in the note or message names the structured
+// value, never another. Returns the envelope it read.
+const TAG = /\((state|exposure_state): ([a-z_]+)\)/g;
+function assertEnvelopeInText(where, res) {
+  const sc = res.structuredContent;
+  const blocks = textBlocks(res);
+  const want = res.isError ? 2 : 3;
+  assert.equal(blocks.length, want, `${where}: ${blocks.length} text block(s), expected ${want}: ${brief(res)}`);
+  let env;
+  try {
+    env = JSON.parse(blocks.at(-1));
+  } catch {
+    assert.fail(`${where}: the last text block is not the envelope's JSON: ${blocks.at(-1).slice(0, 200)}`);
+  }
+  const { data, ...withoutData } = sc;
+  for (const k of ["state", "measured_at", "method", "coverage", "freshness", "notes"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(env, k), `${where}: the text's envelope has no ${k}`);
+    assert.deepEqual(env[k], sc[k], `${where}: the text says ${k} ${JSON.stringify(env[k])}, structuredContent ${JSON.stringify(sc[k])}`);
+  }
+  assert.deepEqual(env, withoutData, `${where}: the text's envelope is not structuredContent without data`);
+  assert.ok(!("data" in env), `${where}: the envelope block repeats data, which is the first block`);
+  if (!res.isError) assert.deepEqual(JSON.parse(blocks[0]), data, `${where}: the first text block is not data`);
+  for (const [, key, value] of noteOf(res).matchAll(TAG)) {
+    assert.equal(value, sc[key], `${where}: the text tags (${key}: ${value}) but structuredContent.${key} is ${JSON.stringify(sc[key])}`);
+  }
+  return env;
+}
 
 // #2307: every numeric field exposure_radar may relay under shadow_ai, by normalised path
 // ([] = any array element, * = any key of a category map), mapped to the name the note, the
@@ -834,16 +915,23 @@ describe(`against a stub API [${ERA}]`, () => {
   describe("#2306: no removed claim in any tool text, and the method is named", () => {
     let tools;
     const notes = [];
+    // #2440: the envelope block of each of the same results, as the strings it carries.
+    const envelopes = [];
     before(async () => {
       ({ tools } = await client.listTools());
       for (const mode of ["ok", "empty", "403"]) {
         stub.state.mode = mode;
         const results = await callAll(client);
-        for (const name of TOOLS) notes.push([`${name}/${mode}`, noteOf(results[name])]);
+        for (const name of TOOLS) {
+          notes.push([`${name}/${mode}`, noteOf(results[name])]);
+          envelopes.push([`${name}/${mode} envelope block`, envelopeWords(results[name])]);
+        }
       }
       stub.state.mode = "ok";
       for (const id of [CVE_UNTRACKED, CVE_UNTRACKED_STALE, CVE_OLD_API, CVE_REJECTED, "not-a-cve"]) {
-        notes.push([`cve_exposure/${id}`, noteOf(await client.callTool({ name: "cve_exposure", arguments: { cve_id: id } }))]);
+        const res = await client.callTool({ name: "cve_exposure", arguments: { cve_id: id } });
+        notes.push([`cve_exposure/${id}`, noteOf(res)]);
+        envelopes.push([`cve_exposure/${id} envelope block`, envelopeWords(res)]);
       }
     });
     it("no tool description or argument description makes a removed claim", () => {
@@ -857,6 +945,13 @@ describe(`against a stub API [${ERA}]`, () => {
     it("no result note or failure text makes a removed claim", () => {
       assert.ok(notes.length >= 20, `only ${notes.length} notes collected`);
       for (const [where, note] of notes) assert.doesNotMatch(note, REMOVED_CLAIMS, `${where}: ${note}`);
+    });
+    it("#2440: no envelope block makes a removed claim or calls a count hosts", () => {
+      assert.equal(envelopes.length, notes.length, "an envelope block for every note");
+      for (const [where, e] of envelopes) {
+        assert.doesNotMatch(e, REMOVED_CLAIMS, `${where}: ${e}`);
+        assert.doesNotMatch(e, HOST_UNIT, `${where}: ${e}`);
+      }
     });
     // The note quotes the API's method sentence verbatim, so the guard above only covers
     // what the API really sends if the notes it read carried that sentence.
@@ -906,6 +1001,7 @@ describe(`against a stub API [${ERA}]`, () => {
       // #2311: the server instructions every client receives in the opening exchange.
       ["server instructions", client.opening.instructions],
       ...notes,
+      ...envelopes,
       ["README.md", flat(readPkgFile("README.md"))],
       ["package.json description", PKG.description],
       ["server.json description", JSON.parse(readPkgFile("server.json")).description],
@@ -927,15 +1023,27 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.ok(checked >= 6, `only ${checked} cadence statements checked`);
     });
 
-    // kevexposure/poller.go reconcileStale Touches last_seen when InternetDB still lists the
-    // PORT, without re-reading the version, so last_seen is no re-sighting of the vulnerable
-    // banner and a patched service can stay counted.
-    it("last_seen is described as port presence, never as a re-sighting of the vulnerable version", () => {
-      for (const [where, t] of shipped()) assert.doesNotMatch(t, /re-seen|most recently seen/i, `${where}: ${t}`);
-      const rule = /last seen listening on its port, not when its vulnerable version was last confirmed/;
+    // kevexposure store.go Upsert sets last_seen to now() when a search matches the banner, and
+    // poller.go reconcileStale Touches it to now() when InternetDB still lists the PORT, without
+    // re-reading the version. So last_seen is EchelonGraph's write or refresh time (#2439): no
+    // sighting of the service, no re-sighting of the vulnerable banner, and a patched service
+    // can stay counted.
+    it("#2439: last_seen is described as a write or refresh time, never as a sighting of the service", () => {
+      let checked = 0;
+      for (const [where, t] of shipped()) {
+        assert.doesNotMatch(t, /re-seen|most recently seen|last seen listening|not seen on its port/i, `${where}: ${t}`);
+        if (/last_seen/.test(t)) checked++;
+      }
+      // The description, the README, and every note and envelope block that quotes the method.
+      assert.ok(checked >= 6, `only ${checked} texts naming last_seen checked`);
+      const rule = /`?last_seen`? is when EchelonGraph last wrote or refreshed a service's row, not when the service was observed/;
       assert.match(tools.find((t) => t.name === "cve_exposure").description, rule);
       assert.match(flat(readPkgFile("README.md")), rule);
-      assert.match(BACKEND_METHOD, rule, "the fixture no longer carries the backend's qualifier");
+      assert.match(BACKEND_METHOD, rule, "the fixture no longer carries the backend's wording");
+      // Still: the re-check reads the port, not the version.
+      for (const t of [tools.find((x) => x.name === "cve_exposure").description, flat(readPkgFile("README.md")), BACKEND_METHOD]) {
+        assert.match(t, /without re-reading the banner, so a patched service can stay counted while its port stays open/);
+      }
     });
 
     // The KEV fetcher (internal/cve/kev/fetcher.go) only UPDATEs existing cves rows, and the
@@ -1045,10 +1153,13 @@ describe(`against a stub API [${ERA}]`, () => {
       for (const id of ["not-a-cve", "CVE-2023-123", "2023-44487", "CVE-2023-44487; DROP"]) {
         const res = await call(id);
         assertErrorResult("cve_exposure", res);
-        const t = textOf(res);
+        const t = noteOf(res);
         assert.match(t, /invalid_input/, `${id}: ${t}`);
         assert.match(t, /Nothing was looked up/, `${id}: ${t}`);
         assert.doesNotMatch(t, /measured|found nothing/, `${id}: ${t}`);
+        // The envelope block beside it says the same: nothing was measured.
+        assert.equal(envelopeOf(res).state, "invalid_input", id);
+        assert.equal(envelopeOf(res).measured_at, null, id);
       }
       assert.deepEqual(stub.state.seen, [], "a malformed id reached the API");
     });
@@ -1062,7 +1173,9 @@ describe(`against a stub API [${ERA}]`, () => {
       const res = await call(CVE_REJECTED);
       assertErrorResult("cve_exposure", res);
       assertNames("cve_exposure", res, stub.base, /invalid_input/, /HTTP 400/, /invalid CVE id/);
-      assert.doesNotMatch(textOf(res), /measured|found nothing|0 exposed/, textOf(res));
+      assert.doesNotMatch(noteOf(res), /measured|found nothing|0 exposed/, noteOf(res));
+      assert.doesNotMatch(envelopeWords(res), /measured|found nothing|0 exposed/, envelopeWords(res));
+      assert.equal(envelopeOf(res).state, "invalid_input");
     });
     it("tracked:false is NOT ASSESSED: outside the tracked set, and 0 is not a measurement", async () => {
       const res = await call(CVE_UNTRACKED);
@@ -1072,7 +1185,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.match(n, /NOT ASSESSED/);
       assert.match(n, /outside the radar's tracked set; 0 is not a measurement/);
       assert.match(n, /\bcve_exposure OK\b/);
-      assert.match(n, /state: not_assessed/);
+      assert.match(n, /\(exposure_state: not_assessed\)/);
       // kev_catalog_listed:false is also the answer when EchelonGraph has no cves row (the KEV
       // fetcher only UPDATEs), so it is worded as what EchelonGraph's data says.
       assert.match(n, new RegExp(`EchelonGraph's CVE data does not mark ${CVE_UNTRACKED} as CISA-KEV-listed \\(kev_catalog_listed is false, which it also is when EchelonGraph holds no record of ${CVE_UNTRACKED}\\)`));
@@ -1092,7 +1205,7 @@ describe(`against a stub API [${ERA}]`, () => {
       stub.state.mode = "ok";
       assert.notEqual(res.isError, true, brief(res));
       const n = noteOf(res);
-      assert.match(n, /state: measured_zero/);
+      assert.match(n, /\(exposure_state: measured_zero\)/);
       assert.match(n, /a measured zero in the radar's sample/);
       assert.match(n, /It is a zero in a sample, not an internet-wide zero: the radar reads at most the first 100 Shodan results per tracked-product query/);
       assert.doesNotMatch(n, /as Shodan sees them|among the radar's tracked products/, n);
@@ -1107,7 +1220,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.doesNotMatch(n, /measured/, n);
       assert.doesNotMatch(n, /found nothing|NOT ASSESSED/, n);
       assert.match(n, /\bcve_exposure OK\b/);
-      assert.match(n, /state: tracking_unknown/);
+      assert.match(n, /\(exposure_state: tracking_unknown\)/);
       assert.match(n, /does not say whether .* is in the radar's tracked set/);
       // The backend also omits `tracked` on purpose when it cannot decide, so "older API"
       // must not be the only reason given.
@@ -1118,13 +1231,27 @@ describe(`against a stub API [${ERA}]`, () => {
     });
     it("a populated footprint names its count, the method the API reports, and Shodan", async () => {
       const n = noteOf(await call(CVE));
-      assert.match(n, /state: exposed/);
+      assert.match(n, /\(exposure_state: exposed\)/);
       assert.match(n, new RegExp(`6213 internet-facing services \\(distinct ip:port, the exposed_hosts field\\) on record whose banner version maps to ${CVE} across 107 countries`));
       assert.ok(n.includes(`Method: ${BACKEND_METHOD} Exposure counts`), `the API's method, which ends in a full stop, is quoted once: ${n}`);
-      // last_seen is refreshed on port presence alone, so it is not a fresh sighting of the
-      // vulnerable version and must not read as one.
-      assert.match(n, /Their latest last_seen is 2026-09-15T04:02:09Z: when one of them was last seen listening on its port, not when its vulnerable version was last confirmed\./);
-      assert.doesNotMatch(n, /most recently seen/, n);
+      // last_seen is EchelonGraph's write time, refreshed on port presence alone (#2439), so it
+      // is neither a sighting of the service nor of the vulnerable version, and must not read as
+      // either.
+      assert.match(n, /Their latest last_seen is 2026-09-15T04:02:09Z: when EchelonGraph last wrote or refreshed one of their rows, not when any of them was observed and not when a vulnerable version was last confirmed\./);
+      assert.doesNotMatch(n, /most recently seen|last seen listening/, n);
+    });
+    // #2440: the note's tag is exposure_state, named as such; the envelope's state is a
+    // different field, and the text never tags it with an exposure_state word.
+    it("#2440: the note's tag names exposure_state, never state, in every case", async () => {
+      for (const id of [CVE, CVE_UNTRACKED, CVE_UNTRACKED_STALE, CVE_OLD_API]) {
+        const res = await call(id);
+        const n = noteOf(res);
+        assert.doesNotMatch(n, /\(state: /, `${id}: ${n}`);
+        const [, key, value] = n.match(/\((exposure_state): ([a-z_]+)\)/) ?? [];
+        assert.equal(key, "exposure_state", `${id}: no exposure_state tag: ${n}`);
+        assert.equal(value, res.structuredContent.exposure_state, id);
+        assert.equal(envelopeOf(res).state, "not_assessed", id);
+      }
     });
   });
 
@@ -1313,6 +1440,33 @@ describe(`against a stub API [${ERA}]`, () => {
       const { relayed, n } = await radarWith(undefined);
       assert.match(n, /Shadow-AI radar freshness is unknown: the answer carries no poller block\./, n);
       assert.equal(relayed.poller, undefined);
+    });
+    // #2313 item 7 / #2440: unknown fields are "dropped and named". 2.0.0 checked the top-level
+    // and stats keys but not the poller block's, so an injected poller.exposed_now: 99999
+    // vanished unmentioned. The known instance fields are still left out by design, unnamed.
+    for (const [label, poller] of [
+      ["a running fleet's block", FLEET_RUNNING],
+      ["a block of unknown freshness", FLEET_UNKNOWN],
+      ["an older API's follower block", FOLLOWER_POLLER],
+    ]) {
+      it(`an unknown key in ${label} is left out and named; its known instance fields are left out unnamed`, async () => {
+        const { relayed, n } = await radarWith({ ...poller, exposed_now: 99999, candidate_services: 12, last_new_inserts: 7, last_error: "crt.sh 503", source_health: "degraded" });
+        // Exactly the two unknown keys, in the order sent: no known instance field is named.
+        assert.match(n, /Left out of shadow_ai because this version of the tool cannot label them: poller\.exposed_now, poller\.candidate_services\./, n);
+        assert.doesNotMatch(n, /Left out of shadow_ai because they were not in the expected shape/, n);
+        assert.doesNotMatch(JSON.stringify(relayed), /99999|exposed_now|candidate_services/, "an unknown poller field was relayed");
+        const found = [...numericPaths(relayed)].filter((p) => !(p in SHADOW_AI_LABELLED));
+        assert.deepEqual(found, [], `numeric fields relayed with no label: ${found.join(", ")}`);
+        if (poller === FLEET_RUNNING) assert.deepEqual(relayed.poller, { running: true, last_run_at: FLEET_RUNNING.last_run_at });
+        else assert.equal(relayed.poller, undefined);
+      });
+    }
+    it("a poller block carrying every field the backend's Status sends names nothing (the control for the test above)", async () => {
+      const every = { ...FLEET_RUNNING, last_new_inserts: 7, last_error: "x", skipped_as_follower: 1, source_health: "healthy", consecutive_fails: 0, shodan_last_new: 2 };
+      assert.deepEqual(Object.keys(every).sort(), [...SHADOW_AI_POLLER_KNOWN].sort(), "the control must carry every known key");
+      const { relayed, n } = await radarWith(every);
+      assert.doesNotMatch(n, /Left out of shadow_ai/, n);
+      assert.deepEqual(relayed.poller, { running: true, last_run_at: FLEET_RUNNING.last_run_at });
     });
     it("the description says what running and last_run_at mean", () => {
       const d = tools.find((t) => t.name === "exposure_radar").description;
@@ -1569,11 +1723,11 @@ describe(`against a stub API [${ERA}]`, () => {
       let untracked = 0;
       for (const row of data.kev_exposure.newest_kev) {
         const n = noteOf(await client.callTool({ name: "cve_exposure", arguments: { cve_id: row.cve_id } }));
-        if (/state: not_assessed/.test(n)) {
+        if (/\(exposure_state: not_assessed\)/.test(n)) {
           untracked++;
           assert.equal(row.exposure_state, "not_assessed", `${row.cve_id}: cve_exposure says NOT ASSESSED, exposure_radar says ${row.exposure_state}`);
         } else {
-          assert.match(n, /state: exposed/, `${row.cve_id}: ${n}`);
+          assert.match(n, /\(exposure_state: exposed\)/, `${row.cve_id}: ${n}`);
           assert.equal(row.exposure_state, "exposed", row.cve_id);
         }
       }
@@ -1935,9 +2089,12 @@ describe(`against a stub API [${ERA}]`, () => {
         for (const name of ["get_cve", "cve_exposure"]) {
           const res = await client.callTool({ name, arguments: { cve_id: blank } });
           assertErrorResult(name, res);
-          const t = textOf(res);
+          const t = noteOf(res);
           assert.match(t, new RegExp(`^${name} FAILED \\(state: invalid_input\\): cve_id is required\\. Nothing was looked up, so this is not a finding\\.$`), t);
           assert.equal(res.structuredContent.state, "invalid_input");
+          // #2440: the message and its envelope block, nothing else.
+          assert.equal(textBlocks(res).length, 2);
+          assert.equal(envelopeOf(res).state, "invalid_input");
           assert.deepEqual(res.structuredContent.error, { kind: "invalid_input", path: null, status: null, message: "cve_id is required" });
         }
         // Before #1880's fix an empty id listed 50 unrelated CVEs as the answer.
@@ -1997,15 +2154,81 @@ describe(`against a stub API [${ERA}]`, () => {
         assert.deepEqual(res.structuredContent.notes.slice(-n.length), n, `${name}: the note is not in notes`);
       }
     });
-    it("cve_exposure, services on record with a real last_seen: measured, dated by last_seen, with the API's method", async () => {
-      const sc = (await call("cve_exposure", { cve_id: CVE })).structuredContent;
-      assert.equal(sc.state, "measured");
-      assert.equal(sc.measured_at, "2026-09-15T04:02:09Z");
+    // #2439: last_seen is EchelonGraph's write time, so a count it dates is not a dated
+    // measurement. The count is relayed, labelled; state is not_assessed and measured_at null.
+    it("#2439: cve_exposure, services on record with a real last_seen: not_assessed, undated, the count labelled, and last_seen named a write time", async () => {
+      const res = await call("cve_exposure", { cve_id: CVE });
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null);
       assert.equal(sc.method, BACKEND_METHOD);
       assert.deepEqual(sc.coverage, { in_scope: true });
       assert.equal(sc.exposure_state, "exposed");
       assert.equal(sc.freshness, null);
-      assert.match(sc.notes[0], /^state is measured: exposed_hosts counts the services the radar has on record for CVE-2023-44487, and measured_at is their latest last_seen/);
+      assert.equal(sc.data.exposed_hosts, 6213, "the count is still relayed");
+      assert.equal(
+        sc.notes[0],
+        "state is not_assessed: exposed_hosts counts the services the radar has on record for CVE-2023-44487, but the answer does not say when any of them was observed, so that count is relayed as what the radar holds on record, not as a dated measurement, and measured_at is null.",
+      );
+      assert.equal(
+        sc.notes[1],
+        "last_seen (2026-09-15T04:02:09Z) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows (when a Shodan search matched the banner, or a re-check found the port still listed), not when any service was observed, and Shodan's own banner time is not stored.",
+      );
+      assert.match(noteOf(res), /\(exposure_state: exposed\) The radar has 6213 internet-facing services \(distinct ip:port, the exposed_hosts field\) on record/);
+    });
+    // The production-shaped case the post-close review of #2313 replayed: 2.0.0 answered it
+    // state measured, measured_at 21:52:34.976885Z, the poller's write time.
+    it("#2439: production's answer (last_seen is the cycle's write time) is never measured, and no write time becomes measured_at", async () => {
+      const P = `/api/v1/public/kev-exposure/cve/${CVE_PROD_WRITE_STAMPED}`;
+      try {
+        // The recorded answer, and the same answer stamped at each write time in the capture.
+        for (const last_seen of PROD_WRITE_TIMES) {
+          stub.state.overrides[P] = { ...PROD_WRITE_STAMPED, last_seen };
+          const res = await call("cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED });
+          assert.notEqual(res.isError, true, brief(res));
+          const sc = res.structuredContent;
+          assert.notEqual(sc.state, "measured", `${last_seen}: a write time made the count measured`);
+          assert.equal(sc.state, "not_assessed", last_seen);
+          assert.equal(sc.measured_at, null, last_seen);
+          for (const t of PROD_WRITE_TIMES) assert.notEqual(sc.measured_at, t, `${last_seen}: measured_at is the write time ${t}`);
+          assert.equal(sc.exposure_state, "exposed");
+          assert.deepEqual(sc.coverage, { in_scope: true });
+          // Relayed, labelled: the count and where it comes from, not dropped.
+          assert.equal(sc.data.exposed_hosts, 229);
+          assert.equal(sc.data.last_seen, last_seen);
+          const n = noteOf(res);
+          assert.match(n, /\(exposure_state: exposed\) The radar has 229 internet-facing services \(distinct ip:port, the exposed_hosts field\) on record whose banner version maps to CVE-2026-87902 across 32 countries\./, n);
+          assert.ok(n.includes(`Their latest last_seen is ${last_seen}: when EchelonGraph last wrote or refreshed one of their rows, not when any of them was observed`), n);
+          assert.ok(sc.notes.some((s) => s.startsWith(`last_seen (${last_seen}) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows`)), sc.notes.join(" | "));
+          // The text says the same (#2440).
+          const env = assertEnvelopeInText(`cve_exposure ${last_seen}`, res);
+          assert.equal(env.state, "not_assessed");
+          assert.equal(env.measured_at, null);
+        }
+      } finally {
+        delete stub.state.overrides[P];
+      }
+    });
+    // measured returns only through observedAt, which reads no field today. A field the API does
+    // not serve (any name a future observation time might take) must not be read into one.
+    it("#2439: a time field the API does not serve today is not read as an observation time", async () => {
+      const P = `/api/v1/public/kev-exposure/cve/${CVE_PROD_WRITE_STAMPED}`;
+      stub.state.overrides[P] = {
+        ...PROD_WRITE_STAMPED,
+        observed_at: "2026-09-20T00:00:00Z",
+        first_seen: "2026-09-10T00:00:00Z",
+        banner_timestamp: "2026-09-19T00:00:00Z",
+        observed_window: { from: "2026-09-06T00:00:00Z", to: "2026-09-20T00:00:00Z" },
+      };
+      try {
+        const sc = (await call("cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED })).structuredContent;
+        assert.equal(sc.state, "not_assessed");
+        assert.equal(sc.measured_at, null);
+        // Relayed in data, verbatim, as the API's JSON always is.
+        assert.equal(sc.data.observed_at, "2026-09-20T00:00:00Z");
+      } finally {
+        delete stub.state.overrides[P];
+      }
     });
     it("cve_exposure, tracked:false: not_assessed, out of scope, undated", async () => {
       for (const id of [CVE_UNTRACKED, CVE_UNTRACKED_STALE]) {
@@ -2040,6 +2263,27 @@ describe(`against a stub API [${ERA}]`, () => {
         stub.state.mode = "ok";
       }
     });
+    // #2440: 2.0.0's text tagged this case "(state: measured_zero)" while the envelope said
+    // not_assessed. The text now tags exposure_state, and carries the envelope itself.
+    it("#2440: a tracked zero's text and structured result agree: exposure_state measured_zero in both, state not_assessed in both", async () => {
+      stub.state.mode = "empty";
+      try {
+        const res = await call("cve_exposure", { cve_id: CVE });
+        const sc = res.structuredContent;
+        const n = noteOf(res);
+        assert.match(n, /\(exposure_state: measured_zero\)/, n);
+        assert.doesNotMatch(n, /\(state: /, n);
+        const env = assertEnvelopeInText("cve_exposure tracked zero", res);
+        assert.equal(env.state, "not_assessed");
+        assert.equal(env.exposure_state, "measured_zero");
+        assert.equal(env.measured_at, null);
+        assert.equal(sc.state, env.state);
+        assert.equal(sc.exposure_state, env.exposure_state);
+        assert.match(env.notes[0], /^state is not_assessed: the API marks CVE-2023-44487 as tracked with 0 services on record, but a zero has no observation to date it/);
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
     it("cve_exposure, services on record but no real last_seen: not presented as measured", async () => {
       const P = `/api/v1/public/kev-exposure/cve/${CVE}`;
       for (const last_seen of [null, "0001-01-01T00:00:00Z", undefined]) {
@@ -2050,6 +2294,9 @@ describe(`against a stub API [${ERA}]`, () => {
           assert.equal(sc.exposure_state, "exposed", String(last_seen));
           assert.equal(sc.state, "not_assessed", String(last_seen));
           assert.equal(sc.measured_at, null, String(last_seen));
+          // No real last_seen, so no sentence about one, and never the Go zero time.
+          assert.ok(!sc.notes.some((s) => s.startsWith("last_seen (")), String(last_seen));
+          assert.doesNotMatch(sc.notes.join(" "), /0001-01-01/);
         } finally {
           delete stub.state.overrides[P];
         }
@@ -2264,15 +2511,54 @@ describe(`#2313: every structuredContent the suite received validates against it
     assert.ok(COLLECTED.length >= 150, `only ${COLLECTED.length} results collected`);
     const seen = {};
     for (const [name, , res] of COLLECTED) (seen[name] ??= new Set()).add(res.structuredContent?.state);
+    // Each tool's possible states, all of them seen. cve_exposure cannot be measured while the
+    // API serves no observation time (#2439), and exposure_radar cannot be either (#2313).
     const expected = {
       cve_summary: ["measured", "failed"],
       search_cves: ["measured", "failed"],
       get_cve: ["measured", "failed", "invalid_input"],
-      cve_exposure: ["measured", "not_assessed", "failed", "invalid_input"],
+      cve_exposure: ["not_assessed", "failed", "invalid_input"],
       exposure_radar: ["not_assessed", "failed"],
     };
     for (const [name, states] of Object.entries(expected)) {
       for (const st of states) assert.ok(seen[name]?.has(st), `${name}: no result in state ${st} (seen: ${[...(seen[name] ?? [])].join(", ")})`);
+      assert.deepEqual([...(seen[name] ?? [])].filter((st) => !states.includes(st)), [], `${name}: a result in a state it cannot answer`);
+    }
+  });
+  // #2440 done-means 1: for every tool, in this era, every result the suite received (success,
+  // not_assessed, failed, invalid_input) carries its envelope in a text block that matches
+  // structuredContent: state, measured_at, method, coverage and freshness, key for key.
+  it("#2440: every result's last text block is its structuredContent without data, and its first (on a success) is data", () => {
+    const seen = {};
+    for (const [name, args, res] of COLLECTED) {
+      assertEnvelopeInText(`${name}(${JSON.stringify(args)})`, res);
+      (seen[name] ??= new Set()).add(res.structuredContent.state);
+    }
+    // Not vacuous: every tool, and each state it answers in, went through the check above.
+    assert.deepEqual(Object.keys(seen).sort(), [...TOOLS].sort());
+    for (const st of STATES) assert.ok(Object.values(seen).some((s) => s.has(st)), `no result in state ${st} was checked`);
+  });
+  it("#2440: the check above can fail: a result without the envelope block, or whose text disagrees with structuredContent, is caught", () => {
+    const pick = (pred) => COLLECTED.find(([n, , r]) => pred(n, r))[2];
+    const ok = pick((n, r) => n === "cve_exposure" && r.structuredContent.state === "not_assessed" && r.structuredContent.exposure_state === "exposed");
+    const bad = pick((n, r) => n === "get_cve" && r.isError);
+    assertEnvelopeInText("control", ok);
+    assertEnvelopeInText("control", bad);
+    const withText = (res, blocks) => ({ ...res, content: blocks.map((t) => ({ type: "text", text: t })) });
+    const env = (res, change) => JSON.stringify({ ...envelopeOf(res), ...change }, null, 2);
+    const [data, note] = textBlocks(ok);
+    for (const [label, res, message] of [
+      ["2.0.0's shape: no envelope block", withText(ok, [data, note]), /text block\(s\), expected 3/],
+      ["a failure without its envelope block", withText(bad, [textBlocks(bad)[0]]), /text block\(s\), expected 2/],
+      ["a text state that disagrees", withText(ok, [data, note, env(ok, { state: "measured" })]), /the text says state/],
+      ["a text measured_at that disagrees", withText(ok, [data, note, env(ok, { measured_at: ok.structuredContent.data.last_seen })]), /the text says measured_at/],
+      ["a text method that disagrees", withText(ok, [data, note, env(ok, { method: "x" })]), /the text says method/],
+      ["a text freshness that disagrees", withText(ok, [data, note, env(ok, { freshness: {} })]), /the text says freshness/],
+      ["a text envelope with no freshness", withText(ok, [data, note, JSON.stringify((({ freshness: _f, ...e }) => e)(envelopeOf(ok)))]), /has no freshness/],
+      ["2.0.0's tag: (state: exposed) beside state not_assessed", withText(ok, [data, note.replace("(exposure_state: exposed)", "(state: exposed)"), textBlocks(ok)[2]]), /tags \(state: exposed\)/],
+      ["an envelope block that is not JSON", withText(ok, [data, note, "state: not_assessed"]), /not the envelope's JSON/],
+    ]) {
+      assert.throws(() => assertEnvelopeInText(label, res), message, label);
     }
   });
   it("every structuredContent validates against its tool's advertised outputSchema, and isError agrees with its state", () => {
@@ -2306,21 +2592,47 @@ describe(`#2313: every structuredContent the suite received validates against it
       assert.ok(m === null || realInstant(m), `${name}(${JSON.stringify(args)}): measured_at ${JSON.stringify(m)}`);
     }
   });
-  it("#2313 done-means 5: every exposure number in a measured result has a real measured_at and a method", () => {
+  // #2313 done-means 5, and #2439: every exposure number in a measured result has a real
+  // measured_at and a method, and no measured_at is a time EchelonGraph wrote a row. Neither
+  // exposure answer serves a time at which what it counts was observed, so today no exposure
+  // result is measured at all: the walk finds no measured exposure number, and the control
+  // below proves it would catch one.
+  it("#2313 done-means 5: every exposure number in a measured result has a real measured_at and a method; today none is measured", () => {
     let measured = 0;
     let undated = 0;
+    let counted = 0;
     for (const [name, args, res] of COLLECTED) {
       measured += assertExposureNumbersDated(`${name}(${JSON.stringify(args)})`, name, res.structuredContent);
-      if (EXPOSURE_TOOLS.has(name) && res.structuredContent.state === "not_assessed") undated++;
+      if (EXPOSURE_TOOLS.has(name) && res.structuredContent.state === "not_assessed") {
+        undated++;
+        if (numbersUnder(res.structuredContent.data).size) counted++;
+      }
     }
-    // Not vacuous: the suite's cve_exposure answers with services on record are measured and
-    // carry numbers (6213 services, 107 countries, and each ranked row's count).
-    assert.ok(measured >= 20, `only ${measured} measured exposure numbers walked`);
+    assert.equal(measured, 0, "an exposure number was measured, but no exposure answer says when what it counts was observed");
+    // Not vacuous: the walk read exposure results whose numbers are relayed, labelled, undated.
     assert.ok(undated >= 10, `only ${undated} not-assessed exposure results walked`);
+    assert.ok(counted >= 10, `only ${counted} not-assessed exposure results carrying numbers walked`);
+  });
+  it("#2439: no cve_exposure result is measured, and none takes its measured_at from last_seen, a write time", () => {
+    let withLastSeen = 0;
+    for (const [name, args, res] of COLLECTED) {
+      if (name !== "cve_exposure" || res.isError) continue;
+      const sc = res.structuredContent;
+      assert.notEqual(sc.state, "measured", `cve_exposure(${JSON.stringify(args)}): measured`);
+      assert.equal(sc.measured_at, null, `cve_exposure(${JSON.stringify(args)}): measured_at ${sc.measured_at}`);
+      if (realInstant(sc.data.last_seen)) {
+        withLastSeen++;
+        assert.notEqual(sc.measured_at, sc.data.last_seen, `cve_exposure(${JSON.stringify(args)}): measured_at is last_seen`);
+        assert.ok(sc.notes.some((s) => s.startsWith(`last_seen (${sc.data.last_seen}) is not measured_at`)), `cve_exposure(${JSON.stringify(args)}): last_seen is not labelled a write time`);
+      }
+    }
+    // Not vacuous: the fixtures with services on record, production's among them.
+    assert.ok(withLastSeen >= 10, `only ${withLastSeen} cve_exposure results with a real last_seen walked`);
   });
   it("the walk above can fail: a measured exposure number with no measured_at, or no method, is caught", () => {
-    const [, , res] = COLLECTED.find(([n, , r]) => n === "cve_exposure" && r.structuredContent.state === "measured");
-    const sc = res.structuredContent;
+    const [, , res] = COLLECTED.find(([n, , r]) => n === "cve_exposure" && r.structuredContent.state === "not_assessed" && r.structuredContent.exposure_state === "exposed");
+    const sc = { ...res.structuredContent, state: "measured", measured_at: "2026-09-20T00:00:00Z" };
+    // The control: dated and with a method, a measured count passes, and the walk counts it.
     assert.ok(assertExposureNumbersDated("control", "cve_exposure", sc) > 0);
     assert.throws(() => assertExposureNumbersDated("mutant", "cve_exposure", { ...sc, measured_at: null }), /under state measured with measured_at null/);
     assert.throws(() => assertExposureNumbersDated("mutant", "cve_exposure", { ...sc, measured_at: "0001-01-01T00:00:00Z" }), /measured_at/);

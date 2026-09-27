@@ -30,28 +30,37 @@ sources on a schedule; each radar refreshes on its own.
 
 Every 12 hours, when Shodan query credits allow, the KEV-exposure radar runs one Shodan query
 per tracked product, reads up to 100 ip:port services per query, and keeps a service when its
-banner version matches a CISA-KEV or high-EPSS (>= 0.5) CVE. A service not seen on its port
-for 21 days is dropped. A count is therefore a banner-version inference over a sample: not an
-exploit test, and not an internet-wide census.
+banner version matches a CISA-KEV or high-EPSS (>= 0.5) CVE. A service whose row has not been
+written or refreshed for 21 days is dropped. A count is therefore a banner-version inference
+over a sample: not an exploit test, and not an internet-wide census.
 
-`last_seen` is when a service was last seen listening on its port, not when its vulnerable
-version was last confirmed. Between searches, a re-check that finds the port still listed by
-Shodan InternetDB refreshes `last_seen` without re-reading the banner, so a patched service can
-stay counted while its port stays open.
+`last_seen` is when EchelonGraph last wrote or refreshed a service's row, not when the service
+was observed, and not when its vulnerable version was last confirmed. It is set to the time of
+the write when a search matches the banner, and again when a re-check finds the port still
+listed by Shodan InternetDB, without re-reading the banner, so a patched service can stay
+counted while its port stays open. Shodan's own time for the banner is not stored. So
+`last_seen` dates the write, never the sighting, and it is never `measured_at` (see
+"Structured results").
 
 The unit is a service, not a machine. Shodan returns one banner per port and the radar keys
 each observation on ip:port, so a machine answering on two ports counts twice. The API's field
 names are kept (`exposed_hosts` here; `distinct_hosts`, `ransomware_hosts` and each ranked
 row's count in `exposure_radar`), but every one of them counts ip:port services.
 
-The radar only looks for its **tracked** set of CVEs, so a zero means different things:
+The radar only looks for its **tracked** set of CVEs, so a zero means different things. The
+note tags each case with its `exposure_state`, as "(exposure_state: …)"; that tag says what the
+count is, and is not the result's `state`:
 
 | API answer | What the tool says |
 |---|---|
-| `tracked: false` | **NOT ASSESSED**: outside the radar's tracked set; 0 is not a measurement. |
-| `tracked: true`, `exposed_hosts: 0` | A measured zero in the radar's sample: none of the up to 100 services it read per tracked-product query matched. Not an internet-wide zero. |
-| no `tracked` field | The API did not say whether the CVE is in the tracked set: an older API, or the radar cannot decide (for example a CISA-KEV or high-EPSS CVE in a tracked product with 0 services on record). 0 exposed services on record, with no claim either way. |
+| `tracked: true`, `exposed_hosts` above 0 | `exposure_state` `exposed`: the count of services the radar has on record for the CVE. |
+| `tracked: false` | `exposure_state` `not_assessed`, **NOT ASSESSED**: outside the radar's tracked set; 0 is not a measurement. |
+| `tracked: true`, `exposed_hosts: 0` | `exposure_state` `measured_zero`, a zero in the radar's sample: none of the up to 100 services it read per tracked-product query matched. Not an internet-wide zero, and undated: the answer does not say when the radar looked. The backend does not send this answer today. |
+| no `tracked` field | The API did not say whether the CVE is in the tracked set: an older API, or the radar cannot decide (for example a CISA-KEV or high-EPSS CVE in a tracked product with 0 services on record). 0 exposed services on record, with no claim either way (`exposure_state` `tracking_unknown`). |
 | HTTP 400, or an id that is not `CVE-YYYY-NNNN…` | An error result tagged `invalid_input`; nothing was looked up. |
+
+Whatever the `exposure_state`, the result's `state` is `not_assessed` with `measured_at` `null`:
+the answer does not say when any service it counts was observed (see "Structured results").
 
 ### How `exposure_radar` counts
 
@@ -151,7 +160,9 @@ yet verified, whose hostname no longer resolves, or whose service no longer answ
 
 The tool relays no number it cannot label. A stats field this version does not know is left
 out, and the note names it; so is a count in an unexpected shape. A ranked row carries only
-its name and its count, and a field added to one is named too.
+its name and its count, and a field added to one is named too. The `poller` block's keys are
+checked the same way: a key this version does not know is left out and named, while the
+instance fields it knows are left out as described below.
 
 ## What a result means
 
@@ -159,7 +170,8 @@ Every tool answers in one of two shapes, so a model reading the result cannot mi
 outage for an all-clear:
 
 - **Success** — the first text block is the API's JSON verbatim; the second is a one-line
-  note saying the call succeeded, which base URL answered, and what it found. When the
+  note saying the call succeeded, which base URL answered, and what it found; the third is
+  the structured result without `data`, as JSON (below). When the
   feed genuinely holds nothing for the query the note says so in words ("we looked and
   found nothing … not a lookup failure"), because a measured zero is a measurement. The
   exception to verbatim is `exposure_radar`: each radar is cut to the fields listed above, and
@@ -179,10 +191,12 @@ outage for an all-clear:
   the host could not be reached, it answered non-2xx, it took longer than the timeout, or
   it answered 2xx with a body that is not a JSON object. The text names the tool, the
   cause (status code or error kind), the path, and the base URL, and says it is not a
-  finding. A failure is never rendered as a success with null fields.
+  finding; the second text block is the structured result, as JSON (below). A failure is never
+  rendered as a success with null fields.
 
-Both shapes also carry a structured result, below. The text blocks are the same as in 1.x, so
-a client that reads only `content` sees what it always saw.
+Both shapes also carry a structured result, below, and repeat it in their last text block, so a
+client that passes only `content` to the model still sees how the answer was measured. The
+first text block (the API's JSON, or the failure) and the note after it are where 1.x put them.
 
 ## Structured results
 
@@ -202,9 +216,14 @@ declares its shape as an `outputSchema` in `tools/list`, with a title and the an
 | `data` | On a success only: the same JSON as the first text block. |
 | `error` | On a failure only: `kind`, `path`, `status` and `message`. |
 
+The last text block of every result is this structured result serialized as JSON, without
+`data`: the same `state`, `measured_at`, `method`, `coverage`, `freshness` and `notes` (and on
+a failure `error`), key for key, since a client may pass only `content` to the model. With
+the first text block as `data`, the text carries the whole structured result.
+
 | `state` | What it means |
 |---|---|
-| `measured` | A measurement of what was asked. An exposure count is `measured` only when the answer dates it (`measured_at`) and says how it was produced (`method`). |
+| `measured` | A measurement of what was asked. An exposure count is `measured` only when the answer says when what it counts was observed (`measured_at`) and how it was produced (`method`). No exposure answer says when today, so neither exposure tool answers `measured`. |
 | `not_assessed` | The answer holds no dated measurement of what was asked, so no number in it is a finding: the radar does not look for this CVE, the answer does not say whether it does, or the answer does not say when what it counts was observed. |
 | `failed` | The lookup did not complete. Not a finding. |
 | `invalid_input` | The input was refused, by this server or by the API, so nothing was looked up. Not a finding. |
@@ -220,11 +239,14 @@ a note says so. Per tool:
   `total_counted` is false the total is not a count, and the note does not call it one.
 - `get_cve` is `measured`, and its `measured_at` is the record's `updated_at`, when EchelonGraph
   last wrote it.
-- `cve_exposure` is `measured` only for services on record with a real `last_seen`, which is its
-  `measured_at`. Every other answer is `not_assessed`, a tracked zero included, since a zero has
-  no observation to date it. `exposure_state` is `exposed`, `measured_zero`, `not_assessed` or
-  `tracking_unknown`, the cases of "How `cve_exposure` counts", and `coverage.in_scope` is the
-  API's `tracked`.
+- `cve_exposure` is `not_assessed` with `measured_at` `null`, every answer: the per-CVE answer
+  carries no time at which the services it counts were observed. Its `last_seen` is when
+  EchelonGraph last wrote or refreshed one of their rows, not when any of them was observed,
+  so it is never `measured_at`, and a note says so. A tracked zero is `not_assessed` too, since
+  a zero has no observation to date it. The count is still relayed, labelled: `exposure_state`
+  is `exposed`, `measured_zero`, `not_assessed` or `tracking_unknown`, the cases of "How
+  `cve_exposure` counts", and `coverage.in_scope` is the API's `tracked`. It becomes `measured`
+  only when the API serves a time at which the counted services were observed.
 - `exposure_radar` is `not_assessed` with `measured_at` `null`: every radar answered, but no
   stats answer says when the services or records it counts were observed, so no count is
   presented as a dated measurement. Its numbers keep the labels above. `freshness` holds each
@@ -255,8 +277,9 @@ carry the package's name and version (`serverInfo`), and every API request carri
 User-Agent, `echelongraph-mcp/<version>`.
 
 Both handshakes also carry the server instructions: the data is public; what `state`,
-`measured_at` and `freshness` mean; that exposure numbers are aggregate counts of ip:port
-services, not an internet-wide census; and that Shodan data is Shodan's.
+`measured_at` and `freshness` mean, and that the last text block repeats them; that exposure
+numbers are aggregate counts of ip:port services, not an internet-wide census; and that Shodan
+data is Shodan's.
 
 ## Install
 

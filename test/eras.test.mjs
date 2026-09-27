@@ -18,14 +18,46 @@ const TOOLS = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposur
 // SUPPORTED_PROTOCOL_VERSIONS): a client asking for one of them gets it back.
 const LEGACY = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const SUMMARY = { summary: { critical: 1, high: 2, medium: 3, low: 4, none: 0, total: 10, last_updated: "2026-09-27T01:00:00Z" } };
+// #2439: production's per-CVE answer shape (2026-09-27), whose last_seen is the poller's write
+// time. 2.0.0 answered it state measured in every era; no era may.
+const EXPOSURE_CVE = "CVE-2026-87902";
+const EXPOSURE = {
+  cve_id: EXPOSURE_CVE,
+  exposed_hosts: 229,
+  countries: 32,
+  kev_listed: true,
+  kev_seen_in_observations: true,
+  kev_catalog_listed: true,
+  tracked: true,
+  method: "Shodan banner match over the radar's tracked product queries.",
+  ransomware: false,
+  top_countries: [{ country: "United States", hosts: 130 }],
+  top_products: [{ product: "wordpress", hosts: 229 }],
+  last_seen: "2026-09-27T21:52:34.976885Z",
+  generated_at: "2026-09-27T22:06:13.516192827Z",
+};
+const ANSWERS = {
+  "/api/v1/public/cves/summary": SUMMARY,
+  [`/api/v1/public/kev-exposure/cve/${EXPOSURE_CVE}`]: EXPOSURE,
+};
+// One call per tool: two successes (cve_summary measured, cve_exposure not_assessed) and three
+// failures (the stub answers every other path 404), so both result shapes reach every era.
+const CALLS = [
+  ["cve_summary", {}],
+  ["search_cves", { search: "tomcat", limit: 2 }],
+  ["get_cve", { cve_id: "CVE-2023-44487" }],
+  ["cve_exposure", { cve_id: EXPOSURE_CVE }],
+  ["exposure_radar", {}],
+];
 
 let stub;
 let env;
 before(async () => {
   stub = http.createServer((req, res) => {
-    if (new URL(req.url, "http://stub").pathname === "/api/v1/public/cves/summary") {
+    const answer = ANSWERS[new URL(req.url, "http://stub").pathname];
+    if (answer) {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(SUMMARY));
+      res.end(JSON.stringify(answer));
       return;
     }
     res.writeHead(404, { "content-type": "text/plain" });
@@ -187,4 +219,53 @@ describe("#2311: the legacy era: initialize, as 1.x clients open", () => {
       }
     });
   });
+});
+
+// #2440: a client that passes only `content` to the model must still see how each answer was
+// measured, whichever protocol version it negotiated. The last text block of every result is
+// structuredContent without data, as JSON; a success's first block is data. #2439: the
+// production-shaped cve_exposure answer is not_assessed in every version.
+describe("#2440: in every protocol version, every tool's text carries its structured envelope", () => {
+  for (const era of [MODERN, ...LEGACY]) {
+    it(`${era}: each tool's last text block is its structuredContent without data`, async () => {
+      const client = await open(era);
+      try {
+        const states = {};
+        for (const [name, args] of CALLS) {
+          const res = await client.callTool({ name, arguments: args });
+          const sc = res.structuredContent;
+          assert.ok(sc && typeof sc === "object", `${era} ${name}: no structuredContent`);
+          const blocks = (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
+          assert.equal(blocks.length, res.isError ? 2 : 3, `${era} ${name}: ${blocks.length} text blocks`);
+          const { data, ...envelope } = sc;
+          const text = JSON.parse(blocks.at(-1));
+          for (const k of ["state", "measured_at", "method", "coverage", "freshness"]) {
+            assert.deepEqual(text[k], sc[k], `${era} ${name}: the text's ${k} is not structuredContent's`);
+          }
+          assert.deepEqual(text, envelope, `${era} ${name}`);
+          if (!res.isError) assert.deepEqual(JSON.parse(blocks[0]), data, `${era} ${name}: the first block is not data`);
+          states[name] = sc.state;
+        }
+        assert.deepEqual(states, { cve_summary: "measured", search_cves: "failed", get_cve: "failed", cve_exposure: "not_assessed", exposure_radar: "failed" });
+      } finally {
+        await client.close();
+      }
+    });
+    it(`${era}: production's cve_exposure answer, dated only by a write time, is not_assessed with measured_at null, in text and structure`, async () => {
+      const client = await open(era);
+      try {
+        const res = await client.callTool({ name: "cve_exposure", arguments: { cve_id: EXPOSURE_CVE } });
+        assert.notEqual(res.isError, true);
+        const text = JSON.parse(res.content.filter((c) => c.type === "text").at(-1).text);
+        for (const env of [res.structuredContent, text]) {
+          assert.equal(env.state, "not_assessed");
+          assert.equal(env.measured_at, null);
+          assert.equal(env.exposure_state, "exposed");
+        }
+        assert.equal(res.structuredContent.data.exposed_hosts, 229, "the count is relayed");
+      } finally {
+        await client.close();
+      }
+    });
+  }
 });
