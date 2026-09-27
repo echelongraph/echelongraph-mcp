@@ -11,20 +11,28 @@
 // "We could not look" and "we looked and found nothing" have to stay distinguishable.
 //
 // Runs against dist/index.js, so build first — `npm test` does. No framework beyond node:test.
+// See server-under-test.mjs for running it against an installed tarball instead.
+//
+// Protocol eras (#2311). The whole suite runs once per era: this file opens every connection
+// with the 2026-07-28 server/discover, and tools-legacy.test.mjs imports it to run the same
+// tests over a 2025-06-18 initialize. Every behavioural rule below has to hold in both.
+//
+// Structured results (#2313). Every tool result the suite receives, in every describe block,
+// is collected, and the last block validates each one's structuredContent against the tool's
+// own advertised outputSchema with a JSON Schema validator (ajv, as the SDK ships it), and
+// walks each one for an exposure number that claims to be measured without a date or a method.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+import { connect, MODERN } from "./mcp-stdio-client.mjs";
+import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
 
-const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DIST = path.join(PKG_DIR, "dist", "index.js");
-const readPkgFile = (name) => fs.readFileSync(path.join(PKG_DIR, name), "utf8");
-const PKG = JSON.parse(readPkgFile("package.json"));
+// The era this run of the suite opens its connections with.
+const ERA = globalThis.MCP_TEST_ERA ?? MODERN;
 const CVE = "CVE-2023-44487";
 // cve_exposure fixtures for the contract of GET /api/v1/public/kev-exposure/cve/:id.
 const CVE_UNTRACKED = "CVE-2099-10001"; // tracked:false, 0 hosts
@@ -306,6 +314,8 @@ const BODIES = {
 //   403         — HTTP 403 with an HTML body, the shape an edge block produces
 //   html        — HTTP 200 with an HTML body (an SPA shell or a wrong path)
 //   null        — HTTP 200 whose JSON body is the literal `null`
+//   number      — HTTP 200 whose JSON body is a bare number (#2311)
+//   truncated   — HTTP 200 whose body is JSON cut off mid-object (#2311)
 //   hang        — accept the request and never answer
 async function startStub() {
   // overrides: pathname -> body, consulted before BODIES in the ok/empty modes.
@@ -327,6 +337,14 @@ async function startStub() {
       case "null":
         res.writeHead(200, { "content-type": "application/json" });
         res.end("null");
+        return;
+      case "number":
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("42");
+        return;
+      case "truncated":
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"summary": {"critical": 42038, "total": 3735');
         return;
       case "hang":
         pending.add(res);
@@ -368,15 +386,18 @@ async function refusedPort() {
   return port;
 }
 
+// Every tool result any test receives: [tool, arguments, result]. The last describe block
+// validates all of them (#2313).
+const COLLECTED = [];
+
 async function spawnServer(env) {
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [DIST],
-    env: { ...process.env, ...env },
-    stderr: "inherit",
-  });
-  const client = new Client({ name: "echelongraph-mcp-tools-test", version: "0.0.0" });
-  await client.connect(transport);
+  const client = await connect({ era: ERA, ...serverCommand(), env: { ...process.env, ...env }, stderr: "inherit" });
+  const call = client.callTool.bind(client);
+  client.callTool = async (req) => {
+    const res = await call(req);
+    COLLECTED.push([req.name, req.arguments ?? {}, res]);
+    return res;
+  };
   return client;
 }
 
@@ -539,6 +560,91 @@ function assertObservedFieldsNotCalledExposed(where, units) {
   return checked;
 }
 
+// ── #2311 / #2313: the structured result ──
+
+// What every tool declares: read-only, no side effects, repeatable, and it reaches the open
+// internet (the EchelonGraph API). Annotations are hints a client MUST treat as untrusted.
+const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const STATES = ["measured", "not_assessed", "failed", "invalid_input"];
+// The tools whose numbers are exposure numbers: every number anywhere in their data.
+const EXPOSURE_TOOLS = new Set(["cve_exposure", "exposure_radar"]);
+const realInstant = (s) => typeof s === "string" && Date.parse(s) > 0;
+
+// A JSON Schema validator: ajv 8 as the SDK bundles it, dispatching on the schema's $schema
+// dialect (2020-12 here). It is what an MCP client runs over structuredContent.
+const validator = new AjvJsonSchemaValidator();
+function assertValid(where, schema, value) {
+  const v = validator.getValidator(schema)(value);
+  assert.ok(v.valid, `${where}: structuredContent does not validate against the outputSchema: ${v.errorMessage}\n${JSON.stringify(value).slice(0, 600)}`);
+}
+const isValid = (schema, value) => validator.getValidator(schema)(value).valid;
+
+// #2313 done-means 5: every exposure number in a result has a non-null measured_at and a
+// method, or the result's state is not measured. Walks one structuredContent; returns how many
+// exposure numbers it found under a measured state, so a caller can prove it was not vacuous.
+function assertExposureNumbersDated(where, tool, sc) {
+  if (!EXPOSURE_TOOLS.has(tool)) return 0;
+  let n = 0;
+  const walk = (v, p) => {
+    if (typeof v === "number") {
+      if (sc.state !== "measured") return;
+      n++;
+      assert.ok(realInstant(sc.measured_at), `${where}: ${p} = ${v} is under state measured with measured_at ${JSON.stringify(sc.measured_at)}`);
+      assert.ok(typeof sc.method === "string" && sc.method.length > 0, `${where}: ${p} = ${v} is under state measured with no method`);
+    } else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${p}[${i}]`));
+    else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, `${p}.${k}`);
+  };
+  walk(sc.data, "data");
+  return n;
+}
+
+// Every path to a number the schema allows, normalised as numericPaths does: [] for an array
+// element, .* for a map value.
+function schemaNumericPaths(s, p = "", out = new Set()) {
+  if (s === null || typeof s !== "object") return out;
+  const types = [].concat(s.type ?? []);
+  if (types.includes("number") || types.includes("integer")) out.add(p);
+  for (const k of ["anyOf", "oneOf", "allOf"]) for (const x of s[k] ?? []) schemaNumericPaths(x, p, out);
+  if (s.items) schemaNumericPaths(s.items, `${p}[]`, out);
+  if (s.properties) for (const [k, x] of Object.entries(s.properties)) schemaNumericPaths(x, p ? `${p}.${k}` : k, out);
+  if (s.additionalProperties && typeof s.additionalProperties === "object" && Object.keys(s.additionalProperties).length) {
+    schemaNumericPaths(s.additionalProperties, `${p}.*`, out);
+  }
+  return out;
+}
+// Every property name and every string enum value a schema holds, at any depth.
+function schemaNames(s, out = new Set()) {
+  if (s === null || typeof s !== "object") return out;
+  if (Array.isArray(s)) {
+    for (const x of s) schemaNames(x, out);
+    return out;
+  }
+  for (const e of s.enum ?? []) if (typeof e === "string") out.add(e);
+  if (s.properties) for (const k of Object.keys(s.properties)) out.add(k);
+  for (const [k, x] of Object.entries(s)) if (k !== "enum" && k !== "description") schemaNames(x, out);
+  return out;
+}
+// The success and failure branches of an outputSchema, by the states each admits.
+const branchOf = (schema, state) => (schema.oneOf ?? []).find((b) => b.properties?.state?.enum?.includes(state));
+// A field name as a description or the README writes it: snake_case, one underscore at least.
+const FIELD_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+// A sentence naming a re-probe (re-check, re-verification) together with an interval: "every
+// 24 h", "a 24-hour re-probe", "daily". The published re-probe interval applies only to hosts
+// EchelonGraph does not own, so any sentence that names one must say so. A window ("in the last
+// 24 h") is not an interval.
+const REPROBE = /\bre-?(?:probe|check|verif)\w*/i;
+const INTERVAL =
+  /\bevery\s+\d+(?:\.\d+)?\s*(?:h|hrs?|hours?|d|days?|min|minutes?)\b|\b\d+(?:\.\d+)?\s*-?\s*(?:h|hrs?|hours?|days?|minutes?)\s+(?:re-?probe|re-?check|re-?verif|interval|cadence)|\b(?:hourly|daily|weekly)\b/i;
+function assertReprobeIntervalsQualified(where, units) {
+  let named = 0;
+  for (const u of units) {
+    if (!REPROBE.test(u) || !INTERVAL.test(u)) continue;
+    named++;
+    assert.ok(u.includes("for hosts we do not own"), `${where}: a re-probe interval without "for hosts we do not own": "${u}"`);
+  }
+  return named;
+}
+
 // The P1 property. Asserted on its own so a pre-fix run shows exactly which tools answer a
 // failure with a success.
 function assertErrorResult(name, res) {
@@ -553,14 +659,15 @@ function assertNames(name, res, base, ...phrases) {
   for (const p of phrases) assert.match(t, p, `${name}: error text lacks ${p}: ${t}`);
 }
 
-describe("failure polarity: unreachable base (ECHELONGRAPH_API_BASE=http://127.0.0.1:1)", () => {
+describe(`failure polarity: unreachable base (ECHELONGRAPH_API_BASE=http://127.0.0.1:1) [${ERA}]`, () => {
   const base = "http://127.0.0.1:1";
   let client, results;
   before(async () => {
     client = await spawnServer({ ECHELONGRAPH_API_BASE: base, ECHELONGRAPH_API_TIMEOUT_MS: "2000" });
     results = await callAll(client);
   });
-  after(() => client.close());
+  // A client that never connected (a failed opening) leaves nothing to close.
+  after(() => client?.close());
   for (const name of TOOLS) {
     it(`${name} returns an error result, not a success with null fields`, () => assertErrorResult(name, results[name]));
     it(`${name} error text names the tool, the failure and the base URL`, () =>
@@ -568,14 +675,15 @@ describe("failure polarity: unreachable base (ECHELONGRAPH_API_BASE=http://127.0
   }
 });
 
-describe("failure polarity: connection refused", () => {
+describe(`failure polarity: connection refused [${ERA}]`, () => {
   let client, results, base;
   before(async () => {
     base = `http://127.0.0.1:${await refusedPort()}`;
     client = await spawnServer({ ECHELONGRAPH_API_BASE: base, ECHELONGRAPH_API_TIMEOUT_MS: "2000" });
     results = await callAll(client);
   });
-  after(() => client.close());
+  // A client that never connected (a failed opening) leaves nothing to close.
+  after(() => client?.close());
   for (const name of TOOLS) {
     it(`${name} returns an error result`, () => assertErrorResult(name, results[name]));
     it(`${name} error text names ECONNREFUSED and the base URL`, () =>
@@ -583,15 +691,20 @@ describe("failure polarity: connection refused", () => {
   }
 });
 
-describe("against a stub API", () => {
+describe(`against a stub API [${ERA}]`, () => {
   let stub, client;
   before(async () => {
     stub = await startStub();
     client = await spawnServer({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "500" });
   });
+  // The stub is closed even when the opening failed: an open listener would keep this file's
+  // process alive after its last test, and node --test would wait on it forever.
   after(async () => {
-    await client.close();
-    await stub.close();
+    try {
+      await client?.close();
+    } finally {
+      await stub?.close();
+    }
   });
 
   describe("failure polarity: upstream answers HTTP 403", () => {
@@ -790,6 +903,8 @@ describe("against a stub API", () => {
     // Every package-authored text a user or a model reads, README reflowed onto one line.
     const shipped = () => [
       ...tools.map((t) => [`${t.name} description`, t.description]),
+      // #2311: the server instructions every client receives in the opening exchange.
+      ["server instructions", client.opening.instructions],
       ...notes,
       ["README.md", flat(readPkgFile("README.md"))],
       ["package.json description", PKG.description],
@@ -850,6 +965,19 @@ describe("against a stub API", () => {
         assert.doesNotMatch(t, /how exposed is the internet|how much of the internet|internet is exposed/i, `${where}: ${t}`);
       }
       assert.match(flat(readPkgFile("README.md")), /how many exposed services does EchelonGraph's radar have on record for it\?/);
+    });
+
+    // #2311: EchelonGraph's published re-probe interval applies only to hosts it does not own, so
+    // any sentence naming a re-probe (or re-check) interval must say "for hosts we do not own".
+    // The package names none today; the guard keeps a later edit from naming one bare.
+    it("no shipped sentence names a re-probe interval without \"for hosts we do not own\"", () => {
+      for (const [where, t] of shipped()) assertReprobeIntervalsQualified(where, sentencesOf(t));
+      assertReprobeIntervalsQualified("README.md", readmeUnits(readPkgFile("README.md")));
+      // The guard can fail: a bare interval is caught, and the qualified one passes.
+      assert.throws(() => assertReprobeIntervalsQualified("mutant", ["The radar re-probes every service every 24 h."]), /for hosts we do not own/);
+      assert.equal(assertReprobeIntervalsQualified("control", ["The radar re-probes every 24 h for hosts we do not own."]), 1);
+      assert.throws(() => assertReprobeIntervalsQualified("mutant", ["Each service gets a 24-hour re-check."]), /for hosts we do not own/);
+      assert.throws(() => assertReprobeIntervalsQualified("mutant", ["Exposed services are re-verified daily."]), /for hosts we do not own/);
     });
 
     // #2306 reopened: Shodan's terms require materials based on Shodan information to
@@ -1674,6 +1802,382 @@ describe("against a stub API", () => {
     });
   });
 
+  // #2311: every tool carries a title, the four annotations and an outputSchema, and the opening
+  // exchange carries the server instructions.
+  describe("#2311: tools/list, the opening exchange and the server instructions", () => {
+    let tools;
+    before(async () => {
+      ({ tools } = await client.listTools());
+    });
+    it("the connection was opened in this run's era", () => {
+      assert.equal(client.era, ERA);
+      if (ERA === MODERN) {
+        assert.ok(client.opening.supportedVersions.includes(MODERN), JSON.stringify(client.opening));
+      } else {
+        assert.equal(client.opening.protocolVersion, ERA, JSON.stringify(client.opening));
+      }
+    });
+    it("every tool has a title, the four annotations, and an outputSchema", () => {
+      assert.deepEqual(tools.map((t) => t.name), TOOLS);
+      for (const t of tools) {
+        assert.equal(typeof t.title, "string", `${t.name}: no title`);
+        assert.ok(t.title.trim().length > 0, `${t.name}: empty title`);
+        assert.deepEqual(t.annotations, ANNOTATIONS, `${t.name}: annotations`);
+        assert.ok(t.outputSchema && typeof t.outputSchema === "object", `${t.name}: no outputSchema`);
+      }
+      assert.equal(new Set(tools.map((t) => t.title)).size, TOOLS.length, "two tools share a title");
+    });
+    it("every outputSchema is an object schema with a success branch that carries data and a failure branch that carries error", () => {
+      for (const t of tools) {
+        const s = t.outputSchema;
+        assert.equal(s.type, "object", `${t.name}: the outputSchema root is not an object schema, so a 2025-era client would receive {result: ...}`);
+        const ok = branchOf(s, "measured") ?? branchOf(s, "not_assessed");
+        const bad = branchOf(s, "failed");
+        assert.ok(ok && bad, `${t.name}: no success or failure branch`);
+        assert.deepEqual(branchOf(s, "not_assessed"), ok, `${t.name}: not_assessed is not in the success branch`);
+        assert.deepEqual(branchOf(s, "invalid_input"), bad, `${t.name}: invalid_input is not in the failure branch`);
+        for (const k of ["state", "measured_at", "method", "coverage", "freshness", "notes", "data"]) assert.ok(ok.required.includes(k), `${t.name}: success does not require ${k}`);
+        for (const k of ["state", "measured_at", "method", "coverage", "freshness", "notes", "error"]) assert.ok(bad.required.includes(k), `${t.name}: failure does not require ${k}`);
+        assert.equal(bad.properties.data, undefined, `${t.name}: a failure may carry data`);
+        assert.equal(bad.additionalProperties, false, `${t.name}: a failure admits fields the schema does not name`);
+        assert.equal(ok.additionalProperties, false, `${t.name}: a success admits envelope fields the schema does not name`);
+        assert.deepEqual(bad.properties.measured_at, { type: "null" }, `${t.name}: a failure may carry measured_at`);
+        // Every state, and only these four.
+        assert.deepEqual([...ok.properties.state.enum, ...bad.properties.state.enum].sort(), [...STATES].sort());
+      }
+    });
+    it("the server instructions say the data is public, what freshness means, that exposure numbers are aggregate, and whose the Shodan data is", () => {
+      const i = client.opening.instructions;
+      assert.equal(typeof i, "string");
+      assert.match(i, /Everything these tools return is public/);
+      assert.match(i, /freshness gives the producing radar's last_run_at: when it last completed a check whose reads succeeded\./);
+      assert.match(i, /not the time of every record the radar's numbers count/);
+      assert.match(i, /Exposure numbers are aggregate/);
+      assert.match(i, /not an internet-wide census/);
+      assert.ok(i.includes(`Exposure counts are derived from Shodan data. ${SHODAN_OWNERSHIP}`), i);
+      assert.match(i, /not_assessed means the answer holds no dated measurement of what was asked/);
+      assert.doesNotMatch(i, REMOVED_CLAIMS);
+      assert.doesNotMatch(i, HOST_UNIT);
+    });
+    it("the MCP handshake reports package.json's name and version", () => {
+      assert.equal(client.getServerVersion()?.name, PKG.name);
+      assert.equal(client.getServerVersion()?.version, PKG.version);
+    });
+    it("#2313: the exposure_radar outputSchema allows exactly the labelled numeric paths, no more and no fewer", () => {
+      const s = tools.find((t) => t.name === "exposure_radar").outputSchema;
+      const paths = [...schemaNumericPaths(branchOf(s, "not_assessed").properties.data)].sort();
+      assert.deepEqual(paths.filter((p) => !(p in RADAR_LABELLED)), [], "the schema allows a number no label covers");
+      assert.deepEqual(paths, Object.keys(RADAR_LABELLED).sort());
+    });
+    // #1880: descriptions listed fields the tools do not return (CWE on get_cve). A description
+    // may name a field only if its own outputSchema holds it.
+    it("#1880: every field a tool description names is a field, or a value, of that tool's outputSchema", () => {
+      const toolNames = new Set(TOOLS);
+      for (const t of tools) {
+        const names = schemaNames(t.outputSchema);
+        const tokens = [...new Set(t.description.match(FIELD_TOKEN) ?? [])];
+        assert.ok(tokens.length >= 2, `${t.name}: its description names no fields`);
+        const unknown = tokens.filter((x) => !names.has(x) && !toolNames.has(x));
+        assert.deepEqual(unknown, [], `${t.name}: the description names fields its outputSchema does not hold`);
+      }
+      assert.doesNotMatch(tools.find((t) => t.name === "get_cve").description, /\bCWE\b/, "get_cve returns no CWE");
+    });
+    it("#1880: every field the README names is a field, or a value, of some tool's outputSchema", () => {
+      const names = new Set([...TOOLS, ...tools.flatMap((t) => [...schemaNames(t.outputSchema)])]);
+      const readme = readPkgFile("README.md").replace(/\b[\w.-]+\.json\b/g, "");
+      const unknown = [...new Set(readme.match(FIELD_TOKEN) ?? [])].filter((x) => !names.has(x));
+      assert.deepEqual(unknown, [], "the README names fields no outputSchema holds");
+    });
+  });
+
+  // #2311 done-means 4: the new failure cases.
+  describe("#2311: a bare-number body, truncated JSON, an empty or blank cve_id, a partial radar failure", () => {
+    it("a 200 whose body is a bare number is a failure, for every tool: not a JSON object", async () => {
+      stub.state.mode = "number";
+      try {
+        const results = await callAll(client);
+        for (const name of TOOLS) {
+          assertErrorResult(name, results[name]);
+          assertNames(name, results[name], stub.base, /was not a JSON object/, /body was 42/);
+          const sc = results[name].structuredContent;
+          assert.equal(sc.state, "failed", name);
+          assert.ok(!("data" in sc), name);
+          // exposure_radar makes four requests, and names each radar's failure.
+          if (name === "exposure_radar") assert.deepEqual(sc.error.radars.map((r) => r.kind), ["not_object", "not_object", "not_object", "not_object"]);
+          else assert.equal(sc.error.kind, "not_object", name);
+        }
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+    it("a 200 whose JSON is cut off is a failure, for every tool: not JSON", async () => {
+      stub.state.mode = "truncated";
+      try {
+        const results = await callAll(client);
+        for (const name of TOOLS) {
+          assertErrorResult(name, results[name]);
+          assertNames(name, results[name], stub.base, /was not JSON/, /body starts: \{"summary"/);
+          const sc = results[name].structuredContent;
+          assert.equal(sc.state, "failed", name);
+          assert.ok(!("data" in sc), name);
+          if (name === "exposure_radar") assert.deepEqual(sc.error.radars.map((r) => r.kind), ["not_json", "not_json", "not_json", "not_json"]);
+          else assert.equal(sc.error.kind, "not_json", name);
+          assert.doesNotMatch(textOf(results[name]), /found nothing|OK:/, name);
+        }
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+    for (const blank of ["", "   ", "\t\n "]) {
+      it(`cve_id ${JSON.stringify(blank)} is refused as invalid_input by get_cve and cve_exposure, with no request made`, async () => {
+        stub.state.mode = "ok";
+        stub.state.seen.length = 0;
+        for (const name of ["get_cve", "cve_exposure"]) {
+          const res = await client.callTool({ name, arguments: { cve_id: blank } });
+          assertErrorResult(name, res);
+          const t = textOf(res);
+          assert.match(t, new RegExp(`^${name} FAILED \\(state: invalid_input\\): cve_id is required\\. Nothing was looked up, so this is not a finding\\.$`), t);
+          assert.equal(res.structuredContent.state, "invalid_input");
+          assert.deepEqual(res.structuredContent.error, { kind: "invalid_input", path: null, status: null, message: "cve_id is required" });
+        }
+        // Before #1880's fix an empty id listed 50 unrelated CVEs as the answer.
+        assert.deepEqual(stub.state.seen, [], "a blank cve_id reached the API");
+      });
+    }
+    const LC_PATH = "/api/v1/public/leaked-credentials/stats";
+    const SA_PATH = "/api/v1/public/shadow-ai-radar/stats";
+    const radarWith = async (overrides) => {
+      Object.assign(stub.state.overrides, overrides);
+      try {
+        return await client.callTool({ name: "exposure_radar", arguments: {} });
+      } finally {
+        for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+      }
+    };
+    it("exposure_radar with one radar failing is a failure that names it and withholds the three that answered", async () => {
+      stub.state.mode = "ok";
+      const res = await radarWith({ [LC_PATH]: { status: 503, body: { error: "leaked-credentials store unavailable" } } });
+      assertErrorResult("exposure_radar", res);
+      const t = textOf(res);
+      assert.match(t, /^exposure_radar FAILED: 1 of 4 radars could not be read from /, t);
+      assert.match(t, /- leaked_credentials: EchelonGraph answered HTTP 503 from .* for GET \/api\/v1\/public\/leaked-credentials\/stats — the API said: leaked-credentials store unavailable\./, t);
+      assert.match(t, /The 3 radar\(s\) that did answer \(kev_exposure, exposed_databases, shadow_ai\) are withheld: a partial radar picture would be read as the whole one\./, t);
+      assert.match(t, /this is not a finding: do not report it as zero/, t);
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "failed");
+      assert.ok(!("data" in sc), "a partial radar picture reached the structured result");
+      assert.deepEqual(sc.coverage, { radars: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"], answered: ["kev_exposure", "exposed_databases", "shadow_ai"], failed: ["leaked_credentials"] });
+      assert.deepEqual(sc.error.radars, [{ radar: "leaked_credentials", kind: "http", path: LC_PATH, status: 503, message: "leaked-credentials store unavailable" }]);
+      // No number any answering radar sent reaches the result, in any block.
+      assert.doesNotMatch(JSON.stringify(res), /25113|7380|36222|31887/);
+    });
+    it("exposure_radar with two radars failing names both, and the withheld two", async () => {
+      stub.state.mode = "ok";
+      const res = await radarWith({ [LC_PATH]: { status: 500, body: { error: "boom" } }, [SA_PATH]: { status: 404, body: { error: "no such route" } } });
+      assertErrorResult("exposure_radar", res);
+      assert.match(textOf(res), /2 of 4 radars could not be read/);
+      assert.deepEqual(res.structuredContent.coverage.failed, ["leaked_credentials", "shadow_ai"]);
+      assert.deepEqual(res.structuredContent.coverage.answered, ["kev_exposure", "exposed_databases"]);
+      assert.deepEqual(res.structuredContent.error.radars.map((r) => [r.radar, r.status]), [["leaked_credentials", 500], ["shadow_ai", 404]]);
+    });
+  });
+
+  // #2313: the envelope each tool returns, case by case.
+  describe("#2313: state, measured_at, method, coverage and freshness, from what the API sends", () => {
+    const call = (name, args = {}) => client.callTool({ name, arguments: args });
+    before(() => {
+      stub.state.mode = "ok";
+    });
+    it("every success carries data equal to content[0], and the note's sentences in notes", async () => {
+      const results = await callAll(client);
+      for (const name of TOOLS) {
+        const res = results[name];
+        assert.deepEqual(res.structuredContent.data, JSON.parse(res.content[0].text), name);
+        const n = sentencesOf(res.content[1].text);
+        assert.deepEqual(res.structuredContent.notes.slice(-n.length), n, `${name}: the note is not in notes`);
+      }
+    });
+    it("cve_exposure, services on record with a real last_seen: measured, dated by last_seen, with the API's method", async () => {
+      const sc = (await call("cve_exposure", { cve_id: CVE })).structuredContent;
+      assert.equal(sc.state, "measured");
+      assert.equal(sc.measured_at, "2026-09-15T04:02:09Z");
+      assert.equal(sc.method, BACKEND_METHOD);
+      assert.deepEqual(sc.coverage, { in_scope: true });
+      assert.equal(sc.exposure_state, "exposed");
+      assert.equal(sc.freshness, null);
+      assert.match(sc.notes[0], /^state is measured: exposed_hosts counts the services the radar has on record for CVE-2023-44487, and measured_at is their latest last_seen/);
+    });
+    it("cve_exposure, tracked:false: not_assessed, out of scope, undated", async () => {
+      for (const id of [CVE_UNTRACKED, CVE_UNTRACKED_STALE]) {
+        const sc = (await call("cve_exposure", { cve_id: id })).structuredContent;
+        assert.equal(sc.state, "not_assessed", id);
+        assert.equal(sc.measured_at, null, id);
+        assert.deepEqual(sc.coverage, { in_scope: false }, id);
+        assert.equal(sc.exposure_state, "not_assessed", id);
+        assert.match(sc.notes[0], /is outside the radar's tracked set, so no number in data is a measurement of its exposure/, id);
+      }
+    });
+    it("cve_exposure, no tracked field (an older API): not_assessed, in_scope null, never the Go zero time", async () => {
+      const res = await call("cve_exposure", { cve_id: CVE_OLD_API });
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null);
+      assert.deepEqual(sc.coverage, { in_scope: null });
+      assert.equal(sc.exposure_state, "tracking_unknown");
+      // The method the API did not send is the package's own statement of it, never absent.
+      assert.match(sc.method, /^Shodan banner match on the radar's tracked products/);
+      assert.doesNotMatch(JSON.stringify({ ...sc, data: undefined }), /0001-01-01/);
+    });
+    it("cve_exposure, tracked:true with 0 services: exposure_state measured_zero, but not_assessed: a zero has no observation to date it", async () => {
+      stub.state.mode = "empty";
+      try {
+        const sc = (await call("cve_exposure", { cve_id: CVE })).structuredContent;
+        assert.equal(sc.exposure_state, "measured_zero");
+        assert.equal(sc.state, "not_assessed");
+        assert.equal(sc.measured_at, null);
+        assert.deepEqual(sc.coverage, { in_scope: true });
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+    it("cve_exposure, services on record but no real last_seen: not presented as measured", async () => {
+      const P = `/api/v1/public/kev-exposure/cve/${CVE}`;
+      for (const last_seen of [null, "0001-01-01T00:00:00Z", undefined]) {
+        const { last_seen: _drop, ...body } = BODIES[P].ok;
+        stub.state.overrides[P] = last_seen === undefined ? body : { ...body, last_seen };
+        try {
+          const sc = (await call("cve_exposure", { cve_id: CVE })).structuredContent;
+          assert.equal(sc.exposure_state, "exposed", String(last_seen));
+          assert.equal(sc.state, "not_assessed", String(last_seen));
+          assert.equal(sc.measured_at, null, String(last_seen));
+        } finally {
+          delete stub.state.overrides[P];
+        }
+      }
+    });
+    it("cve_exposure, HTTP 400: invalid_input with the API's status and message", async () => {
+      const sc = (await call("cve_exposure", { cve_id: CVE_REJECTED })).structuredContent;
+      assert.equal(sc.state, "invalid_input");
+      assert.deepEqual(sc.error, { kind: "http", path: `/api/v1/public/kev-exposure/cve/${CVE_REJECTED}`, status: 400, message: "invalid CVE id" });
+      assert.equal(sc.method, null);
+      assert.equal(sc.measured_at, null);
+    });
+    it("get_cve, HTTP 404: failed, with the API's own message", async () => {
+      stub.state.mode = "empty";
+      try {
+        const sc = (await call("get_cve", { cve_id: CVE })).structuredContent;
+        assert.equal(sc.state, "failed");
+        assert.deepEqual(sc.error, { kind: "http", path: `/api/v1/public/cves/${CVE}`, status: 404, message: `CVE not found: ${CVE}` });
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+    it("exposure_radar: not_assessed and undated, with each radar's last_run_at as freshness, and every radar answered", async () => {
+      const sc = (await call("exposure_radar")).structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null);
+      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but no stats answer says when the services or records it counts were observed/);
+      assert.deepEqual(sc.freshness, {
+        kev_exposure: { last_run_at: LAST_RUN.kev_exposure },
+        exposed_databases: { last_run_at: LAST_RUN.exposed_databases },
+        leaked_credentials: { last_run_at: LAST_RUN.leaked_credentials },
+        // The fixture's poller block is an older API's follower: freshness unknown, so null.
+        shadow_ai: { last_run_at: null, running: null },
+      });
+      assert.deepEqual(sc.coverage, { radars: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"], answered: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"], failed: [] });
+      // generated_at is never presented as freshness or as measured_at.
+      assert.doesNotMatch(JSON.stringify({ ...sc, data: undefined, notes: undefined }), /2026-09-27T09:00:00Z/);
+    });
+    it("exposure_radar: a running fleet's poller block is shadow_ai's freshness; an unreal stamp never is", async () => {
+      const SA = "/api/v1/public/shadow-ai-radar/stats";
+      const KEV = "/api/v1/public/kev-exposure/stats";
+      stub.state.overrides[SA] = { stats: PROD_SHADOW_STATS, poller: FLEET_RUNNING };
+      stub.state.overrides[KEV] = { ...PROD_KEV_STATS, last_run_at: "0001-01-01T00:00:00Z" };
+      try {
+        const sc = (await call("exposure_radar")).structuredContent;
+        assert.deepEqual(sc.freshness.shadow_ai, { last_run_at: FLEET_RUNNING.last_run_at, running: true });
+        assert.deepEqual(sc.freshness.kev_exposure, { last_run_at: null });
+      } finally {
+        delete stub.state.overrides[SA];
+        delete stub.state.overrides[KEV];
+      }
+    });
+    it("cve_summary: measured, dated by summary.last_updated; get_cve: dated by the record's updated_at when it has one", async () => {
+      const s = (await call("cve_summary")).structuredContent;
+      assert.equal(s.state, "measured");
+      assert.equal(s.measured_at, "2026-09-15T04:47:02.406Z");
+      assert.equal(s.freshness, null);
+      const g = (await call("get_cve", { cve_id: CVE })).structuredContent;
+      assert.equal(g.state, "measured");
+      assert.equal(g.measured_at, null, "the fixture record has no updated_at");
+      const P = `/api/v1/public/cves/${CVE}`;
+      stub.state.overrides[P] = { ...BODIES[P].ok, updated_at: "2026-09-20T01:02:03Z" };
+      try {
+        assert.equal((await call("get_cve", { cve_id: CVE })).structuredContent.measured_at, "2026-09-20T01:02:03Z");
+      } finally {
+        delete stub.state.overrides[P];
+      }
+    });
+    // core-backend cve/handler.go ListCVEs: total_counted false means no count is in hand and
+    // total means nothing; total_is_lower_bound true means at least total; search_relaxed true
+    // means the rows are a superset of a phrase's matches.
+    it("search_cves: coverage is the list's own account, and an uncounted total is never called a count", async () => {
+      const P = "/api/v1/public/cves";
+      const row = BODIES[P].ok.cves[0];
+      const cases = [
+        [{ cves: [row], total: 0, total_counted: false, total_is_lower_bound: false, search_relaxed: false, limit: 2, offset: 0 }, /The API did not count the matches \(total_counted is false\), so its total is not a count; 1 returned in this page\./, /matched|found nothing/],
+        [{ cves: [row], total: 5000, total_counted: true, total_is_lower_bound: true, search_relaxed: false, limit: 2, offset: 0 }, /The query matched at least 5000 CVEs \(total_is_lower_bound is true: the count stopped at that floor\); 1 returned in this page\./, /found nothing/],
+        [{ cves: [row], total: 12, total_counted: true, total_is_lower_bound: false, search_relaxed: true, limit: 2, offset: 0 }, /The query matched 12 CVEs; 1 returned in this page\. The API relaxed the search phrase to all of its words \(search_relaxed is true\), so these rows are a superset of the rows that match the phrase itself\./, /found nothing/],
+        [{ cves: [], total: 0, total_counted: false, total_is_lower_bound: false, search_relaxed: false, limit: 2, offset: 0 }, /The query returned 0 CVEs — a measured empty result/, /matched \d/],
+      ];
+      for (const [body, says, never] of cases) {
+        stub.state.overrides[P] = body;
+        try {
+          const res = await call("search_cves", { search: "tomcat", limit: 2 });
+          assert.notEqual(res.isError, true, brief(res));
+          const n = noteOf(res);
+          assert.match(n, says, n);
+          assert.doesNotMatch(n, never, n);
+          const { cves, ...flags } = body;
+          assert.deepEqual(res.structuredContent.coverage, { ...flags, returned: cves.length });
+        } finally {
+          delete stub.state.overrides[P];
+        }
+      }
+    });
+    it("a 2xx whose field does not fit the outputSchema is a failure, worded as one, never relayed", async () => {
+      const cases = [
+        ["get_cve", { cve_id: CVE }, `/api/v1/public/cves/${CVE}`, { ...BODIES[`/api/v1/public/cves/${CVE}`].ok, cvss_v3_score: "7.5" }, /cvss_v3_score/],
+        ["cve_exposure", { cve_id: CVE }, `/api/v1/public/kev-exposure/cve/${CVE}`, { ...BODIES[`/api/v1/public/kev-exposure/cve/${CVE}`].ok, exposed_hosts: "6213" }, /exposed_hosts/],
+        ["search_cves", CALLS.search_cves, "/api/v1/public/cves", { ...BODIES["/api/v1/public/cves"].ok, total: "1" }, /total/],
+      ];
+      for (const [name, args, p, body, field] of cases) {
+        stub.state.overrides[p] = body;
+        try {
+          const res = await call(name, args);
+          assertErrorResult(name, res);
+          assertNames(name, res, stub.base, /did not match this tool's output schema/, field, /this is not a finding/);
+          assert.equal(res.structuredContent.state, "failed");
+          assert.equal(res.structuredContent.error.kind, "unexpected_shape");
+          assert.ok(!("data" in res.structuredContent));
+        } finally {
+          delete stub.state.overrides[p];
+        }
+      }
+    });
+    it("a field the API adds later is still relayed by the tools that relay the API's JSON verbatim", async () => {
+      const P = `/api/v1/public/cves/${CVE}`;
+      stub.state.overrides[P] = { ...BODIES[P].ok, cwe_ids: ["CWE-400"], brand_new: { nested: 1 } };
+      try {
+        const res = await call("get_cve", { cve_id: CVE });
+        assert.notEqual(res.isError, true, brief(res));
+        assert.deepEqual(res.structuredContent.data.cwe_ids, ["CWE-400"]);
+      } finally {
+        delete stub.state.overrides[P];
+      }
+    });
+  });
+
   // 1.0.1: the version is read from package.json, so adoption per release is countable.
   describe("package identity: version, User-Agent, tool order, registry metadata", () => {
     it("the MCP handshake reports package.json's version", () => {
@@ -1719,14 +2223,15 @@ describe("against a stub API", () => {
 // A control on the fix itself: the error path quotes what fetch reported, and fetch quotes
 // the URL when it refuses one that carries a credential. Nothing configured into
 // ECHELONGRAPH_API_BASE may come back out through a tool result.
-describe("a credential in ECHELONGRAPH_API_BASE never reaches a result", () => {
+describe(`a credential in ECHELONGRAPH_API_BASE never reaches a result [${ERA}]`, () => {
   const base = "http://user:s3cretvalue@127.0.0.1:1";
   let client, results;
   before(async () => {
     client = await spawnServer({ ECHELONGRAPH_API_BASE: base, ECHELONGRAPH_API_TIMEOUT_MS: "2000" });
     results = await callAll(client);
   });
-  after(() => client.close());
+  // A client that never connected (a failed opening) leaves nothing to close.
+  after(() => client?.close());
   for (const name of TOOLS) {
     it(`${name} is an error result whose text masks the credential`, () => {
       const res = results[name];
@@ -1734,6 +2239,111 @@ describe("a credential in ECHELONGRAPH_API_BASE never reaches a result", () => {
       const t = textOf(res);
       assert.doesNotMatch(t, /s3cretvalue/, `${name}: credential leaked into the result: ${t}`);
       assert.ok(t.includes("***@127.0.0.1:1"), `${name}: masked base not shown: ${t}`);
+      // #2311: the structured result is masked too, every field of it.
+      assert.doesNotMatch(JSON.stringify(res), /s3cretvalue/, `${name}: credential leaked into the structured result: ${JSON.stringify(res.structuredContent)}`);
+      assert.equal(res.structuredContent?.state, "failed", `${name}: ${JSON.stringify(res.structuredContent)}`);
     });
   }
+});
+
+// #2313 done-means 4 and 5, over every tool result the suite above received, in this era:
+// successes, not-assessed answers, failures and refused inputs alike. Runs last, so every
+// describe block before it has filled COLLECTED.
+describe(`#2313: every structuredContent the suite received validates against its tool's outputSchema, and dates every measured exposure number [${ERA}]`, () => {
+  let schemas;
+  before(async () => {
+    // tools/list reaches no API, so an unreachable base is enough to read the schemas.
+    const client = await spawnServer({ ECHELONGRAPH_API_BASE: "http://127.0.0.1:1" });
+    try {
+      schemas = Object.fromEntries((await client.listTools()).tools.map((t) => [t.name, t.outputSchema]));
+    } finally {
+      await client.close();
+    }
+  });
+  it("the suite collected results from every tool, in every state each tool can answer", () => {
+    assert.ok(COLLECTED.length >= 150, `only ${COLLECTED.length} results collected`);
+    const seen = {};
+    for (const [name, , res] of COLLECTED) (seen[name] ??= new Set()).add(res.structuredContent?.state);
+    const expected = {
+      cve_summary: ["measured", "failed"],
+      search_cves: ["measured", "failed"],
+      get_cve: ["measured", "failed", "invalid_input"],
+      cve_exposure: ["measured", "not_assessed", "failed", "invalid_input"],
+      exposure_radar: ["not_assessed", "failed"],
+    };
+    for (const [name, states] of Object.entries(expected)) {
+      for (const st of states) assert.ok(seen[name]?.has(st), `${name}: no result in state ${st} (seen: ${[...(seen[name] ?? [])].join(", ")})`);
+    }
+  });
+  it("every structuredContent validates against its tool's advertised outputSchema, and isError agrees with its state", () => {
+    for (const [name, args, res] of COLLECTED) {
+      const at = `${name}(${JSON.stringify(args)})`;
+      assert.ok(res.structuredContent && typeof res.structuredContent === "object", `${at}: no structuredContent: ${brief(res)}`);
+      assertValid(at, schemas[name], res.structuredContent);
+      const failedState = res.structuredContent.state === "failed" || res.structuredContent.state === "invalid_input";
+      assert.equal(res.isError === true, failedState, `${at}: isError ${res.isError} with state ${res.structuredContent.state}`);
+    }
+  });
+  it("the validator is not vacuous: it rejects a failure carrying data, a success without data, an unknown state, and an unlabelled radar number", () => {
+    const ok = COLLECTED.find(([n, , r]) => n === "exposure_radar" && !r.isError)[2].structuredContent;
+    const bad = COLLECTED.find(([n, , r]) => n === "cve_exposure" && r.isError)[2].structuredContent;
+    assert.ok(isValid(schemas.exposure_radar, ok) && isValid(schemas.cve_exposure, bad), "the controls' base cases must be valid");
+    const { data: _d, ...noData } = ok;
+    for (const [label, schema, mutant] of [
+      ["a failure carrying data", schemas.cve_exposure, { ...bad, data: { exposed_hosts: 0 } }],
+      ["a success without data", schemas.exposure_radar, noData],
+      ["an unknown state", schemas.exposure_radar, { ...ok, state: "measured_zero" }],
+      ["a failure with a measured_at", schemas.cve_exposure, { ...bad, measured_at: "2026-09-27T00:00:00Z" }],
+      ["an unlabelled radar number", schemas.exposure_radar, { ...ok, data: { ...ok.data, kev_exposure: { ...ok.data.kev_exposure, candidate_hosts: 99999 } } }],
+      ["a newest_kev row with no exposure_state", schemas.exposure_radar, { ...ok, data: { ...ok.data, kev_exposure: { ...ok.data.kev_exposure, newest_kev: [{ cve_id: "CVE-2026-1", exposed_hosts: 0 }] } } }],
+    ]) {
+      assert.equal(isValid(schema, mutant), false, `the validator accepted ${label}`);
+    }
+  });
+  it("every measured_at is null or a real instant, never the Go zero time", () => {
+    for (const [name, args, res] of COLLECTED) {
+      const m = res.structuredContent.measured_at;
+      assert.ok(m === null || realInstant(m), `${name}(${JSON.stringify(args)}): measured_at ${JSON.stringify(m)}`);
+    }
+  });
+  it("#2313 done-means 5: every exposure number in a measured result has a real measured_at and a method", () => {
+    let measured = 0;
+    let undated = 0;
+    for (const [name, args, res] of COLLECTED) {
+      measured += assertExposureNumbersDated(`${name}(${JSON.stringify(args)})`, name, res.structuredContent);
+      if (EXPOSURE_TOOLS.has(name) && res.structuredContent.state === "not_assessed") undated++;
+    }
+    // Not vacuous: the suite's cve_exposure answers with services on record are measured and
+    // carry numbers (6213 services, 107 countries, and each ranked row's count).
+    assert.ok(measured >= 20, `only ${measured} measured exposure numbers walked`);
+    assert.ok(undated >= 10, `only ${undated} not-assessed exposure results walked`);
+  });
+  it("the walk above can fail: a measured exposure number with no measured_at, or no method, is caught", () => {
+    const [, , res] = COLLECTED.find(([n, , r]) => n === "cve_exposure" && r.structuredContent.state === "measured");
+    const sc = res.structuredContent;
+    assert.ok(assertExposureNumbersDated("control", "cve_exposure", sc) > 0);
+    assert.throws(() => assertExposureNumbersDated("mutant", "cve_exposure", { ...sc, measured_at: null }), /under state measured with measured_at null/);
+    assert.throws(() => assertExposureNumbersDated("mutant", "cve_exposure", { ...sc, measured_at: "0001-01-01T00:00:00Z" }), /measured_at/);
+    assert.throws(() => assertExposureNumbersDated("mutant", "cve_exposure", { ...sc, method: "" }), /no method/);
+    const radar = COLLECTED.find(([n, , r]) => n === "exposure_radar" && !r.isError)[2].structuredContent;
+    assert.throws(() => assertExposureNumbersDated("mutant", "exposure_radar", { ...radar, state: "measured" }), /under state measured with measured_at null/);
+  });
+  it("every structured result that names Shodan indicates Shodan's ownership and copyright", () => {
+    let checked = 0;
+    for (const [name, args, res] of COLLECTED) {
+      const all = JSON.stringify(res.structuredContent);
+      if (!/Shodan/.test(all)) continue;
+      checked++;
+      assert.ok(res.structuredContent.notes.some((n) => n.includes(SHODAN_OWNERSHIP)), `${name}(${JSON.stringify(args)}): ${res.structuredContent.notes.join(" | ")}`);
+    }
+    assert.ok(checked >= 20, `only ${checked} structured results naming Shodan checked`);
+  });
+  it("no structured result makes a removed claim or calls a count hosts", () => {
+    for (const [name, args, res] of COLLECTED) {
+      const { data: _d, ...envelope } = res.structuredContent;
+      const t = JSON.stringify(envelope);
+      assert.doesNotMatch(t, REMOVED_CLAIMS, `${name}(${JSON.stringify(args)}): ${t}`);
+      assert.doesNotMatch(t, HOST_UNIT, `${name}(${JSON.stringify(args)}): ${t}`);
+    }
+  });
 });

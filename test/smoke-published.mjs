@@ -2,12 +2,17 @@
 // user's Claude Desktop / Cursor would, connects as an MCP client, lists tools, and calls
 // cve_exposure against the production API. Proves the published artifact works end to end.
 // Its requests carry the package's User-Agent, so they are counted as external MCP adoption.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+// It opens with a 2025-06-18 initialize, the handshake every published version answers (1.x is
+// legacy-only; 2.x serves both eras).
+import { connect } from "./mcp-stdio-client.mjs";
 
-const transport = new StdioClientTransport({ command: "npx", args: ["-y", "echelongraph-mcp"] });
-const client = new Client({ name: "smoke-published", version: "1.0.0" });
-await client.connect(transport);
+const client = await connect({
+  era: "2025-06-18",
+  command: "npx",
+  args: ["-y", "echelongraph-mcp"],
+  env: process.env,
+  clientInfo: { name: "smoke-published", version: "1.0.0" },
+});
 
 const { tools } = await client.listTools();
 console.log("PUBLISHED tools:", tools.map((t) => t.name).join(", "));

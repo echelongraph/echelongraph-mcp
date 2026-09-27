@@ -1,12 +1,16 @@
 // Smoke test: spawn the built MCP server, list its tools, and call the cve_exposure tool
 // against the PRODUCTION EchelonGraph API. Run after `npm run build`: `npm run smoke`.
 // Its requests carry this package's User-Agent, so they are counted as external MCP adoption.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+// It opens over the 2026-07-28 era (server/discover); the tests cover both eras against a stub.
+import { connect, MODERN } from "./mcp-stdio-client.mjs";
 
-const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
-const client = new Client({ name: "echelongraph-mcp-smoke", version: "1.0.0" });
-await client.connect(transport);
+const client = await connect({
+  era: MODERN,
+  command: process.execPath,
+  args: ["dist/index.js"],
+  env: process.env,
+  clientInfo: { name: "echelongraph-mcp-smoke", version: "1.0.0" },
+});
 
 const { tools } = await client.listTools();
 console.log("TOOLS:", tools.map((t) => t.name).join(", "));

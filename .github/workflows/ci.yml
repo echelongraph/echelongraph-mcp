@@ -21,8 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json engines is ">=18": test the floor it promises and every LTS above it.
-        node: ["18", "20", "22", "24"]
+        # package.json engines is ">=20" (2.0.0: @modelcontextprotocol/server 2.x requires Node 20):
+        # test the floor it promises and every LTS above it.
+        node: ["20", "22", "24"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

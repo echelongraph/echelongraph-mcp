@@ -1,7 +1,7 @@
 name: Unpack an npm tarball the way a user receives it
 description: >-
   Extracts an npm tarball into a fresh directory, installs only the tarball's own production
-  dependencies, proves the MCP SDK resolves from inside it, and copies the test suite in, so
+  dependencies, proves every dependency it declares resolves from inside it, and copies the test suite in, so
   the suite can run against exactly what `npx echelongraph-mcp` installs. Refuses when a
   node_modules above that directory could satisfy an import the package itself is missing.
 inputs:
@@ -55,15 +55,26 @@ runs:
         # What a user's `npx echelongraph-mcp` installs: the tarball's own production
         # dependencies, resolved fresh from its package.json, nothing from this repository.
         ( cd "$PKG" && npm install --omit=dev --ignore-scripts --no-audit --no-fund --no-package-lock )
-        [ -f "$PKG/node_modules/@modelcontextprotocol/sdk/package.json" ] || {
-          echo "::error::@modelcontextprotocol/sdk did not install inside the unpacked package"; exit 1; }
+        # Every dependency the tarball's own package.json declares must have installed inside
+        # it. Read from the tarball, not named here, so an SDK change (2.0.0 moved from
+        # @modelcontextprotocol/sdk to @modelcontextprotocol/server) cannot leave this step
+        # asserting a package nobody depends on.
+        DEPS="$(cd "$PKG" && node -e '
+          const fs = require("fs");
+          const deps = Object.keys(require("./package.json").dependencies || {});
+          if (deps.length === 0) { console.error("::error::the tarball declares no dependencies"); process.exit(1); }
+          const missing = deps.filter((d) => !fs.existsSync(`node_modules/${d}/package.json`));
+          if (missing.length) { console.error(`::error::${missing.join(", ")} did not install inside the unpacked package`); process.exit(1); }
+          process.stdout.write(deps.map((d) => `${d} ${require(`./node_modules/${d}/package.json`).version}`).join(", "));
+        ')"
         mkdir "$PKG/test"
         cp -R "$TESTS_ABS/." "$PKG/test/"
-        # Prove the tests' own import of the SDK resolves from inside the package.
-        RESOLVED="$(cd "$PKG/test" && env -u NODE_PATH node -e 'process.stdout.write(require.resolve("@modelcontextprotocol/sdk/client/index.js", { paths: [process.cwd()] }))')"
+        # Prove the tests' own package import (the SDK's bundled ajv validator, which checks every
+        # structuredContent against its tool's outputSchema) resolves from inside the package.
+        RESOLVED="$(cd "$PKG/test" && env -u NODE_PATH node --input-type=module -e 'process.stdout.write(new URL(import.meta.resolve("@modelcontextprotocol/server/validators/ajv")).pathname)')"
         case "$RESOLVED" in
           "$PKG/node_modules/"*) ;;
-          *) echo "::error::the SDK resolved from $RESOLVED, outside $PKG/node_modules"; exit 1 ;;
+          *) echo "::error::the tests' SDK import resolved from $RESOLVED, outside $PKG/node_modules"; exit 1 ;;
         esac
-        echo "deps installed from the tarball's own package.json (sdk $(node -p "require('$PKG/node_modules/@modelcontextprotocol/sdk/package.json').version"), resolved at $RESOLVED)"
+        echo "deps installed from the tarball's own package.json ($DEPS), the tests' SDK import resolved at $RESOLVED"
         echo "dir=$PKG" >> "$GITHUB_OUTPUT"

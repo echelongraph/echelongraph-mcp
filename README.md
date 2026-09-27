@@ -19,7 +19,7 @@ API call a tool needs to answer.
 |---|---|
 | `cve_summary` | Counts of active CVEs by severity, and when the feed was last updated. |
 | `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores. |
-| `get_cve` | Full detail for one CVE (CVSS v3/v4, EG score, EPSS, KEV+ransomware, GHSA, CWE, references). |
+| `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
 | `cve_exposure` | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. |
 | `exposure_radar` | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. |
 
@@ -181,9 +181,87 @@ outage for an all-clear:
   cause (status code or error kind), the path, and the base URL, and says it is not a
   finding. A failure is never rendered as a success with null fields.
 
+Both shapes also carry a structured result, below. The text blocks are the same as in 1.x, so
+a client that reads only `content` sees what it always saw.
+
+## Structured results
+
+Since 2.0.0 every result, success or failure, carries `structuredContent`, and every tool
+declares its shape as an `outputSchema` in `tools/list`, with a title and the annotations
+`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true` and
+`openWorldHint: true` (hints, which a client treats as untrusted).
+
+| Field | What it holds |
+|---|---|
+| `state` | `measured`, `not_assessed`, `failed` or `invalid_input` (below). |
+| `measured_at` | When the underlying observation was made, as the API states it. `null` when the answer does not say or holds no observation; never the Go zero time. |
+| `method` | How the numbers were produced. `null` on a failure. |
+| `coverage` | What the answer covers, where the tool can say: `in_scope` for `cve_exposure`, the list's own account of its count for `search_cves`, and the radars that answered for `exposure_radar`. |
+| `freshness` | The producing radar's last completed check (`last_run_at`), where the API serves one; `null` where it serves none. |
+| `notes` | The caveats, one sentence each: what the envelope itself needs saying, then the note from the text block. |
+| `data` | On a success only: the same JSON as the first text block. |
+| `error` | On a failure only: `kind`, `path`, `status` and `message`. |
+
+| `state` | What it means |
+|---|---|
+| `measured` | A measurement of what was asked. An exposure count is `measured` only when the answer dates it (`measured_at`) and says how it was produced (`method`). |
+| `not_assessed` | The answer holds no dated measurement of what was asked, so no number in it is a finding: the radar does not look for this CVE, the answer does not say whether it does, or the answer does not say when what it counts was observed. |
+| `failed` | The lookup did not complete. Not a finding. |
+| `invalid_input` | The input was refused, by this server or by the API, so nothing was looked up. Not a finding. |
+
+Every field comes from what the API sends; where the API does not say, the field is `null` and
+a note says so. Per tool:
+
+- `cve_summary` is `measured`, and its `measured_at` is `summary.last_updated`, the newest
+  modification time among the active CVE records it counts.
+- `search_cves` is `measured`, with `measured_at` `null`: each record carries its own times. Its
+  `coverage` repeats the list's `total`, `total_counted`, `total_is_lower_bound`,
+  `search_relaxed`, `limit` and `offset`, and adds `returned`, the rows in the page. When
+  `total_counted` is false the total is not a count, and the note does not call it one.
+- `get_cve` is `measured`, and its `measured_at` is the record's `updated_at`, when EchelonGraph
+  last wrote it.
+- `cve_exposure` is `measured` only for services on record with a real `last_seen`, which is its
+  `measured_at`. Every other answer is `not_assessed`, a tracked zero included, since a zero has
+  no observation to date it. `exposure_state` is `exposed`, `measured_zero`, `not_assessed` or
+  `tracking_unknown`, the cases of "How `cve_exposure` counts", and `coverage.in_scope` is the
+  API's `tracked`.
+- `exposure_radar` is `not_assessed` with `measured_at` `null`: every radar answered, but no
+  stats answer says when the services or records it counts were observed, so no count is
+  presented as a dated measurement. Its numbers keep the labels above. `freshness` holds each
+  radar's `last_run_at` where the API serves one, and for `shadow_ai` also `running`.
+
+The CVE feed tools' `freshness` is `null`: the feed's answers carry no time at which its
+pollers last completed a poll for the feed as a whole.
+
+A success whose fields do not fit the tool's `outputSchema` (a field of a type the schema does
+not allow) is returned as a failure with `error.kind` `unexpected_shape`, never relayed. A
+field the API adds later is still relayed by the four tools that relay the API's JSON, and
+`exposure_radar` leaves it out and names it, as above.
+
+## Protocol versions
+
+The server answers both eras of the Model Context Protocol on stdio:
+
+- **2026-07-28**: a client that opens with `server/discover` receives a DiscoverResult listing
+  `2026-07-28`, the tools capability and the server instructions, and then sends each request
+  with the per-request `_meta` envelope.
+- **2025 and earlier**: a client that opens with `initialize`, as every 1.x SDK client does,
+  negotiates `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`; a version the server does
+  not know is answered with `2025-11-25`.
+
+The first message of a connection picks its era. The DiscoverResult lists only `2026-07-28`,
+as the SDK builds it: the 2025-era versions are reached through `initialize`. Both handshakes
+carry the package's name and version (`serverInfo`), and every API request carries them in its
+User-Agent, `echelongraph-mcp/<version>`.
+
+Both handshakes also carry the server instructions: the data is public; what `state`,
+`measured_at` and `freshness` mean; that exposure numbers are aggregate counts of ip:port
+services, not an internet-wide census; and that Shodan data is Shodan's.
+
 ## Install
 
-Add it to your MCP client's config. It runs via `npx` — no global install needed.
+Requires Node.js 20 or later. Add it to your MCP client's config. It runs via `npx` — no global
+install needed.
 
 ### Claude Desktop
 
@@ -230,12 +308,17 @@ services does EchelonGraph's radar have on record for it?"*
 ```bash
 npm install
 npm run build      # tsc → dist/
-npm test           # build, then behavioural tests against a stub API (no network needed)
+npm test           # build, then the behavioural suite over both protocol eras, against a stub API (no network needed)
 npm run smoke      # spawn the server + call cve_exposure against the production API
 ```
 
 `npm run smoke` calls the production API with this package's User-Agent, so its requests are
 counted as external MCP adoption. `npm test` never leaves the machine.
+
+`npm test` runs the suite once over a 2026-07-28 `server/discover` and once over a 2025-06-18
+`initialize`, plus the era tests. To run it against an installed package rather than `dist/`,
+set `ECHELONGRAPH_MCP_BIN` to that package's `echelongraph-mcp` bin: the tests then run the bin
+directly, as `npx` does, and read that package's own files.
 
 ## License
 
