@@ -171,7 +171,7 @@ outage for an all-clear:
 
 - **Success** — the first text block is the API's JSON verbatim; the second is a one-line
   note saying the call succeeded, which base URL answered, and what it found; the third is
-  the structured result without `data`, as JSON (below). When the
+  the structured result as JSON, less what the first two already say (below). When the
   feed genuinely holds nothing for the query the note says so in words ("we looked and
   found nothing … not a lookup failure"), because a measured zero is a measurement. The
   exception to verbatim is `exposure_radar`: each radar is cut to the fields listed above, and
@@ -191,12 +191,13 @@ outage for an all-clear:
   the host could not be reached, it answered non-2xx, it took longer than the timeout, or
   it answered 2xx with a body that is not a JSON object. The text names the tool, the
   cause (status code or error kind), the path, and the base URL, and says it is not a
-  finding; the second text block is the structured result, as JSON (below). A failure is never
-  rendered as a success with null fields.
+  finding; the second text block is the structured result as JSON, less the message's
+  sentences (below). A failure is never rendered as a success with null fields.
 
-Both shapes also carry a structured result, below, and repeat it in their last text block, so a
-client that passes only `content` to the model still sees how the answer was measured. The
-first text block (the API's JSON, or the failure) and the note after it are where 1.x put them.
+Both shapes also carry a structured result, below, and repeat it in their last text block, less
+what an earlier block already says, so a client that passes only `content` to the model still
+sees how the answer was measured. The first text block (the API's JSON, or the failure) and the
+note after it are where 1.x put them.
 
 ## Structured results
 
@@ -216,15 +217,21 @@ declares its shape as an `outputSchema` in `tools/list`, with a title and the an
 | `data` | On a success only: the same JSON as the first text block. |
 | `error` | On a failure only: `kind`, `path`, `status` and `message`. |
 
-The last text block of every result is this structured result serialized as JSON, without
-`data`: the same `state`, `measured_at`, `method`, `coverage`, `freshness` and `notes` (and on
-a failure `error`), key for key, since a client may pass only `content` to the model. With
-the first text block as `data`, the text carries the whole structured result.
+The last text block of every result is this structured result serialized as JSON, less what
+an earlier text block already says verbatim, since a client may pass only `content` to the
+model. It carries the same `state`, `measured_at`, `coverage` and `freshness` (and on a failure
+`error`), key for key. It leaves out `data`, which is a success's first text block, and the
+note's sentences, which are the text block just before it (on a failure, the message) and
+with which `notes` ends: its `notes` holds only the sentences the envelope adds about itself,
+and is left out when there are none. It leaves out `method` too where that note quotes it verbatim, as
+`cve_exposure`'s does ("Method: …"). So the text blocks together carry the whole structured
+result, and cannot disagree with it. Before 2.2.0 this block repeated the whole note, so every
+note was sent twice.
 
 | `state` | What it means |
 |---|---|
 | `measured` | A measurement of what was asked. An exposure count is `measured` only when the answer says when what it counts was observed (`measured_at`) and how it was produced (`method`). No exposure answer says when today, so neither exposure tool answers `measured`. |
-| `not_assessed` | The answer holds no dated measurement of what was asked, so no number in it is a finding: the radar does not look for this CVE, the answer does not say whether it does, or the answer does not say when what it counts was observed. |
+| `not_assessed` | The answer holds no dated measurement of what was asked, so no count in it is presented as one: the radar does not look for this CVE, the answer does not say whether it does, or the answer does not say when what it counts was observed. It can still relay a count, as what the source holds on record, undated: `cve_exposure`'s `exposed_hosts` when its `exposure_state` is `exposed`, and `exposure_radar`'s labelled totals. The notes, and `exposure_state` where the result carries it, say what each count is. |
 | `failed` | The lookup did not complete. Not a finding. |
 | `invalid_input` | The input was refused, by this server or by the API, so nothing was looked up. Not a finding. |
 

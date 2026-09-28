@@ -13,10 +13,11 @@
 //     nothing ("we looked and found nothing" is a measurement). One exception: exposure_radar
 //     relays each radar's answer cut to the fields it can label by what they count, and names
 //     what it left out (readKEVExposure, readExposedDatabases, readLeakedCredentials and
-//     readShadowAI; #2307, #2313). content[2] is the envelope below, as JSON.
+//     readShadowAI; #2307, #2313). content[2] is the envelope below, as JSON, less what
+//     content[0] and the note already say.
 //   - failure (isError: true): the lookup did not complete — unreachable host, non-2xx,
 //     timeout, or a 2xx whose body is not a JSON object — named by tool, cause and base URL,
-//     in content[0]; content[1] is the envelope below, as JSON.
+//     in content[0]; content[1] is the envelope below, as JSON, less the message's sentences.
 //     Never a success with null fields: a model handed one of those tells its user "no
 //     exposure found", and an outage becomes an all-clear.
 //
@@ -26,13 +27,16 @@
 // with, on a success, `data` equal to what content[0] carries, and on a failure an `error`.
 // Each tool advertises the envelope as its outputSchema.
 //
-// The envelope in the text (#2440). Many clients pass only `content` to the model, so the last
-// text block of every result is structuredContent serialized as JSON, without `data` (which
-// content[0] already carries verbatim): the same state, measured_at, method, coverage,
-// freshness, notes and, on a failure, error, key for key. content[0] + that block is the whole
-// of structuredContent. The MCP spec (2025-06-18, Tools, Structured Content) asks a tool that
-// returns structured content to return it serialized in a text block too; the JSON block stays
-// first and the note second, as in 1.x, so a client that parses content[0] is unaffected.
+// The envelope in the text (#2440, #2467). Many clients pass only `content` to the model, so the
+// last text block of every result is structuredContent serialized as JSON, less what an earlier
+// text block already carries verbatim: `data` (content[0] on a success), the note's sentences
+// (the block just before, which structuredContent's notes end with), and method where that note
+// quotes it. The rest — state, measured_at, coverage, freshness, the envelope's own notes and,
+// on a failure, error — is copied key for key, so the text blocks together are the whole of
+// structuredContent and cannot disagree with it. The MCP spec (2025-06-18, Tools, Structured
+// Content) asks a tool that returns structured content to return it serialized in a text block
+// too; the JSON block stays first and the note second, as in 1.x, so a client that parses
+// content[0] is unaffected.
 //
 // Protocol eras (#2311). serveStdio answers both: a 2026-07-28 client's server/discover and
 // per-request `_meta` envelope, and a 2025-era client's `initialize` handshake. The first
@@ -185,7 +189,12 @@ const text = (t: string): Text => ({ type: "text", text: t });
 //                is only ever measured with an observation time (measured_at) and a method.
 //                not_assessed: the answer holds no dated measurement of what was asked — the
 //                radar does not look for this CVE, cannot say whether it does, or the answer
-//                does not say when what it counts was observed. Its numbers are not findings.
+//                does not say when what it counts was observed — so no count in it is presented
+//                as one. It can still relay a count, as what the source holds on record,
+//                undated, and its notes (and cve_exposure's exposure_state) say what each count
+//                is (#2465): every cve_exposure count of services on record, and exposure_radar's
+//                totals, are relayed under this state, so it never says its numbers are not
+//                findings.
 //                failed / invalid_input: nothing was measured (the #1874 failure contract).
 //   measured_at  when the underlying observation was made, as the API states it; null when the
 //                answer does not say or holds no observation. Never the Go zero time.
@@ -197,7 +206,7 @@ const text = (t: string): Text => ({ type: "text", text: t });
 //                sentence about the envelope itself.
 // Every field is derived from what the API sends. Where the API does not say, the envelope
 // says null and a note says so; nothing is filled in. The result's last text block repeats the
-// envelope (see envelopeText).
+// envelope, less what the text before it already says (see envelopeText).
 type State = "measured" | "not_assessed" | "failed" | "invalid_input";
 type ErrorKind = Failure["kind"] | "invalid_input" | "internal" | "unexpected_shape" | "radars";
 // radars: exposure_radar's per-radar failures, when more than one request was made.
@@ -254,21 +263,36 @@ const INVALID_INPUT = "(state: invalid_input)";
 const REJECTED_INPUT =
   "The API rejected the request as invalid input, so nothing was looked up: this is not a finding. Do not report it as zero, none found, or unexposed; correct the input and retry.";
 
-// The envelope as a text block (#2440): structuredContent without `data`, serialized as JSON,
-// so a client that passes only `content` to the model still sees how the answer was measured.
-// `data` is left out because content[0] carries it verbatim; every other key is copied as is,
-// so the text and the structured result cannot disagree.
-const envelopeText = (structured: Record<string, unknown>): Text => {
-  const { data: _data, ...envelope } = structured;
+// The envelope as a text block (#2440), so a client that passes only `content` to the model
+// still sees how the answer was measured: structuredContent serialized as JSON, less what an
+// earlier text block already carries verbatim (#2467). 2.1.0 sent the whole envelope without
+// `data`, so every note went out twice, once as prose and once as the notes array, and
+// cve_exposure's method a third time.
+//   data    left out: content[0] carries it verbatim.
+//   notes   only the envelope's own sentences (`own`), which no text block says; the rest of
+//           structuredContent's notes are the sentences of `said`, the text block just before
+//           this one (the note, or a failure's message). Left out when there are none.
+//   method  left out when `said` quotes it verbatim (cve_exposure's note, "Method: …").
+// Every other key is copied as is, in structuredContent's order, so the text blocks together are
+// the whole of structuredContent and cannot disagree with it.
+const envelopeText = (structured: Record<string, unknown>, said: string, own: readonly string[]): Text => {
+  const envelope: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(structured)) {
+    if (k === "data") continue;
+    if (k === "notes") {
+      if (own.length) envelope.notes = own;
+    } else if (!(k === "method" && typeof v === "string" && said.includes(v))) envelope[k] = v;
+  }
   return text(JSON.stringify(envelope, null, 2));
 };
 
 // A failure result: the #1874 text, and an envelope saying nothing was measured, in
 // structuredContent and again as the last text block. The error quotes only what
-// describeFailure already quotes (a redacted cause, the API's own message).
+// describeFailure already quotes (a redacted cause, the API's own message). Every note is a
+// sentence of the message, so the text envelope carries none.
 const failure = (state: "failed" | "invalid_input", message: string, error: ErrorInfo, coverage: Record<string, unknown> | null = null): ToolResult => {
   const structuredContent = { state, measured_at: null, method: null, coverage, freshness: null, notes: sentences(message), error };
-  return { content: [text(message), envelopeText(structuredContent)], structuredContent, isError: true };
+  return { content: [text(message), envelopeText(structuredContent, message, [])], structuredContent, isError: true };
 };
 const errorOf = (f: Failure): ErrorInfo => ({ kind: f.kind, path: f.path, status: f.status ?? null, message: f.detail });
 
@@ -320,11 +344,12 @@ const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolResult => 
   return p.success ? r : unexpectedShape(tool, p.error);
 };
 
-// A success: content[0] is the data, content[1] the note, content[2] the envelope without data;
+// A success: content[0] is the data, content[1] the note, content[2] the envelope less both;
 // the envelope carries both, the note as sentences after any the envelope adds about itself.
 const succeeded = (data: object, note: string, env: Omit<Envelope, "notes"> & { notes?: string[] }): ToolResult => {
-  const structuredContent = { ...env, notes: [...(env.notes ?? []), ...sentences(note)], data };
-  return { content: [text(JSON.stringify(data, null, 2)), text(note), envelopeText(structuredContent)], structuredContent };
+  const own = env.notes ?? [];
+  const structuredContent = { ...env, notes: [...own, ...sentences(note)], data };
+  return { content: [text(JSON.stringify(data, null, 2)), text(note), envelopeText(structuredContent, note, own)], structuredContent };
 };
 const okHead = (tool: string, status?: number) =>
   `${tool} OK: EchelonGraph answered${status === undefined ? "" : ` HTTP ${status}`} from ${SHOWN_BASE}.`;
@@ -530,7 +555,7 @@ const SHODAN_ATTRIBUTION = "Exposure counts are derived from Shodan data.";
 // first; this sentence, placed beside it wherever Shodan data is named, does the second.
 const SHODAN_OWNERSHIP = "Shodan data is owned by Shodan, which holds its copyright (© Shodan).";
 
-const CVE_EXPOSURE_DESCRIPTION = `Internet-exposure footprint for one CVE from EchelonGraph's KEV-exposure radar: how many internet-facing services (distinct ip:port, returned as exposed_hosts; a machine answering on two ports counts twice) the radar has on record running a version its CVE matcher maps to this CVE, with a country/product breakdown and a ransomware flag. Aggregate and host-redacted; free and keyless. Method: exposure counts are derived from Shodan data. ${SHODAN_OWNERSHIP} Every 12 h, when Shodan query credits allow, the radar runs one Shodan query per tracked product, reads up to 100 ip:port services per query, and keeps a service when its banner version matches a CISA-KEV or high-EPSS CVE; a service whose row has not been written or refreshed for 21 days is dropped. last_seen is when EchelonGraph last wrote or refreshed a service's row, not when the service was observed and not when its vulnerable version was last confirmed: it is set to the time of the write when a search matches the banner, and again when a re-check finds the port still listed by Shodan InternetDB, without re-reading the banner, so a patched service can stay counted while its port stays open. A count is therefore a banner-version inference over a sample, not an exploit test and not an internet-wide census. The radar only looks for its tracked set of CVEs: for a CVE outside that set the result says NOT ASSESSED, and its 0 is not a measurement.`;
+const CVE_EXPOSURE_DESCRIPTION = `Internet-exposure footprint for one CVE from EchelonGraph's KEV-exposure radar: how many internet-facing services (distinct ip:port, returned as exposed_hosts; a machine answering on two ports counts twice) the radar has on record running a version its CVE matcher maps to this CVE, with a country/product breakdown and a ransomware flag. Aggregate and host-redacted; free and keyless. Method: exposure counts are derived from Shodan data. ${SHODAN_OWNERSHIP} Every 12 h, when Shodan query credits allow, the radar runs one Shodan query per tracked product, reads up to 100 ip:port services per query, and keeps a service when its banner version matches a CISA-KEV or high-EPSS CVE; a service whose row has not been written or refreshed for 21 days is dropped. last_seen is when EchelonGraph last wrote or refreshed a service's row, not when the service was observed and not when its vulnerable version was last confirmed: it is set to the time of the write when a search matches the banner, and again when a re-check finds the port still listed by Shodan InternetDB, without re-reading the banner, so a patched service can stay counted while its port stays open. A count is therefore a banner-version inference over a sample, not an exploit test and not an internet-wide census. The radar only looks for its tracked set of CVEs: for a CVE outside that set the note says NOT ASSESSED (exposure_state not_assessed), and its 0 is not a measurement.`;
 
 function exposureNote(head: string, id: string, d: object): string {
   const cve = strAt(d, "cve_id") ?? id;
@@ -1302,7 +1327,7 @@ const RADAR_METHOD =
   "Aggregate counts over what each radar holds on record: kev_exposure, Shodan banners whose version maps to a CISA-KEV-listed CVE; exposed_databases, services found through Shodan (LeakIX when Shodan query credits run low) and confirmed by EchelonGraph's own identified check; leaked_credentials, credential-shaped strings in public GitHub push events; shadow_ai, services found through Certificate Transparency logs and Shodan and checked by EchelonGraph's identified probes.";
 const RADAR_NAMES = RADARS.map(([name]) => name);
 const RADAR_STATE_NOTE =
-  "state is not_assessed: every radar answered, but no stats answer says when the services or records it counts were observed, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, labelled below by what it counts.";
+  "state is not_assessed: every radar answered, but no stats answer says when the services or records it counts were observed, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, and the note labels each one by what it counts.";
 const RADAR_FRESHNESS_NOTE =
   "freshness gives each radar's last completed check where the API serves one (freshness.kev_exposure.last_run_at, freshness.exposed_databases.last_run_at, freshness.leaked_credentials.last_run_at, and freshness.shadow_ai.last_run_at with freshness.shadow_ai.running), and null where it does not.";
 
@@ -1391,6 +1416,15 @@ const ErrorSchema = z.strictObject({
   message: z.string().describe("The cause: the API's own message, or what went wrong."),
 });
 const NOTES = z.array(z.string()).describe("Caveats, one sentence each.");
+// The success states (#2465). 2.1.0 described not_assessed as no dated measurement whose numbers
+// were all denied the status of findings, on the same schema as a cve_exposure answer relaying
+// services on record for a CISA-KEV CVE, which is not_assessed because its count is undated
+// (#2439). A client that respects the schema was told that count is not a finding. The count is
+// what the radar holds on record: not a dated measurement, and not nothing. So the description
+// says both, and leaves what each count is to the notes and exposure_state, which say it per
+// answer; it makes no blanket claim about the numbers, in either direction.
+const SUCCESS_STATE =
+  "measured: a measurement of what was asked; an exposure count is measured only with measured_at and method. not_assessed: the answer holds no dated measurement of what was asked, so no count in it is presented as one; it can still relay a count, as what the source holds on record, undated, and its notes (and exposure_state, where the result carries it) say what each count is.";
 
 function envelopeSchema(o: {
   data: z.ZodType;
@@ -1402,7 +1436,7 @@ function envelopeSchema(o: {
   const coverage = o.coverage ? o.coverage.nullable() : z.null();
   return z.discriminatedUnion("state", [
     z.strictObject({
-      state: z.enum(["measured", "not_assessed"]).describe("measured: a measurement of what was asked; an exposure count is measured only with measured_at and method. not_assessed: no dated measurement of what was asked, and no number in it is a finding."),
+      state: z.enum(["measured", "not_assessed"]).describe(SUCCESS_STATE),
       measured_at: Instant.nullable().describe("When the underlying observation was made, as the API states it; null when the answer does not say or holds no observation."),
       method: z.string().describe("How the numbers were produced."),
       coverage: coverage.describe("What the answer covers; null where the answer says nothing about it."),
@@ -1514,7 +1548,9 @@ const CVE_EXPOSURE_OUTPUT = envelopeSchema({
     exposure_state: z
       .enum(["exposed", "measured_zero", "not_assessed", "tracking_unknown"])
       .nullable()
-      .describe("What the answer's count is: exposed, a measured zero, not assessed, or tracking unknown; null when it carries no count."),
+      .describe(
+        "What the answer's count is, as the note's (exposure_state: …) tag says; not state, which says whether the answer is a dated measurement. exposed: data.exposed_hosts counts the services the radar holds on record for the CVE, above 0. measured_zero: the API marks the CVE as tracked with 0 services, a zero in the radar's sample. not_assessed: the CVE is outside the radar's tracked set, so its count, if any, is not a current measurement. tracking_unknown: the API does not say whether the radar tracks the CVE, so its 0 is not evidence either way. null: the answer carries no count.",
+      ),
   },
 });
 
@@ -1597,9 +1633,12 @@ const EXPOSURE_RADAR_OUTPUT = envelopeSchema({
 const INSTRUCTIONS = [
   "EchelonGraph's public CVE and internet-exposure data, read-only and keyless.",
   "Everything these tools return is public: EchelonGraph's CVE Pulse feed, and aggregate, host-redacted totals from its exposure radars.",
-  "Every result says how it was measured: state, measured_at, method, coverage, freshness and notes, in its structuredContent and again in its last text block, which is that structuredContent as JSON without data (the first text block is the data).",
+  "Every result says how it was measured: state, measured_at, method, coverage, freshness and notes, in its structuredContent and again in its text.",
+  "Its last text block is that structuredContent as JSON, less what an earlier text block already gives verbatim: data, which is a success's first text block; the sentences of the text block just before it (the note, or a failure's message), with which structuredContent's notes end; and method, where that block quotes it.",
   "state is measured, not_assessed, failed or invalid_input.",
-  "not_assessed means the answer holds no dated measurement of what was asked (for example a CVE outside the KEV-exposure radar's tracked set), so a zero in it is not a finding of no exposure.",
+  "not_assessed means the answer holds no dated measurement of what was asked, so no count in it is presented as one.",
+  "It can still relay a count, as what the source holds on record, undated, and its notes say what each count is: cve_exposure's exposed_hosts when its exposure_state is exposed, and exposure_radar's labelled totals, are such counts.",
+  "A zero is not a finding of no exposure where the answer holds no measurement for that CVE, for example a CVE outside the KEV-exposure radar's tracked set (exposure_state not_assessed).",
   "failed and invalid_input mean nothing was measured: never report them as zero, none found or unexposed.",
   "measured_at is when the underlying observation was made, and null when the answer does not say or holds none.",
   "freshness gives the producing radar's last_run_at: when it last completed a check whose reads succeeded.",
@@ -1614,7 +1653,7 @@ const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
 
 // What each description says about its structured result, naming only fields its schema holds.
 const FEED_ENVELOPE =
-  "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the feed serves no poll-completion time) and notes, with data equal to the API's JSON; the result's last text block repeats it without data.";
+  "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the feed serves no poll-completion time) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
 
 // One server, built per connection by serveStdio for whichever era the client opens with.
 // tools/list answers in registration order, which is the order below.
@@ -1666,7 +1705,7 @@ function createServer(): McpServer {
     "cve_exposure",
     {
       title: "Internet exposure for one CVE",
-      description: `${CVE_EXPOSURE_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: the per-CVE answer says when EchelonGraph last wrote a row (last_seen), not when any counted service was observed, so no count is presented as a dated measurement; the count is still relayed, labelled. exposure_state says what the count is: exposed, measured_zero, not_assessed or tracking_unknown; coverage.in_scope is the API's tracked verdict; freshness is null, since the per-CVE answer carries no last completed check; data is the API's JSON. The result's last text block repeats the structured result without data.`,
+      description: `${CVE_EXPOSURE_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: the per-CVE answer says when EchelonGraph last wrote a row (last_seen), not when any counted service was observed, so no count is presented as a dated measurement; the count is still relayed, labelled, as what the radar holds on record. exposure_state says what the count is: exposed, measured_zero, not_assessed or tracking_unknown; coverage.in_scope is the API's tracked verdict; freshness is null, since the per-CVE answer carries no last completed check; data is the API's JSON. The result's last text block repeats the structured result without data (the first text block), without the note's sentences (the text block before it), with which notes ends, and without method where the note quotes it verbatim ("Method: …").`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: CVE_EXPOSURE_OUTPUT,
       annotations: ANNOTATIONS,
@@ -1678,7 +1717,7 @@ function createServer(): McpServer {
     "exposure_radar",
     {
       title: "Exposure radar totals",
-      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: every radar answered, but no stats answer says when the services or records it counts were observed, so no count is presented as a dated measurement. freshness gives each radar's last_run_at (and shadow_ai's running) where the API serves one; coverage names the radars that answered; data is the relayed result above. The result's last text block repeats the structured result without data.`,
+      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: every radar answered, but no stats answer says when the services or records it counts were observed, so no count is presented as a dated measurement; each count is still relayed, labelled, as what that radar holds on record. freshness gives each radar's last_run_at (and shadow_ai's running) where the API serves one; coverage names the radars that answered; data is the relayed result above. The result's last text block repeats the structured result without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.`,
       outputSchema: EXPOSURE_RADAR_OUTPUT,
       annotations: ANNOTATIONS,
     },

@@ -461,12 +461,27 @@ const stringsIn = (v, out = []) => {
 const envelopeWords = (res) => stringsIn(envelopeOf(res)).join(" ");
 const brief = (res) => JSON.stringify(res).replace(/\s+/g, " ").slice(0, 300);
 
-// #2440: a result's text carries its envelope. A success is three text blocks (the API's JSON,
-// the note, the envelope) and a failure two (the message, the envelope). The envelope block
-// parses to structuredContent without data, key for key, so state, measured_at, method, coverage
-// and freshness in the text are the structured ones; a success's first block parses to data;
-// and a "(state: …)" or "(exposure_state: …)" tag in the note or message names the structured
-// value, never another. Returns the envelope it read.
+// The server's own split of a note into notes (index.ts `sentences`): whitespace runs collapsed,
+// one sentence per entry, ending in ".", "!" or "?" before whitespace.
+const noteSentences = (t) => t.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).filter(Boolean);
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+// #2440, #2467: a result's text carries its envelope. A success is three text blocks (the API's
+// JSON, the note, the envelope) and a failure two (the message, the envelope). The envelope block
+// is structuredContent as JSON less what an earlier block already says verbatim, and nothing else
+// (#2467: 2.1.0 repeated the whole note in it):
+//   - state, measured_at, coverage and freshness are always in it, equal to structuredContent's;
+//   - data is not: a success's first block parses to it;
+//   - notes holds only the envelope's own sentences: structuredContent's notes are those followed
+//     by the sentences of the block just before the envelope (the note, or the message), each
+//     found verbatim in that block, and none of the own sentences is one of them. With no own
+//     sentence, notes is left out rather than sent empty;
+//   - method is in it, equal, unless the block before quotes structuredContent's method verbatim,
+//     and then it is left out, since the text already says it.
+// So the text, rebuilt from its blocks, is structuredContent exactly: text and structure cannot
+// disagree, and nothing structuredContent says is missing from the text. A "(state: …)" or
+// "(exposure_state: …)" tag in the note or message names the structured value, never another.
+// Returns the envelope block as read.
 const TAG = /\((state|exposure_state): ([a-z_]+)\)/g;
 function assertEnvelopeInText(where, res) {
   const sc = res.structuredContent;
@@ -479,17 +494,32 @@ function assertEnvelopeInText(where, res) {
   } catch {
     assert.fail(`${where}: the last text block is not the envelope's JSON: ${blocks.at(-1).slice(0, 200)}`);
   }
+  const said = blocks.at(-2);
   const { data, ...withoutData } = sc;
-  for (const k of ["state", "measured_at", "method", "coverage", "freshness", "notes"]) {
-    assert.ok(Object.prototype.hasOwnProperty.call(env, k), `${where}: the text's envelope has no ${k}`);
+  for (const k of ["state", "measured_at", "coverage", "freshness", ...(has(env, "method") ? ["method"] : [])]) {
+    assert.ok(has(env, k), `${where}: the text's envelope has no ${k}`);
     assert.deepEqual(env[k], sc[k], `${where}: the text says ${k} ${JSON.stringify(env[k])}, structuredContent ${JSON.stringify(sc[k])}`);
   }
-  assert.deepEqual(env, withoutData, `${where}: the text's envelope is not structuredContent without data`);
   assert.ok(!("data" in env), `${where}: the envelope block repeats data, which is the first block`);
   if (!res.isError) assert.deepEqual(JSON.parse(blocks[0]), data, `${where}: the first text block is not data`);
   for (const [, key, value] of noteOf(res).matchAll(TAG)) {
     assert.equal(value, sc[key], `${where}: the text tags (${key}: ${value}) but structuredContent.${key} is ${JSON.stringify(sc[key])}`);
   }
+  // method: in the envelope block, or verbatim in the block before it; never both, never neither.
+  const quoted = typeof sc.method === "string" && said.includes(sc.method);
+  if (has(env, "method")) assert.ok(!quoted, `${where}: the envelope block repeats method, which the block before it quotes verbatim`);
+  else assert.ok(quoted, `${where}: the text's envelope has no method, and the block before it does not quote ${JSON.stringify(sc.method)}`);
+  // notes: the envelope's own sentences, then the block before's, each verbatim there.
+  if (has(env, "notes")) assert.ok(Array.isArray(env.notes) && env.notes.length > 0, `${where}: the envelope block sends notes ${JSON.stringify(env.notes)}; with none of its own it is left out`);
+  const own = env.notes ?? [];
+  const before = noteSentences(said);
+  for (const s of before) assert.ok(said.includes(s), `${where}: the note's sentence is not verbatim in the block before the envelope: "${s}"`);
+  const repeated = own.filter((s) => before.includes(s));
+  assert.deepEqual(repeated, [], `${where}: the envelope block repeats the block before it`);
+  assert.deepEqual(sc.notes, [...own, ...before], `${where}: structuredContent's notes are not the envelope block's notes followed by the sentences of the block before it`);
+  // The whole: rebuilt from the blocks, the text is structuredContent without data.
+  const rebuilt = { ...env, notes: [...own, ...before], ...(has(env, "method") ? {} : { method: sc.method }) };
+  assert.deepEqual(rebuilt, withoutData, `${where}: the text's envelope, rebuilt, is not structuredContent without data`);
   return env;
 }
 
@@ -705,6 +735,33 @@ function schemaNames(s, out = new Set()) {
   for (const [k, x] of Object.entries(s)) if (k !== "enum" && k !== "description") schemaNames(x, out);
   return out;
 }
+// Every description string a schema holds, at any depth (a property named `description`, such as
+// get_cve's, is a schema, and is walked).
+function schemaDescriptions(s, out = []) {
+  if (Array.isArray(s)) for (const x of s) schemaDescriptions(x, out);
+  else if (s !== null && typeof s === "object") {
+    for (const [k, x] of Object.entries(s)) {
+      if (k === "description" && typeof x === "string") out.push(x);
+      else schemaDescriptions(x, out);
+    }
+  }
+  return out;
+}
+// #2465: a sentence that denies the numbers in an answer are findings, in any of the ways it has
+// been or could be written: 2.1.0's schema said "no number in it is a finding", and its code
+// comment "Its numbers are not findings". Scoped to numbers, counts and figures, so a failure's
+// "this is not a finding" and "a zero … is not a finding of no exposure" are not matched: those
+// are said of an answer that relays no count, or of a zero.
+const DENIES_FINDINGS = [
+  /\bno (?:number|count|figure)s?\b[^.;]*?\b(?:is|are)\b[^.;]*?\bfindings?\b/i,
+  /\bnone of (?:it|its|the|these|those)\b[^.;]*?\b(?:numbers?|counts?|figures?)\b[^.;]*?\bfindings?\b/i,
+  /\b(?:numbers|counts|figures)\b[^.;]*?\b(?:is|are) not (?:a )?findings?\b/i,
+];
+// Returns how many sentences it read, so a caller can prove it was not vacuous.
+function assertNoFindingDenied(where, units) {
+  for (const u of units) for (const re of DENIES_FINDINGS) assert.doesNotMatch(u, re, `${where}: a sentence denies the numbers are findings: "${u}"`);
+  return units.length;
+}
 // The success and failure branches of an outputSchema, by the states each admits.
 const branchOf = (schema, state) => (schema.oneOf ?? []).find((b) => b.properties?.state?.enum?.includes(state));
 // A field name as a description or the README writes it: snake_case, one underscore at least.
@@ -915,7 +972,8 @@ describe(`against a stub API [${ERA}]`, () => {
   describe("#2306: no removed claim in any tool text, and the method is named", () => {
     let tools;
     const notes = [];
-    // #2440: the envelope block of each of the same results, as the strings it carries.
+    // #2440: the envelope block of each of the same results, as the strings it carries, and
+    // (#2467) the text block just before it, whose sentences the envelope block no longer repeats.
     const envelopes = [];
     before(async () => {
       ({ tools } = await client.listTools());
@@ -924,14 +982,14 @@ describe(`against a stub API [${ERA}]`, () => {
         const results = await callAll(client);
         for (const name of TOOLS) {
           notes.push([`${name}/${mode}`, noteOf(results[name])]);
-          envelopes.push([`${name}/${mode} envelope block`, envelopeWords(results[name])]);
+          envelopes.push([`${name}/${mode} envelope block`, envelopeWords(results[name]), textBlocks(results[name]).at(-2)]);
         }
       }
       stub.state.mode = "ok";
       for (const id of [CVE_UNTRACKED, CVE_UNTRACKED_STALE, CVE_OLD_API, CVE_REJECTED, "not-a-cve"]) {
         const res = await client.callTool({ name: "cve_exposure", arguments: { cve_id: id } });
         notes.push([`cve_exposure/${id}`, noteOf(res)]);
-        envelopes.push([`cve_exposure/${id} envelope block`, envelopeWords(res)]);
+        envelopes.push([`cve_exposure/${id} envelope block`, envelopeWords(res), textBlocks(res).at(-2)]);
       }
     });
     it("no tool description or argument description makes a removed claim", () => {
@@ -1111,12 +1169,17 @@ describe(`against a stub API [${ERA}]`, () => {
     });
     it("every shipped text that names Shodan indicates Shodan's ownership and copyright", () => {
       let checked = 0;
-      for (const [where, t] of shipped()) {
+      for (const [where, t, before] of shipped()) {
         if (!/Shodan/.test(t)) continue;
         checked++;
         // server.json's description is capped at 100 characters by the registry schema, so
         // it carries the short form; the README it points to carries the sentence.
         if (where === "server.json description") assert.match(t, /Shodan data \(© Shodan\)/, `${where}: ${t}`);
+        // #2467: an envelope block no longer repeats the note just before it, which states
+        // Shodan's ownership in the same result; the block names Shodan in method or in its own
+        // notes (last_seen), and is read after that note. The note is itself one of the texts
+        // this loop checks, and structuredContent's notes carry the sentence (the walk at the end).
+        else if (before !== undefined) assert.ok(t.includes(SHODAN_OWNERSHIP) || before.includes(SHODAN_OWNERSHIP), `${where}, and the block before it: ${before} ${t}`);
         else assert.ok(t.includes(SHODAN_OWNERSHIP), `${where}: ${t}`);
       }
       // Two tool descriptions, the cve_exposure and exposure_radar success notes, the README,
@@ -1780,6 +1843,70 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2353: core-backend adds a string `attribution` to every answer derived from Shodan data —
+  // kev-exposure (stats, cve/:id), exposed-databases/stats, shadow-ai-radar/stats — naming what is
+  // Shodan's and ending in Shodan's ownership sentence (internal/shodan Ownership; the strings
+  // below are those handlers' own). This version of the tool was published before the field
+  // existed, so these tests hold what the published tool does with it: the answer is still a
+  // success, no number changes, exposure_radar leaves the field out and names it like any field
+  // it cannot label, cve_exposure relays it as data (its data schema admits fields the API adds),
+  // and each note still states Shodan's ownership itself.
+  describe("#2353: a string `attribution` on the Shodan-derived answers is tolerated", () => {
+    const OWN = "Shodan data is owned by Shodan, which holds its copyright (© Shodan). EchelonGraph claims no ownership of it or copyright in it.";
+    const KEV_ATTRIBUTION = `The services counted here are derived from Shodan data: Shodan banner matches, re-checked against Shodan InternetDB. ${OWN}`;
+    const PATHS = {
+      kev_exposure: ["/api/v1/public/kev-exposure/stats", KEV_ATTRIBUTION],
+      exposed_databases: ["/api/v1/public/exposed-databases/stats", `The services counted here come from Shodan data, or from LeakIX data when Shodan query credits run low. ${OWN}`],
+      shadow_ai: ["/api/v1/public/shadow-ai-radar/stats", `Observations whose source is "shodan", and every count that includes them, are derived from Shodan data. ${OWN}`],
+    };
+    const CVE_PATH = `/api/v1/public/kev-exposure/cve/${CVE}`;
+    const withOverrides = async (overrides, fn) => {
+      Object.assign(stub.state.overrides, overrides);
+      try {
+        return await fn();
+      } finally {
+        for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+      }
+    };
+    before(() => { stub.state.mode = "ok"; });
+
+    it("exposure_radar: every number relayed as before, attribution left out and named per radar, ownership still stated", async () => {
+      const before = await client.callTool({ name: "exposure_radar", arguments: {} });
+      assert.notEqual(before.isError, true, brief(before));
+      const overrides = Object.fromEntries(Object.values(PATHS).map(([path, attribution]) => [path, { ...BODIES[path].ok, attribution }]));
+      const after = await withOverrides(overrides, () => client.callTool({ name: "exposure_radar", arguments: {} }));
+      assert.notEqual(after.isError, true, brief(after));
+      assert.deepEqual(JSON.parse(after.content[0].text), JSON.parse(before.content[0].text), "the attribution changed what exposure_radar relays");
+      assert.doesNotMatch(after.content[0].text, /attribution/);
+      const n = noteOf(after);
+      for (const radar of Object.keys(PATHS)) {
+        assert.match(n, new RegExp(`Left out of ${radar} because this version of the tool cannot label them: attribution\\.`), n);
+      }
+      assert.doesNotMatch(n, /Left out of leaked_credentials/, n);
+      assert.doesNotMatch(n, /not in the expected shape/, n);
+      assert.match(n, /Shodan data is owned by Shodan, which holds its copyright \(© Shodan\)\./, n);
+      // Apart from those three sentences, the note is the one the tool gave before.
+      const without = n.replace(/ Left out of (?:kev_exposure|exposed_databases|shadow_ai) because this version of the tool cannot label them: attribution\./g, "");
+      assert.equal(without, noteOf(before));
+    });
+
+    it("cve_exposure: the attribution is relayed as data, and the note and envelope are the ones it gave before", async () => {
+      const before = await client.callTool({ name: "cve_exposure", arguments: { cve_id: CVE } });
+      assert.notEqual(before.isError, true, brief(before));
+      const after = await withOverrides({ [CVE_PATH]: { ...BODIES[CVE_PATH].ok, attribution: KEV_ATTRIBUTION } }, () =>
+        client.callTool({ name: "cve_exposure", arguments: { cve_id: CVE } }),
+      );
+      assert.notEqual(after.isError, true, brief(after));
+      const data = JSON.parse(after.content[0].text);
+      assert.equal(data.attribution, KEV_ATTRIBUTION);
+      const { attribution: _a, ...rest } = data;
+      assert.deepEqual(rest, JSON.parse(before.content[0].text), "the attribution changed another relayed field");
+      assert.equal(noteOf(after), noteOf(before));
+      assert.deepEqual(envelopeOf(after), envelopeOf(before));
+      assert.match(noteOf(after), /Shodan data is owned by Shodan, which holds its copyright \(© Shodan\)\./);
+    });
+  });
+
   // #2335: kev_exposure, exposed_databases and leaked_credentials each answer last_run_at: when
   // that radar last COMPLETED a check, read from poller_run_state (core-backend
   // pollerlock/published.go), UTC and truncated to the second, omitted when unknown and never
@@ -2425,6 +2552,63 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2467: what each result costs in the channel a model reads. 2.1.0's envelope block repeated
+  // the note before it sentence for sentence (82% of exposure_radar's block on production's
+  // answers) and nothing measured it, so the fold was silent. Each case below is one of the
+  // fixtures above, production's recorded cve_exposure answer (#2439) among them, and its total
+  // text (every text block, with the stub's base URL counted as production's, so the number is
+  // what a production client receives for the same answer) must stay within its bound: the size
+  // measured when #2467 landed, plus MARGIN. The text is deterministic, so the margin only lets a
+  // changed word through; a sentence added to a note (nearly every one is longer than MARGIN), or
+  // a repeat creeping back into the envelope block, fails here as a number. Before #2467, on these
+  // fixtures: exposure_radar 32,606, cve_exposure 6,165, cve_summary 1,141, search_cves 1,231,
+  // get_cve 940, the get_cve failure 910 and the search_cves failure 1,133. Raise a measurement on
+  // purpose, to a new measurement, never to make a run pass.
+  describe("#2467: every tool's text stays within its measured size", () => {
+    const PROD_BASE = "https://app.echelongraph.io";
+    const PROD_CVE_PATH = `/api/v1/public/kev-exposure/cve/${CVE_PROD_WRITE_STAMPED}`;
+    const MARGIN = 50;
+    // [case, tool, arguments, stub mode, overrides, what the case must be, characters of text
+    // measured at 2.2.0 (2026-09-28)].
+    const CASES = [
+      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 22_883],
+      ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
+      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 971],
+      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_085],
+      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 809],
+      ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
+      ["search_cves, failed (an edge's HTTP 403 page)", "search_cves", CALLS.search_cves, "403", {}, { state: "failed" }, 705],
+    ];
+    const measured = {};
+    before(async () => {
+      try {
+        for (const [label, name, args, mode, overrides] of CASES) {
+          stub.state.mode = mode;
+          Object.assign(stub.state.overrides, overrides);
+          try {
+            const res = await client.callTool({ name, arguments: args });
+            const blocks = textBlocks(res).map((t) => t.split(stub.base).join(PROD_BASE));
+            measured[label] = { res, total: blocks.reduce((n, t) => n + t.length, 0), envelope: blocks.at(-1).length };
+          } finally {
+            for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+          }
+        }
+      } finally {
+        stub.state.mode = "ok";
+      }
+    });
+    for (const [label, , , , , is, size] of CASES) {
+      const bound = size + MARGIN;
+      it(`${label}: at most ${bound} characters of text (${size} measured, plus ${MARGIN})`, (t) => {
+        const { res, total, envelope } = measured[label];
+        // The bound is only about this case if the case is what it says it is.
+        for (const [k, v] of Object.entries(is)) assert.equal(res.structuredContent[k], v, `${label}: ${k}`);
+        t.diagnostic(`${label}: ${total} characters of text, ${envelope} of them the envelope block`);
+        assert.ok(total <= bound, `${label}: ${total} characters of text, over its bound of ${bound} (${size} measured when #2467 landed, plus ${MARGIN})`);
+      });
+    }
+  });
+
   // 1.0.1: the version is read from package.json, so adoption per release is countable.
   describe("package identity: version, User-Agent, tool order, registry metadata", () => {
     it("the MCP handshake reports package.json's version", () => {
@@ -2497,12 +2681,15 @@ describe(`a credential in ECHELONGRAPH_API_BASE never reaches a result [${ERA}]`
 // successes, not-assessed answers, failures and refused inputs alike. Runs last, so every
 // describe block before it has filled COLLECTED.
 describe(`#2313: every structuredContent the suite received validates against its tool's outputSchema, and dates every measured exposure number [${ERA}]`, () => {
-  let schemas;
+  let schemas, descriptions, instructions;
   before(async () => {
     // tools/list reaches no API, so an unreachable base is enough to read the schemas.
     const client = await spawnServer({ ECHELONGRAPH_API_BASE: "http://127.0.0.1:1" });
     try {
-      schemas = Object.fromEntries((await client.listTools()).tools.map((t) => [t.name, t.outputSchema]));
+      const { tools } = await client.listTools();
+      schemas = Object.fromEntries(tools.map((t) => [t.name, t.outputSchema]));
+      descriptions = Object.fromEntries(tools.map((t) => [t.name, t.description]));
+      instructions = client.opening.instructions;
     } finally {
       await client.close();
     }
@@ -2526,27 +2713,43 @@ describe(`#2313: every structuredContent the suite received validates against it
     }
   });
   // #2440 done-means 1: for every tool, in this era, every result the suite received (success,
-  // not_assessed, failed, invalid_input) carries its envelope in a text block that matches
-  // structuredContent: state, measured_at, method, coverage and freshness, key for key.
-  it("#2440: every result's last text block is its structuredContent without data, and its first (on a success) is data", () => {
+  // not_assessed, failed, invalid_input) carries its envelope in its text: state, measured_at,
+  // method, coverage and freshness matching structuredContent. #2467: the envelope block leaves
+  // out only what an earlier block says verbatim, so the text rebuilds to structuredContent.
+  it("#2440, #2467: every result's text rebuilds to its structuredContent, and its envelope block repeats nothing", () => {
     const seen = {};
+    let methodQuoted = 0;
+    let methodKept = 0;
+    let ownNotes = 0;
+    let noOwnNotes = 0;
     for (const [name, args, res] of COLLECTED) {
-      assertEnvelopeInText(`${name}(${JSON.stringify(args)})`, res);
+      const env = assertEnvelopeInText(`${name}(${JSON.stringify(args)})`, res);
       (seen[name] ??= new Set()).add(res.structuredContent.state);
+      if (typeof res.structuredContent.method === "string") has(env, "method") ? methodKept++ : methodQuoted++;
+      has(env, "notes") ? ownNotes++ : noOwnNotes++;
     }
-    // Not vacuous: every tool, and each state it answers in, went through the check above.
+    // Not vacuous: every tool, and each state it answers in, went through the check above, and
+    // both ways each key can go: method kept (the CVE feed, exposure_radar) and left out because
+    // the note quotes it (cve_exposure), notes of the envelope's own (every success) and none
+    // (every failure, whose notes are all the message's).
     assert.deepEqual(Object.keys(seen).sort(), [...TOOLS].sort());
     for (const st of STATES) assert.ok(Object.values(seen).some((s) => s.has(st)), `no result in state ${st} was checked`);
+    assert.ok(methodQuoted >= 10 && methodKept >= 10, `method left out ${methodQuoted} times, kept ${methodKept}`);
+    assert.ok(ownNotes >= 10 && noOwnNotes >= 10, `own notes in ${ownNotes} envelope blocks, none in ${noOwnNotes}`);
   });
-  it("#2440: the check above can fail: a result without the envelope block, or whose text disagrees with structuredContent, is caught", () => {
+  it("#2440, #2467: the check above can fail: a result without the envelope block, whose text disagrees with structuredContent, drops something, or repeats the note, is caught", () => {
     const pick = (pred) => COLLECTED.find(([n, , r]) => pred(n, r))[2];
     const ok = pick((n, r) => n === "cve_exposure" && r.structuredContent.state === "not_assessed" && r.structuredContent.exposure_state === "exposed");
+    const feed = pick((n, r) => n === "cve_summary" && !r.isError);
     const bad = pick((n, r) => n === "get_cve" && r.isError);
-    assertEnvelopeInText("control", ok);
-    assertEnvelopeInText("control", bad);
+    for (const r of [ok, feed, bad]) assertEnvelopeInText("control", r);
     const withText = (res, blocks) => ({ ...res, content: blocks.map((t) => ({ type: "text", text: t })) });
     const env = (res, change) => JSON.stringify({ ...envelopeOf(res), ...change }, null, 2);
+    // 2.1.0's envelope block: structuredContent without data, the note's sentences and all.
+    const whole = (res) => JSON.stringify((({ data: _d, ...e }) => e)(res.structuredContent), null, 2);
     const [data, note] = textBlocks(ok);
+    const [feedData, feedNote] = textBlocks(feed);
+    const without = (res, key) => JSON.stringify((({ [key]: _k, ...e }) => e)(envelopeOf(res)), null, 2);
     for (const [label, res, message] of [
       ["2.0.0's shape: no envelope block", withText(ok, [data, note]), /text block\(s\), expected 3/],
       ["a failure without its envelope block", withText(bad, [textBlocks(bad)[0]]), /text block\(s\), expected 2/],
@@ -2554,9 +2757,18 @@ describe(`#2313: every structuredContent the suite received validates against it
       ["a text measured_at that disagrees", withText(ok, [data, note, env(ok, { measured_at: ok.structuredContent.data.last_seen })]), /the text says measured_at/],
       ["a text method that disagrees", withText(ok, [data, note, env(ok, { method: "x" })]), /the text says method/],
       ["a text freshness that disagrees", withText(ok, [data, note, env(ok, { freshness: {} })]), /the text says freshness/],
-      ["a text envelope with no freshness", withText(ok, [data, note, JSON.stringify((({ freshness: _f, ...e }) => e)(envelopeOf(ok)))]), /has no freshness/],
+      ["a text envelope with no freshness", withText(ok, [data, note, without(ok, "freshness")]), /has no freshness/],
       ["2.0.0's tag: (state: exposed) beside state not_assessed", withText(ok, [data, note.replace("(exposure_state: exposed)", "(state: exposed)"), textBlocks(ok)[2]]), /tags \(state: exposed\)/],
       ["an envelope block that is not JSON", withText(ok, [data, note, "state: not_assessed"]), /not the envelope's JSON/],
+      // #2467: what 2.1.0 sent, and what a fix could lose.
+      ["2.1.0's envelope block, repeating the note and the method it quotes", withText(ok, [data, note, whole(ok)]), /repeats method/],
+      ["2.1.0's envelope block, repeating the note", withText(feed, [feedData, feedNote, whole(feed)]), /repeats the block before it/],
+      ["2.1.0's failure envelope block, repeating the message", withText(bad, [textBlocks(bad)[0], whole(bad)]), /repeats the block before it/],
+      ["an own note the text drops", withText(ok, [data, note, env(ok, { notes: envelopeOf(ok).notes.slice(1) })]), /notes are not the envelope block's notes followed by/],
+      ["a method the text drops though the note does not quote it", withText(feed, [feedData, feedNote, without(feed, "method")]), /has no method, and the block before it does not quote/],
+      ["a note sentence the note no longer says", withText(ok, [data, note.replace(/ Exposure counts are derived from Shodan data\./, ""), textBlocks(ok)[2]]), /notes are not the envelope block's notes followed by/],
+      ["an empty notes array instead of none", withText(bad, [textBlocks(bad)[0], env(bad, { notes: [] })]), /with none of its own it is left out/],
+      ["a key structuredContent does not have", withText(ok, [data, note, env(ok, { exposed_hosts: 229 })]), /rebuilt, is not structuredContent without data/],
     ]) {
       assert.throws(() => assertEnvelopeInText(label, res), message, label);
     }
@@ -2639,6 +2851,65 @@ describe(`#2313: every structuredContent the suite received validates against it
     assert.throws(() => assertExposureNumbersDated("mutant", "cve_exposure", { ...sc, method: "" }), /no method/);
     const radar = COLLECTED.find(([n, , r]) => n === "exposure_radar" && !r.isError)[2].structuredContent;
     assert.throws(() => assertExposureNumbersDated("mutant", "exposure_radar", { ...radar, state: "measured" }), /under state measured with measured_at null/);
+  });
+  // #2465: 2.1.0's outputSchema described not_assessed as "no dated measurement of what was
+  // asked, and no number in it is a finding", while every cve_exposure answer is not_assessed
+  // (#2439), production's 249 services on record for a CISA-KEV-listed CVE among them, and
+  // exposure_radar relays its labelled totals under the same state. A client that respects the
+  // schema was told those counts are not findings. Every text a client holds for an answer that
+  // relays a non-zero count is read here sentence by sentence: every description in its tool's
+  // outputSchema, the tool's description, the server instructions, the result's note and
+  // envelope block, its structured notes and method, and the README the package ships. None may
+  // deny that the numbers in it are findings. The other direction stays as #2439 left it (the
+  // walks above): such an answer is never measured, and its measured_at is null.
+  it("#2465: no text a client holds for an answer that relays a non-zero count says the numbers in it are not findings", () => {
+    const answers = {};
+    let exposedUndated = 0;
+    let sentences = 0;
+    for (const [name, args, res] of COLLECTED) {
+      const sc = res.structuredContent;
+      if (res.isError || ![...numbersUnder(sc.data)].some((n) => n !== 0)) continue;
+      answers[name] = (answers[name] ?? 0) + 1;
+      if (name === "cve_exposure" && sc.exposure_state === "exposed" && sc.state === "not_assessed" && sc.data.exposed_hosts > 0) exposedUndated++;
+      // The package's own words about this answer: not data, which is the API's JSON.
+      const texts = [...schemaDescriptions(schemas[name]), descriptions[name], instructions, ...textBlocks(res).slice(1), ...sc.notes, sc.method];
+      sentences += assertNoFindingDenied(`${name}(${JSON.stringify(args)})`, texts.flatMap(sentencesOf));
+    }
+    sentences += assertNoFindingDenied("README.md", readmeUnits(readPkgFile("README.md")));
+    // Not vacuous: answers of every tool that relays counts, among them cve_exposure's exposed
+    // answers under not_assessed, which are what #2465 is about, and exposure_radar's totals.
+    assert.deepEqual(Object.keys(answers).sort(), [...TOOLS].sort(), JSON.stringify(answers));
+    assert.ok(exposedUndated >= 10, `only ${exposedUndated} undated exposed cve_exposure answers read`);
+    assert.ok(answers.exposure_radar >= 10, `only ${answers.exposure_radar} exposure_radar answers read`);
+    assert.ok(sentences >= 1000, `only ${sentences} sentences read`);
+  });
+  // What the description says instead, in both directions: a not_assessed answer is no dated
+  // measurement and presents no count as one (#2439), and it can still relay a count, as what
+  // the source holds on record, undated, which its notes and exposure_state describe (#2465).
+  it("#2465: every outputSchema says a not_assessed answer can relay a count on record, undated, and presents none as a dated measurement", () => {
+    for (const [name, schema] of Object.entries(schemas)) {
+      const d = branchOf(schema, "not_assessed").properties.state.description;
+      assert.match(d, /not_assessed: the answer holds no dated measurement of what was asked, so no count in it is presented as one;/, `${name}: ${d}`);
+      assert.match(d, /it can still relay a count, as what the source holds on record, undated, and its notes \(and exposure_state, where the result carries it\) say what each count is\./, `${name}: ${d}`);
+    }
+    assert.match(instructions, /not_assessed means the answer holds no dated measurement of what was asked, so no count in it is presented as one\./);
+    assert.match(instructions, /It can still relay a count, as what the source holds on record, undated/);
+    // exposure_state, the field that tells a relayed count from nothing to report, says so.
+    const es = branchOf(schemas.cve_exposure, "not_assessed").properties.exposure_state.description;
+    assert.match(es, /not state, which says whether the answer is a dated measurement\. exposed: data\.exposed_hosts counts the services the radar holds on record for the CVE, above 0\./, es);
+  });
+  it("#2465: the check above can fail: 2.1.0's state description, and the other ways to say it, are caught", () => {
+    const today = branchOf(schemas.cve_exposure, "not_assessed").properties.state.description;
+    assert.ok(assertNoFindingDenied("control", sentencesOf(today)) >= 1);
+    for (const mutant of [
+      "measured: a measurement of what was asked; an exposure count is measured only with measured_at and method. not_assessed: no dated measurement of what was asked, and no number in it is a finding.",
+      today.replace(/ It can still relay a count[^]*$| it can still relay a count[^]*$/, " no number in it is a finding."),
+      "Its numbers are not findings.",
+      "None of its counts is a finding.",
+      "No count here is a finding of exposure.",
+    ]) {
+      assert.throws(() => assertNoFindingDenied("mutant", sentencesOf(mutant)), /denies the numbers are findings/, mutant);
+    }
   });
   it("every structured result that names Shodan indicates Shodan's ownership and copyright", () => {
     let checked = 0;

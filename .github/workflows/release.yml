@@ -39,6 +39,7 @@ jobs:
       tarball: ${{ steps.pack.outputs.name }}
       sha1: ${{ steps.pack.outputs.sha1 }}
       integrity: ${{ steps.pack.outputs.integrity }}
+      already: ${{ steps.registry.outputs.already }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,16 +88,23 @@ jobs:
             echo "::error::$GITHUB_SHA is not on main. Release from a commit that main contains."; exit 1; }
           echo "$GITHUB_SHA is on main"
 
-      - name: The version is not on npm yet
+      # Until trusted publishing is configured (#2317 in the maintainers' tracker), a release is
+      # published by the maintainers' script, and its tag is pushed here afterwards so the source
+      # of every published version is public. For such a tag this job still builds, tests and
+      # packs, and then PROVES the registry serves exactly what this commit packs (the step after
+      # Pack) instead of publishing; publish and verify are skipped. A tag whose version is not on
+      # npm yet publishes as before.
+      - name: Is the version on npm yet
+        id: registry
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$REGISTRY/$PACKAGE/$VERSION" || echo 000)"
           case "$CODE" in
-            404) echo "$PACKAGE@$VERSION is free (404)" ;;
-            200) echo "::error::$PACKAGE@$VERSION is ALREADY PUBLISHED. npm versions are immutable; bump the version."; exit 1 ;;
-            *)   echo "::error::the registry answered $CODE for $PACKAGE/$VERSION, not a clear 'free'. Not publishing on an unclear answer."; exit 1 ;;
+            404) echo "$PACKAGE@$VERSION is free (404): this run publishes it"; echo "already=false" >> "$GITHUB_OUTPUT" ;;
+            200) echo "::notice::$PACKAGE@$VERSION is already on npm: this run checks that the registry serves exactly what this commit packs, and publishes nothing"; echo "already=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "::error::the registry answered $CODE for $PACKAGE/$VERSION, not a clear yes or no. Not proceeding on an unclear answer."; exit 1 ;;
           esac
 
       # No dependency declares an install script; --ignore-scripts keeps it that way for the
@@ -127,6 +135,27 @@ jobs:
             echo "integrity=$INTEGRITY"
           } >> "$GITHUB_OUTPUT"
 
+      - name: An already-published version is exactly what this commit packs
+        if: steps.registry.outputs.already == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OURS: ${{ steps.pack.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/registry" "$RUNNER_TEMP/cmp/ours" "$RUNNER_TEMP/cmp/theirs"
+          NAME="$(cd "$RUNNER_TEMP/registry" && npm pack --silent "$PACKAGE@$VERSION" | tail -1)"
+          THEIRS="$RUNNER_TEMP/registry/$NAME"
+          [ -f "$THEIRS" ] || { echo "::error::could not download $PACKAGE@$VERSION from the registry"; exit 1; }
+          tar -xzf "$OURS" -C "$RUNNER_TEMP/cmp/ours"
+          tar -xzf "$THEIRS" -C "$RUNNER_TEMP/cmp/theirs"
+          # Contents, not tarball bytes: gzip output can differ between npm versions.
+          if diff -r "$RUNNER_TEMP/cmp/ours/package" "$RUNNER_TEMP/cmp/theirs/package"; then
+            echo "The registry's $PACKAGE@$VERSION is file-for-file what this commit packs."
+          else
+            echo "::error::the registry's $PACKAGE@$VERSION DIFFERS from what this commit packs. The published version's source is not this commit."
+            exit 1
+          fi
+
       - name: Unpack the tarball with its own dependencies
         id: unpack
         uses: ./.github/actions/unpack-tarball
@@ -147,6 +176,7 @@ jobs:
   publish:
     name: Publish the tested tarball with provenance
     needs: build
+    if: needs.build.outputs.already != 'true'
     runs-on: ubuntu-latest # trusted publishing supports GitHub-hosted runners only
     timeout-minutes: 15
     environment: npm-publish

@@ -223,14 +223,18 @@ describe("#2311: the legacy era: initialize, as 1.x clients open", () => {
 
 // #2440: a client that passes only `content` to the model must still see how each answer was
 // measured, whichever protocol version it negotiated. The last text block of every result is
-// structuredContent without data, as JSON; a success's first block is data. #2439: the
-// production-shaped cve_exposure answer is not_assessed in every version.
+// structuredContent as JSON, less what an earlier block says verbatim (#2467): data, which is
+// the first block on a success, the sentences of the block just before it, with which notes
+// ends, and method where that block quotes it. #2439: the production-shaped cve_exposure answer
+// is not_assessed in every version.
+const sentencesOf = (t) => t.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).filter(Boolean);
 describe("#2440: in every protocol version, every tool's text carries its structured envelope", () => {
   for (const era of [MODERN, ...LEGACY]) {
-    it(`${era}: each tool's last text block is its structuredContent without data`, async () => {
+    it(`${era}: each tool's text blocks together are its structuredContent, and the last repeats nothing`, async () => {
       const client = await open(era);
       try {
         const states = {};
+        let methodQuoted = 0;
         for (const [name, args] of CALLS) {
           const res = await client.callTool({ name, arguments: args });
           const sc = res.structuredContent;
@@ -239,13 +243,30 @@ describe("#2440: in every protocol version, every tool's text carries its struct
           assert.equal(blocks.length, res.isError ? 2 : 3, `${era} ${name}: ${blocks.length} text blocks`);
           const { data, ...envelope } = sc;
           const text = JSON.parse(blocks.at(-1));
-          for (const k of ["state", "measured_at", "method", "coverage", "freshness"]) {
+          const said = blocks.at(-2);
+          for (const k of ["state", "measured_at", "coverage", "freshness"]) {
             assert.deepEqual(text[k], sc[k], `${era} ${name}: the text's ${k} is not structuredContent's`);
           }
-          assert.deepEqual(text, envelope, `${era} ${name}`);
+          // method: in the envelope block, or quoted verbatim by the block before it, not both.
+          const quoted = typeof sc.method === "string" && said.includes(sc.method);
+          if ("method" in text) {
+            assert.deepEqual(text.method, sc.method, `${era} ${name}: the text's method is not structuredContent's`);
+            assert.ok(!quoted, `${era} ${name}: the envelope block repeats the method the note quotes`);
+          } else {
+            assert.ok(quoted, `${era} ${name}: no text block carries method`);
+            methodQuoted++;
+          }
+          // notes: the envelope block's own, then the block before's sentences, each verbatim.
+          const before = sentencesOf(said);
+          for (const s of before) assert.ok(said.includes(s), `${era} ${name}: "${s}"`);
+          const own = text.notes ?? [];
+          assert.deepEqual(own.filter((s) => before.includes(s)), [], `${era} ${name}: the envelope block repeats the note`);
+          assert.deepEqual(sc.notes, [...own, ...before], `${era} ${name}: the text's notes and note are not structuredContent's notes`);
+          assert.deepEqual({ ...text, method: sc.method, notes: sc.notes }, envelope, `${era} ${name}`);
           if (!res.isError) assert.deepEqual(JSON.parse(blocks[0]), data, `${era} ${name}: the first block is not data`);
           states[name] = sc.state;
         }
+        assert.equal(methodQuoted, 1, `${era}: cve_exposure's note quotes its method, so its envelope block leaves it out`);
         assert.deepEqual(states, { cve_summary: "measured", search_cves: "failed", get_cve: "failed", cve_exposure: "not_assessed", exposure_radar: "failed" });
       } finally {
         await client.close();
