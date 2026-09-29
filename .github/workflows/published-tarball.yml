@@ -11,7 +11,10 @@ name: Published tarball
 # ships: that is the divergence it exists to report.
 #
 # On failure it opens an issue titled "Published echelongraph-mcp@latest fails its own test
-# suite", or comments on the open one.
+# suite", or comments on the open one. On a green real run it closes any open one, citing that
+# run, so an alert never outlives its cause and the next failure opens a fresh issue rather than
+# a comment on a stale one. (Before this, #2 stayed open, telling every visitor that `latest`
+# failed its tests, for a day after a green run had disproved it.)
 #
 # Control: run it by hand with `control: true`. The run blanks the Shodan ownership sentence
 # in the unpacked dist/index.js, so the suite MUST fail and the issue MUST be opened or
@@ -146,6 +149,30 @@ jobs:
           else
             gh issue create --title "$ISSUE_TITLE" --body-file "$BODY"
           fi
+
+      # A green REAL run closes the alert: the package npm serves passes its own suite now,
+      # so an open alert is false. Never on a control run (its suite is corrupted on purpose,
+      # so it cannot reach here green; the condition says so anyway). The alert is matched by
+      # its exact title among open issues, as the step above matches it.
+      - name: Close the alert issue after a green run
+        if: success() && env.CONTROL != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.pack.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          NUMBERS="$(gh issue list --state open --limit 1000 --json number,title \
+            | node -e 'let r="";process.stdin.on("data",(d)=>r+=d).on("end",()=>{process.stdout.write(JSON.parse(r).filter((i)=>i.title===process.env.ISSUE_TITLE).map((i)=>i.number).join(" "))})')"
+          if [ -z "$NUMBERS" ]; then
+            echo "no open alert issue; nothing to close"
+            exit 0
+          fi
+          for N in $NUMBERS; do
+            gh issue close "$N" --comment "This run tested the package npm serves as \`$PACKAGE@latest\` (\`$VERSION\`) with the suite from \`$GITHUB_SHA\` ($GITHUB_REF_NAME), and it passed: $RUN_URL. Closing: the failure this issue reported no longer reproduces. A later failure opens a new issue."
+            echo "closed #$N"
+          done
 
       - name: "Control: the suite must have failed"
         if: always() && env.CONTROL == 'true' && steps.test.outcome == 'success'
