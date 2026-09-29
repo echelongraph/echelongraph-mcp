@@ -27,7 +27,11 @@ name: Published tarball
 
 on:
   schedule:
-    - cron: "23 6 * * *" # daily, 06:23 UTC
+    # Daily at 23:07 UTC, which is 08:07 KST: the maintainers are in Korea, so a result (or an
+    # alert) is waiting at the start of their day. Not :00, because GitHub delays schedules at the
+    # top of the hour under load; the first scheduled run of this workflow, due 06:23 UTC,
+    # started at 14:13 UTC.
+    - cron: "7 23 * * *"
   workflow_dispatch:
     inputs:
       control:
