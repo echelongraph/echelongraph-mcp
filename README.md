@@ -21,7 +21,7 @@ API call a tool needs to answer.
 | `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores. |
 | `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
 | `cve_exposure` | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. |
-| `exposure_radar` | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. |
+| `exposure_radar` | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. |
 
 Every figure is as fresh as the schedule that refreshes it. The CVE feed is polled from its
 sources on a schedule; each radar refreshes on its own.
@@ -164,6 +164,74 @@ its name and its count, and a field added to one is named too. The `poller` bloc
 checked the same way: a key this version does not know is left out and named, while the
 instance fields it knows are left out as described below.
 
+#### `mcp_servers`
+
+The AI-exposure radar's MCP-server verdicts, from `GET /api/v1/public/ai-exposure/stats?service=mcp`.
+Every hostname was named like an MCP server in EchelonGraph's own Certificate Transparency
+feed, matched by hostname pattern; no Shodan data is used. Each is checked by EchelonGraph's
+identified MCP probe: a `server/discover` request, and `initialize` only if that is refused. It
+never sends `tools/call`. The answer is counts and timestamps only, with no hostname, version or
+server name, and the tool repeats no string it carries but its timestamps. Each hostname is
+counted once, by its latest verdict on record, and EchelonGraph's own control servers are left
+out. The unit is a hostname, not an ip:port service.
+
+| Field | What it counts |
+|---|---|
+| `mcp_servers.total` | Hostnames the radar has checked for an MCP server, each once, by its latest verdict on record. Not every one is an MCP server: see `mcp_servers.not_assessed_by_reason`. It is `mcp_servers.protected` + `mcp_servers.pending_readjudication` + `mcp_servers.not_assessed`. |
+| `mcp_servers.protected` | Hostnames whose `/mcp` endpoint asked for credentials (a 401 or 403) and whose OAuth protected-resource metadata validated under RFC 9728: a 200 JSON document whose resource is identical to the server's identifier and that names at least one authorization server. |
+| `mcp_servers.prm_via.header`, `mcp_servers.prm_via.wellknown_path`, `mcp_servers.prm_via.wellknown_root` | The protected ones, by where that document was found: the same-origin URL the credential challenge named; `/.well-known/oauth-protected-resource` followed by the endpoint's path; or `/.well-known/oauth-protected-resource` itself. They add up to `mcp_servers.protected`. |
+| `mcp_servers.pending_readjudication` | Verdicts decided by a rule EchelonGraph has since replaced and not yet re-checked under the current rules. They are in neither `mcp_servers.protected` nor `mcp_servers.not_assessed`. |
+| `mcp_servers.not_assessed` | The rest, whose protection the radar could not assess. Not assessed does not mean unprotected. `mcp_servers.not_assessed_by_reason` puts each of them in exactly one bucket (below). |
+| `mcp_servers.own_controls_excluded` | EchelonGraph's own control servers, left out of every other `mcp_servers` number. |
+| `mcp_servers.window.from`, `mcp_servers.window.to` | Timestamps, not counts: when the oldest and the newest of the verdicts counted were last checked. The counts are each hostname's latest verdict, not one sweep at one time. With no verdict counted there is no window. |
+| `mcp_servers.last_run_at` | A timestamp, not a count: when the AI-exposure radar, which checks other AI services as well as MCP servers, last completed a check (a cycle whose reads succeeded and whose scan opt-out register answered). It is not the time of every verdict counted. |
+| `mcp_servers.enabled` | Whether the API reports the radar running: true when a check completed within 45 minutes of its answer. |
+| `mcp_servers.counted_at` | A timestamp, not a count: when the API read these counts. |
+
+`mcp_servers.not_assessed_by_reason` divides `mcp_servers.not_assessed`:
+
+| Bucket | What it holds |
+|---|---|
+| `mcp_servers.not_assessed_by_reason.identified_no_challenge` | Servers that identified themselves as MCP servers (a DiscoverResult, an InitializeResult, or the endpoint event of the deprecated HTTP+SSE transport) and did not ask for credentials at the handshake. That is normal in MCP: authorization is optional in the spec, and a server can enforce it at `tools/call` instead, which EchelonGraph never sends. So this bucket is not a finding of exposure. |
+| `mcp_servers.not_assessed_by_reason.resource_mismatch` | An endpoint that asked for credentials, whose metadata document's resource is absent or not identical to the server's identifier. |
+| `mcp_servers.not_assessed_by_reason.cross_origin_pointer` | An endpoint that asked for credentials, whose challenge named a metadata URL on another origin, which EchelonGraph records and does not request. |
+| `mcp_servers.not_assessed_by_reason.bare_challenge_no_prm` | An endpoint that asked for credentials, whose challenge named no metadata URL, and neither well-known URI answered 2xx. |
+| `mcp_servers.not_assessed_by_reason.pointer_unreachable` | An endpoint that asked for credentials, whose same-origin metadata URL did not answer 2xx in full. |
+| `mcp_servers.not_assessed_by_reason.pointer_invalid` | An endpoint that asked for credentials, whose challenge's metadata pointer is not a URL EchelonGraph will request. |
+| `mcp_servers.not_assessed_by_reason.no_authorization_servers` | An endpoint that asked for credentials, whose metadata document names no authorization server. |
+| `mcp_servers.not_assessed_by_reason.wellknown_unreachable` | An endpoint that asked for credentials, where a well-known metadata request got no complete HTTP answer. |
+| `mcp_servers.not_assessed_by_reason.metadata_invalid` | An endpoint that asked for credentials, whose metadata answer is not a 200 with a JSON object within the size cap. |
+| `mcp_servers.not_assessed_by_reason.challenge_unadjudicated` | An endpoint that asked for credentials before EchelonGraph read RFC 9728 metadata, not re-checked since. |
+| `mcp_servers.not_assessed_by_reason.no_http_answer` | Hostnames that gave no HTTP answer: DNS, TCP or TLS failed, or the request timed out. Not a count of MCP servers. |
+| `mcp_servers.not_assessed_by_reason.not_identified_as_mcp` | Hostnames that answered HTTP with nothing that identified an MCP server: a login or error page, a body that is not JSON-RPC, a 4xx or 5xx. Not a count of MCP servers. |
+
+The eight credential-challenge buckets hold endpoints that asked for credentials: only their
+metadata did not validate, so none of them is shown to lack protection.
+
+`mcp_servers.era` and `mcp_servers.transport` each divide every counted hostname, so each adds
+up to `mcp_servers.total`:
+
+| Bucket | What it holds |
+|---|---|
+| `mcp_servers.era.legacy` | An initialize-era server: an InitializeResult, or the endpoint event of the deprecated HTTP+SSE transport. |
+| `mcp_servers.era.dual` | A server that answered `server/discover` and itself named an initialize-era version too. A lower bound: a server built on the reference SDK names only modern versions there, and is counted modern. |
+| `mcp_servers.era.modern` | A server that answered `server/discover` and named no initialize-era version. Not proven modern-only: EchelonGraph does not send it `initialize` to tell. |
+| `mcp_servers.era.unknown` | Nothing identified an era; every credential challenge is here. |
+| `mcp_servers.era.not_measured` | A verdict recorded before EchelonGraph's probe began recording the era, not re-checked since. |
+| `mcp_servers.transport.streamable_http` | Identified by a POST to `/mcp`. |
+| `mcp_servers.transport.legacy_sse` | Identified by the endpoint event of `GET /sse`, the deprecated HTTP+SSE transport. |
+| `mcp_servers.transport.unknown` | Nothing identified a transport. |
+| `mcp_servers.transport.not_measured` | Recorded before the era probe, not re-checked since. |
+
+The tool refuses the answer, as a failure of that radar and never as zeros, when it does not say
+`service` `mcp` (an API older than `?service=mcp` ignores the parameter and answers its counts
+over every AI service it checks), when `mcp_servers.total`, `mcp_servers.protected`,
+`mcp_servers.pending_readjudication` or `mcp_servers.not_assessed` is missing or not a whole
+number, or when they contradict each other. A partition whose buckets are not exactly those
+above, each a whole number adding up to the count it divides, is left out whole and named. A
+field this version does not know is left out, and named only when its name is shaped like a
+field name.
+
 ## What a result means
 
 Every tool answers in one of two shapes, so a model reading the result cannot mistake an
@@ -255,9 +323,11 @@ a note says so. Per tool:
   `cve_exposure` counts", and `coverage.in_scope` is the API's `tracked`. It becomes `measured`
   only when the API serves a time at which the counted services were observed.
 - `exposure_radar` is `not_assessed` with `measured_at` `null`: every radar answered, but no
-  stats answer says when the services or records it counts were observed, so no count is
-  presented as a dated measurement. Its numbers keep the labels above. `freshness` holds each
-  radar's `last_run_at` where the API serves one, and for `shadow_ai` also `running`.
+  answer gives one time at which what it counts was observed, so no count is presented as a
+  dated measurement. `mcp_servers` dates its verdicts only by a window, `mcp_servers.window.from`
+  to `mcp_servers.window.to`, over checks made at different times, which is not one observation
+  time. Its numbers keep the labels above. `freshness` holds each radar's `last_run_at` where the
+  API serves one, for `shadow_ai` also `running`, and for `mcp_servers` also `enabled`.
 
 The CVE feed tools' `freshness` is `null`: the feed's answers carry no time at which its
 pollers last completed a poll for the feed as a whole.

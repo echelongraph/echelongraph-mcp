@@ -12,9 +12,9 @@
 //     the call succeeded, where, and what it found — in words, including when it found
 //     nothing ("we looked and found nothing" is a measurement). One exception: exposure_radar
 //     relays each radar's answer cut to the fields it can label by what they count, and names
-//     what it left out (readKEVExposure, readExposedDatabases, readLeakedCredentials and
-//     readShadowAI; #2307, #2313). content[2] is the envelope below, as JSON, less what
-//     content[0] and the note already say.
+//     what it left out (readKEVExposure, readExposedDatabases, readLeakedCredentials,
+//     readShadowAI and readMCPServers; #2307, #2313, #2315). content[2] is the envelope below,
+//     as JSON, less what content[0] and the note already say.
 //   - failure (isError: true): the lookup did not complete — unreachable host, non-2xx,
 //     timeout, or a 2xx whose body is not a JSON object — named by tool, cause and base URL,
 //     in content[0]; content[1] is the envelope below, as JSON, less the message's sentences.
@@ -82,9 +82,11 @@ const SHOWN_BASE = (() => {
   }
 })();
 
+// unexpected_shape is never returned by api(): it is exposure_radar refusing an answer that is
+// not the counts it asked for (mcpRefusal, #2315), named per radar like any other failure.
 type Failure = {
   ok: false;
-  kind: "network" | "timeout" | "http" | "not_json" | "not_object";
+  kind: "network" | "timeout" | "http" | "not_json" | "not_object" | "unexpected_shape";
   path: string;
   status?: number;
   detail: string;
@@ -247,6 +249,8 @@ function describeFailure(f: Failure): string {
       return `EchelonGraph answered HTTP ${f.status} ${where} but the body was not JSON (${f.detail}).`;
     case "not_object":
       return `EchelonGraph answered HTTP ${f.status} ${where} but the body was not a JSON object (${f.detail}).`;
+    case "unexpected_shape":
+      return `EchelonGraph answered HTTP ${f.status} ${where}, but ${f.detail}.`;
   }
 }
 
@@ -696,15 +700,18 @@ async function cveExposure(cve_id: string): Promise<ToolResult> {
 
 // Every quadrant that finds its services through Shodan, attributed. The exposed-database
 // radar searches Shodan dorks and falls back to LeakIX when the Shodan query budget is low
-// (core-backend/internal/exposeddb/poller.go).
+// (core-backend/internal/exposeddb/poller.go). MCP-server discovery is named too, as the one
+// that uses none (#2315; see the block comment above readMCPServers), so the attribution is
+// never read as covering it.
 const RADAR_SOURCES =
-  "KEV-exposure, exposed-database and shadow-AI discovery use Shodan data (shadow AI also uses Certificate Transparency logs; exposed databases fall back to LeakIX when Shodan query credits run low).";
+  "KEV-exposure, exposed-database and shadow-AI discovery use Shodan data (shadow AI also uses Certificate Transparency logs; exposed databases fall back to LeakIX when Shodan query credits run low). MCP-server discovery uses no Shodan data: its hostnames come from EchelonGraph's own Certificate Transparency feed, matched by hostname pattern.";
 
 const RADARS = [
   ["kev_exposure", "/api/v1/public/kev-exposure/stats"],
   ["exposed_databases", "/api/v1/public/exposed-databases/stats"],
   ["leaked_credentials", "/api/v1/public/leaked-credentials/stats"],
   ["shadow_ai", "/api/v1/public/shadow-ai-radar/stats"],
+  ["mcp_servers", "/api/v1/public/ai-exposure/stats?service=mcp"],
 ] as const;
 
 // The shadow-AI stats answer, regrouped by what each number counts (#2307).
@@ -1310,12 +1317,247 @@ function readShadowAI(sa: object): { data: object; sentences: string[] } {
   return { data, sentences };
 }
 
+// ── mcp_servers: GET /api/v1/public/ai-exposure/stats?service=mcp (#2315) ──
+//
+// core-backend/internal/aiexposure (handler.go MCPPublicCounts, store.go): the AI-exposure
+// radar's MCP rows, one per hostname, each counted once by its latest verdict on record, with
+// EchelonGraph's own control servers left out and counted in own_controls_excluded. Counts,
+// timestamps and one constant (service "mcp"); no hostname, version or server name.
+//   total                   protected + pending_readjudication + not_assessed
+//   protected               the /mcp endpoint answered 401/403 and its RFC 9728 protected-resource
+//                           metadata validated (prm.go); prm_via divides exactly these rows by
+//                           where that document was found
+//   pending_readjudication  a verdict of a rule since replaced, not yet re-checked (store.go
+//                           readjudicationPredicate); in neither of the other two
+//   not_assessed            the rest; not_assessed_by_reason divides exactly these rows, first
+//                           match wins: the eight prm.go reason codes (a challenge whose metadata
+//                           did not validate), identified_no_challenge, challenge_unadjudicated
+//                           (a challenge recorded before #2312), no_http_answer, not_identified_as_mcp
+//   era, transport          divide every counted row; a row written before #2314 recorded an era
+//                           is not_measured (era.go says what each value rests on)
+//   window                  from/to: the oldest and newest last-check time over the counted rows
+//   enabled, last_run_at    exactly as the unparameterised answer computes them: the AI-exposure
+//                           radar's fleet-wide liveness and last completed check, over every AI
+//                           service it checks, not MCP servers alone. enabled is true when a check
+//                           completed within liveWindow (45 minutes) of the answer.
+//   counted_at              when the API read the counts
+//
+// Discovery uses no Shodan data, so this reader carries no Shodan attribution. poller.go
+// discover enqueues only hostnames that store.go CandidateHosts matches by pattern (catalog.go
+// HostPatternIndex) in ct_domains and shadow_ct_observations, and that query drops every domain
+// holding a ':'; a Shodan row's domain is its ip:port (shadowctlog poller.go shodanDomain), so
+// none reaches the queue.
+//
+// identified_no_challenge is where #2307's mistake would be made again: a server that
+// identified itself as an MCP server and asked for no credentials at the handshake. MCP
+// authorization is optional (MCP 2026-07-28, Authorization › Protocol Requirements), a server
+// can enforce it at tools/call, and the probe never sends tools/call (mcp.go), so nothing here
+// says whether such a server gives anything away. Every text says what the bucket is, and never
+// calls it open, exposed or unauthenticated.
+//
+// What is refused, and what is left out. An API older than ?service=mcp ignores the parameter
+// and answers its counts over EVERY AI service, `protected` among them (aiexposure PublicCounts);
+// relayed as MCP-server counts, that is #2307 again. And the API refuses to serve counts that
+// contradict its method (a 500, never a 200 that breaks a sum), so a 200 that breaks one is not
+// an answer of that contract. So the radar is refused, as a per-radar failure (mcpRefusal),
+// when the answer does not say service "mcp", when a headline count is missing or not a whole
+// number, or when total is not the sum of the other three. Below the headline, the file's rule
+// for a known field in an unexpected shape holds: a partition is relayed only with exactly its
+// buckets, each a whole number, adding up to the count it divides, or it is left out whole and
+// named, since a partition missing a bucket, or carrying one this version cannot label, is an
+// undercount that reads as complete. A field this version does not know is left out, and named
+// only when its name is shaped like a field name: the answer is counts only, a key could itself
+// be a hostname, and the tool repeats no string the answer carries but its timestamps.
+const MCP_HEADLINE = ["total", "protected", "pending_readjudication", "not_assessed"] as const;
+const MCP_CHALLENGE_REASONS = [
+  "resource_mismatch",
+  "cross_origin_pointer",
+  "bare_challenge_no_prm",
+  "pointer_unreachable",
+  "pointer_invalid",
+  "no_authorization_servers",
+  "wellknown_unreachable",
+  "metadata_invalid",
+] as const;
+const MCP_PARTITIONS = {
+  not_assessed_by_reason: {
+    of: "not_assessed",
+    buckets: ["identified_no_challenge", ...MCP_CHALLENGE_REASONS, "challenge_unadjudicated", "no_http_answer", "not_identified_as_mcp"],
+  },
+  prm_via: { of: "protected", buckets: ["header", "wellknown_path", "wellknown_root"] },
+  era: { of: "total", buckets: ["legacy", "dual", "modern", "unknown", "not_measured"] },
+  transport: { of: "total", buckets: ["streamable_http", "legacy_sse", "unknown", "not_measured"] },
+} as const satisfies Record<string, { of: (typeof MCP_HEADLINE)[number]; buckets: readonly string[] }>;
+type MCPPartition = keyof typeof MCP_PARTITIONS;
+const MCP_PARTITION_NAMES = Object.keys(MCP_PARTITIONS) as MCPPartition[];
+const MCP_INSTANTS = ["last_run_at", "counted_at"] as const;
+const MCP_KNOWN = new Set<string>(["service", ...MCP_HEADLINE, ...MCP_PARTITION_NAMES, "own_controls_excluded", "window", "enabled", ...MCP_INSTANTS]);
+// What each challenge reason code says (prm.go prmReasonCodes), for the note.
+const MCP_CHALLENGE_MEANS: Record<(typeof MCP_CHALLENGE_REASONS)[number], string> = {
+  resource_mismatch: "the document's resource is absent or not identical to the server's identifier",
+  cross_origin_pointer: "the challenge pointed to metadata on another origin, which EchelonGraph does not request",
+  bare_challenge_no_prm: "no metadata URL was named and neither well-known URI answered 2xx",
+  pointer_unreachable: "the same-origin metadata URL did not answer 2xx in full",
+  pointer_invalid: "the metadata pointer is not a URL EchelonGraph will request",
+  no_authorization_servers: "the document names no authorization server",
+  wellknown_unreachable: "a well-known metadata request got no complete HTTP answer",
+  metadata_invalid: "the answer is not a 200 JSON object within the size cap",
+};
+// A count as the MCP answer states one: a whole number, zero or more.
+const isWhole = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+// The shape of a field name. An unknown key of this shape is named when left out; any other is
+// counted, not repeated, since it could be a hostname.
+const FIELD_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+// core-backend aiexposure handler.go liveWindow: how recently a check must have completed for
+// the API to answer enabled true. A liveness window, not a re-probe interval.
+// MCP_CHALLENGE_REASONS as the tool description names them, spelled out as ONE constant string: the
+// description is published, and the site's tool-claims check (marketing-site lib/mcpToolClaims.test.ts)
+// reads every description statically, folding only references to constant strings, so a .map() here
+// made the whole description unreadable to it. tools.test.mjs pins this to MCP_CHALLENGE_REASONS.
+const MCP_CHALLENGE_REASON_FIELDS =
+  "mcp_servers.not_assessed_by_reason.resource_mismatch, mcp_servers.not_assessed_by_reason.cross_origin_pointer, mcp_servers.not_assessed_by_reason.bare_challenge_no_prm, mcp_servers.not_assessed_by_reason.pointer_unreachable, mcp_servers.not_assessed_by_reason.pointer_invalid, mcp_servers.not_assessed_by_reason.no_authorization_servers, mcp_servers.not_assessed_by_reason.wellknown_unreachable and mcp_servers.not_assessed_by_reason.metadata_invalid";
+const MCP_ENABLED_WITHIN = "45 minutes";
+
+// Why an ?service=mcp answer is not relayed at all, or undefined when it can be read. The
+// sentence quotes no value the answer carries.
+function mcpRefusal(body: object): string | undefined {
+  if (!isPlainObject(body)) return "the answer is not a JSON object carrying the MCP-server counts";
+  if (body.service === undefined) {
+    return "the answer carries no service field, so it is not the MCP-server counts: an API older than service=mcp ignores that parameter and answers the AI-exposure radar's counts over every AI service it checks, which this tool does not relay as MCP-server counts";
+  }
+  if (body.service !== "mcp") return "the answer names a service other than mcp, so it is not the MCP-server counts";
+  const bad = MCP_HEADLINE.filter((k) => !isWhole(body[k]));
+  if (bad.length) return `its ${listed(bad)} ${be(bad.length)} missing or not a whole number of zero or more, so its counts are not relayed`;
+  const [total, protectedN, pending, notAssessed] = MCP_HEADLINE.map((k) => body[k] as number);
+  if (total !== protectedN + pending + notAssessed) {
+    return "its counts contradict each other (total is not protected + pending_readjudication + not_assessed, an answer the API's own integrity check does not serve), so they are not relayed";
+  }
+  return undefined;
+}
+
+function readMCPServers(src: Record<string, unknown>): { data: object; sentences: string[] } {
+  const data: Record<string, unknown> = {};
+  const unusable: string[] = [];
+  const unsummed: string[] = [];
+  for (const k of MCP_HEADLINE) data[k] = src[k];
+  for (const k of MCP_PARTITION_NAMES) {
+    const { of, buckets } = MCP_PARTITIONS[k];
+    const v = src[k];
+    const exact = isPlainObject(v) && Object.keys(v).length === buckets.length && buckets.every((b) => Object.prototype.hasOwnProperty.call(v, b) && isWhole(v[b]));
+    if (!exact) {
+      unusable.push(k);
+      continue;
+    }
+    if (buckets.reduce((sum, b) => sum + (v[b] as number), 0) !== src[of]) {
+      unsummed.push(k);
+      continue;
+    }
+    data[k] = Object.fromEntries(buckets.map((b) => [b, v[b]]));
+  }
+  if (isWhole(src.own_controls_excluded)) data.own_controls_excluded = src.own_controls_excluded;
+  else unusable.push("own_controls_excluded");
+  // window: from and to, both real instants, from not after to. With no row counted the API has
+  // no window to give (null, or from and to null), and none is relayed.
+  const w = src.window;
+  const from = strAt(w, "from");
+  const to = strAt(w, "to");
+  const noWindow = w === null || w === undefined || (isPlainObject(w) && w.from === null && w.to === null && Object.keys(w).length === 2);
+  if (isPlainObject(w) && Object.keys(w).length === 2 && realInstant(from) && realInstant(to) && Date.parse(from) <= Date.parse(to)) data.window = { from, to };
+  else if (!(noWindow && src.total === 0)) unusable.push("window");
+  if (typeof src.enabled === "boolean") data.enabled = src.enabled;
+  else unusable.push("enabled");
+  // A timestamp that is not a real instant is not relayed as one (readRadar's rule).
+  for (const k of MCP_INSTANTS) {
+    const s = strAt(src, k);
+    if (realInstant(s)) data[k] = s;
+    else if (src[k] !== undefined && src[k] !== null && typeof src[k] !== "string") unusable.push(k);
+  }
+  const extra = Object.keys(src).filter((k) => !MCP_KNOWN.has(k));
+  const named = extra.filter((k) => FIELD_NAME.test(k));
+  const unnamed = extra.length - named.length;
+
+  const sentences: string[] = [];
+  const n = (k: string): number => data[k] as number;
+  const b = (p: MCPPartition, bucket: string): string => `mcp_servers.${p}.${bucket} (${(data[p] as Record<string, number>)[bucket]})`;
+  sentences.push(
+    `MCP servers: mcp_servers.total (${n("total")}) counts hostnames the AI-exposure radar has checked for an MCP server, each once, by its latest verdict on record; each was named like an MCP server in EchelonGraph's own Certificate Transparency feed, and not every one is an MCP server.`,
+  );
+  if (n("total") === 0) sentences.push("mcp_servers.total is 0: the radar holds no verdict on record for a hostname named like an MCP server.");
+  sentences.push(
+    `mcp_servers.protected (${n("protected")}) counts hostnames whose /mcp endpoint asked for credentials (a 401 or 403) and whose OAuth protected-resource metadata validated under RFC 9728: a 200 JSON document whose resource is identical to the server's identifier and that names at least one authorization server.`,
+  );
+  if (data.prm_via) {
+    sentences.push(
+      `mcp_servers.prm_via divides them by where that document was found: ${b("prm_via", "header")}, the same-origin URL the challenge named; ${b("prm_via", "wellknown_path")}, /.well-known/oauth-protected-resource followed by the endpoint's path; and ${b("prm_via", "wellknown_root")}, that URI at the root.`,
+    );
+  }
+  sentences.push(
+    `mcp_servers.pending_readjudication (${n("pending_readjudication")}) counts verdicts decided by a rule EchelonGraph has since replaced and not yet re-checked under the current rules; they are in neither mcp_servers.protected nor mcp_servers.not_assessed.`,
+    `mcp_servers.not_assessed (${n("not_assessed")}) counts the rest, whose protection the radar could not assess; not assessed does not mean unprotected${data.not_assessed_by_reason ? ", and mcp_servers.not_assessed_by_reason puts each in exactly one bucket" : ""}.`,
+  );
+  if (data.not_assessed_by_reason) {
+    sentences.push(
+      `${b("not_assessed_by_reason", "identified_no_challenge")} counts servers that identified themselves as MCP servers (a DiscoverResult, an InitializeResult, or the endpoint event of the deprecated HTTP+SSE transport) and did not ask for credentials at the handshake.`,
+      "That is normal in MCP: authorization is optional in the spec, and a server can enforce it at tools/call instead, which EchelonGraph never sends, so this bucket is not a finding of exposure.",
+      `Endpoints that asked for credentials (a 401 or 403) but whose RFC 9728 metadata did not validate are counted by why: ${MCP_CHALLENGE_REASONS.map((r, i) => `${i === MCP_CHALLENGE_REASONS.length - 1 ? "and " : ""}${b("not_assessed_by_reason", r)}, ${MCP_CHALLENGE_MEANS[r]}`).join("; ")}.`,
+      "Each of those endpoints asked for credentials, so none of them is shown to lack protection: only its metadata did not validate.",
+      `${b("not_assessed_by_reason", "challenge_unadjudicated")} counts endpoints that asked for credentials before EchelonGraph read RFC 9728 metadata, not re-checked since.`,
+      `${b("not_assessed_by_reason", "no_http_answer")} counts hostnames that gave no HTTP answer (DNS, TCP or TLS failed, or the request timed out), and ${b("not_assessed_by_reason", "not_identified_as_mcp")} hostnames that answered HTTP with nothing that identified an MCP server (a login or error page, a body that is not JSON-RPC, a 4xx or 5xx): neither is a count of MCP servers.`,
+    );
+  }
+  if (data.era) {
+    sentences.push(
+      `mcp_servers.era divides every counted hostname by the protocol era its answer identified: ${b("era", "legacy")}, an initialize-era server (an InitializeResult, or the legacy SSE endpoint event); ${b("era", "dual")}, answered server/discover and named an initialize-era version too, a lower bound, since a server built on the reference SDK names only modern versions there and is counted modern; ${b("era", "modern")}, answered server/discover and named no initialize-era version, not proven modern-only, since EchelonGraph does not send initialize to tell; ${b("era", "unknown")}, nothing identified an era, every credential challenge included; and ${b("era", "not_measured")}, a verdict recorded before EchelonGraph's probe began recording the era and not re-checked since.`,
+    );
+  }
+  if (data.transport) {
+    sentences.push(
+      `mcp_servers.transport divides them by the transport that identified the server: ${b("transport", "streamable_http")}, a POST to /mcp; ${b("transport", "legacy_sse")}, the endpoint event of GET /sse (the deprecated HTTP+SSE transport); ${b("transport", "unknown")}, nothing identified one; and ${b("transport", "not_measured")}, recorded before the era probe and not re-checked since.`,
+    );
+  }
+  if (data.own_controls_excluded !== undefined) {
+    sentences.push(`mcp_servers.own_controls_excluded (${n("own_controls_excluded")}) counts EchelonGraph's own control servers, which are left out of every other mcp_servers number.`);
+  }
+  if (data.window) {
+    sentences.push(
+      `mcp_servers.window says when the verdicts counted were last checked: the oldest at ${from} (mcp_servers.window.from) and the newest at ${to} (mcp_servers.window.to), so the counts are each hostname's latest verdict, not one sweep at one time.`,
+    );
+  }
+  const at = data.last_run_at;
+  if (typeof at === "string") {
+    sentences.push(
+      `mcp_servers last completed check: ${at} (mcp_servers.last_run_at, a timestamp, not a count).`,
+      "mcp_servers.last_run_at is when the AI-exposure radar, which checks other AI services as well as MCP servers, last finished a cycle whose reads succeeded and whose scan opt-out register answered.",
+      "mcp_servers.last_run_at is not the time of every verdict the mcp_servers numbers count (mcp_servers.window says when those were checked); nor is it mcp_servers.counted_at, when the API read those numbers.",
+    );
+  }
+  if (data.enabled === true) {
+    sentences.push(`mcp_servers.enabled is true: the API reports the AI-exposure radar running, a check having completed within ${MCP_ENABLED_WITHIN} of its answer.`);
+  } else if (data.enabled === false) {
+    sentences.push(
+      `mcp_servers.enabled is false: the API does not report the AI-exposure radar running (no check completed within ${MCP_ENABLED_WITHIN} of its answer), so these numbers may be stale.`,
+    );
+  }
+  if (typeof data.counted_at === "string") {
+    sentences.push(`mcp_servers.counted_at (${data.counted_at}) is when the API read these counts: a timestamp, not a count, and not when any verdict was checked.`);
+  }
+  sentences.push(...leftOut("mcp_servers", named, unusable));
+  if (unsummed.length) sentences.push(`Left out of mcp_servers because their buckets do not add up to the count they divide: ${unsummed.join(", ")}.`);
+  if (unnamed) {
+    sentences.push(
+      `Also left out of mcp_servers: ${unnamed} field${unnamed === 1 ? "" : "s"} whose name is not shaped like a field name, not repeated here, since a name could itself identify a server.`,
+    );
+  }
+  return { data, sentences };
+}
+
 const EXPOSURE_RADAR_DESCRIPTION =
-  `Aggregate totals from EchelonGraph's internet-exposure radars, each refreshed on its own schedule: internet-facing services running actively-exploited (CISA-KEV) CVEs, plus the ransomware-linked subset, derived from Shodan data; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check (not a pure read: on Redis it names its client, and on ClickHouse its query is recorded in the server's query log); leaked credentials sampled from public GitHub push events; and shadow AI services found through Certificate Transparency logs and Shodan and then checked by EchelonGraph's identified probes. Every number in the result is labelled here and in the result's note by what it counts; a field this version cannot label is left out and named in the note. ` +
+  `Aggregate totals from EchelonGraph's internet-exposure radars, each refreshed on its own schedule: internet-facing services running actively-exploited (CISA-KEV) CVEs, plus the ransomware-linked subset, derived from Shodan data; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check (not a pure read: on Redis it names its client, and on ClickHouse its query is recorded in the server's query log); leaked credentials sampled from public GitHub push events; and shadow AI services found through Certificate Transparency logs and Shodan and then checked by EchelonGraph's identified probes. It also gives MCP-server counts: hostnames named like an MCP server in EchelonGraph's own Certificate Transparency feed (no Shodan data), each counted once by its latest verdict from EchelonGraph's identified MCP probe, which never sends tools/call. Every number in the result is labelled here and in the result's note by what it counts; a field this version cannot label is left out and named in the note. ` +
     `kev_exposure: kev_exposure.distinct_hosts counts distinct ip:port services, not machines (a machine answering on two ports counts twice), with at least one CISA-KEV-listed CVE on record, and kev_exposure.ransomware_hosts those with a ransomware-linked one; kev_exposure.kev_cves_exposed and kev_exposure.ransomware_cves count distinct CVEs with at least one such service; kev_exposure.correlations counts service×CVE pairs, not services, so a service with three KEV CVEs counts three times. kev_exposure.top_products, kev_exposure.top_countries and kev_exposure.top_cves rank up to 12 products, 10 countries and 12 CVEs by those services; kev_exposure.top_cves[].cvss_v3_score and kev_exposure.top_cves[].epss_score are the highest CVSS v3 base score and EPSS probability recorded on that CVE's observations. kev_exposure.trend counts service×CVE pairs still on record by the week in which each was first recorded, over 12 weeks, so earlier weeks read low. kev_exposure.newest_kev lists the 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed, each with an exposure_state: exposed, where kev_exposure.newest_kev[].exposed_hosts counts distinct ip:port services on record with it; or not_assessed, where the API's answer holds no measurement for that CVE (its 0 is not one) and no count is relayed, and cve_exposure says per CVE whether the radar tracks it. kev_exposure.newest_kev[].cvss_v3_score and kev_exposure.newest_kev[].epss_score are the CVE record's CVSS v3 base score and EPSS probability. ` +
     `exposed_databases: exposed_databases.distinct_hosts counts distinct ip:port services the check confirmed answering without authentication, and exposed_databases.engines the distinct engine types among them; exposed_databases.top_engines and exposed_databases.top_countries rank up to 15 engines and 10 countries by those services. exposed_databases.pii_likely and exposed_databases.pci_likely count services whose schema names (never record values) pass a high-confidence, precision-first gate for personal or payment-card data, so a service outside them is not shown to hold no such data. ` +
     `leaked_credentials: leaked_credentials.total counts (repository, secret) pairs, not distinct secrets, so one secret in three repositories counts three times; leaked_credentials.distinct_secrets counts each secret once and leaked_credentials.distinct_repos counts repositories; leaked_credentials.top_providers and leaked_credentials.top_types rank up to 15 providers and secret types by those pairs. None is validated: each is a credential-shaped string that passed EchelonGraph's filters, at most structurally checked and never tested against its provider. Each of those three radars also carries generated_at, when the API computed its totals, and, when the API can tell, last_run_at. kev_exposure.last_run_at, exposed_databases.last_run_at and leaked_credentials.last_run_at are timestamps, not counts: each is when that radar last completed a check, a cycle whose reads succeeded, among them a Shodan search (for exposed_databases, or its LeakIX fallback) that answered at least one query, or for leaked_credentials a read of the public GitHub event stream. A cycle that read nothing does not move it, and it is not the time of every record a radar's numbers count, which cover everything still on record, not only what the last check found. A radar whose answer carries no last_run_at has none in the result, and the note says nothing about it. ` +
-    `shadow_ai: the result is regrouped by what each number counts. shadow_ai.confirmed_exposed counts services EchelonGraph's probes found answering without an authentication gate (liveness active, or rechecking during a re-check): confirmed_exposed.total is the sum of confirmed_exposed.by_category, and confirmed_exposed.last_24h counts those first recorded in the last 24 h. Of the shadow_ai numbers, only confirmed_exposed counts exposed services. shadow_ai.observed counts every Certificate Transparency or Shodan observation on record, whatever its verification state: its numbers are observed, not exposed. They are observed.total; observed.by_category (the same observations by category); observed.last_24h (those first recorded in the last 24 h); observed.trend_30d (observations per UTC day over the last 30 days); and observed.top_products, observed.top_countries and observed.top_issuers (up to ten products, countries and issuers ranked by observations, where an issuer is the certificate's CA for a Certificate Transparency observation and the hosting operator Shodan reports for a Shodan one). shadow_ai.authentication counts observations by probe outcome: authentication.observed where a probe observed an authentication gate (a 401/403, a login page or an auth marker), and authentication.not_determined where the service answered but no probe could tell. Neither authentication count is part of confirmed_exposed, and observed.total minus confirmed_exposed.total is not a count of secured services. The shadow-AI poller block carries only running and last_run_at: last_run_at is when the radar's leader last completed a Certificate Transparency (crt.sh) cycle, and its running is true only when that was within ${SHADOW_AI_SILENT_AFTER} of the answer. ${SHODAN_OWNERSHIP}`;
+    `shadow_ai: the result is regrouped by what each number counts. shadow_ai.confirmed_exposed counts services EchelonGraph's probes found answering without an authentication gate (liveness active, or rechecking during a re-check): confirmed_exposed.total is the sum of confirmed_exposed.by_category, and confirmed_exposed.last_24h counts those first recorded in the last 24 h. Of the shadow_ai numbers, only confirmed_exposed counts exposed services. shadow_ai.observed counts every Certificate Transparency or Shodan observation on record, whatever its verification state: its numbers are observed, not exposed. They are observed.total; observed.by_category (the same observations by category); observed.last_24h (those first recorded in the last 24 h); observed.trend_30d (observations per UTC day over the last 30 days); and observed.top_products, observed.top_countries and observed.top_issuers (up to ten products, countries and issuers ranked by observations, where an issuer is the certificate's CA for a Certificate Transparency observation and the hosting operator Shodan reports for a Shodan one). shadow_ai.authentication counts observations by probe outcome: authentication.observed where a probe observed an authentication gate (a 401/403, a login page or an auth marker), and authentication.not_determined where the service answered but no probe could tell. Neither authentication count is part of confirmed_exposed, and observed.total minus confirmed_exposed.total is not a count of secured services. The shadow-AI poller block carries only running and last_run_at: last_run_at is when the radar's leader last completed a Certificate Transparency (crt.sh) cycle, and its running is true only when that was within ${SHADOW_AI_SILENT_AFTER} of the answer. ` +
+    `mcp_servers: counts and timestamps only, no hostname. mcp_servers.total counts hostnames the AI-exposure radar has checked for an MCP server, each once by its latest verdict on record, and not every one is an MCP server; EchelonGraph's own control servers are left out, and mcp_servers.own_controls_excluded counts them. mcp_servers.total is mcp_servers.protected plus mcp_servers.pending_readjudication plus mcp_servers.not_assessed. mcp_servers.protected counts hostnames whose /mcp endpoint asked for credentials and whose OAuth protected-resource metadata validated under RFC 9728; mcp_servers.prm_via divides them by where that document was found: mcp_servers.prm_via.header, mcp_servers.prm_via.wellknown_path and mcp_servers.prm_via.wellknown_root. mcp_servers.pending_readjudication counts verdicts of a rule since replaced, not yet re-checked. mcp_servers.not_assessed counts the rest, whose protection the radar could not assess (not assessed does not mean unprotected), and mcp_servers.not_assessed_by_reason puts each in one bucket. mcp_servers.not_assessed_by_reason.identified_no_challenge holds servers that identified themselves as MCP servers and did not ask for credentials at the handshake. That is normal in MCP: authorization is optional in the spec, and a server can enforce it at tools/call instead, which EchelonGraph never sends, so this bucket is not a finding of exposure. ${MCP_CHALLENGE_REASON_FIELDS} hold endpoints that asked for credentials but whose RFC 9728 metadata did not validate, by why, so none of them is shown to lack protection; mcp_servers.not_assessed_by_reason.challenge_unadjudicated holds endpoints that asked for credentials before that check existed, not yet re-checked. mcp_servers.not_assessed_by_reason.no_http_answer holds hostnames that gave no HTTP answer, and mcp_servers.not_assessed_by_reason.not_identified_as_mcp hostnames whose HTTP answer identified no MCP server. mcp_servers.era divides every counted hostname by protocol era: mcp_servers.era.legacy; mcp_servers.era.dual, a lower bound; mcp_servers.era.modern, not proven modern-only; mcp_servers.era.unknown; and mcp_servers.era.not_measured, recorded before the era probe and not re-checked since. mcp_servers.transport divides them by transport: mcp_servers.transport.streamable_http, mcp_servers.transport.legacy_sse, mcp_servers.transport.unknown and mcp_servers.transport.not_measured. mcp_servers.window.from and mcp_servers.window.to are when the oldest and the newest of the verdicts counted were last checked. mcp_servers.last_run_at is a timestamp, not a count: when the AI-exposure radar, which checks other AI services too, last completed a check; mcp_servers.enabled is whether one completed within ${MCP_ENABLED_WITHIN} of the answer, and mcp_servers.counted_at is when the API read the counts. A partition whose buckets do not add up to the count it divides is left out and named; an answer that does not say it is the MCP-server counts, or whose mcp_servers.total, mcp_servers.protected, mcp_servers.pending_readjudication and mcp_servers.not_assessed are missing or contradict each other, is a failure. ${SHODAN_OWNERSHIP}`;
 
 // exposure_radar's envelope. Every radar answered, but no stats answer says when the services
 // or records it counts were observed: each count covers everything that radar still holds on
@@ -1323,13 +1565,26 @@ const EXPOSURE_RADAR_DESCRIPTION =
 // last_run_at (the radar's last completed check), neither of which is that time (#2335). So
 // the result is not_assessed with measured_at null, and says why; its numbers keep their labels,
 // and freshness carries each radar's last_run_at where the API serves one.
+//
+// mcp_servers (#2315) does not change that, by the envelope's own rule (the `state` block above
+// the State type): an exposure count is measured only with measured_at, "when the underlying
+// observation was made, as the API states it", and otherwise it is not_assessed and relayed as
+// what the source holds on record. The MCP answer states no such time. Its counts are each
+// hostname's LATEST verdict, and window.from and window.to are the oldest and newest last-check
+// times over the counted rows, a span of checks made at different times, not one observation.
+// Taking window.to as measured_at would date every count by its newest verdict, the reading
+// #2335 and #2439 refuse for last_run_at and last_seen; window.from would date each one by its
+// oldest. And the envelope is one for five radars, four of which carry no time of observation at
+// all, so a measured state would date their numbers too (#2313 done-means 5). So the state stays
+// not_assessed with measured_at null, the window is relayed in data and labelled by the note,
+// and the envelope's own note names it.
 const RADAR_METHOD =
-  "Aggregate counts over what each radar holds on record: kev_exposure, Shodan banners whose version maps to a CISA-KEV-listed CVE; exposed_databases, services found through Shodan (LeakIX when Shodan query credits run low) and confirmed by EchelonGraph's own identified check; leaked_credentials, credential-shaped strings in public GitHub push events; shadow_ai, services found through Certificate Transparency logs and Shodan and checked by EchelonGraph's identified probes.";
+  "Aggregate counts over what each radar holds on record: kev_exposure, Shodan banners whose version maps to a CISA-KEV-listed CVE; exposed_databases, services found through Shodan (LeakIX when Shodan query credits run low) and confirmed by EchelonGraph's own identified check; leaked_credentials, credential-shaped strings in public GitHub push events; shadow_ai, services found through Certificate Transparency logs and Shodan and checked by EchelonGraph's identified probes; mcp_servers, the latest verdict on record per hostname named like an MCP server in EchelonGraph's own Certificate Transparency feed, from EchelonGraph's identified MCP probe (server/discover, and initialize only if that is refused; never tools/call), where protected means the endpoint's RFC 9728 protected-resource metadata validated.";
 const RADAR_NAMES = RADARS.map(([name]) => name);
 const RADAR_STATE_NOTE =
-  "state is not_assessed: every radar answered, but no stats answer says when the services or records it counts were observed, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, and the note labels each one by what it counts.";
+  "state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure, exposed_databases, leaked_credentials and shadow_ai give none, and mcp_servers dates its verdicts at most by a window (mcp_servers.window), from the oldest check among them to the newest, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, and the note labels each one by what it counts.";
 const RADAR_FRESHNESS_NOTE =
-  "freshness gives each radar's last completed check where the API serves one (freshness.kev_exposure.last_run_at, freshness.exposed_databases.last_run_at, freshness.leaked_credentials.last_run_at, and freshness.shadow_ai.last_run_at with freshness.shadow_ai.running), and null where it does not.";
+  "freshness gives each radar's last completed check where the API serves one (freshness.kev_exposure.last_run_at, freshness.exposed_databases.last_run_at, freshness.leaked_credentials.last_run_at, freshness.shadow_ai.last_run_at with freshness.shadow_ai.running, and freshness.mcp_servers.last_run_at with freshness.mcp_servers.enabled), and null where it does not.";
 
 type RadarFailure = { radar: string; kind: Failure["kind"]; path: string; status: number | null; message: string };
 
@@ -1339,10 +1594,14 @@ async function exposureRadar(): Promise<ToolResult> {
     const results = await Promise.all(RADARS.map(([, path]) => api(path)));
     const data: Record<string, object> = {};
     const failures: [string, Failure][] = [];
-    RADARS.forEach(([name], i) => {
+    RADARS.forEach(([name, path], i) => {
       const r = results[i];
-      if (r.ok) data[name] = r.data;
-      else failures.push([name, r]);
+      if (!r.ok) return void failures.push([name, r]);
+      // mcp_servers is read only when the answer is the MCP-server counts at all (mcpRefusal): an
+      // answer that is not is a failure of that radar, named like any other, never zeros.
+      const refused = name === "mcp_servers" ? mcpRefusal(r.data) : undefined;
+      if (refused === undefined) data[name] = r.data;
+      else failures.push([name, { ok: false, kind: "unexpected_shape", path, status: r.status, detail: refused }]);
     });
     if (failures.length) {
       // All or nothing: a radar picture with one quadrant missing reads as the whole one,
@@ -1367,6 +1626,7 @@ async function exposureRadar(): Promise<ToolResult> {
       exposed_databases: readExposedDatabases(data.exposed_databases),
       leaked_credentials: readLeakedCredentials(data.leaked_credentials),
       shadow_ai: readShadowAI(data.shadow_ai),
+      mcp_servers: readMCPServers(data.mcp_servers as Record<string, unknown>),
     };
     const relayed: Record<string, object> = {};
     const said: string[] = [];
@@ -1377,6 +1637,7 @@ async function exposureRadar(): Promise<ToolResult> {
     // Only what the readers relayed: a last_run_at that is not a real instant never got there.
     const stamp = (radar: string, ...keys: string[]): string | null => instantOrNull(strAt(relayed[radar], ...keys));
     const running = boolAt(relayed.shadow_ai, "poller", "running");
+    const enabled = boolAt(relayed.mcp_servers, "enabled");
     return succeeded(
       relayed,
       `${okHead(tool)} All ${RADARS.length} radars answered: ${RADARS.map(([name]) => name).join(", ")}. Every number relayed is labelled below by what it counts, and a field this version cannot label is left out and named. ${said.join(" ")} ${RADAR_SOURCES} ${SHODAN_OWNERSHIP} Each radar refreshes on its own schedule.`,
@@ -1390,6 +1651,7 @@ async function exposureRadar(): Promise<ToolResult> {
           exposed_databases: { last_run_at: stamp("exposed_databases", "last_run_at") },
           leaked_credentials: { last_run_at: stamp("leaked_credentials", "last_run_at") },
           shadow_ai: { last_run_at: stamp("shadow_ai", "poller", "last_run_at"), running: running ?? null },
+          mcp_servers: { last_run_at: stamp("mcp_servers", "last_run_at"), enabled: enabled ?? null },
         },
         notes: [RADAR_STATE_NOTE, RADAR_FRESHNESS_NOTE],
       },
@@ -1593,12 +1855,25 @@ const ShadowAIData = z.strictObject({
   poller: z.strictObject({ running: z.boolean(), last_run_at: Instant }).optional(),
 });
 const LastRun = z.strictObject({ last_run_at: Instant.nullable() });
+// mcp_servers as readMCPServers relays it, from the same constants (#2315): the headline counts
+// always (an answer without them is refused), and each partition with exactly its buckets or not
+// at all.
+const Whole = z.number().int().min(0);
+const MCPServersData = z.strictObject({
+  ...Object.fromEntries(MCP_HEADLINE.map((k) => [k, Whole])),
+  ...Object.fromEntries(MCP_PARTITION_NAMES.map((k) => [k, z.strictObject(Object.fromEntries(MCP_PARTITIONS[k].buckets.map((b) => [b, Whole]))).optional()])),
+  own_controls_excluded: Whole.optional(),
+  window: z.strictObject({ from: Instant, to: Instant }).optional(),
+  enabled: z.boolean().optional(),
+  ...Object.fromEntries(MCP_INSTANTS.map((k) => [k, Instant.optional()])),
+});
 const EXPOSURE_RADAR_OUTPUT = envelopeSchema({
   data: z.strictObject({
     kev_exposure: zRadar(KEV_SPEC, { newest_kev: z.array(NewestKEVRow) }),
     exposed_databases: zRadar(EXPOSED_DB_SPEC),
     leaked_credentials: zRadar(LEAKED_CREDS_SPEC),
     shadow_ai: ShadowAIData,
+    mcp_servers: MCPServersData,
   }),
   coverage: z.strictObject({
     radars: z.array(z.string()).describe("The radars this tool reads."),
@@ -1610,13 +1885,14 @@ const EXPOSURE_RADAR_OUTPUT = envelopeSchema({
     exposed_databases: LastRun,
     leaked_credentials: LastRun,
     shadow_ai: z.strictObject({ last_run_at: Instant.nullable(), running: z.boolean().nullable() }),
+    mcp_servers: z.strictObject({ last_run_at: Instant.nullable(), enabled: z.boolean().nullable() }),
   }),
   error: ErrorSchema.extend({
     radars: z
       .array(
         z.strictObject({
           radar: z.string(),
-          kind: z.enum(["network", "timeout", "http", "not_json", "not_object"]),
+          kind: z.enum(["network", "timeout", "http", "not_json", "not_object", "unexpected_shape"]),
           path: z.string(),
           status: z.number().int().nullable(),
           message: z.string(),
@@ -1645,7 +1921,9 @@ const INSTRUCTIONS = [
   "That is not the time of every record the radar's numbers count, which cover everything still on record, and it is null when the API does not say.",
   "Every figure is as fresh as the schedule that refreshes it.",
   "Exposure numbers are aggregate: counts of distinct ip:port services on EchelonGraph's record (a machine answering on two ports counts twice), not machines, and not an internet-wide census.",
+  "exposure_radar's mcp_servers counts hostnames instead, each by its latest verdict on record.",
   `${SHODAN_ATTRIBUTION} ${SHODAN_OWNERSHIP}`,
+  "exposure_radar's mcp_servers counts use no Shodan data: their hostnames come from EchelonGraph's own Certificate Transparency feed.",
 ].join(" ");
 
 const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
@@ -1717,7 +1995,7 @@ function createServer(): McpServer {
     "exposure_radar",
     {
       title: "Exposure radar totals",
-      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: every radar answered, but no stats answer says when the services or records it counts were observed, so no count is presented as a dated measurement; each count is still relayed, labelled, as what that radar holds on record. freshness gives each radar's last_run_at (and shadow_ai's running) where the API serves one; coverage names the radars that answered; data is the relayed result above. The result's last text block repeats the structured result without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.`,
+      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: every radar answered, but none gives one time at which what it counts was observed (mcp_servers dates its verdicts at most by a window, mcp_servers.window), so no count is presented as a dated measurement; each count is still relayed, labelled, as what that radar holds on record. freshness gives each radar's last_run_at (and running for shadow_ai, enabled for mcp_servers) where the API serves one; coverage names the radars that answered; data is the relayed result above. The result's last text block repeats the structured result without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.`,
       outputSchema: EXPOSURE_RADAR_OUTPUT,
       annotations: ANNOTATIONS,
     },

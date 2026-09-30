@@ -248,6 +248,65 @@ const PROD_LEAKED_CREDS_STATS = {
   generated_at: "2026-09-27T09:00:00Z",
   last_run_at: LAST_RUN.leaked_credentials,
 };
+// #2315: the ?service=mcp answer (GET /api/v1/public/ai-exposure/stats?service=mcp), key for key
+// as the contract gives it (core-backend aiexposure handler.go MCPPublicCounts). The counts are
+// made up, not production's; every partition adds up to the count it divides, and window.from,
+// window.to, last_run_at and counted_at are four different instants, so a reader that relays one
+// as another, or takes one for measured_at, is caught. None of the numbers is one the shadow-AI
+// fixture above sends.
+const MCP_PATH = "/api/v1/public/ai-exposure/stats?service=mcp";
+const MCP_REASONS = {
+  identified_no_challenge: 347,
+  resource_mismatch: 233,
+  cross_origin_pointer: 58,
+  bare_challenge_no_prm: 41,
+  pointer_unreachable: 11,
+  pointer_invalid: 6,
+  no_authorization_servers: 4,
+  wellknown_unreachable: 9,
+  metadata_invalid: 2,
+  challenge_unadjudicated: 877,
+  no_http_answer: 6120,
+  not_identified_as_mcp: 1893,
+};
+const MCP_STATS = {
+  service: "mcp",
+  total: 10217,
+  protected: 611,
+  pending_readjudication: 5,
+  not_assessed: 9601,
+  not_assessed_by_reason: MCP_REASONS,
+  prm_via: { header: 402, wellknown_path: 131, wellknown_root: 78 },
+  era: { legacy: 213, dual: 4, modern: 37, unknown: 1402, not_measured: 8561 },
+  transport: { streamable_http: 251, legacy_sse: 3, unknown: 1402, not_measured: 8561 },
+  window: { from: "2026-09-12T00:04:01Z", to: "2026-09-28T22:51:09Z" },
+  own_controls_excluded: 3,
+  enabled: true,
+  last_run_at: "2026-09-28T23:05:44Z",
+  counted_at: "2026-09-28T23:06:00Z",
+};
+// What exposure_radar must relay for it: every count and timestamp as given, and not `service`,
+// the one string in the answer that is not a timestamp.
+const { service: _mcpService, ...MCP_RELAYED } = MCP_STATS;
+const zeroed = (o) => Object.fromEntries(Object.keys(o).map((k) => [k, 0]));
+// A radar that holds no MCP verdict and has never completed a check: every count 0, from and to
+// null (the contract's window struct with nothing to span), last_run_at null, enabled false.
+const MCP_EMPTY = {
+  service: "mcp",
+  total: 0,
+  protected: 0,
+  pending_readjudication: 0,
+  not_assessed: 0,
+  not_assessed_by_reason: zeroed(MCP_REASONS),
+  prm_via: zeroed(MCP_STATS.prm_via),
+  era: zeroed(MCP_STATS.era),
+  transport: zeroed(MCP_STATS.transport),
+  window: { from: null, to: null },
+  own_controls_excluded: 0,
+  enabled: false,
+  last_run_at: null,
+  counted_at: "2026-09-28T23:06:00Z",
+};
 // What exposure_radar must relay for newest_kev: the tracked row with its count, and every
 // untracked row marked not_assessed with no count at all.
 const NEWEST_KEV_RELAYED = NEWEST_KEV.map(({ exposed_hosts, ...r }) =>
@@ -338,6 +397,8 @@ const BODIES = {
   ),
   // stats.total counts every observation; the confirmed-exposed count is the sum of
   // visible_by_category (2,000 here, as on 2026-09-27 against a total of 36,222).
+  // Keyed by the whole request URL: a request without ?service=mcp gets the router's 404.
+  [MCP_PATH]: { ok: MCP_STATS, empty: MCP_EMPTY },
   "/api/v1/public/shadow-ai-radar/stats": {
     ok: { stats: PROD_SHADOW_STATS, poller: FOLLOWER_POLLER },
     empty: { stats: { total: 0, by_category: {}, visible_by_category: {}, last_24h_count: 0, last_24h_visible_count: 0, auth_confirmed: 0, auth_undetermined: 0 }, poller: FOLLOWER_POLLER },
@@ -346,7 +407,9 @@ const BODIES = {
 
 // A stub API whose behaviour is switched per describe block. Modes:
 //   ok / empty  — HTTP 200 with the matching body above (get_cve's `empty` is the API's 404;
-//                 a body with a `status` is answered with that status)
+//                 a body with a `status` is answered with that status, and one with a `raw`
+//                 string is answered with that string as is). A body is looked up by the whole
+//                 request URL first, then by its path.
 //   403         — HTTP 403 with an HTML body, the shape an edge block produces
 //   html        — HTTP 200 with an HTML body (an SPA shell or a wrong path)
 //   null        — HTTP 200 whose JSON body is the literal `null`
@@ -354,7 +417,7 @@ const BODIES = {
 //   truncated   — HTTP 200 whose body is JSON cut off mid-object (#2311)
 //   hang        — accept the request and never answer
 async function startStub() {
-  // overrides: pathname -> body, consulted before BODIES in the ok/empty modes.
+  // overrides: request URL or pathname -> body, consulted before BODIES in the ok/empty modes.
   const state = { mode: "ok", seen: [], userAgents: [], overrides: {} };
   const pending = new Set();
   const server = http.createServer((req, res) => {
@@ -387,7 +450,7 @@ async function startStub() {
         req.on("close", () => pending.delete(res));
         return;
       default: {
-        const entry = state.overrides[pathname] ?? BODIES[pathname]?.[state.mode];
+        const entry = state.overrides[req.url] ?? state.overrides[pathname] ?? BODIES[req.url]?.[state.mode] ?? BODIES[pathname]?.[state.mode];
         if (entry === undefined) {
           // What the Go router does for a path it does not know.
           res.writeHead(404, { "content-type": "text/plain" });
@@ -397,7 +460,7 @@ async function startStub() {
         const status = entry.status ?? 200;
         const body = entry.status ? entry.body : entry;
         res.writeHead(status, { "content-type": "application/json" });
-        res.end(JSON.stringify(body));
+        res.end(typeof entry.raw === "string" ? entry.raw : JSON.stringify(body));
       }
     }
   });
@@ -554,7 +617,7 @@ function numericPaths(v, p = "", out = new Set()) {
   return out;
 }
 
-// #2313 item 7: the same for the whole exposure_radar result, all four radars. Every numeric
+// #2313 item 7: the same for the whole exposure_radar result, all five radars. Every numeric
 // path, normalised as above, mapped to the name the note, the description and the README label
 // it by. Each label was checked against the Go source at HEAD (core-backend/internal):
 //   kev_exposure.distinct_hosts     kevexposure/store.go:413 COUNT(DISTINCT host), host = "ip:port" (poller.go:355)
@@ -574,6 +637,9 @@ function numericPaths(v, p = "", out = new Set()) {
 //                                   one row per (repo, secret) store.go:46-50
 //   leaked_credentials.top_providers / .top_types leakedcreds/store.go:209-221 COUNT(*), LIMIT 15
 //   none validated                  leakedcreds/detect.go:29-33 ("verified" = structural, never live)
+//   mcp_servers.* (#2315)           aiexposure handler.go MCPPublicCounts and the #2315 contract:
+//                                   one hostname per row, latest verdict; protected = RFC 9728
+//                                   validated (prm.go), each partition adds up to the count it divides
 const RADAR_LABELLED = {
   "kev_exposure.distinct_hosts": "kev_exposure.distinct_hosts",
   "kev_exposure.ransomware_hosts": "kev_exposure.ransomware_hosts",
@@ -601,6 +667,17 @@ const RADAR_LABELLED = {
   "leaked_credentials.top_providers[].count": "leaked_credentials.top_providers",
   "leaked_credentials.top_types[].count": "leaked_credentials.top_types",
   ...Object.fromEntries(Object.entries(SHADOW_AI_LABELLED).map(([p, name]) => [`shadow_ai.${p}`, name])),
+  // Every mcp_servers number is labelled by its own full path.
+  ...Object.fromEntries(
+    [
+      "total",
+      "protected",
+      "pending_readjudication",
+      "not_assessed",
+      "own_controls_excluded",
+      ...["not_assessed_by_reason", "prm_via", "era", "transport"].flatMap((p) => Object.keys(MCP_STATS[p]).map((b) => `${p}.${b}`)),
+    ].map((k) => [`mcp_servers.${k}`, `mcp_servers.${k}`]),
+  ),
 };
 // The numeric paths of a relayed exposure_radar result that carry no label.
 const unlabelledIn = (data) => [...numericPaths(data)].filter((p) => !(p in RADAR_LABELLED)).sort();
@@ -920,8 +997,10 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(data.exposed_hosts, 6213);
       assert.equal(data.countries, 107);
     });
-    it("exposure_radar returns all four radars, none null", () => {
+    it("exposure_radar returns all five radars, none null", () => {
       const data = JSON.parse(results.exposure_radar.content[0].text);
+      assert.equal(data.mcp_servers.total, 10217);
+      assert.equal(data.mcp_servers.protected, 611);
       assert.equal(data.kev_exposure.distinct_hosts, 25113);
       assert.equal(data.exposed_databases.distinct_hosts, 7380);
       assert.equal(data.leaked_credentials.total, 531);
@@ -1633,11 +1712,11 @@ describe(`against a stub API [${ERA}]`, () => {
     });
 
     // ── item 7: every numeric path labelled or dropped ──
-    it("every numeric path in the whole result, all four radars, is a labelled one, and every labelled one is there", () => {
+    it("every numeric path in the whole result, all five radars, is a labelled one, and every labelled one is there", () => {
       assert.deepEqual(unlabelledIn(data), [], `numeric fields relayed with no label: ${unlabelledIn(data).join(", ")}`);
       // Not vacuous: the production-shaped answers reach every labelled path of every radar.
       assert.deepEqual([...numericPaths(data)].sort(), Object.keys(RADAR_LABELLED).sort());
-      for (const radar of ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"]) {
+      for (const radar of ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai", "mcp_servers"]) {
         assert.ok([...numericPaths(data)].some((p) => p.startsWith(`${radar}.`)), `no number from ${radar}`);
       }
     });
@@ -1654,6 +1733,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.deepEqual(data.exposed_databases, PROD_EXPOSED_DB_STATS);
       assert.deepEqual(data.leaked_credentials, PROD_LEAKED_CREDS_STATS);
       assert.deepEqual(data.shadow_ai, PROD_SHADOW_RELAYED);
+      assert.deepEqual(data.mcp_servers, MCP_RELAYED);
     });
     // Each label below was checked against the Go source; the comment above RADAR_LABELLED
     // cites the line.
@@ -2083,6 +2163,314 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2315: exposure_radar's fifth radar, mcp_servers: the adjudicated MCP-server counts of
+  // GET /api/v1/public/ai-exposure/stats?service=mcp, inside the #2313 envelope. What the tool must
+  // hold to, each from the ticket or the contract:
+  //   - counts relayed as given, labelled; protected is RFC 9728 validated, and not_assessed is not
+  //     unprotected;
+  //   - identified_no_challenge is never called open, exposed or unauthenticated (#2307's mistake,
+  //     one bucket over): MCP authorization is optional, and only tools/call, which EchelonGraph
+  //     never sends, could tell;
+  //   - an answer that is not the MCP-server counts (a 400, an API older than ?service=mcp, a
+  //     malformed body, counts that contradict each other) is a failure of that radar, never zeros;
+  //   - no string the answer carries but its timestamps reaches the result;
+  //   - discovery is EchelonGraph's own Certificate Transparency feed, so no Shodan attribution
+  //     covers it.
+  describe("#2315: exposure_radar relays the adjudicated MCP-server counts (mcp_servers)", () => {
+    let tools, res, data, note, description, readme, instructions;
+    // Calls exposure_radar with the ?service=mcp answer replaced by `entry`.
+    const withMCP = async (entry) => {
+      stub.state.overrides[MCP_PATH] = entry;
+      try {
+        return await client.callTool({ name: "exposure_radar", arguments: {} });
+      } finally {
+        delete stub.state.overrides[MCP_PATH];
+      }
+    };
+    const relaying = async (body) => {
+      const r = await withMCP(body);
+      assert.notEqual(r.isError, true, brief(r));
+      return { r, relayed: JSON.parse(r.content[0].text).mcp_servers, n: noteOf(r) };
+    };
+    // Everything a client holds for a result: every text block and the structured result.
+    const everything = (r) => `${textBlocks(r).join("\n")}\n${JSON.stringify(r.structuredContent)}`;
+    // A refused mcp_servers answer: a failure naming that radar alone, with no radar's numbers.
+    const MCP_NUMBERS = /10217|9601|6120|8561|1893/;
+    const assertRefused = (r, kind, status, message) => {
+      assertErrorResult("exposure_radar", r);
+      const sc = r.structuredContent;
+      assert.equal(sc.state, "failed");
+      assert.ok(!("data" in sc), "a refused answer reached the structured result as data");
+      assert.deepEqual(sc.coverage.failed, ["mcp_servers"]);
+      assert.deepEqual(sc.coverage.answered, ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"]);
+      assert.equal(sc.error.kind, "radars");
+      assert.equal(sc.error.radars.length, 1, JSON.stringify(sc.error.radars));
+      const [f] = sc.error.radars;
+      assert.deepEqual({ radar: f.radar, kind: f.kind, path: f.path, status: f.status }, { radar: "mcp_servers", kind, path: MCP_PATH, status });
+      assert.match(f.message, message);
+      const t = textOf(r);
+      assert.match(t, /^exposure_radar FAILED: 1 of 5 radars could not be read from /, t);
+      assert.match(t, /this is not a finding: do not report it as zero, none found, absent, or unexposed/, t);
+      assert.match(t, /The 4 radar\(s\) that did answer \(kev_exposure, exposed_databases, leaked_credentials, shadow_ai\) are withheld/, t);
+      // Never zeros, and no number of any radar.
+      assert.doesNotMatch(everything(r), MCP_NUMBERS, "an MCP-server count reached a refused result");
+      assert.doesNotMatch(everything(r), /25113|7380|36222/, "a withheld radar's number reached the result");
+      return t;
+    };
+    // What no text may say of identified_no_challenge, or of any mcp_servers number.
+    const ACCUSES = /\bopen\b|\bexposed\b|\bunauthenticated\b|\bunauthori[sz]ed\b|\bvulnerable\b|without (?:authentication|credentials|auth)\b/i;
+    const NAMES_MCP = /\bmcp_servers\b|identified_no_challenge|That is normal in MCP/;
+    function assertMCPNotAccused(where, units) {
+      let checked = 0;
+      for (const u of units) {
+        if (!NAMES_MCP.test(u)) continue;
+        checked++;
+        assert.doesNotMatch(u, ACCUSES, `${where}: a sentence about mcp_servers calls a server open, exposed or unauthenticated: "${u}"`);
+      }
+      return checked;
+    }
+    // The bucket's own words, as the note, the description and the README each give them.
+    const NORMAL_IN_MCP = /That is normal in MCP: authorization is optional in the spec, and a server can enforce it at `?tools\/call`? instead, which EchelonGraph never sends[.,] [Ss]o this bucket is not a finding of exposure\./;
+    before(async () => {
+      stub.state.mode = "ok";
+      stub.state.seen.length = 0;
+      ({ tools } = await client.listTools());
+      instructions = client.opening.instructions;
+      res = await client.callTool({ name: "exposure_radar", arguments: {} });
+      data = JSON.parse(res.content[0].text);
+      note = noteOf(res);
+      description = tools.find((t) => t.name === "exposure_radar").description;
+      readme = readPkgFile("README.md");
+    });
+
+    it("the description names every RFC 9728 reason bucket, in the answer's order, as one constant sentence", () => {
+      // The description spells the eight reasons out as a constant (MCP_CHALLENGE_REASON_FIELDS), so the site's
+      // tool-claims check can read it statically; this pins that constant to the buckets the answer carries.
+      const reasons = Object.keys(MCP_REASONS).filter(
+        (k) => !["identified_no_challenge", "challenge_unadjudicated", "no_http_answer", "not_identified_as_mcp"].includes(k),
+      );
+      assert.equal(reasons.length, 8, reasons.join(", "));
+      const named = reasons.map((r) => `mcp_servers.not_assessed_by_reason.${r}`);
+      const sentence = `${named.slice(0, -1).join(", ")} and ${named.at(-1)} hold endpoints that asked for credentials`;
+      assert.ok(description.includes(sentence), `the description does not name the reasons as the answer carries them: ${sentence}`);
+    });
+    it("asks for ?service=mcp, never the unparameterised answer (every AI service's counts)", () => {
+      assert.ok(stub.state.seen.includes(MCP_PATH), stub.state.seen.join(", "));
+      assert.ok(!stub.state.seen.includes("/api/v1/public/ai-exposure/stats"), stub.state.seen.join(", "));
+    });
+    it("a well-formed answer: every count and timestamp relayed as given, and nothing else", () => {
+      assert.deepEqual(data.mcp_servers, MCP_RELAYED);
+      assert.ok(!("service" in data.mcp_servers), "service is a string the answer carries, and not a timestamp");
+      // No string but a timestamp: the relayed strings are exactly the answer's four instants.
+      const strings = [];
+      const walk = (v) => (typeof v === "string" ? strings.push(v) : v && typeof v === "object" && Object.values(v).forEach(walk));
+      walk(data.mcp_servers);
+      assert.deepEqual(strings.sort(), [MCP_STATS.window.from, MCP_STATS.window.to, MCP_STATS.last_run_at, MCP_STATS.counted_at].sort());
+      for (const s of strings) assert.ok(realInstant(s), s);
+    });
+    it("the envelope: not_assessed with measured_at null, never the window's ends, last_run_at or counted_at", () => {
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null);
+      assert.deepEqual(sc.freshness.mcp_servers, { last_run_at: MCP_STATS.last_run_at, enabled: true });
+      assert.match(sc.notes[0], /mcp_servers dates its verdicts at most by a window \(mcp_servers\.window\), from the oldest check among them to the newest, so no count here is presented as a dated measurement and measured_at is null\./);
+      assert.match(sc.notes[1], /freshness\.mcp_servers\.last_run_at with freshness\.mcp_servers\.enabled/);
+      assert.match(sc.method, /; mcp_servers, the latest verdict on record per hostname named like an MCP server in EchelonGraph's own Certificate Transparency feed, from EchelonGraph's identified MCP probe \(server\/discover, and initialize only if that is refused; never tools\/call\), where protected means the endpoint's RFC 9728 protected-resource metadata validated\.$/);
+      assert.equal(assertEnvelopeInText("exposure_radar with mcp_servers", res).state, "not_assessed");
+    });
+    it("the note labels every mcp_servers number by what it counts", () => {
+      for (const re of [
+        /MCP servers: mcp_servers\.total \(10217\) counts hostnames the AI-exposure radar has checked for an MCP server, each once, by its latest verdict on record; each was named like an MCP server in EchelonGraph's own Certificate Transparency feed, and not every one is an MCP server\./,
+        /mcp_servers\.protected \(611\) counts hostnames whose \/mcp endpoint asked for credentials \(a 401 or 403\) and whose OAuth protected-resource metadata validated under RFC 9728: a 200 JSON document whose resource is identical to the server's identifier and that names at least one authorization server\./,
+        /mcp_servers\.prm_via divides them by where that document was found: mcp_servers\.prm_via\.header \(402\), the same-origin URL the challenge named; mcp_servers\.prm_via\.wellknown_path \(131\), .*; and mcp_servers\.prm_via\.wellknown_root \(78\), that URI at the root\./,
+        /mcp_servers\.pending_readjudication \(5\) counts verdicts decided by a rule EchelonGraph has since replaced and not yet re-checked under the current rules; they are in neither mcp_servers\.protected nor mcp_servers\.not_assessed\./,
+        /mcp_servers\.not_assessed \(9601\) counts the rest, whose protection the radar could not assess; not assessed does not mean unprotected, and mcp_servers\.not_assessed_by_reason puts each in exactly one bucket\./,
+        /Endpoints that asked for credentials \(a 401 or 403\) but whose RFC 9728 metadata did not validate are counted by why: mcp_servers\.not_assessed_by_reason\.resource_mismatch \(233\), the document's resource is absent or not identical to the server's identifier; /,
+        /and mcp_servers\.not_assessed_by_reason\.metadata_invalid \(2\), the answer is not a 200 JSON object within the size cap\./,
+        /Each of those endpoints asked for credentials, so none of them is shown to lack protection: only its metadata did not validate\./,
+        /mcp_servers\.not_assessed_by_reason\.challenge_unadjudicated \(877\) counts endpoints that asked for credentials before EchelonGraph read RFC 9728 metadata, not re-checked since\./,
+        /mcp_servers\.not_assessed_by_reason\.no_http_answer \(6120\) counts hostnames that gave no HTTP answer .* and mcp_servers\.not_assessed_by_reason\.not_identified_as_mcp \(1893\) hostnames that answered HTTP with nothing that identified an MCP server .*: neither is a count of MCP servers\./,
+        /mcp_servers\.era\.dual \(4\), answered server\/discover and named an initialize-era version too, a lower bound, since a server built on the reference SDK names only modern versions there and is counted modern;/,
+        /mcp_servers\.era\.modern \(37\), answered server\/discover and named no initialize-era version, not proven modern-only, since EchelonGraph does not send initialize to tell;/,
+        /and mcp_servers\.era\.not_measured \(8561\), a verdict recorded before EchelonGraph's probe began recording the era and not re-checked since\./,
+        /mcp_servers\.transport divides them by the transport that identified the server: mcp_servers\.transport\.streamable_http \(251\), a POST to \/mcp; mcp_servers\.transport\.legacy_sse \(3\)/,
+        /mcp_servers\.own_controls_excluded \(3\) counts EchelonGraph's own control servers, which are left out of every other mcp_servers number\./,
+        /mcp_servers\.window says when the verdicts counted were last checked: the oldest at 2026-09-12T00:04:01Z \(mcp_servers\.window\.from\) and the newest at 2026-09-28T22:51:09Z \(mcp_servers\.window\.to\), so the counts are each hostname's latest verdict, not one sweep at one time\./,
+        /mcp_servers last completed check: 2026-09-28T23:05:44Z \(mcp_servers\.last_run_at, a timestamp, not a count\)\./,
+        /mcp_servers\.enabled is true: the API reports the AI-exposure radar running, a check having completed within 45 minutes of its answer\./,
+        /mcp_servers\.counted_at \(2026-09-28T23:06:00Z\) is when the API read these counts: a timestamp, not a count, and not when any verdict was checked\./,
+      ]) {
+        assert.match(note, re);
+      }
+      assert.doesNotMatch(note, /Left out of mcp_servers|left out of mcp_servers/, note);
+      // Each stamp is printed in its own labelled sentence only.
+      for (const t of [MCP_STATS.last_run_at, MCP_STATS.counted_at]) assert.equal(sentencesOf(note).filter((s) => s.includes(t)).length, 1, t);
+    });
+    it("identified_no_challenge: said to be normal in MCP and not a finding of exposure, never open, exposed or unauthenticated", () => {
+      assert.match(
+        note,
+        /mcp_servers\.not_assessed_by_reason\.identified_no_challenge \(347\) counts servers that identified themselves as MCP servers \(a DiscoverResult, an InitializeResult, or the endpoint event of the deprecated HTTP\+SSE transport\) and did not ask for credentials at the handshake\. /,
+      );
+      const flatReadme = readme.replace(/\s+/g, " ");
+      for (const [where, t] of [["note", note], ["description", description], ["README", flatReadme]]) {
+        assert.match(t, NORMAL_IN_MCP, where);
+        assert.match(t, /mcp_servers\.not_assessed_by_reason\.identified_no_challenge`? (?:\| )?(?:\(347\) counts |holds )?[Ss]ervers that identified themselves as MCP servers/, where);
+      }
+      // Every text a client holds, sentence by sentence (the README's table rows each one unit).
+      const units = [
+        ...sentencesOf(note),
+        ...sentencesOf(description),
+        ...sentencesOf(instructions),
+        ...res.structuredContent.notes.flatMap(sentencesOf),
+        ...sentencesOf(res.structuredContent.method),
+        ...readmeUnits(readme),
+      ];
+      const checked = assertMCPNotAccused("exposure_radar", units);
+      assert.ok(checked >= 40, `only ${checked} sentences about mcp_servers checked`);
+      // The guard can fail: each way the bucket has been, or could be, mislabelled.
+      for (const mutant of [
+        "mcp_servers.not_assessed_by_reason.identified_no_challenge (347) counts open MCP servers.",
+        "identified_no_challenge: 347 MCP servers exposed on the internet.",
+        "mcp_servers.not_assessed_by_reason.identified_no_challenge counts unauthenticated MCP servers.",
+        "That is normal in MCP, but these servers answer without authentication.",
+        "mcp_servers holds 347 vulnerable servers.",
+      ]) {
+        assert.throws(() => assertMCPNotAccused("mutant", [mutant]), /calls a server open, exposed or unauthenticated/, mutant);
+      }
+    });
+    it("no Shodan attribution covers mcp_servers: its discovery is EchelonGraph's own Certificate Transparency feed", () => {
+      assert.match(note, /MCP-server discovery uses no Shodan data: its hostnames come from EchelonGraph's own Certificate Transparency feed, matched by hostname pattern\./);
+      for (const s of sentencesOf(note).filter((x) => x.includes("mcp_servers"))) assert.doesNotMatch(s, /Shodan/, s);
+      assert.match(description, /It also gives MCP-server counts: hostnames named like an MCP server in EchelonGraph's own Certificate Transparency feed \(no Shodan data\)/);
+      assert.match(instructions, /exposure_radar's mcp_servers counts use no Shodan data: their hostnames come from EchelonGraph's own Certificate Transparency feed\./);
+      assert.match(readme.replace(/\s+/g, " "), /Every hostname was named like an MCP server in EchelonGraph's own Certificate Transparency feed, matched by hostname pattern; no Shodan data is used\./);
+    });
+    it("no re-check interval is stated for mcp_servers", () => {
+      const units = [...sentencesOf(note), ...sentencesOf(description), ...readmeUnits(readme)].filter((u) => NAMES_MCP.test(u));
+      assert.equal(assertReprobeIntervalsQualified("mcp_servers", units), 0, "a sentence about mcp_servers names a re-check interval");
+    });
+
+    // ── what is refused: a failure of that radar, never zeros ──
+    it("HTTP 400 (an API that does not serve service=mcp) is a failure entry for mcp_servers, not zeros", async () => {
+      const r = await withMCP({ status: 400, body: { error: "unknown service", supported: [] } });
+      const t = assertRefused(r, "http", 400, /^unknown service$/);
+      assert.match(t, /- mcp_servers: EchelonGraph answered HTTP 400 from .* for GET \/api\/v1\/public\/ai-exposure\/stats\?service=mcp — the API said: unknown service\./, t);
+      assert.equal(r.structuredContent.state, "failed", "exposure_radar takes no input, so a radar's 400 is not invalid_input");
+    });
+    it("a 200 from an API older than ?service=mcp (every AI service's counts, with a protected of their own) is refused, never relayed as MCP-server counts", async () => {
+      const r = await withMCP({ open: 70913, protected: 44021, not_assessed: 290061, pending_readjudication: 0, enabled: true, last_run_at: MCP_STATS.last_run_at });
+      const t = assertRefused(r, "unexpected_shape", 200, /^the answer carries no service field, so it is not the MCP-server counts: an API older than service=mcp ignores that parameter/);
+      assert.match(t, /- mcp_servers: EchelonGraph answered HTTP 200 from .* for GET \/api\/v1\/public\/ai-exposure\/stats\?service=mcp, but the answer carries no service field, so it is not the MCP-server counts/, t);
+      assert.doesNotMatch(everything(r), /70913|44021|290061/, "the all-services counts reached the result");
+    });
+    for (const [label, entry, kind, message] of [
+      // A body that is not JSON is quoted, as every tool's not_json failure quotes it (#1874), so
+      // this one carries no count.
+      ["JSON cut off mid-object", { raw: '{"service":"mcp","total":' }, "not_json", /body starts: \{"service":"mcp","total":$/],
+      ["a JSON null", { raw: "null" }, "not_object", /body was null/],
+      ["a JSON array", [MCP_STATS], "unexpected_shape", /^the answer is not a JSON object carrying the MCP-server counts$/],
+      ["a service other than mcp", { ...MCP_STATS, service: "evil-leak.example.com" }, "unexpected_shape", /^the answer names a service other than mcp, so it is not the MCP-server counts$/],
+      ["a count sent as a string", { ...MCP_STATS, protected: "611" }, "unexpected_shape", /^its protected is missing or not a whole number of zero or more, so its counts are not relayed$/],
+      ["a count missing", (({ total: _t, ...rest }) => rest)(MCP_STATS), "unexpected_shape", /^its total is missing or not a whole number/],
+      ["a negative and a fractional count", { ...MCP_STATS, pending_readjudication: -5, not_assessed: 9601.5 }, "unexpected_shape", /^its pending_readjudication and not_assessed are missing or not a whole number/],
+      ["counts that contradict each other (total is not protected + pending_readjudication + not_assessed)", { ...MCP_STATS, total: 10218 }, "unexpected_shape", /^its counts contradict each other \(total is not protected \+ pending_readjudication \+ not_assessed, an answer the API's own integrity check does not serve\), so they are not relayed$/],
+    ]) {
+      it(`a malformed answer, ${label}, is a failure entry for mcp_servers, not zeros`, async () => {
+        const r = await withMCP(entry);
+        assertRefused(r, kind, 200, message);
+        assert.doesNotMatch(everything(r), /evil-leak/, "a string the answer carried reached the result");
+      });
+    }
+
+    // ── what is left out: named, never relayed partly ──
+    it("a partition whose buckets do not add up to the count it divides is left out whole and named; the rest is relayed", async () => {
+      const { relayed, n } = await relaying({
+        ...MCP_STATS,
+        prm_via: { ...MCP_STATS.prm_via, header: 401 },
+        era: { ...MCP_STATS.era, modern: 38 },
+      });
+      assert.equal(relayed.prm_via, undefined);
+      assert.equal(relayed.era, undefined);
+      const { prm_via: _p, era: _e, ...rest } = MCP_RELAYED;
+      assert.deepEqual(relayed, rest);
+      assert.match(n, /Left out of mcp_servers because their buckets do not add up to the count they divide: prm_via, era\./, n);
+      assert.doesNotMatch(n, /mcp_servers\.prm_via\.|mcp_servers\.era\./, "a left-out partition's buckets are still labelled in the note");
+      assert.match(n, /mcp_servers\.transport divides them/, n);
+    });
+    it("a partition missing a bucket, carrying one this version cannot label, or with a bucket that is not a count is left out whole and named; the unknown bucket's name is not repeated", async () => {
+      const { dual: _dual, ...eraWithoutDual } = MCP_STATS.era;
+      const { relayed, n, r } = await relaying({
+        ...MCP_STATS,
+        era: eraWithoutDual,
+        transport: { ...MCP_STATS.transport, "evil-leak.example.com": 0 },
+        not_assessed_by_reason: { ...MCP_REASONS, no_http_answer: "6120" },
+      });
+      for (const p of ["era", "transport", "not_assessed_by_reason"]) assert.equal(relayed[p], undefined, p);
+      assert.deepEqual(relayed.prm_via, MCP_STATS.prm_via);
+      assert.match(n, /Left out of mcp_servers because they were not in the expected shape: not_assessed_by_reason, era, transport\./, n);
+      assert.doesNotMatch(everything(r), /evil-leak/);
+      assert.doesNotMatch(n, /identified_no_challenge/, "a left-out partition's buckets are still labelled in the note");
+    });
+    it("a hostile field the answer should never carry is not relayed and its value never repeated; a field-shaped name is named, any other only counted", async () => {
+      const { relayed, n, r } = await relaying({
+        ...MCP_STATS,
+        host: "evil-leak.example.com",
+        hostnames: ["evil-leak.example.com", "203.0.113.7:443"],
+        server_name: "EvilLeak MCP",
+        version: "evil-leak-1.0",
+        "evil-leak.example.com": 1,
+        EvilLeak: { count: 9 },
+      });
+      assert.deepEqual(relayed, MCP_RELAYED, "the counts are relayed as before, and nothing else");
+      assert.doesNotMatch(everything(r), /evil-?leak|203\.0\.113\.7/i, "a string the answer carried reached the result");
+      assert.match(n, /Left out of mcp_servers because this version of the tool cannot label them: host, hostnames, server_name, version\./, n);
+      assert.match(n, /Also left out of mcp_servers: 2 fields whose name is not shaped like a field name, not repeated here, since a name could itself identify a server\./, n);
+      assert.deepEqual(unlabelledIn(JSON.parse(r.content[0].text)), []);
+    });
+    it("a timestamp that is not a time is not relayed, and not repeated; a window without a real span is left out and named", async () => {
+      const { relayed, n, r } = await relaying({
+        ...MCP_STATS,
+        window: { from: "evil-leak.example.com", to: MCP_STATS.window.to },
+        last_run_at: "0001-01-01T00:00:00Z",
+        counted_at: "evil-leak.example.com",
+      });
+      for (const k of ["window", "last_run_at", "counted_at"]) assert.ok(!(k in relayed), `${k}: ${JSON.stringify(relayed[k])}`);
+      assert.match(n, /Left out of mcp_servers because they were not in the expected shape: window\./, n);
+      assert.doesNotMatch(everything(r), /evil-leak|0001-01-01/);
+      assert.doesNotMatch(n, /mcp_servers last completed check/, n);
+      assert.deepEqual(r.structuredContent.freshness.mcp_servers, { last_run_at: null, enabled: true });
+      // A window whose from is after its to, and none at all while rows are counted, are left out too.
+      for (const window of [{ from: MCP_STATS.window.to, to: MCP_STATS.window.from }, null, { from: null, to: null }]) {
+        const again = await relaying({ ...MCP_STATS, window });
+        assert.ok(!("window" in again.relayed), JSON.stringify(window));
+        assert.match(again.n, /Left out of mcp_servers because they were not in the expected shape: window\./, JSON.stringify(window));
+      }
+    });
+    it("the genuine-empty answer is relayed as zeros on record, with no window, and a radar not reported running is said in words", async () => {
+      for (const window of [MCP_EMPTY.window, null]) {
+        const { relayed, n, r } = await relaying({ ...MCP_EMPTY, window });
+        const { service: _s, window: _w, last_run_at: _l, ...expected } = MCP_EMPTY;
+        assert.deepEqual(relayed, expected);
+        assert.match(n, /mcp_servers\.total is 0: the radar holds no verdict on record for a hostname named like an MCP server\./, n);
+        assert.match(n, /mcp_servers\.enabled is false: the API does not report the AI-exposure radar running \(no check completed within 45 minutes of its answer\), so these numbers may be stale\./, n);
+        assert.doesNotMatch(n, /Left out of mcp_servers|mcp_servers last completed check|mcp_servers\.window says/, n);
+        assert.deepEqual(r.structuredContent.freshness.mcp_servers, { last_run_at: null, enabled: false });
+      }
+    });
+    it("the outputSchema admits no mcp_servers string field but the timestamps, and no count but the labelled ones", () => {
+      const s = branchOf(tools.find((t) => t.name === "exposure_radar").outputSchema, "not_assessed").properties.data.properties.mcp_servers;
+      assert.equal(s.additionalProperties, false);
+      const strings = [];
+      const walk = (x, p) => {
+        if (x?.type === "string") strings.push(p);
+        for (const [k, y] of Object.entries(x?.properties ?? {})) walk(y, p ? `${p}.${k}` : k);
+      };
+      walk(s, "");
+      assert.deepEqual(strings.sort(), ["counted_at", "last_run_at", "window.from", "window.to"]);
+      assert.deepEqual([...schemaNumericPaths(s, "mcp_servers")].sort(), Object.keys(RADAR_LABELLED).filter((p) => p.startsWith("mcp_servers.")).sort());
+    });
+  });
+
   // #2311: every tool carries a title, the four annotations and an outputSchema, and the opening
   // exchange carries the server instructions.
   describe("#2311: tools/list, the opening exchange and the server instructions", () => {
@@ -2183,8 +2571,8 @@ describe(`against a stub API [${ERA}]`, () => {
           const sc = results[name].structuredContent;
           assert.equal(sc.state, "failed", name);
           assert.ok(!("data" in sc), name);
-          // exposure_radar makes four requests, and names each radar's failure.
-          if (name === "exposure_radar") assert.deepEqual(sc.error.radars.map((r) => r.kind), ["not_object", "not_object", "not_object", "not_object"]);
+          // exposure_radar makes five requests, and names each radar's failure.
+          if (name === "exposure_radar") assert.deepEqual(sc.error.radars.map((r) => r.kind), ["not_object", "not_object", "not_object", "not_object", "not_object"]);
           else assert.equal(sc.error.kind, "not_object", name);
         }
       } finally {
@@ -2201,7 +2589,7 @@ describe(`against a stub API [${ERA}]`, () => {
           const sc = results[name].structuredContent;
           assert.equal(sc.state, "failed", name);
           assert.ok(!("data" in sc), name);
-          if (name === "exposure_radar") assert.deepEqual(sc.error.radars.map((r) => r.kind), ["not_json", "not_json", "not_json", "not_json"]);
+          if (name === "exposure_radar") assert.deepEqual(sc.error.radars.map((r) => r.kind), ["not_json", "not_json", "not_json", "not_json", "not_json"]);
           else assert.equal(sc.error.kind, "not_json", name);
           assert.doesNotMatch(textOf(results[name]), /found nothing|OK:/, name);
         }
@@ -2238,30 +2626,30 @@ describe(`against a stub API [${ERA}]`, () => {
         for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
       }
     };
-    it("exposure_radar with one radar failing is a failure that names it and withholds the three that answered", async () => {
+    it("exposure_radar with one radar failing is a failure that names it and withholds the four that answered", async () => {
       stub.state.mode = "ok";
       const res = await radarWith({ [LC_PATH]: { status: 503, body: { error: "leaked-credentials store unavailable" } } });
       assertErrorResult("exposure_radar", res);
       const t = textOf(res);
-      assert.match(t, /^exposure_radar FAILED: 1 of 4 radars could not be read from /, t);
+      assert.match(t, /^exposure_radar FAILED: 1 of 5 radars could not be read from /, t);
       assert.match(t, /- leaked_credentials: EchelonGraph answered HTTP 503 from .* for GET \/api\/v1\/public\/leaked-credentials\/stats — the API said: leaked-credentials store unavailable\./, t);
-      assert.match(t, /The 3 radar\(s\) that did answer \(kev_exposure, exposed_databases, shadow_ai\) are withheld: a partial radar picture would be read as the whole one\./, t);
+      assert.match(t, /The 4 radar\(s\) that did answer \(kev_exposure, exposed_databases, shadow_ai, mcp_servers\) are withheld: a partial radar picture would be read as the whole one\./, t);
       assert.match(t, /this is not a finding: do not report it as zero/, t);
       const sc = res.structuredContent;
       assert.equal(sc.state, "failed");
       assert.ok(!("data" in sc), "a partial radar picture reached the structured result");
-      assert.deepEqual(sc.coverage, { radars: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"], answered: ["kev_exposure", "exposed_databases", "shadow_ai"], failed: ["leaked_credentials"] });
+      assert.deepEqual(sc.coverage, { radars: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai", "mcp_servers"], answered: ["kev_exposure", "exposed_databases", "shadow_ai", "mcp_servers"], failed: ["leaked_credentials"] });
       assert.deepEqual(sc.error.radars, [{ radar: "leaked_credentials", kind: "http", path: LC_PATH, status: 503, message: "leaked-credentials store unavailable" }]);
       // No number any answering radar sent reaches the result, in any block.
-      assert.doesNotMatch(JSON.stringify(res), /25113|7380|36222|31887/);
+      assert.doesNotMatch(JSON.stringify(res), /25113|7380|36222|31887|10217|9601/);
     });
     it("exposure_radar with two radars failing names both, and the withheld two", async () => {
       stub.state.mode = "ok";
       const res = await radarWith({ [LC_PATH]: { status: 500, body: { error: "boom" } }, [SA_PATH]: { status: 404, body: { error: "no such route" } } });
       assertErrorResult("exposure_radar", res);
-      assert.match(textOf(res), /2 of 4 radars could not be read/);
+      assert.match(textOf(res), /2 of 5 radars could not be read/);
       assert.deepEqual(res.structuredContent.coverage.failed, ["leaked_credentials", "shadow_ai"]);
-      assert.deepEqual(res.structuredContent.coverage.answered, ["kev_exposure", "exposed_databases"]);
+      assert.deepEqual(res.structuredContent.coverage.answered, ["kev_exposure", "exposed_databases", "mcp_servers"]);
       assert.deepEqual(res.structuredContent.error.radars.map((r) => [r.radar, r.status]), [["leaked_credentials", 500], ["shadow_ai", 404]]);
     });
   });
@@ -2450,15 +2838,18 @@ describe(`against a stub API [${ERA}]`, () => {
       const sc = (await call("exposure_radar")).structuredContent;
       assert.equal(sc.state, "not_assessed");
       assert.equal(sc.measured_at, null);
-      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but no stats answer says when the services or records it counts were observed/);
+      // #2315: mcp_servers dates its verdicts by a window, which is not one observation time.
+      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure, exposed_databases, leaked_credentials and shadow_ai give none, and mcp_servers dates its verdicts at most by a window \(mcp_servers\.window\)/);
       assert.deepEqual(sc.freshness, {
         kev_exposure: { last_run_at: LAST_RUN.kev_exposure },
         exposed_databases: { last_run_at: LAST_RUN.exposed_databases },
         leaked_credentials: { last_run_at: LAST_RUN.leaked_credentials },
         // The fixture's poller block is an older API's follower: freshness unknown, so null.
         shadow_ai: { last_run_at: null, running: null },
+        mcp_servers: { last_run_at: MCP_STATS.last_run_at, enabled: true },
       });
-      assert.deepEqual(sc.coverage, { radars: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"], answered: ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai"], failed: [] });
+      const radars = ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai", "mcp_servers"];
+      assert.deepEqual(sc.coverage, { radars, answered: radars, failed: [] });
       // generated_at is never presented as freshness or as measured_at.
       assert.doesNotMatch(JSON.stringify({ ...sc, data: undefined, notes: undefined }), /2026-09-27T09:00:00Z/);
     });
@@ -2569,9 +2960,12 @@ describe(`against a stub API [${ERA}]`, () => {
     const PROD_CVE_PATH = `/api/v1/public/kev-exposure/cve/${CVE_PROD_WRITE_STAMPED}`;
     const MARGIN = 50;
     // [case, tool, arguments, stub mode, overrides, what the case must be, characters of text
-    // measured at 2.2.0 (2026-09-28)].
+    // measured at 2.2.0 (2026-09-28)]. exposure_radar was raised on purpose at 2.3.0 (2026-09-29,
+    // #2315), from 22,883 to 30,949: the fifth radar, mcp_servers, adds 8,066 characters, which are
+    // its 29 labelled counts and 4 timestamps in data, the note sentence that labels each, and its
+    // clause in method and in the envelope's two notes. The other bounds are unchanged.
     const CASES = [
-      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 22_883],
+      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 971],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_085],
