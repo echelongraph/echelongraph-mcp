@@ -488,6 +488,26 @@ function rowsScoreNote(d: object): string {
   return out.map((s) => ` ${s}`).join("");
 }
 
+// ── summary.none, the not-yet-scored bucket (#2610) ──
+//
+// core-backend cve/store.go Summary buckets the active CVEs on effectiveSeverityExpr: the
+// EchelonGraph band, else NVD's, else the CVSS v2 band, else NONE, where a band of NONE or UNKNOWN
+// counts as none. So summary.none counts the CVEs with no severity band from any source, and the
+// store sends the same number again as summary.unscored (CVESummary: "the residual band-less
+// bucket … numerically identical to None"; Critical+High+Medium+Low+Unscored == Total). It is not
+// a count of CVEs rated severity None, but a model handed "counts by severity … none" reports
+// "3,381 CVEs rated None" (production on 2026-09-30: none 3,381, unscored 3,381). The JSON is
+// relayed as sent; the note says what the count is whenever it is above zero, and names
+// summary.unscored as the same count when the answer carries it equal. A zero is not labelled:
+// there is no CVE in it to misreport.
+function summaryNoneNote(d: object): string {
+  const none = numAt(d, "summary", "none");
+  if (none === undefined || none <= 0) return "";
+  const unscored = numAt(d, "summary", "unscored");
+  const same = unscored === none ? ` summary.unscored (${unscored}) is the same count under its own name.` : "";
+  return ` summary.none (${none}) is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored.${same} Report them as not yet scored, not as CVEs rated None.`;
+}
+
 async function cveSummary(): Promise<ToolResult> {
   const tool = "cve_summary";
   try {
@@ -509,13 +529,14 @@ async function cveSummary(): Promise<ToolResult> {
       ],
     };
     const total = numAt(r.data, "summary", "total");
-    if (total === undefined) return succeeded(r.data, head, env);
+    const none = summaryNoneNote(r.data);
+    if (total === undefined) return succeeded(r.data, `${head}${none}`, env);
     if (total === 0) {
-      return succeeded(r.data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.`, env);
+      return succeeded(r.data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.${none}`, env);
     }
     // A stamp that is not a real instant stays in the JSON and is not repeated as prose.
     const stamp = realInstant(updated) ? ` (last updated ${updated})` : "";
-    return succeeded(r.data, `${head} The feed holds ${total} active CVEs${stamp}.`, env);
+    return succeeded(r.data, `${head} The feed holds ${total} active CVEs${stamp}.${none}`, env);
   } catch (e) {
     return crashed(tool, e);
   }
@@ -1854,7 +1875,9 @@ const CVE_SUMMARY_OUTPUT = envelopeSchema({
         high: opt(z.number()),
         medium: opt(z.number()),
         low: opt(z.number()),
-        none: opt(z.number()),
+        // #2610: the not-yet-scored bucket, not a rating (see summaryNoneNote).
+        none: opt(z.number()).describe("The active CVEs with no severity band from any source: CVEs not yet scored, not a severity rating of None."),
+        unscored: opt(z.number()).describe("The same count as none, under its own name."),
         last_updated: opt(z.string()),
       })
       .optional(),
@@ -2034,6 +2057,10 @@ const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
 // What each description says about its structured result, naming only fields its schema holds.
 const FEED_ENVELOPE =
   "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the feed serves no poll-completion time) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
+// #2610: what cve_summary says summary.none is (summaryNoneNote), one constant string for the same
+// reason as SCORE_ASSESSED_DESCRIPTION below.
+const SUMMARY_NONE_DESCRIPTION =
+  "summary.none is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored, and the answer may carry the same count again as summary.unscored. Whenever summary.none is above zero the note says so: report those CVEs as not yet scored, not as CVEs rated None.";
 // #2535: what search_cves and get_cve say about score_assessed, one constant string, since the
 // site's tool-claims check (marketing-site lib/mcpToolClaims.test.ts) folds only constant strings.
 const SCORE_ASSESSED_DESCRIPTION =
@@ -2048,7 +2075,7 @@ function createServer(): McpServer {
     "cve_summary",
     {
       title: "CVE feed summary",
-      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs and their counts by severity (summary.critical, summary.high, summary.medium, summary.low, summary.none), plus summary.last_updated, the newest modification time among those records. The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
+      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
       outputSchema: CVE_SUMMARY_OUTPUT,
       annotations: ANNOTATIONS,
     },

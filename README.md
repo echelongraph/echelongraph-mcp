@@ -17,7 +17,7 @@ API call a tool needs to answer.
 
 | Tool | What it does |
 |---|---|
-| `cve_summary` | Counts of active CVEs by severity, and when the feed was last updated. |
+| `cve_summary` | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), and when the feed was last updated. |
 | `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; the note names each row not yet scored. |
 | `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
 | `cve_exposure` | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. |

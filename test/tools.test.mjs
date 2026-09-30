@@ -359,11 +359,12 @@ const SCORE_ROWS = {
 
 // Stub bodies shaped like the live API answered on 2026-09-15, trimmed to the fields the
 // tests assert on. `ok` is a populated answer; `empty` is the genuine-nothing answer. The CVE
-// rows carry score_assessed true, as every scored row on the API does (#2535).
+// rows carry score_assessed true, as every scored row on the API does (#2535). The summary
+// carries unscored beside none, equal to it, as core-backend cve/store.go Summary sends it (#2610).
 const BODIES = {
   "/api/v1/public/cves/summary": {
-    ok: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 42038, high: 148562, medium: 166226, low: 14192, none: 2487, total: 373505, last_updated: "2026-09-15T04:47:02.406Z" } },
-    empty: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 0, high: 0, medium: 0, low: 0, none: 0, total: 0, last_updated: "2026-09-15T04:47:02.406Z" } },
+    ok: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 42038, high: 148562, medium: 166226, low: 14192, none: 2487, unscored: 2487, total: 373505, last_updated: "2026-09-15T04:47:02.406Z" } },
+    empty: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 0, high: 0, medium: 0, low: 0, none: 0, unscored: 0, total: 0, last_updated: "2026-09-15T04:47:02.406Z" } },
   },
   "/api/v1/public/cves": {
     ok: { cves: [{ cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, score_assessed: true, kev_listed: true }], limit: 2, offset: 0, total: 1 },
@@ -607,6 +608,63 @@ function assertEnvelopeInText(where, res) {
   const rebuilt = { ...env, notes: [...own, ...before], ...(has(env, "method") ? {} : { method: sc.method }) };
   assert.deepEqual(rebuilt, withoutData, `${where}: the text's envelope, rebuilt, is not structuredContent without data`);
   return env;
+}
+
+// #2531: the repeat share, as a number. assertEnvelopeInText holds the structure #2467 set; this
+// measures what that structure is for. For every text block after the first it counts the block's
+// sentences that an earlier block already holds, verbatim, and gives the share: repeated sentences
+// over sentences. What a model reads in a block is its sentences: a prose block (the note, a
+// failure's message) split as the server splits a note, and a JSON block (the data, the envelope)
+// split the same way string by string, so a note repeated inside JSON, as 2.1.0's notes array
+// repeated it, is found sentence by sentence. A sentence is prose: words, ending in ".", "!" or
+// "?". A value is not one: a timestamp, a state, an id, a radar's name, or a failure's quoted cause
+// (error.message, which the message quotes inside its own sentence, #2313). The envelope carries
+// such values on purpose, and they are held equal to structuredContent by the check above.
+const IS_SENTENCE = /\s.*[.!?]$/;
+function readBlock(block) {
+  let strings;
+  try {
+    strings = stringsIn(JSON.parse(block));
+  } catch {
+    strings = [block];
+  }
+  const norm = strings.map((s) => s.replace(/\s+/g, " ").trim());
+  return { text: norm.join("\n"), sentences: norm.flatMap(noteSentences).filter((s) => IS_SENTENCE.test(s)) };
+}
+// The repeats a success's note makes on purpose, each a sentence the data block before it (the API's
+// JSON verbatim, #1874) also carries: the API's own method, which cve_exposure's note quotes
+// ("Method: …", #2306), and Shodan's ownership, which a note on Shodan-derived data states (#2306)
+// and such an answer's attribution string can state too (#2353). Only the note of a three-block
+// success makes them; the same sentence in any other block, or in a result of any other shape, is a
+// repeat like any other.
+function quotedOnPurpose(res, i, s) {
+  if (res.isError || textBlocks(res).length !== 3 || i !== 1) return false;
+  const method = res.structuredContent?.data?.method;
+  return s === SHODAN_OWNERSHIP || (typeof method === "string" && noteSentences(method).includes(s));
+}
+// Per block: its sentences, the ones an earlier block holds verbatim, and of those the ones not
+// quoted on purpose. The envelope block is the last. Returns three shares: the envelope block's;
+// every block's after the first (all); and the same less the quotes on purpose (other).
+function repeatShare(res) {
+  const read = textBlocks(res).map(readBlock);
+  const blocks = read.map((b, i) => {
+    const repeated = b.sentences.filter((s) => read.slice(0, i).some((e) => e.text.includes(s)));
+    return { sentences: b.sentences, repeated, other: repeated.filter((s) => !quotedOnPurpose(res, i, s)) };
+  });
+  const share = (bs, key) => {
+    const n = bs.reduce((k, b) => k + b.sentences.length, 0);
+    const r = bs.reduce((k, b) => k + b[key].length, 0);
+    return { sentences: n, repeated: r, share: n ? r / n : 0 };
+  };
+  return { blocks, envelope: share(blocks.slice(-1), "repeated"), all: share(blocks.slice(1), "repeated"), other: share(blocks.slice(1), "other") };
+}
+// The property, as numbers: the envelope block's repeat share is 0, and so is every block's besides
+// the quotes on purpose. The test over every result and its control both call this.
+function assertNoRepeat(where, res) {
+  const r = repeatShare(res);
+  assert.equal(r.envelope.share, 0, `${where}: the envelope block's repeat share is ${r.envelope.share}, ${r.envelope.repeated} of its ${r.envelope.sentences} sentences said by an earlier block: ${JSON.stringify(r.blocks.at(-1).repeated)}`);
+  assert.equal(r.other.share, 0, `${where}: the repeat share across its blocks is ${r.other.share}, ${r.other.repeated} of ${r.other.sentences} sentences said by an earlier block: ${JSON.stringify(r.blocks.flatMap((b) => b.other))}`);
+  return r;
 }
 
 // #2307: every numeric field exposure_radar may relay under shadow_ai, by normalised path
@@ -3131,6 +3189,114 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2610: cve_summary relays summary.none as the API sends it, and says what it counts. core-backend
+  // cve/store.go Summary buckets the active CVEs on effectiveSeverityExpr (the EchelonGraph band,
+  // else NVD's, else the CVSS v2 band, else NONE, a NONE or UNKNOWN band counting as none), so
+  // summary.none is the CVEs with no severity band from any source, and the store sends it again as
+  // summary.unscored ("the residual band-less bucket … numerically identical to None"). It is not a
+  // count of CVEs rated severity None. Production answered none 3,381 and unscored 3,381 on
+  // 2026-09-30, and a model handed 2.3.1's "counts by severity (… summary.none)" reports 3,381 CVEs
+  // rated None: #2535's defect, in aggregate. The note labels a none above zero and names unscored as
+  // the same count only when the answer carries it equal; a zero is not labelled.
+  describe("#2610: cve_summary says summary.none counts CVEs not yet scored, never CVEs rated None", () => {
+    const P = "/api/v1/public/cves/summary";
+    const OK = BODIES[P].ok;
+    const withSummary = (fields) => ({ ...OK, summary: { ...OK.summary, ...fields } });
+    const STAMP = OK.summary.last_updated;
+    // The four bands, which with none (and so with unscored) add up to total, as in store.go.
+    const BANDED = OK.summary.critical + OK.summary.high + OK.summary.medium + OK.summary.low;
+    // cve_summary against a body served for this call only.
+    async function summary(body) {
+      stub.state.mode = "ok";
+      stub.state.overrides[P] = body;
+      try {
+        const res = await client.callTool({ name: "cve_summary", arguments: {} });
+        assert.notEqual(res.isError, true, brief(res));
+        return res;
+      } finally {
+        delete stub.state.overrides[P];
+      }
+    }
+    const label = (none) => `summary.none (${none}) is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored.`;
+    const REPORT = "Report them as not yet scored, not as CVEs rated None.";
+    // The property, for a note relaying a summary.none above zero: it says what the count is, and how
+    // to report it. The tests and the control below all call this.
+    function assertNoneLabelled(where, note, none) {
+      assert.ok(note.includes(label(none)), `${where}: the note does not say what summary.none (${none}) counts: ${note}`);
+      assert.ok(note.includes(REPORT), `${where}: the note does not say how to report summary.none: ${note}`);
+    }
+
+    it("the fixture (none 2487, unscored 2487): the note labels summary.none, names summary.unscored as the same count, and the JSON is relayed as sent", async () => {
+      const res = await summary(OK);
+      const n = noteOf(res);
+      assert.equal(
+        n,
+        `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 373505 active CVEs (last updated ${STAMP}). ${label(2487)} summary.unscored (2487) is the same count under its own name. ${REPORT}`,
+      );
+      assertNoneLabelled("cve_summary", n, 2487);
+      assert.deepEqual(JSON.parse(res.content[0].text), OK);
+      assert.deepEqual(res.structuredContent.data, OK);
+      assert.equal(res.structuredContent.state, "measured");
+      assert.ok(res.structuredContent.notes.includes(label(2487)), res.structuredContent.notes.join(" | "));
+    });
+
+    it("production's answer of 2026-09-30 (none 3381, unscored 3381): labelled, with the equality named", async () => {
+      const body = withSummary({ none: 3381, unscored: 3381, total: BANDED + 3381 });
+      const res = await summary(body);
+      const n = noteOf(res);
+      assertNoneLabelled("cve_summary", n, 3381);
+      assert.ok(n.includes("summary.unscored (3381) is the same count under its own name."), n);
+      assert.deepEqual(res.structuredContent.data, body);
+    });
+
+    it("an answer that carries no summary.unscored: labelled, and unscored is not named", async () => {
+      const { unscored: _u, ...trimmed } = OK.summary;
+      const n = noteOf(await summary({ ...OK, summary: trimmed }));
+      assertNoneLabelled("cve_summary", n, 2487);
+      assert.doesNotMatch(n, /unscored/, n);
+    });
+
+    it("an answer whose summary.unscored is not summary.none: labelled, and no equality is claimed", async () => {
+      const n = noteOf(await summary(withSummary({ unscored: 2400 })));
+      assertNoneLabelled("cve_summary", n, 2487);
+      assert.doesNotMatch(n, /unscored/, n);
+    });
+
+    it("a populated feed whose summary.none is 0: the note is 2.3.1's, word for word", async () => {
+      const n = noteOf(await summary(withSummary({ none: 0, unscored: 0, total: BANDED })));
+      assert.equal(n, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds ${BANDED} active CVEs (last updated ${STAMP}).`);
+    });
+
+    it("the description says what summary.none counts, and the outputSchema describes none and unscored", async () => {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "cve_summary");
+      const d = t.description;
+      assert.ok(d.includes("the count with no band (summary.none)"), d);
+      assert.ok(d.includes("summary.none is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored, and the answer may carry the same count again as summary.unscored."), d);
+      assert.ok(d.includes("Whenever summary.none is above zero the note says so: report those CVEs as not yet scored, not as CVEs rated None."), d);
+      // 2.3.1 listed summary.none among the counts by severity.
+      assert.doesNotMatch(d, /by severity[^.]*\(summary\.critical[^)]*summary\.none/, d);
+      const s = branchOf(t.outputSchema, "measured").properties.data.properties.summary.properties;
+      assert.equal(s.none.description, "The active CVEs with no severity band from any source: CVEs not yet scored, not a severity rating of None.");
+      assert.equal(s.unscored.description, "The same count as none, under its own name.");
+      assert.deepEqual(s.unscored.type, ["number", "null"]);
+    });
+
+    it("the label check can fail: 2.3.1's note, the note with its label removed, and a note that calls the count a rating, are caught", async () => {
+      const n = noteOf(await summary(OK));
+      assertNoneLabelled("control", n, 2487);
+      for (const [what, mutant] of [
+        ["2.3.1's note", `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 373505 active CVEs (last updated ${STAMP}).`],
+        ["the label removed", n.replace(` ${label(2487)}`, "")],
+        ["the report sentence removed", n.replace(` ${REPORT}`, "")],
+        ["the count called a rating", n.replace(label(2487), "summary.none (2487): 2487 CVEs are rated severity None.")],
+        ["another count labelled", n.replace(label(2487), label(2486))],
+      ]) {
+        assert.throws(() => assertNoneLabelled(what, mutant, 2487), /the note does not say/, what);
+      }
+    });
+  });
+
   // #2467: what each result costs in the channel a model reads. 2.1.0's envelope block repeated
   // the note before it sentence for sentence (82% of exposure_radar's block on production's
   // answers) and nothing measured it, so the fold was silent. Each case below is one of the
@@ -3155,11 +3321,15 @@ describe(`against a stub API [${ERA}]`, () => {
     // get_cve were re-measured on purpose, from 1,085 to 1,115 and from 809 to 835: their fixtures
     // gained score_assessed true, as every scored row on the API carries it, 30 and 26 characters of
     // the first text block; their notes are unchanged. The two not-yet-scored cases are new, measured
-    // then. The other bounds are unchanged.
+    // then. At 2.3.2 (2026-09-30, #2610) cve_summary was re-measured on purpose, from 971 to 1,259:
+    // its fixture gained summary.unscored, equal to summary.none, as core-backend's store sends it (22
+    // characters of the first text block), and its note the three sentences that say what
+    // summary.none counts (266 characters); its envelope block is unchanged at 563. The other bounds
+    // are unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
-      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 971],
+      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 1_259],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
       ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 835],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
@@ -3167,6 +3337,18 @@ describe(`against a stub API [${ERA}]`, () => {
       ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_355],
       ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 1_803],
     ];
+    // #2531: the check itself, one function, so the control below runs the predicate the cases
+    // run. The text is every text block, with the stub's base URL counted as production's.
+    const sizeOf = (res) => {
+      const blocks = textBlocks(res).map((t) => t.split(stub.base).join(PROD_BASE));
+      return { total: blocks.reduce((n, t) => n + t.length, 0), envelope: blocks.at(-1).length };
+    };
+    function assertWithinBound(label, res, size) {
+      const { total } = sizeOf(res);
+      const bound = size + MARGIN;
+      assert.ok(total <= bound, `${label}: ${total} characters of text, over its bound of ${bound} (${size} measured, plus ${MARGIN})`);
+      return total;
+    }
     const measured = {};
     before(async () => {
       try {
@@ -3174,9 +3356,7 @@ describe(`against a stub API [${ERA}]`, () => {
           stub.state.mode = mode;
           Object.assign(stub.state.overrides, overrides);
           try {
-            const res = await client.callTool({ name, arguments: args });
-            const blocks = textBlocks(res).map((t) => t.split(stub.base).join(PROD_BASE));
-            measured[label] = { res, total: blocks.reduce((n, t) => n + t.length, 0), envelope: blocks.at(-1).length };
+            measured[label] = await client.callTool({ name, arguments: args });
           } finally {
             for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
           }
@@ -3188,13 +3368,36 @@ describe(`against a stub API [${ERA}]`, () => {
     for (const [label, , , , , is, size] of CASES) {
       const bound = size + MARGIN;
       it(`${label}: at most ${bound} characters of text (${size} measured, plus ${MARGIN})`, (t) => {
-        const { res, total, envelope } = measured[label];
+        const res = measured[label];
         // The bound is only about this case if the case is what it says it is.
         for (const [k, v] of Object.entries(is)) assert.equal(res.structuredContent[k], v, `${label}: ${k}`);
+        const { total, envelope } = sizeOf(res);
         t.diagnostic(`${label}: ${total} characters of text, ${envelope} of them the envelope block`);
-        assert.ok(total <= bound, `${label}: ${total} characters of text, over its bound of ${bound} (${size} measured when #2467 landed, plus ${MARGIN})`);
+        assertWithinBound(label, res, size);
       });
     }
+    // #2531: the bound can fail. The control runs assertWithinBound on cve_summary's measured result:
+    // as measured it passes; with its note grown to exactly the bound it still passes, and one
+    // character more fails; and at its measured size, one sentence more in the note fails, since a
+    // note's sentence is longer than MARGIN. Each oversized note is sized from the bound, not from the
+    // note, so a note that shrinks later leaves the control as sharp as it is today.
+    it("#2531: the bound can fail: an injected oversized note is over it, by as little as one character", () => {
+      const [label, , , , , , size] = CASES.find(([l]) => l === "cve_summary");
+      const res = measured[label];
+      const [data, note, env] = textBlocks(res);
+      const withNote = (n) => ({ ...res, content: [data, n, env].map((t) => ({ type: "text", text: t })) });
+      const total = assertWithinBound("control", res, size);
+      const pad = (k) => "x".repeat(Math.max(0, k));
+      assertWithinBound("control, its note grown to the bound", withNote(note + pad(size + MARGIN - total)), size);
+      const sentence = " summary.unscored (2487) is the same count under its own name.";
+      assert.ok(sentence.length > MARGIN, `the injected sentence is ${sentence.length} characters, within MARGIN`);
+      for (const [what, oversized] of [
+        ["one character over", note + pad(size + MARGIN - total + 1)],
+        ["one sentence more, at the measured size", note + pad(size - total) + sentence],
+      ]) {
+        assert.throws(() => assertWithinBound(what, withNote(oversized), size), /over its bound of/, what);
+      }
+    });
   });
 
   // 1.0.1: the version is read from package.json, so adoption per release is countable.
@@ -3359,6 +3562,64 @@ describe(`#2313: every structuredContent the suite received validates against it
       ["a key structuredContent does not have", withText(ok, [data, note, env(ok, { exposed_hosts: 229 })]), /rebuilt, is not structuredContent without data/],
     ]) {
       assert.throws(() => assertEnvelopeInText(label, res), message, label);
+    }
+  });
+  // #2531: the repeat share, as a number, over every result the suite received: the envelope
+  // block's, which is #2467's property (its trip-wire: any repeat between blocks), and every block's
+  // after the first. Printed per tool, the way the size test prints sizes, so a change reads from
+  // the run as a number. Measured on these fixtures at 2.3.2 (2026-09-30), in each era: 0 of the 562
+  // sentences in 244 envelope blocks; across every block after the first, 130 of 5,026, every one of
+  // them cve_exposure's note quoting its answer's own method (3 sentences an answer) or, once,
+  // Shodan's ownership, which that answer's attribution also says (quotedOnPurpose); 0 besides.
+  it("#2531: the repeat share, as a number: 0 in every result's envelope block, and 0 across its blocks besides what a note quotes on purpose", (t) => {
+    const per = {};
+    for (const [name, args, res] of COLLECTED) {
+      const r = assertNoRepeat(`${name}(${JSON.stringify(args)})`, res);
+      const o = (per[name] ??= { results: 0, envelope: [0, 0], all: [0, 0], other: [0, 0], highest: 0 });
+      o.results++;
+      for (const k of ["envelope", "all", "other"]) {
+        o[k][0] += r[k].repeated;
+        o[k][1] += r[k].sentences;
+      }
+      o.highest = Math.max(o.highest, r.all.share);
+    }
+    const share = ([r, n]) => `${r} of ${n} sentences, share ${n ? +(r / n).toFixed(3) : 0}`;
+    for (const [name, o] of Object.entries(per)) {
+      t.diagnostic(
+        `${name}: ${o.results} results; envelope blocks repeat ${share(o.envelope)}; every block after the first repeats ${share(o.all)} (highest in one result ${+o.highest.toFixed(3)}); less a note's quotes on purpose, ${share(o.other)}`,
+      );
+    }
+    // Not vacuous: every tool, envelope blocks that hold sentences, and the on-purpose quote exercised.
+    assert.deepEqual(Object.keys(per).sort(), [...TOOLS].sort());
+    const envelopeSentences = Object.values(per).reduce((k, o) => k + o.envelope[1], 0);
+    assert.ok(envelopeSentences >= 300, `only ${envelopeSentences} envelope-block sentences measured`);
+    assert.ok(per.cve_exposure.all[0] > 0, "no note quoted its answer's own method, so the on-purpose exception was never exercised");
+  });
+  it("#2531: the repeat share can fail: an injected duplicate block, 2.1.0's envelope block, and a quote outside the note are each above 0", () => {
+    const pick = (pred) => COLLECTED.find(([n, , r]) => pred(n, r))[2];
+    const feed = pick((n, r) => n === "cve_summary" && !r.isError);
+    const bad = pick((n, r) => n === "get_cve" && r.isError);
+    const exposed = pick((n, r) => n === "cve_exposure" && r.structuredContent.exposure_state === "exposed" && r.structuredContent.data.method === BACKEND_METHOD);
+    for (const r of [feed, bad, exposed]) assertNoRepeat("control", r);
+    // The exception is bounded: the note's method quote is counted, and is all that is excused.
+    const quoted = repeatShare(exposed);
+    assert.ok(quoted.all.share > 0 && quoted.other.share === 0, JSON.stringify(quoted.blocks.map((b) => b.repeated)));
+    const withText = (res, blocks) => ({ ...res, content: blocks.map((t) => ({ type: "text", text: t })) });
+    // 2.1.0's envelope block: structuredContent without data, the note's sentences and all.
+    const whole = (res) => JSON.stringify((({ data: _d, ...e }) => e)(res.structuredContent), null, 2);
+    const [data, note, env] = textBlocks(feed);
+    const [message, badEnv] = textBlocks(bad);
+    const [eData, eNote, eEnv] = textBlocks(exposed);
+    for (const [label, res, which] of [
+      ["the note block injected twice", withText(feed, [data, note, note, env]), "all"],
+      ["the envelope block injected twice", withText(feed, [data, note, env, env]), "envelope"],
+      ["2.1.0's envelope block, repeating the note", withText(feed, [data, note, whole(feed)]), "envelope"],
+      ["a failure's message injected twice", withText(bad, [message, message, badEnv]), "all"],
+      ["cve_exposure's data block injected twice, method and all", withText(exposed, [eData, eData, eNote, eEnv]), "all"],
+    ]) {
+      const r = repeatShare(res);
+      assert.ok(r[which].share > 0, `${label}: the ${which} share is ${r[which].share}`);
+      assert.throws(() => assertNoRepeat(label, res), /repeat share/, label);
     }
   });
   it("every structuredContent validates against its tool's advertised outputSchema, and isError agrees with its state", () => {
