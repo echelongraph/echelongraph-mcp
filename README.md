@@ -17,7 +17,7 @@ API call a tool needs to answer.
 
 | Tool | What it does |
 |---|---|
-| `cve_summary` | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), and when the feed was last updated. |
+| `cve_summary` | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), the same CVEs counted by NVD's severity label, as provenance (`summary.nvd_critical` to `summary.nvd_none`), the rejected (withdrawn) records outside the total (`summary.rejected`), and when the feed was last updated. |
 | `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; the note names each row not yet scored. |
 | `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
 | `cve_exposure` | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. |
@@ -25,6 +25,30 @@ API call a tool needs to answer.
 
 Every figure is as fresh as the schedule that refreshes it. The CVE feed is polled from its
 sources on a schedule; each radar refreshes on its own.
+
+### How `cve_summary` reads its counts
+
+`summary.critical`, `summary.high`, `summary.medium` and `summary.low` count the active CVEs by
+severity band, and `summary.total` counts them all. `summary.none` counts the active CVEs with no
+severity band from any source: CVEs not yet scored, not CVEs rated None. The answer sends the same
+count again as `summary.unscored`.
+
+`summary.nvd_critical`, `summary.nvd_high`, `summary.nvd_medium`, `summary.nvd_low` and
+`summary.nvd_none` count the same active CVEs a second time, by NVD's CVSS severity label (v3.x,
+else v4.0). Before NVD's record arrives, or where it gives none, a pre-NVD label from the CVE.org
+record or a GitHub advisory can stand in. They are provenance, never EchelonGraph's severity band. `summary.nvd_none` counts the active CVEs with no
+Critical, High, Medium or Low label there, and many of those carry an NVD CVSS v2 score instead, so
+it is neither a count of CVEs rated None nor the count of CVEs with no severity, which is
+`summary.none`.
+
+`summary.rejected` counts the CVE records rejected (withdrawn) by their numbering authority.
+`summary.total` and the other counts leave them out, and they are withdrawn records, never
+vulnerabilities.
+
+The tool relays the API's JSON as it was sent. When `summary.none`, `summary.nvd_none` or
+`summary.rejected` is above zero, the note says what it counts, with the number from the answer.
+The note says the five NVD counts add up to `summary.total` only when the answer's do, and says
+nothing about a field the answer does not carry.
 
 ### How `get_cve` and `search_cves` read the EchelonGraph score
 

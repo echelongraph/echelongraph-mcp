@@ -508,6 +508,45 @@ function summaryNoneNote(d: object): string {
   return ` summary.none (${none}) is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored.${same} Report them as not yet scored, not as CVEs rated None.`;
 }
 
+// ── summary.nvd_*, NVD's label, and summary.rejected (#2641) ──
+//
+// core-backend cve/store.go Summary sends a second histogram beside the first: nvd_critical,
+// nvd_high, nvd_medium, nvd_low and nvd_none bucket the same active CVEs on the records' own
+// `severity` column instead of effectiveSeverityExpr. That column holds NVD's CVSS label (v3.1, else
+// v3.0, else v4.0: cve/poller.go). Before NVD's record arrives it holds a pre-NVD label, the CVE.org
+// record's (cve/mitre/convert.go) or a GitHub advisory's (vendoradv SeedStubCVEFromAdvisory), and
+// where NVD's record gives none, CISA's Vulnrichment v4 label can fill it (vulnrichment/backfill.go).
+// nvd_none counts every active CVE whose label there is none of CRITICAL, HIGH, MEDIUM or LOW.
+// CVESummary's own comment says to render it "as provenance, never as a rating", and nvd_none is
+// large by design: #1107 measured that the feed holds NVD's own CVSS v2 score for 72,359 of them.
+// So nvd_none is not a count of CVEs rated None, and not the count of CVEs with no severity, which
+// is summary.none. rejected is COUNT(*) of the rows whose vuln_status is REJECTED: records withdrawn
+// by their numbering authority, outside the active rows that total and both histograms count.
+// Through 2.3.3 the tool relayed all six fields with no word about any of them, and a model handed
+// nvd_none 75,962 beside a note about summary.none 3,408 (production, 2026-09-30) reports "75,962
+// CVEs rated None". The JSON is relayed as sent. As for summary.none, the note says what nvd_none
+// and rejected count, with the answer's own numbers, whenever each is above zero (a zero has no CVE
+// in it to misreport); it says the five nvd_ counts add up to summary.total only when the answer's
+// do; and an answer without the fields (an API older than them) gets no sentence about them.
+const NVD_HISTOGRAM = ["nvd_critical", "nvd_high", "nvd_medium", "nvd_low", "nvd_none"] as const;
+function summaryNVDNote(d: object): string {
+  const nvdNone = numAt(d, "summary", "nvd_none");
+  if (nvdNone === undefined || nvdNone <= 0) return "";
+  const counts = NVD_HISTOGRAM.map((k) => numAt(d, "summary", k));
+  const total = numAt(d, "summary", "total");
+  const present = NVD_HISTOGRAM.filter((_, i) => counts[i] !== undefined).map((k) => `summary.${k}`);
+  const adds = total !== undefined && counts.every((n) => n !== undefined) && counts.reduce<number>((a, n) => a + (n ?? 0), 0) === total;
+  const histogram = adds
+    ? ` ${listed(present)} add up to summary.total (${total}): the same active CVEs, counted by NVD's severity label as provenance, not by EchelonGraph's severity.`
+    : ` ${listed(present)} ${present.length === 1 ? "counts" : "count"} active CVEs by NVD's severity label, as provenance, not by EchelonGraph's severity.`;
+  return `${histogram} summary.nvd_none (${nvdNone}) is not a count of CVEs rated None, nor of CVEs with no severity: it counts the active CVEs with no Critical, High, Medium or Low CVSS label from NVD (v3.x, else v4.0) or a pre-NVD record, many of them with an NVD CVSS v2 score instead. Report them as CVEs without an NVD severity label, not as CVEs rated None or as CVEs not yet scored.`;
+}
+function summaryRejectedNote(d: object): string {
+  const rejected = numAt(d, "summary", "rejected");
+  if (rejected === undefined || rejected <= 0) return "";
+  return ` summary.rejected (${rejected}) counts CVE records rejected (withdrawn) by their numbering authority, not active CVEs: report them as withdrawn records, never as vulnerabilities.`;
+}
+
 async function cveSummary(): Promise<ToolResult> {
   const tool = "cve_summary";
   try {
@@ -529,14 +568,15 @@ async function cveSummary(): Promise<ToolResult> {
       ],
     };
     const total = numAt(r.data, "summary", "total");
-    const none = summaryNoneNote(r.data);
-    if (total === undefined) return succeeded(r.data, `${head}${none}`, env);
+    // What summary.none (#2610), the NVD histogram and summary.rejected (#2641) count.
+    const labels = `${summaryNoneNote(r.data)}${summaryNVDNote(r.data)}${summaryRejectedNote(r.data)}`;
+    if (total === undefined) return succeeded(r.data, `${head}${labels}`, env);
     if (total === 0) {
-      return succeeded(r.data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.${none}`, env);
+      return succeeded(r.data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.${labels}`, env);
     }
     // A stamp that is not a real instant stays in the JSON and is not repeated as prose.
     const stamp = realInstant(updated) ? ` (last updated ${updated})` : "";
-    return succeeded(r.data, `${head} The feed holds ${total} active CVEs${stamp}.${none}`, env);
+    return succeeded(r.data, `${head} The feed holds ${total} active CVEs${stamp}.${labels}`, env);
   } catch (e) {
     return crashed(tool, e);
   }
@@ -1866,6 +1906,9 @@ const CVERecord = z.looseObject({
   updated_at: opt(z.string()),
 });
 
+// One of the NVD histogram's four labelled buckets (#2641).
+const nvdBand = (label: string) =>
+  opt(z.number()).describe(`Of the active CVEs total counts, those whose NVD CVSS severity label is ${label}: NVD's label, as provenance, never EchelonGraph's severity band.`);
 const CVE_SUMMARY_OUTPUT = envelopeSchema({
   data: z.looseObject({
     summary: z
@@ -1878,6 +1921,16 @@ const CVE_SUMMARY_OUTPUT = envelopeSchema({
         // #2610: the not-yet-scored bucket, not a rating (see summaryNoneNote).
         none: opt(z.number()).describe("The active CVEs with no severity band from any source: CVEs not yet scored, not a severity rating of None."),
         unscored: opt(z.number()).describe("The same count as none, under its own name."),
+        // #2641: NVD's label, as provenance, not a rating; and the withdrawn records (see
+        // summaryNVDNote and summaryRejectedNote).
+        nvd_critical: nvdBand("Critical"),
+        nvd_high: nvdBand("High"),
+        nvd_medium: nvdBand("Medium"),
+        nvd_low: nvdBand("Low"),
+        nvd_none: opt(z.number()).describe(
+          "Of the active CVEs total counts, those with no Critical, High, Medium or Low NVD CVSS severity label, many of them with an NVD CVSS v2 score instead: neither a count of CVEs rated None nor the count of CVEs with no severity, which is none.",
+        ),
+        rejected: opt(z.number()).describe("The CVE records rejected (withdrawn) by their numbering authority, which total and every other count here leave out: withdrawn records, never vulnerabilities."),
         last_updated: opt(z.string()),
       })
       .optional(),
@@ -2061,6 +2114,15 @@ const FEED_ENVELOPE =
 // reason as SCORE_ASSESSED_DESCRIPTION below.
 const SUMMARY_NONE_DESCRIPTION =
   "summary.none is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored, and the answer may carry the same count again as summary.unscored. Whenever summary.none is above zero the note says so: report those CVEs as not yet scored, not as CVEs rated None.";
+// #2641: what cve_summary says the NVD histogram and summary.rejected are (summaryNVDNote,
+// summaryRejectedNote), constant strings for the same reason. Neither uses the words "any", "not",
+// "rating", "scored", "source" or "yet": the site's #2610 control (marketing-site
+// lib/mcpToolClaims.test.ts) holds that exactly those words of the /pulse/mcp cve_summary row are
+// backed by SUMMARY_NONE_DESCRIPTION alone, and fails if another sentence backs one.
+const SUMMARY_NVD_DESCRIPTION =
+  "summary.nvd_critical, summary.nvd_high, summary.nvd_medium, summary.nvd_low and summary.nvd_none count the same active CVEs as summary.total by NVD's CVSS severity label (v3.x, else v4.0; before NVD's record arrives, or where it gives none, a pre-NVD label from the CVE.org record or a GitHub advisory can stand in): provenance, never EchelonGraph's severity band. summary.nvd_none counts the active CVEs with no Critical, High, Medium or Low label there, CVEs NVD never labelled under CVSS v3 among them, and many of those carry an NVD CVSS v2 score instead: it is neither a count of CVEs rated None nor the count of CVEs with no severity, which is summary.none. Whenever summary.nvd_none is above zero the note says what it counts, with its count.";
+const SUMMARY_REJECTED_DESCRIPTION =
+  "summary.rejected counts the CVE records rejected (withdrawn) by their numbering authority, which summary.total and the other counts above leave out: report them as withdrawn records, never as vulnerabilities.";
 // #2535: what search_cves and get_cve say about score_assessed, one constant string, since the
 // site's tool-claims check (marketing-site lib/mcpToolClaims.test.ts) folds only constant strings.
 const SCORE_ASSESSED_DESCRIPTION =
@@ -2075,7 +2137,7 @@ function createServer(): McpServer {
     "cve_summary",
     {
       title: "CVE feed summary",
-      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
+      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
       outputSchema: CVE_SUMMARY_OUTPUT,
       annotations: ANNOTATIONS,
     },

@@ -357,14 +357,34 @@ const SCORE_ROWS = {
   [CVE_SCORE_UNSTATED]: { cve_id: CVE_SCORE_UNSTATED, echelongraph_score: 0, echelongraph_severity: "NONE", score_confidence: "NONE", kev_listed: false },
 };
 
+// #2641: production's /api/v1/public/cves/summary, read 2026-09-30T10:02:13Z through the
+// operator probe, whole: every one of the fourteen summary fields and the eight of the poller
+// block (core-backend cve/store.go CVESummary, cve/poller.go Stats), in the order it sent them.
+// Through 2.3.3 this fixture was trimmed to the fields the tests asserted on, so it held none of
+// nvd_critical, nvd_high, nvd_medium, nvd_low, nvd_none or rejected, and no test could see that
+// the tool relayed nvd_none (75,962, 22 times summary.none) with no word about what it counts.
+// Both histograms add up to total, as store.go Summary builds them.
+const PROD_CVE_SUMMARY = {
+  poller: { cves_ingested: 7195, cves_skipped: 51, http_retries: 0, interval: "20m0s", last_poll_at: "2026-09-30T09:46:50Z", last_poll_dur_ms: 1214, poll_count: 4, poll_errors: 0 },
+  summary: {
+    critical: 42887, high: 151750, medium: 168729, low: 14500, none: 3408, unscored: 3408, total: 381274,
+    nvd_critical: 39188, nvd_high: 121655, nvd_medium: 134157, nvd_low: 10312, nvd_none: 75962, rejected: 884,
+    last_updated: "2026-09-30T09:56:35.584Z",
+  },
+};
+
 // Stub bodies shaped like the live API answered on 2026-09-15, trimmed to the fields the
-// tests assert on. `ok` is a populated answer; `empty` is the genuine-nothing answer. The CVE
-// rows carry score_assessed true, as every scored row on the API does (#2535). The summary
-// carries unscored beside none, equal to it, as core-backend cve/store.go Summary sends it (#2610).
+// tests assert on, except cve_summary's, which is production's whole answer (#2641). `ok` is a
+// populated answer; `empty` is the genuine-nothing answer. The CVE rows carry score_assessed
+// true, as every scored row on the API does (#2535). The summary carries unscored beside none,
+// equal to it, as core-backend cve/store.go Summary sends it (#2610).
 const BODIES = {
   "/api/v1/public/cves/summary": {
-    ok: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 42038, high: 148562, medium: 166226, low: 14192, none: 2487, unscored: 2487, total: 373505, last_updated: "2026-09-15T04:47:02.406Z" } },
-    empty: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 0, high: 0, medium: 0, low: 0, none: 0, unscored: 0, total: 0, last_updated: "2026-09-15T04:47:02.406Z" } },
+    ok: PROD_CVE_SUMMARY,
+    empty: {
+      poller: PROD_CVE_SUMMARY.poller,
+      summary: { critical: 0, high: 0, medium: 0, low: 0, none: 0, unscored: 0, total: 0, nvd_critical: 0, nvd_high: 0, nvd_medium: 0, nvd_low: 0, nvd_none: 0, rejected: 0, last_updated: PROD_CVE_SUMMARY.summary.last_updated },
+    },
   },
   "/api/v1/public/cves": {
     ok: { cves: [{ cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, score_assessed: true, kev_listed: true }], limit: 2, offset: 0, total: 1 },
@@ -1060,7 +1080,7 @@ describe(`against a stub API [${ERA}]`, () => {
       });
     }
     it("cve_summary returns the feed totals", () => {
-      assert.equal(JSON.parse(results.cve_summary.content[0].text).summary.total, 373505);
+      assert.equal(JSON.parse(results.cve_summary.content[0].text).summary.total, 381274);
     });
     it("search_cves forwards the filters and returns the rows", () => {
       assert.ok(stub.state.seen.includes("/api/v1/public/cves?search=tomcat&limit=2"), `seen: ${stub.state.seen}`);
@@ -2951,7 +2971,7 @@ describe(`against a stub API [${ERA}]`, () => {
     it("cve_summary: measured, dated by summary.last_updated; get_cve: dated by the record's updated_at when it has one", async () => {
       const s = (await call("cve_summary")).structuredContent;
       assert.equal(s.state, "measured");
-      assert.equal(s.measured_at, "2026-09-15T04:47:02.406Z");
+      assert.equal(s.measured_at, "2026-09-30T09:56:35.584Z");
       assert.equal(s.freshness, null);
       const g = (await call("get_cve", { cve_id: CVE })).structuredContent;
       assert.equal(g.state, "measured");
@@ -3189,6 +3209,25 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // cve_summary against a body served for this call only (#2610, #2641).
+  async function cveSummaryWith(body) {
+    stub.state.mode = "ok";
+    stub.state.overrides["/api/v1/public/cves/summary"] = body;
+    try {
+      const res = await client.callTool({ name: "cve_summary", arguments: {} });
+      assert.notEqual(res.isError, true, brief(res));
+      return res;
+    } finally {
+      delete stub.state.overrides["/api/v1/public/cves/summary"];
+    }
+  }
+  // The answer with the named summary fields left out: what an API older than them sends.
+  const cveSummaryWithout = (...keys) => {
+    const ok = BODIES["/api/v1/public/cves/summary"].ok;
+    return { ...ok, summary: Object.fromEntries(Object.entries(ok.summary).filter(([k]) => !keys.includes(k))) };
+  };
+  const NVD_HISTOGRAM = ["nvd_critical", "nvd_high", "nvd_medium", "nvd_low", "nvd_none"];
+
   // #2610: cve_summary relays summary.none as the API sends it, and says what it counts. core-backend
   // cve/store.go Summary buckets the active CVEs on effectiveSeverityExpr (the EchelonGraph band,
   // else NVD's, else the CVSS v2 band, else NONE, a NONE or UNKNOWN band counting as none), so
@@ -3205,18 +3244,7 @@ describe(`against a stub API [${ERA}]`, () => {
     const STAMP = OK.summary.last_updated;
     // The four bands, which with none (and so with unscored) add up to total, as in store.go.
     const BANDED = OK.summary.critical + OK.summary.high + OK.summary.medium + OK.summary.low;
-    // cve_summary against a body served for this call only.
-    async function summary(body) {
-      stub.state.mode = "ok";
-      stub.state.overrides[P] = body;
-      try {
-        const res = await client.callTool({ name: "cve_summary", arguments: {} });
-        assert.notEqual(res.isError, true, brief(res));
-        return res;
-      } finally {
-        delete stub.state.overrides[P];
-      }
-    }
+    const summary = cveSummaryWith;
     const label = (none) => `summary.none (${none}) is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored.`;
     const REPORT = "Report them as not yet scored, not as CVEs rated None.";
     // The property, for a note relaying a summary.none above zero: it says what the count is, and how
@@ -3226,18 +3254,17 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.ok(note.includes(REPORT), `${where}: the note does not say how to report summary.none: ${note}`);
     }
 
-    it("the fixture (none 2487, unscored 2487): the note labels summary.none, names summary.unscored as the same count, and the JSON is relayed as sent", async () => {
+    it("the fixture, production's whole answer (none 3408, unscored 3408): the note labels summary.none, names summary.unscored as the same count, and the JSON is relayed as sent", async () => {
       const res = await summary(OK);
       const n = noteOf(res);
-      assert.equal(
-        n,
-        `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 373505 active CVEs (last updated ${STAMP}). ${label(2487)} summary.unscored (2487) is the same count under its own name. ${REPORT}`,
-      );
-      assertNoneLabelled("cve_summary", n, 2487);
+      // The sentences after these are #2641's, pinned word for word in its block below.
+      const head = `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${label(3408)} summary.unscored (3408) is the same count under its own name. ${REPORT}`;
+      assert.ok(n.startsWith(`${head} `), n);
+      assertNoneLabelled("cve_summary", n, 3408);
       assert.deepEqual(JSON.parse(res.content[0].text), OK);
       assert.deepEqual(res.structuredContent.data, OK);
       assert.equal(res.structuredContent.state, "measured");
-      assert.ok(res.structuredContent.notes.includes(label(2487)), res.structuredContent.notes.join(" | "));
+      assert.ok(res.structuredContent.notes.includes(label(3408)), res.structuredContent.notes.join(" | "));
     });
 
     it("production's answer of 2026-09-30 (none 3381, unscored 3381): labelled, with the equality named", async () => {
@@ -3250,20 +3277,22 @@ describe(`against a stub API [${ERA}]`, () => {
     });
 
     it("an answer that carries no summary.unscored: labelled, and unscored is not named", async () => {
-      const { unscored: _u, ...trimmed } = OK.summary;
-      const n = noteOf(await summary({ ...OK, summary: trimmed }));
-      assertNoneLabelled("cve_summary", n, 2487);
+      const n = noteOf(await summary(cveSummaryWithout("unscored")));
+      assertNoneLabelled("cve_summary", n, 3408);
       assert.doesNotMatch(n, /unscored/, n);
     });
 
     it("an answer whose summary.unscored is not summary.none: labelled, and no equality is claimed", async () => {
-      const n = noteOf(await summary(withSummary({ unscored: 2400 })));
-      assertNoneLabelled("cve_summary", n, 2487);
+      const n = noteOf(await summary(withSummary({ unscored: 3400 })));
+      assertNoneLabelled("cve_summary", n, 3408);
       assert.doesNotMatch(n, /unscored/, n);
     });
 
-    it("a populated feed whose summary.none is 0: the note is 2.3.1's, word for word", async () => {
-      const n = noteOf(await summary(withSummary({ none: 0, unscored: 0, total: BANDED })));
+    // #2641: production's answer carries the NVD histogram and rejected too, which the note labels
+    // (the block below). An API older than those fields sends the shape 2.3.1 was written against.
+    it("a populated feed whose summary.none is 0, from an API with no NVD histogram and no rejected: the note is 2.3.1's, word for word", async () => {
+      const older = cveSummaryWithout(...NVD_HISTOGRAM, "rejected");
+      const n = noteOf(await summary({ ...older, summary: { ...older.summary, none: 0, unscored: 0, total: BANDED } }));
       assert.equal(n, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds ${BANDED} active CVEs (last updated ${STAMP}).`);
     });
 
@@ -3284,16 +3313,191 @@ describe(`against a stub API [${ERA}]`, () => {
 
     it("the label check can fail: 2.3.1's note, the note with its label removed, and a note that calls the count a rating, are caught", async () => {
       const n = noteOf(await summary(OK));
-      assertNoneLabelled("control", n, 2487);
+      assertNoneLabelled("control", n, 3408);
       for (const [what, mutant] of [
-        ["2.3.1's note", `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 373505 active CVEs (last updated ${STAMP}).`],
-        ["the label removed", n.replace(` ${label(2487)}`, "")],
+        ["2.3.1's note", `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds ${OK.summary.total} active CVEs (last updated ${STAMP}).`],
+        ["the label removed", n.replace(` ${label(3408)}`, "")],
         ["the report sentence removed", n.replace(` ${REPORT}`, "")],
-        ["the count called a rating", n.replace(label(2487), "summary.none (2487): 2487 CVEs are rated severity None.")],
-        ["another count labelled", n.replace(label(2487), label(2486))],
+        ["the count called a rating", n.replace(label(3408), "summary.none (3408): 3408 CVEs are rated severity None.")],
+        ["another count labelled", n.replace(label(3408), label(3407))],
       ]) {
-        assert.throws(() => assertNoneLabelled(what, mutant, 2487), /the note does not say/, what);
+        assert.throws(() => assertNoneLabelled(what, mutant, 3408), /the note does not say/, what);
       }
+    });
+  });
+
+  // #2641: cve_summary relays the NVD histogram and summary.rejected as the API sends them, and says
+  // what they count. core-backend cve/store.go Summary buckets the same active CVEs a second time, on
+  // the records' NVD severity label (nvd_critical, nvd_high, nvd_medium, nvd_low and nvd_none;
+  // CVESummary: "render it as provenance, never as a rating"), and counts the rejected records apart
+  // (rejected, which total leaves out). nvd_none is large by design: 75,962 in production's answer
+  // beside summary.none 3,408, and #1107 measured that the feed holds NVD's own CVSS v2 score for
+  // 72,359 of them. 2.3.3 relayed all six fields with no word about any, and its fixture carried none
+  // of them, so no test could see it: a model reports "75,962 CVEs rated None", or "NVD has no
+  // severity for 75,962 CVEs". The note labels nvd_none and rejected above zero, with the answer's own
+  // counts; it says the five nvd_ counts add up to summary.total only when the answer's do; and it
+  // says nothing of a field the answer does not carry.
+  describe("#2641: cve_summary says the nvd_ counts are NVD's label as provenance, what summary.nvd_none counts, and what summary.rejected counts", () => {
+    const P = "/api/v1/public/cves/summary";
+    const OK = BODIES[P].ok;
+    const withSummary = (fields) => ({ ...OK, summary: { ...OK.summary, ...fields } });
+    const STAMP = OK.summary.last_updated;
+    const summary = cveSummaryWith;
+    // #2610's sentences about summary.none on the fixture, which come first.
+    const NONE_NOTE = "summary.none (3408) is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored. summary.unscored (3408) is the same count under its own name. Report them as not yet scored, not as CVEs rated None.";
+    const ALL_FIVE = "summary.nvd_critical, summary.nvd_high, summary.nvd_medium, summary.nvd_low and summary.nvd_none";
+    const addsUp = (total) => `${ALL_FIVE} add up to summary.total (${total}): the same active CVEs, counted by NVD's severity label as provenance, not by EchelonGraph's severity.`;
+    const nvdNoneLabel = (k) =>
+      `summary.nvd_none (${k}) is not a count of CVEs rated None, nor of CVEs with no severity: it counts the active CVEs with no Critical, High, Medium or Low CVSS label from NVD (v3.x, else v4.0) or a pre-NVD record, many of them with an NVD CVSS v2 score instead.`;
+    const NVD_REPORT = "Report them as CVEs without an NVD severity label, not as CVEs rated None or as CVEs not yet scored.";
+    const rejectedLabel = (k) => `summary.rejected (${k}) counts CVE records rejected (withdrawn) by their numbering authority, not active CVEs: report them as withdrawn records, never as vulnerabilities.`;
+    // The properties the tests and the control below all call. For a note relaying a summary.nvd_none
+    // above zero: it says the nvd_ counts are NVD's label, as provenance, what nvd_none counts with the
+    // answer's own count, and how to report it.
+    function assertNVDNoneLabelled(where, note, k) {
+      assert.match(note, /by NVD's severity label,? as provenance, not by EchelonGraph's severity\./, `${where}: the note does not say the nvd_ counts are NVD's label, as provenance: ${note}`);
+      assert.ok(note.includes(nvdNoneLabel(k)), `${where}: the note does not say what summary.nvd_none (${k}) counts: ${note}`);
+      assert.ok(note.includes(NVD_REPORT), `${where}: the note does not say how to report summary.nvd_none: ${note}`);
+    }
+    // For a note relaying a summary.rejected above zero: it says what the count is, with its count.
+    function assertRejectedLabelled(where, note, k) {
+      assert.ok(note.includes(rejectedLabel(k)), `${where}: the note does not say what summary.rejected (${k}) counts: ${note}`);
+    }
+    // A note that says the nvd_ counts add up to summary.total says it of an answer whose five do.
+    // Returns whether the note says it.
+    function assertSumTrue(where, note, s) {
+      const m = note.match(/add up to summary\.total \((\d+)\)/);
+      if (!m) return false;
+      const sum = NVD_HISTOGRAM.reduce((a, k) => a + (typeof s[k] === "number" ? s[k] : NaN), 0);
+      assert.ok(sum === s.total && Number(m[1]) === s.total, `${where}: the note says the nvd_ counts add up to summary.total (${m[1]}); the answer's add up to ${sum}, and its total is ${s.total}`);
+      return true;
+    }
+
+    it("the fixture is production's whole answer, relayed as sent: its fourteen summary fields and eight poller fields, none stripped", async () => {
+      const res = await summary(OK);
+      const relayed = JSON.parse(res.content[0].text);
+      assert.deepEqual(relayed, OK);
+      assert.deepEqual(res.structuredContent.data, OK);
+      assert.deepEqual(Object.keys(relayed.summary), ["critical", "high", "medium", "low", "none", "unscored", "total", ...NVD_HISTOGRAM, "rejected", "last_updated"]);
+      assert.deepEqual(Object.keys(relayed.poller), ["cves_ingested", "cves_skipped", "http_retries", "interval", "last_poll_at", "last_poll_dur_ms", "poll_count", "poll_errors"]);
+    });
+
+    it("production's answer: the note says the five nvd_ counts add up to summary.total as NVD's label, labels summary.nvd_none (75962) and summary.rejected (884), word for word", async () => {
+      const res = await summary(OK);
+      const n = noteOf(res);
+      assert.equal(
+        n,
+        `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE} ${addsUp(381274)} ${nvdNoneLabel(75962)} ${NVD_REPORT} ${rejectedLabel(884)}`,
+      );
+      assertNVDNoneLabelled("cve_summary", n, 75962);
+      assertRejectedLabelled("cve_summary", n, 884);
+      assert.equal(assertSumTrue("cve_summary", n, OK.summary), true);
+      for (const sentence of [addsUp(381274), nvdNoneLabel(75962), NVD_REPORT, rejectedLabel(884)]) {
+        assert.ok(res.structuredContent.notes.includes(sentence), `${sentence} | ${res.structuredContent.notes.join(" | ")}`);
+      }
+    });
+
+    it("an answer whose nvd_ counts do not add up to summary.total: labelled, and no sum is claimed", async () => {
+      const body = withSummary({ nvd_low: OK.summary.nvd_low + 1 });
+      const n = noteOf(await summary(body));
+      assertNVDNoneLabelled("cve_summary", n, 75962);
+      assert.equal(assertSumTrue("cve_summary", n, body.summary), false, n);
+      assert.ok(n.includes(`${ALL_FIVE} count active CVEs by NVD's severity label, as provenance, not by EchelonGraph's severity.`), n);
+    });
+
+    it("an answer that lacks an nvd_ band: labelled, the fields it carries named, and no sum claimed", async () => {
+      const n = noteOf(await summary(cveSummaryWithout("nvd_low")));
+      assertNVDNoneLabelled("cve_summary", n, 75962);
+      assert.doesNotMatch(n, /nvd_low|add up to/, n);
+      assert.ok(n.includes("summary.nvd_critical, summary.nvd_high, summary.nvd_medium and summary.nvd_none count active CVEs by NVD's severity label, as provenance, not by EchelonGraph's severity."), n);
+      const alone = noteOf(await summary(cveSummaryWithout("nvd_critical", "nvd_high", "nvd_medium", "nvd_low")));
+      assertNVDNoneLabelled("cve_summary", alone, 75962);
+      assert.ok(alone.includes(" summary.nvd_none counts active CVEs by NVD's severity label, as provenance, not by EchelonGraph's severity."), alone);
+    });
+
+    it("an API older than the NVD histogram and rejected: the note names neither and invents no count, and is 2.3.2's, word for word", async () => {
+      const n = noteOf(await summary(cveSummaryWithout(...NVD_HISTOGRAM, "rejected")));
+      assert.equal(n, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE}`);
+      assert.doesNotMatch(n, /nvd|NVD|rejected|withdrawn/, n);
+    });
+
+    it("a zero is not labelled: summary.nvd_none 0 gets no NVD sentence, summary.rejected 0 no rejected one, each apart from the other", async () => {
+      const noNVD = noteOf(await summary(withSummary({ nvd_none: 0 })));
+      assert.doesNotMatch(noNVD, /nvd_|NVD/, noNVD);
+      assertRejectedLabelled("cve_summary", noNVD, 884);
+      const noRejected = noteOf(await summary(withSummary({ rejected: 0 })));
+      assertNVDNoneLabelled("cve_summary", noRejected, 75962);
+      assert.doesNotMatch(noRejected, /rejected|withdrawn/, noRejected);
+      const neither = noteOf(await summary(withSummary({ nvd_none: 0, rejected: 0 })));
+      assert.equal(neither, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE}`);
+    });
+
+    it("a summary.none of 0 leaves the NVD and rejected sentences in place", async () => {
+      const n = noteOf(await summary(withSummary({ none: 0, unscored: 0 })));
+      assert.doesNotMatch(n, /summary\.none \(/, n);
+      assertNVDNoneLabelled("cve_summary", n, 75962);
+      assertRejectedLabelled("cve_summary", n, 884);
+    });
+
+    it("the description says what the nvd_ counts, summary.nvd_none and summary.rejected are, and the outputSchema describes each", async () => {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "cve_summary");
+      const d = t.description;
+      assert.ok(
+        d.includes(
+          `${ALL_FIVE} count the same active CVEs as summary.total by NVD's CVSS severity label (v3.x, else v4.0; before NVD's record arrives, or where it gives none, a pre-NVD label from the CVE.org record or a GitHub advisory can stand in): provenance, never EchelonGraph's severity band.`,
+        ),
+        d,
+      );
+      assert.ok(
+        d.includes(
+          "summary.nvd_none counts the active CVEs with no Critical, High, Medium or Low label there, CVEs NVD never labelled under CVSS v3 among them, and many of those carry an NVD CVSS v2 score instead: it is neither a count of CVEs rated None nor the count of CVEs with no severity, which is summary.none. Whenever summary.nvd_none is above zero the note says what it counts, with its count.",
+        ),
+        d,
+      );
+      assert.ok(
+        d.includes("summary.rejected counts the CVE records rejected (withdrawn) by their numbering authority, which summary.total and the other counts above leave out: report them as withdrawn records, never as vulnerabilities."),
+        d,
+      );
+      const s = branchOf(t.outputSchema, "measured").properties.data.properties.summary.properties;
+      for (const [k, label] of [["nvd_critical", "Critical"], ["nvd_high", "High"], ["nvd_medium", "Medium"], ["nvd_low", "Low"]]) {
+        assert.equal(s[k].description, `Of the active CVEs total counts, those whose NVD CVSS severity label is ${label}: NVD's label, as provenance, never EchelonGraph's severity band.`, k);
+      }
+      assert.equal(
+        s.nvd_none.description,
+        "Of the active CVEs total counts, those with no Critical, High, Medium or Low NVD CVSS severity label, many of them with an NVD CVSS v2 score instead: neither a count of CVEs rated None nor the count of CVEs with no severity, which is none.",
+      );
+      assert.equal(s.rejected.description, "The CVE records rejected (withdrawn) by their numbering authority, which total and every other count here leave out: withdrawn records, never vulnerabilities.");
+      for (const k of [...NVD_HISTOGRAM, "rejected"]) assert.deepEqual(s[k].type, ["number", "null"], k);
+    });
+
+    it("the label checks can fail: 2.3.3's note, each label removed, another count, nvd_none called a rating, rejected called vulnerabilities, and a sum the answer does not add up to, are caught", async () => {
+      const n = noteOf(await summary(OK));
+      assertNVDNoneLabelled("control", n, 75962);
+      assertRejectedLabelled("control", n, 884);
+      assert.equal(assertSumTrue("control", n, OK.summary), true);
+      const v233 = `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE}`;
+      for (const [what, mutant] of [
+        ["2.3.3's note", v233],
+        ["the histogram sentence removed", n.replace(` ${addsUp(381274)}`, "")],
+        ["the nvd_none label removed", n.replace(` ${nvdNoneLabel(75962)}`, "")],
+        ["the nvd_none report sentence removed", n.replace(` ${NVD_REPORT}`, "")],
+        ["nvd_none called a rating", n.replace(nvdNoneLabel(75962), "summary.nvd_none (75962): 75962 CVEs are rated severity None.")],
+        ["another nvd_none count", n.replace(nvdNoneLabel(75962), nvdNoneLabel(75961))],
+      ]) {
+        assert.throws(() => assertNVDNoneLabelled(what, mutant, 75962), /the note does not say/, what);
+      }
+      for (const [what, mutant] of [
+        ["2.3.3's note", v233],
+        ["the rejected label removed", n.replace(` ${rejectedLabel(884)}`, "")],
+        ["rejected called vulnerabilities", n.replace(rejectedLabel(884), "summary.rejected (884) counts 884 rejected vulnerabilities.")],
+        ["another rejected count", n.replace(rejectedLabel(884), rejectedLabel(883))],
+      ]) {
+        assert.throws(() => assertRejectedLabelled(what, mutant, 884), /the note does not say/, what);
+      }
+      // The sum sentence, said of an answer whose nvd_ counts do not add up to its total.
+      const off = { ...OK.summary, nvd_low: OK.summary.nvd_low + 1 };
+      assert.throws(() => assertSumTrue("a sum the answer does not add up to", n, off), /add up to/);
     });
   });
 
@@ -3324,12 +3528,19 @@ describe(`against a stub API [${ERA}]`, () => {
     // then. At 2.3.2 (2026-09-30, #2610) cve_summary was re-measured on purpose, from 971 to 1,259:
     // its fixture gained summary.unscored, equal to summary.none, as core-backend's store sends it (22
     // characters of the first text block), and its note the three sentences that say what
-    // summary.none counts (266 characters); its envelope block is unchanged at 563. The other bounds
-    // are unchanged.
+    // summary.none counts (266 characters); its envelope block is unchanged at 563. After 2.3.3
+    // (2026-09-30, #2641) cve_summary was re-measured on purpose, from 1,259 to 2,338. Its fixture
+    // became production's whole answer, read 2026-09-30T10:02:13Z, whose data block is 590 characters
+    // where the trimmed fixture's was 275: the five nvd_ counts, rejected, and the seven poller fields
+    // it had left out. On that answer 2.3.3's own text measures 1,574 (#2641 measured 1,571 on the
+    // answer of 09:45Z), so the bound of 1,259 had never been measured against what a production
+    // client receives. The note gains the four sentences that say the nvd_ counts are NVD's label, as
+    // provenance, and what summary.nvd_none and summary.rejected count (764 characters, from 421 to
+    // 1,185); the envelope block is unchanged at 563. The other bounds are unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
-      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 1_259],
+      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_338],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
       ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 835],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
@@ -3389,7 +3600,7 @@ describe(`against a stub API [${ERA}]`, () => {
       const total = assertWithinBound("control", res, size);
       const pad = (k) => "x".repeat(Math.max(0, k));
       assertWithinBound("control, its note grown to the bound", withNote(note + pad(size + MARGIN - total)), size);
-      const sentence = " summary.unscored (2487) is the same count under its own name.";
+      const sentence = " summary.unscored (3408) is the same count under its own name.";
       assert.ok(sentence.length > MARGIN, `the injected sentence is ${sentence.length} characters, within MARGIN`);
       for (const [what, oversized] of [
         ["one character over", note + pad(size + MARGIN - total + 1)],
