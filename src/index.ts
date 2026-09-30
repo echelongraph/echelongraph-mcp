@@ -398,6 +398,96 @@ const CVE_FEED_METHOD =
 const NO_FEED_FRESHNESS =
   "freshness is null: the CVE feed's answer carries no time at which its pollers last completed a poll for the feed as a whole.";
 
+// ── The EchelonGraph score, and score_assessed (#2535) ──
+//
+// score_assessed is what makes echelongraph_score readable (core-backend cve/store.go, the CVE
+// struct's ScoreAssessed, migration 097). true: EchelonGraph scored the CVE. false: it could not,
+// and the scorer's echelongraph_score is 0 as a PLACEHOLDER, not a rating (cve/scoring/scorer.go
+// Output.Assessed: no real assessment has scored below 0.4, so a 0 is always an absence). The
+// fields derived from the score hold placeholders too: echelongraph_severity NONE and
+// echelongraph_risk 0, beside score_confidence NONE and a score_rationale saying no assessment is
+// available (scorer.go Rule 0 and Rule 7). store.go scanFullCVE, which both endpoints these tools
+// call marshal through, withholds echelongraph_score, echelongraph_severity and echelongraph_risk
+// on the FLAG, never on the value (#1106, #1949); an API before those sent the placeholders, and 0
+// is the bottom of every sort. score_unassessed_reason says why: no_signal (no source has
+// published severity data yet, so the CVE is revisited when one does) or rejected (the record was
+// withdrawn by its numbering authority, and is never scored). The API never omits score_assessed,
+// so an answer without it comes from an API older than migration 097.
+//
+// A model handed echelongraph_score 0 reports "EG score 0, no risk", which is how CVE-2026-41566
+// was indexed as "EG 0.0" before it was scored. So the note labels each CVE whose answer says
+// score_assessed false, per CVE for get_cve and per row for search_cves: NOT YET SCORED, or NOT
+// SCORED for a rejected record, which never will be. A CVE whose answer carries no score_assessed
+// is labelled as one the answer does not say about. An assessed CVE's note is unchanged.
+//
+// The JSON is relayed as the API sent it, placeholders included: nothing is rewritten. The file
+// rewrites a not-assessed value in one place only, exposure_radar's newest_kev (newestKEVRow),
+// because that tool relays its own cut of each answer and its description says so. A tool that
+// relays the API's JSON verbatim labels instead, as cve_exposure labels a 0 outside the radar's
+// tracked set (exposure_state), and these two do the same.
+type ScoreState = "assessed" | "not_assessed" | "unstated";
+function scoreStateOf(rec: unknown): ScoreState {
+  const v = boolAt(rec, "score_assessed");
+  return v === true ? "assessed" : v === false ? "not_assessed" : "unstated";
+}
+const scoreRejected = (rec: unknown): boolean => strAt(rec, "score_unassessed_reason") === "rejected";
+// The fields that hold a placeholder, not a score, on a CVE that is not scored.
+const PLACEHOLDER_FIELDS = ["echelongraph_score", "echelongraph_severity", "echelongraph_risk"] as const;
+// No sentence below writes a digit: a note that says "0" beside "score" is the defect itself.
+const UNSTATED_SCORE =
+  "echelongraph_score is EchelonGraph's score only when score_assessed is true, so a zero echelongraph_score there is not a rating: it can be the placeholder a CVE not yet scored carries.";
+
+// get_cve's sentences about the one CVE's score, each starting with a space; none when the
+// answer says the CVE is scored.
+function cveScoreNote(cve: string, rec: object): string {
+  const state = scoreStateOf(rec);
+  if (state === "assessed") return "";
+  if (state === "unstated") {
+    return ` The answer does not say whether EchelonGraph has scored ${cve}: it carries no score_assessed (an API older than that field sends none). ${UNSTATED_SCORE}`;
+  }
+  const rejected = scoreRejected(rec);
+  const reportAs = rejected ? "not scored" : "not yet scored";
+  const head = rejected
+    ? ` (score_assessed: false) NOT SCORED: the record of ${cve} was rejected (withdrawn) by its numbering authority (score_unassessed_reason rejected), and EchelonGraph does not score a withdrawn record, so the record holds no EchelonGraph score for it.`
+    : ` (score_assessed: false) NOT YET SCORED: EchelonGraph has not yet scored ${cve}, so the record holds no EchelonGraph score for it, and the absence of one does not mean ${cve} is harmless.`;
+  const why = strAt(rec, "score_unassessed_reason") === "no_signal" ? " score_unassessed_reason is no_signal: no source has yet published severity data EchelonGraph can score." : "";
+  const carried = PLACEHOLDER_FIELDS.filter((k) => field(rec, k) !== undefined && field(rec, k) !== null);
+  const placeholders = carried.length
+    ? ` ${listed(carried)} ${carried.length === 1 ? "is a placeholder" : "are placeholders"}, not a score: report ${cve} as ${reportAs}, and do not repeat ${carried.length === 1 ? "that value" : "those values"} as its score.`
+    : ` Report ${cve} as ${reportAs}, not as a zero or low score.`;
+  return `${head}${why}${placeholders}`;
+}
+
+// search_cves' sentences about its rows' scores, naming each row a sentence is about, each
+// starting with a space; none when every row says it is scored.
+function rowsScoreNote(d: object): string {
+  const rows = field(d, "cves");
+  if (!Array.isArray(rows) || rows.length === 0) return "";
+  const n = rows.length;
+  const ids = (pred: (r: unknown) => boolean): string[] => rows.flatMap((r, i) => (pred(r) ? [strAt(r, "cve_id") ?? `cves[${i}]`] : []));
+  const notYet = ids((r) => scoreStateOf(r) === "not_assessed" && !scoreRejected(r));
+  const rejected = ids((r) => scoreStateOf(r) === "not_assessed" && scoreRejected(r));
+  const unstated = ids((r) => scoreStateOf(r) === "unstated");
+  const of = (k: number): string => (k < n ? `${k} of the ${n} CVEs in this page` : n === 1 ? "the 1 CVE in this page" : `all ${n} CVEs in this page`);
+  const out: string[] = [];
+  if (notYet.length) {
+    out.push(
+      `(score_assessed: false) NOT YET SCORED: ${of(notYet.length)} ${be(notYet.length)} not yet scored by EchelonGraph: ${listed(notYet)}. For each, echelongraph_score, echelongraph_severity and echelongraph_risk, where its row carries them, are placeholders, not a score, and the absence of a score does not mean the CVE is harmless: report each as not yet scored, not as a zero or low score.`,
+    );
+  }
+  if (rejected.length) {
+    out.push(
+      `(score_assessed: false) NOT SCORED: ${of(rejected.length)} ${rejected.length === 1 ? "has a record" : "have records"} rejected (withdrawn) by the numbering authority (score_unassessed_reason rejected), which EchelonGraph does not score: ${listed(rejected)}. For each, echelongraph_score, echelongraph_severity and echelongraph_risk, where its row carries them, are placeholders, not a score: report each as not scored.`,
+    );
+  }
+  if (unstated.length) {
+    out.push(
+      `The answer does not say whether EchelonGraph has scored ${of(unstated.length)}: ${listed(unstated)} (no score_assessed in ${unstated.length === 1 ? "its row" : "their rows"}; an API older than that field sends none). ${UNSTATED_SCORE}`,
+    );
+  }
+  return out.map((s) => ` ${s}`).join("");
+}
+
 async function cveSummary(): Promise<ToolResult> {
   const tool = "cve_summary";
   try {
@@ -477,24 +567,27 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
       relaxed === true
         ? " The API relaxed the search phrase to all of its words (search_relaxed is true), so these rows are a superset of the rows that match the phrase itself."
         : "";
+    // Then what each row's score is (#2535): empty when every row says it is scored, or there
+    // are no rows.
+    const tail = `${relaxedNote}${rowsScoreNote(r.data)}`;
     // A total the API did not count is not a count: the page's own rows are all that is known.
     if (counted === false) {
       const empty = shown === 0 && (offset ?? 0) === 0;
       return succeeded(
         r.data,
         empty
-          ? `${head} The query returned 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${relaxedNote}`
-          : `${head} The API did not count the matches (total_counted is false), so its total is not a count${shown === undefined ? "" : `; ${shown} returned in this page`}.${relaxedNote}`,
+          ? `${head} The query returned 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${tail}`
+          : `${head} The API did not count the matches (total_counted is false), so its total is not a count${shown === undefined ? "" : `; ${shown} returned in this page`}.${tail}`,
         env,
       );
     }
     const total = numAt(r.data, "total") ?? shown;
-    if (total === undefined) return succeeded(r.data, `${head}${relaxedNote}`, env);
+    if (total === undefined) return succeeded(r.data, `${head}${tail}`, env);
     if (total === 0 && floor !== true) {
-      return succeeded(r.data, `${head} The query matched 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${relaxedNote}`, env);
+      return succeeded(r.data, `${head} The query matched 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${tail}`, env);
     }
     const matched = floor === true ? `at least ${total} CVEs (total_is_lower_bound is true: the count stopped at that floor)` : `${total} CVEs`;
-    return succeeded(r.data, `${head} The query matched ${matched}${shown === undefined ? "" : `; ${shown} returned in this page`}.${relaxedNote}`, env);
+    return succeeded(r.data, `${head} The query matched ${matched}${shown === undefined ? "" : `; ${shown} returned in this page`}.${tail}`, env);
   } catch (e) {
     return crashed(tool, e);
   }
@@ -508,7 +601,8 @@ async function getCVE(cve_id: string): Promise<ToolResult> {
     const r = await api(`/api/v1/public/cves/${encodeURIComponent(id)}`);
     if (!r.ok) return failed(tool, r);
     const written = strAt(r.data, "updated_at");
-    return succeeded(r.data, `${okHead(tool, r.status)} Returned the record for ${strAt(r.data, "cve_id") ?? id}.`, {
+    const cve = strAt(r.data, "cve_id") ?? id;
+    return succeeded(r.data, `${okHead(tool, r.status)} Returned the record for ${cve}.${cveScoreNote(cve, r.data)}`, {
       state: "measured",
       measured_at: instantOrNull(written),
       method: CVE_FEED_METHOD,
@@ -1728,9 +1822,17 @@ const CVERecord = z.looseObject({
   cvss_v3_score: opt(z.number()),
   cvss_v4_score: opt(z.number()),
   cvss_v4_severity: opt(z.string()),
-  echelongraph_score: opt(z.number()),
-  echelongraph_severity: opt(z.string()),
+  // #2535: the score is a score only beside score_assessed true (see cveScoreNote).
+  echelongraph_score: opt(z.number()).describe("EchelonGraph's 0-10 score for the CVE: a score only when score_assessed is true. With score_assessed false it is a placeholder, not a rating."),
+  echelongraph_severity: opt(z.string()).describe("The severity band of echelongraph_score: a rating only when score_assessed is true. With score_assessed false it is a placeholder (NONE)."),
+  echelongraph_risk: opt(z.number()).describe("EchelonGraph's 0-100 risk priority, fused from the score, exploitation and automatability: a rating only when score_assessed is true. With score_assessed false it is a placeholder."),
   score_confidence: opt(z.string()),
+  score_assessed: opt(z.boolean()).describe(
+    "Whether EchelonGraph has scored the CVE. true: echelongraph_score, echelongraph_severity and echelongraph_risk are its score. false: the CVE is NOT YET SCORED, not scored 0, and any of those three it carries is a placeholder, not a rating; the API may leave them out. Absent (an API older than the field): the answer does not say whether the CVE was scored.",
+  ),
+  score_unassessed_reason: opt(z.string()).describe(
+    "Why score_assessed is false: no_signal, no source has yet published severity data EchelonGraph can score; or rejected, the record was withdrawn by its numbering authority and is never scored. Absent when the CVE is scored.",
+  ),
   epss_score: opt(z.number()),
   epss_percentile: opt(z.number()),
   kev_listed: opt(z.boolean()),
@@ -1932,6 +2034,10 @@ const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
 // What each description says about its structured result, naming only fields its schema holds.
 const FEED_ENVELOPE =
   "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the feed serves no poll-completion time) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
+// #2535: what search_cves and get_cve say about score_assessed, one constant string, since the
+// site's tool-claims check (marketing-site lib/mcpToolClaims.test.ts) folds only constant strings.
+const SCORE_ASSESSED_DESCRIPTION =
+  "echelongraph_score, echelongraph_severity and echelongraph_risk are EchelonGraph's score only when score_assessed is true. With score_assessed false the CVE is NOT YET SCORED, not scored 0: any of those three it carries (0, NONE, 0) is a placeholder, not a rating, and does not mean the CVE is harmless; the API may leave them out instead, score_confidence is NONE, and score_unassessed_reason says why (a rejected record, withdrawn by its numbering authority, is never scored, and the note says NOT SCORED). The note labels each such CVE NOT YET SCORED: report it that way, never as a score of 0. An answer with no score_assessed (an API older than that field) does not say whether the CVE was scored, the note says so, and a 0 there is not a rating either.";
 
 // One server, built per connection by serveStdio for whichever era the client opens with.
 // tools/list answers in registration order, which is the order below.
@@ -1953,7 +2059,7 @@ function createServer(): McpServer {
     "search_cves",
     {
       title: "Search CVEs",
-      description: `Search/list CVEs from EchelonGraph's CVE feed (NVD + MITRE-CNA pre-NVD + CISA-KEV + EPSS + GitHub GHSA, each polled on a schedule). Filter by severity, minimum CVSS, free text, and sort. Returns cves, each with cve_id, severity, cvss_v3_score, echelongraph_score, epss_score and kev_listed where the record has them, and the list's total, total_counted (false: the matches were not counted, so total is not a count), total_is_lower_bound (true: at least total), search_relaxed (true: a phrase was relaxed to all of its words), limit and offset. ${FEED_ENVELOPE} coverage repeats total, total_counted, total_is_lower_bound, search_relaxed, limit and offset, and gives returned, the rows in this page.`,
+      description: `Search/list CVEs from EchelonGraph's CVE feed (NVD + MITRE-CNA pre-NVD + CISA-KEV + EPSS + GitHub GHSA, each polled on a schedule). Filter by severity, minimum CVSS, free text, and sort. Returns cves, each with cve_id, severity, cvss_v3_score, echelongraph_score and score_assessed (whether EchelonGraph has scored it), epss_score and kev_listed where the record has them, and the list's total, total_counted (false: the matches were not counted, so total is not a count), total_is_lower_bound (true: at least total), search_relaxed (true: a phrase was relaxed to all of its words), limit and offset. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} coverage repeats total, total_counted, total_is_lower_bound, search_relaxed, limit and offset, and gives returned, the rows in this page.`,
       inputSchema: z.object({
         search: z.string().optional().describe("free-text search (product, vendor, or keyword, e.g. 'tomcat')"),
         severity: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]).optional().describe("filter to one severity"),
@@ -1971,7 +2077,7 @@ function createServer(): McpServer {
     "get_cve",
     {
       title: "CVE detail",
-      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${FEED_ENVELOPE}`,
+      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE}`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,

@@ -335,19 +335,42 @@ const CALLS = {
 };
 const TOOLS = Object.keys(CALLS);
 
+// #2535: score_assessed. A CVE EchelonGraph has not scored carries score_assessed false, and
+// any echelongraph_score it carries is a placeholder, not a rating (core-backend cve/store.go,
+// the CVE struct's ScoreAssessed). The API sends the key on every CVE row. Since #1106 and #1949
+// it withholds echelongraph_score, echelongraph_severity and echelongraph_risk on an unscored
+// row (store.go scanFullCVE) and still sends score_confidence NONE, the scorer's rationale and
+// score_unassessed_reason. An API before those sent the placeholders 0, NONE and 0: the shape a
+// model reads as "EG score 0", and how CVE-2026-41566 was indexed as "EG 0.0" before it was
+// scored. An API before migration 097 sent no score_assessed at all. Synthetic ids, one per shape.
+const CVE_UNSCORED_ZERO = "CVE-2099-20001"; // score_assessed false, placeholders sent: 0, NONE, 0
+const CVE_UNSCORED = "CVE-2099-20002"; // score_assessed false, placeholders withheld (production's shape)
+const CVE_UNSCORED_REJECTED = "CVE-2099-20003"; // score_assessed false, the record rejected
+const CVE_SCORE_UNSTATED = "CVE-2099-20004"; // no score_assessed, and a 0 score
+// cve/scoring/scorer.go Rule 7, verbatim: the rationale an unscored CVE carries.
+const NO_DATA_RATIONALE =
+  "No severity assessment is available for this CVE yet. No source has published a CVSS v3.1, v4.0 or v2.0 base score, it is not in CISA KEV, there is no GitHub Security Advisory, and the advisory text does not state a vendor severity we can parse. This is NOT a score of zero and NOT a statement that the CVE is harmless — it means we cannot yet assess it. The EchelonGraph score will populate as soon as any source publishes data.";
+const SCORE_ROWS = {
+  [CVE_UNSCORED_ZERO]: { cve_id: CVE_UNSCORED_ZERO, echelongraph_score: 0, echelongraph_severity: "NONE", echelongraph_risk: 0, score_confidence: "NONE", score_assessed: false, score_unassessed_reason: "no_signal", epss_score: 0.00041, kev_listed: false },
+  [CVE_UNSCORED]: { cve_id: CVE_UNSCORED, score_confidence: "NONE", score_rationale: NO_DATA_RATIONALE, score_assessed: false, score_unassessed_reason: "no_signal", epss_score: 0.00041, kev_listed: false },
+  [CVE_UNSCORED_REJECTED]: { cve_id: CVE_UNSCORED_REJECTED, score_confidence: "NONE", score_assessed: false, score_unassessed_reason: "rejected", kev_listed: false },
+  [CVE_SCORE_UNSTATED]: { cve_id: CVE_SCORE_UNSTATED, echelongraph_score: 0, echelongraph_severity: "NONE", score_confidence: "NONE", kev_listed: false },
+};
+
 // Stub bodies shaped like the live API answered on 2026-09-15, trimmed to the fields the
-// tests assert on. `ok` is a populated answer; `empty` is the genuine-nothing answer.
+// tests assert on. `ok` is a populated answer; `empty` is the genuine-nothing answer. The CVE
+// rows carry score_assessed true, as every scored row on the API does (#2535).
 const BODIES = {
   "/api/v1/public/cves/summary": {
     ok: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 42038, high: 148562, medium: 166226, low: 14192, none: 2487, total: 373505, last_updated: "2026-09-15T04:47:02.406Z" } },
     empty: { poller: { last_poll_at: "2026-09-15T04:45:07Z" }, summary: { critical: 0, high: 0, medium: 0, low: 0, none: 0, total: 0, last_updated: "2026-09-15T04:47:02.406Z" } },
   },
   "/api/v1/public/cves": {
-    ok: { cves: [{ cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, kev_listed: true }], limit: 2, offset: 0, total: 1 },
+    ok: { cves: [{ cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, score_assessed: true, kev_listed: true }], limit: 2, offset: 0, total: 1 },
     empty: { cves: [], limit: 2, offset: 0, total: 0 },
   },
   [`/api/v1/public/cves/${CVE}`]: {
-    ok: { cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, score_confidence: "HIGH", epss_score: 0.99999, kev_listed: true, kev_ransomware: false },
+    ok: { cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, score_confidence: "HIGH", score_assessed: true, epss_score: 0.99999, kev_listed: true, kev_ransomware: false },
     // The live API answers an unknown CVE with HTTP 404 and its own JSON message.
     empty: { status: 404, body: { error: `CVE not found: ${CVE}` } },
   },
@@ -2943,6 +2966,171 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2535: get_cve and search_cves relay echelongraph_score as the API sends it, and the note
+  // says what it is: a score only when score_assessed is true. For a CVE whose answer says
+  // score_assessed false the note says NOT YET SCORED (NOT SCORED for a rejected record) and
+  // never reads a 0 as a score; for one whose answer carries no score_assessed it says the
+  // answer does not say; for a scored CVE the note is what it was before #2535, word for word.
+  describe("#2535: an EchelonGraph score is a score only when score_assessed is true", () => {
+    const call = (name, args) => client.callTool({ name, arguments: args });
+    const GET = (id) => `/api/v1/public/cves/${id}`;
+    const LIST = "/api/v1/public/cves";
+    const SCORED = BODIES[GET(CVE)].ok;
+    const SCORED_ROW = BODIES[LIST].ok.cves[0];
+    // get_cve, or a one-page search_cves, against a body served for this call only.
+    async function served(p, body, name, args) {
+      stub.state.mode = "ok";
+      stub.state.overrides[p] = body;
+      try {
+        const res = await call(name, args);
+        assert.notEqual(res.isError, true, brief(res));
+        return res;
+      } finally {
+        delete stub.state.overrides[p];
+      }
+    }
+    const getCve = (body) => served(GET(body.cve_id), body, "get_cve", { cve_id: body.cve_id });
+    const searchPage = (rows) => served(LIST, { cves: rows, limit: 50, offset: 0, total: rows.length }, "search_cves", { search: "x", limit: 50 });
+    // A note that reads a 0 as a score says "0" somewhere: "EG score 0", "EG 0.0",
+    // "echelongraph_score: 0", "scored 0". The note's own score sentences write no digit, so once
+    // the base URL and the CVE ids are taken out, no 0 may be left in it.
+    function assertNoZeroRead(where, note) {
+      const bare = note.split(stub.base).join(" ").replace(/CVE-\d{4}-\d{4,}/g, " ").replace(/cves\[\d+\]/g, " ");
+      // A 0 or 0.0 standing alone, a sentence's last word included; not the 0 of 10, 200 or 0.5.
+      assert.doesNotMatch(bare, /(?<![\w.])0(?:\.0+)?(?!\.?\d|\w)/, `${where}: the note says 0: ${note}`);
+    }
+
+    it("the zero check can fail: the ways a note could read a 0 as a score are caught, and a note with none passes", () => {
+      const head = `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${CVE_UNSCORED_ZERO}.`;
+      assertNoZeroRead("control", head);
+      assertNoZeroRead("control", `${head} The query matched 10 CVEs, the first with an EPSS of 0.5.`);
+      for (const mutant of [" Its EG score is 0.", " EG 0.0.", " echelongraph_score: 0.", ` ${CVE_UNSCORED_ZERO} scored 0 (NONE).`]) {
+        assert.throws(() => assertNoZeroRead("mutant", head + mutant), /the note says 0/, mutant);
+      }
+    });
+
+    it("get_cve, score_assessed false with the placeholders 0, NONE and 0: NOT YET SCORED, each placeholder named, no 0 read as a score, the JSON relayed as sent", async () => {
+      const body = SCORE_ROWS[CVE_UNSCORED_ZERO];
+      const res = await getCve(body);
+      const n = noteOf(res);
+      assert.equal(
+        n,
+        `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${CVE_UNSCORED_ZERO}. (score_assessed: false) NOT YET SCORED: EchelonGraph has not yet scored ${CVE_UNSCORED_ZERO}, so the record holds no EchelonGraph score for it, and the absence of one does not mean ${CVE_UNSCORED_ZERO} is harmless. score_unassessed_reason is no_signal: no source has yet published severity data EchelonGraph can score. echelongraph_score, echelongraph_severity and echelongraph_risk are placeholders, not a score: report ${CVE_UNSCORED_ZERO} as not yet scored, and do not repeat those values as its score.`,
+      );
+      assertNoZeroRead("get_cve", n);
+      // Relayed as given: the placeholders stay in the JSON, and the note says what they are.
+      assert.deepEqual(JSON.parse(res.content[0].text), body);
+      assert.deepEqual(res.structuredContent.data, body);
+      assert.equal(res.structuredContent.state, "measured");
+      assert.ok(res.structuredContent.notes.includes("(score_assessed: false) NOT YET SCORED: EchelonGraph has not yet scored CVE-2099-20001, so the record holds no EchelonGraph score for it, and the absence of one does not mean CVE-2099-20001 is harmless."), res.structuredContent.notes.join(" | "));
+    });
+
+    it("get_cve, score_assessed false with the placeholders withheld (production's shape): NOT YET SCORED, and never a zero", async () => {
+      const res = await getCve(SCORE_ROWS[CVE_UNSCORED]);
+      const n = noteOf(res);
+      assert.equal(
+        n,
+        `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${CVE_UNSCORED}. (score_assessed: false) NOT YET SCORED: EchelonGraph has not yet scored ${CVE_UNSCORED}, so the record holds no EchelonGraph score for it, and the absence of one does not mean ${CVE_UNSCORED} is harmless. score_unassessed_reason is no_signal: no source has yet published severity data EchelonGraph can score. Report ${CVE_UNSCORED} as not yet scored, not as a zero or low score.`,
+      );
+      assertNoZeroRead("get_cve", n);
+      assert.deepEqual(res.structuredContent.data, SCORE_ROWS[CVE_UNSCORED]);
+    });
+
+    it("get_cve, score_assessed false for a rejected record: NOT SCORED, never NOT YET SCORED, since it never will be", async () => {
+      const n = noteOf(await getCve(SCORE_ROWS[CVE_UNSCORED_REJECTED]));
+      assert.match(n, /\(score_assessed: false\) NOT SCORED: the record of CVE-2099-20003 was rejected \(withdrawn\) by its numbering authority \(score_unassessed_reason rejected\), and EchelonGraph does not score a withdrawn record/, n);
+      assert.match(n, /Report CVE-2099-20003 as not scored, not as a zero or low score\.$/, n);
+      assert.doesNotMatch(n, /NOT YET SCORED|not yet scored/, n);
+      assertNoZeroRead("get_cve", n);
+    });
+
+    it("get_cve, no score_assessed in the answer: the note says the answer does not say, and never presents the 0 as a score", async () => {
+      const res = await getCve(SCORE_ROWS[CVE_SCORE_UNSTATED]);
+      const n = noteOf(res);
+      assert.equal(
+        n,
+        `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${CVE_SCORE_UNSTATED}. The answer does not say whether EchelonGraph has scored ${CVE_SCORE_UNSTATED}: it carries no score_assessed (an API older than that field sends none). echelongraph_score is EchelonGraph's score only when score_assessed is true, so a zero echelongraph_score there is not a rating: it can be the placeholder a CVE not yet scored carries.`,
+      );
+      // It does not say NOT YET SCORED either: the answer does not say that.
+      assert.doesNotMatch(n, /NOT YET SCORED|NOT SCORED|score_assessed: false/, n);
+      assertNoZeroRead("get_cve", n);
+      assert.deepEqual(res.structuredContent.data, SCORE_ROWS[CVE_SCORE_UNSTATED]);
+    });
+
+    it("get_cve, score_assessed true: the note is unchanged, word for word", async () => {
+      const res = await getCve(SCORED);
+      assert.equal(noteOf(res), `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${CVE}.`);
+      assert.equal(res.structuredContent.data.echelongraph_score, 9);
+    });
+
+    it("search_cves labels each row by its score_assessed: every unscored row named NOT YET SCORED, the rejected one NOT SCORED, the unstated one as not said, the scored one not at all", async () => {
+      const rows = [SCORED_ROW, SCORE_ROWS[CVE_UNSCORED_ZERO], SCORE_ROWS[CVE_UNSCORED], SCORE_ROWS[CVE_UNSCORED_REJECTED], SCORE_ROWS[CVE_SCORE_UNSTATED]];
+      const res = await searchPage(rows);
+      const n = noteOf(res);
+      assert.equal(
+        n,
+        `search_cves OK: EchelonGraph answered HTTP 200 from ${stub.base}. The query matched 5 CVEs; 5 returned in this page. ` +
+          `(score_assessed: false) NOT YET SCORED: 2 of the 5 CVEs in this page are not yet scored by EchelonGraph: ${CVE_UNSCORED_ZERO} and ${CVE_UNSCORED}. For each, echelongraph_score, echelongraph_severity and echelongraph_risk, where its row carries them, are placeholders, not a score, and the absence of a score does not mean the CVE is harmless: report each as not yet scored, not as a zero or low score. ` +
+          `(score_assessed: false) NOT SCORED: 1 of the 5 CVEs in this page has a record rejected (withdrawn) by the numbering authority (score_unassessed_reason rejected), which EchelonGraph does not score: ${CVE_UNSCORED_REJECTED}. For each, echelongraph_score, echelongraph_severity and echelongraph_risk, where its row carries them, are placeholders, not a score: report each as not scored. ` +
+          `The answer does not say whether EchelonGraph has scored 1 of the 5 CVEs in this page: ${CVE_SCORE_UNSTATED} (no score_assessed in its row; an API older than that field sends none). echelongraph_score is EchelonGraph's score only when score_assessed is true, so a zero echelongraph_score there is not a rating: it can be the placeholder a CVE not yet scored carries.`,
+      );
+      // The scored row is in no sentence about scores.
+      assert.ok(!n.includes(CVE), `the scored row ${CVE} is labelled: ${n}`);
+      assertNoZeroRead("search_cves", n);
+      assert.deepEqual(res.structuredContent.data.cves, rows);
+    });
+
+    it("search_cves, one row and it unscored: the 1 CVE in this page is NOT YET SCORED, by id", async () => {
+      const n = noteOf(await searchPage([SCORE_ROWS[CVE_UNSCORED_ZERO]]));
+      assert.match(n, /\(score_assessed: false\) NOT YET SCORED: the 1 CVE in this page is not yet scored by EchelonGraph: CVE-2099-20001\./, n);
+      assertNoZeroRead("search_cves", n);
+    });
+
+    it("search_cves, every row without score_assessed: the answer does not say, for all of them, and no 0 is read as a score", async () => {
+      const unstated = [SCORE_ROWS[CVE_SCORE_UNSTATED], { ...SCORE_ROWS[CVE_SCORE_UNSTATED], cve_id: "CVE-2099-20005" }];
+      const n = noteOf(await searchPage(unstated));
+      assert.match(n, /The answer does not say whether EchelonGraph has scored all 2 CVEs in this page: CVE-2099-20004 and CVE-2099-20005 \(no score_assessed in their rows; an API older than that field sends none\)\./, n);
+      assert.doesNotMatch(n, /NOT YET SCORED|NOT SCORED/, n);
+      assertNoZeroRead("search_cves", n);
+    });
+
+    it("search_cves, every row scored: the note is unchanged, word for word", async () => {
+      const n = noteOf(await searchPage([SCORED_ROW]));
+      assert.equal(n, `search_cves OK: EchelonGraph answered HTTP 200 from ${stub.base}. The query matched 1 CVEs; 1 returned in this page.`);
+    });
+
+    it("both descriptions say the score is a score only when score_assessed is true, and that an unscored CVE is NOT YET SCORED, not scored 0", async () => {
+      const { tools } = await client.listTools();
+      for (const name of ["search_cves", "get_cve"]) {
+        const t = tools.find((x) => x.name === name);
+        const d = t.description;
+        assert.ok(d.includes("echelongraph_score, echelongraph_severity and echelongraph_risk are EchelonGraph's score only when score_assessed is true."), `${name}: ${d}`);
+        assert.ok(d.includes("With score_assessed false the CVE is NOT YET SCORED, not scored 0: any of those three it carries (0, NONE, 0) is a placeholder, not a rating, and does not mean the CVE is harmless;"), `${name}: ${d}`);
+        assert.ok(d.includes("An answer with no score_assessed (an API older than that field) does not say whether the CVE was scored, the note says so, and a 0 there is not a rating either."), `${name}: ${d}`);
+        // The outputSchema describes the field, and the score fields beside it.
+        const data = branchOf(t.outputSchema, "measured").properties.data;
+        const rec = name === "get_cve" ? data : data.properties.cves.items;
+        assert.match(rec.properties.score_assessed.description, /^Whether EchelonGraph has scored the CVE\. true: echelongraph_score, echelongraph_severity and echelongraph_risk are its score\. false: the CVE is NOT YET SCORED, not scored 0/, name);
+        assert.deepEqual(rec.properties.score_assessed.type, ["boolean", "null"], name);
+        for (const f of ["echelongraph_score", "echelongraph_severity", "echelongraph_risk"]) {
+          assert.match(rec.properties[f].description, /only when score_assessed is true\. With score_assessed false it is a placeholder/, `${name} ${f}`);
+        }
+        assert.match(rec.properties.score_unassessed_reason.description, /^Why score_assessed is false: no_signal, .*; or rejected, /, name);
+      }
+    });
+
+    it("a score_assessed that is not a boolean is not relayed: the answer does not fit the outputSchema", async () => {
+      stub.state.overrides[GET(CVE)] = { ...SCORED, score_assessed: "false" };
+      try {
+        const res = await call("get_cve", { cve_id: CVE });
+        assertErrorResult("get_cve", res);
+        assertNames("get_cve", res, stub.base, /did not match this tool's output schema/, /score_assessed/);
+      } finally {
+        delete stub.state.overrides[GET(CVE)];
+      }
+    });
+  });
+
   // #2467: what each result costs in the channel a model reads. 2.1.0's envelope block repeated
   // the note before it sentence for sentence (82% of exposure_radar's block on production's
   // answers) and nothing measured it, so the fold was silent. Each case below is one of the
@@ -2963,15 +3151,21 @@ describe(`against a stub API [${ERA}]`, () => {
     // measured at 2.2.0 (2026-09-28)]. exposure_radar was raised on purpose at 2.3.0 (2026-09-29,
     // #2315), from 22,883 to 30,949: the fifth radar, mcp_servers, adds 8,066 characters, which are
     // its 29 labelled counts and 4 timestamps in data, the note sentence that labels each, and its
-    // clause in method and in the envelope's two notes. The other bounds are unchanged.
+    // clause in method and in the envelope's two notes. At 2.3.1 (2026-09-30, #2535) search_cves and
+    // get_cve were re-measured on purpose, from 1,085 to 1,115 and from 809 to 835: their fixtures
+    // gained score_assessed true, as every scored row on the API carries it, 30 and 26 characters of
+    // the first text block; their notes are unchanged. The two not-yet-scored cases are new, measured
+    // then. The other bounds are unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 971],
-      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_085],
-      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 809],
+      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
+      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 835],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
       ["search_cves, failed (an edge's HTTP 403 page)", "search_cves", CALLS.search_cves, "403", {}, { state: "failed" }, 705],
+      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_355],
+      ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 1_803],
     ];
     const measured = {};
     before(async () => {

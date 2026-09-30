@@ -18,13 +18,33 @@ API call a tool needs to answer.
 | Tool | What it does |
 |---|---|
 | `cve_summary` | Counts of active CVEs by severity, and when the feed was last updated. |
-| `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores. |
-| `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
+| `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; the note names each row not yet scored. |
+| `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
 | `cve_exposure` | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. |
 | `exposure_radar` | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. |
 
 Every figure is as fresh as the schedule that refreshes it. The CVE feed is polled from its
 sources on a schedule; each radar refreshes on its own.
+
+### How `get_cve` and `search_cves` read the EchelonGraph score
+
+`echelongraph_score` (0 to 10), its band `echelongraph_severity` and the risk priority
+`echelongraph_risk` (0 to 100) are EchelonGraph's score only when the record's
+`score_assessed` is `true`. A CVE EchelonGraph has not scored carries `score_assessed: false`,
+and it is **not yet scored**, not scored 0. The API leaves those three fields out on it, or (an
+API before that change) sends `0`, `NONE` and `0` as placeholders, which are not a rating and do
+not mean the CVE is harmless. Its `score_confidence` is `NONE`, and `score_unassessed_reason`
+says why: no source has yet published severity data EchelonGraph can score, or the record was
+rejected (withdrawn) by its numbering authority, and a rejected record is never scored.
+
+Both tools relay the API's JSON as it was sent, and the note says what the score is, for
+`get_cve` per CVE and for `search_cves` per row, naming each CVE it is about:
+
+| API answer | What the note says |
+|---|---|
+| `score_assessed: true` | Nothing more: the score is a score. |
+| `score_assessed: false` | **NOT YET SCORED**, tagged "(score_assessed: false)": report the CVE as not yet scored, never as a zero or low score. Each of `echelongraph_score`, `echelongraph_severity` and `echelongraph_risk` it carries is named as a placeholder. A rejected record is **NOT SCORED** instead. |
+| no `score_assessed` field | The answer does not say whether the CVE was scored (an API older than the field), and a zero `echelongraph_score` in it is not a rating. |
 
 ### How `cve_exposure` counts
 
