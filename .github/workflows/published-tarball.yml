@@ -22,6 +22,9 @@ name: Published tarball
 # would then be unable to see a broken release. A control that cannot find the sentence to
 # blank fails without alerting: a broken control proves nothing.
 #
+# A second job, `provenance`, checks daily that latest carries SLSA v1 provenance from
+# release.yml at refs/tags/v<latest>, with its own alert issue and its own control; see it below.
+#
 # GitHub disables scheduled workflows in a public repository after 60 days without activity
 # in it; re-enable this one from the Actions tab if that happens.
 
@@ -182,4 +185,129 @@ jobs:
         if: always() && env.CONTROL == 'true' && steps.test.outcome == 'success'
         run: |
           echo "::error::CONTROL FAILED: the suite PASSED against a package with the Shodan ownership sentence blanked. This job cannot detect a broken release."
+          exit 1
+
+  # npm's latest must carry SLSA v1 provenance from release.yml at refs/tags/v<latest>, built from
+  # the commit that tag points at today (.github/scripts/check-provenance.sh). A green Release run
+  # is not proof of that: a version published outside release.yml (2.3.2 and earlier were, by the
+  # maintainers' script with a token) runs its tag's Release green with publish and verify skipped.
+  # An attestation naming refs/tags/v<latest> also proves the tag existed when latest was published.
+  #
+  # It has its own alert issue, so a missing attestation is never reported as a failing test suite,
+  # and a green run closes only its own alert. Independent of the job above: each reports on its own.
+  #
+  # Control: with `control: true` it checks 2.3.2 instead of latest. 2.3.2 was published with a
+  # token and can never gain an attestation (npm attaches them at publish), so the check MUST fail
+  # and the alert MUST fire, marked as a control. A control whose check passes fails loudly.
+  provenance:
+    name: echelongraph-mcp@latest carries provenance from release.yml at its tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # This job's alert. It replaces the workflow-level title for this job only.
+      ISSUE_TITLE: Published echelongraph-mcp@latest has no provenance from release.yml at its tag
+      CONTROL_VERSION: "2.3.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "lts/*"
+          package-manager-cache: false
+
+      - name: The version to check, and the commit its tag points at
+        id: target
+        run: |
+          set -euo pipefail
+          if [ "$CONTROL" = true ]; then
+            VERSION="$CONTROL_VERSION"
+            echo "CONTROL: checking $PACKAGE@$VERSION, which has no attestation. The check must fail."
+          else
+            VERSION="$(npm view "$PACKAGE" dist-tags.latest --prefer-online)"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the version to check is '$VERSION', not MAJOR.MINOR.PATCH"; exit 1; }
+          # The tag as this repository serves it now; the checkout above is main, without tags.
+          # An annotated tag lists its commit on the peeled ^{} line, a lightweight one directly.
+          COMMIT="$(git ls-remote origin "refs/tags/v$VERSION^{}" | cut -f1)"
+          [ -n "$COMMIT" ] || COMMIT="$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)"
+          [ -n "$COMMIT" ] || { echo "::error::this repository has no tag v$VERSION, so the source $PACKAGE@$VERSION was published from is not public"; exit 1; }
+          echo "$PACKAGE@$VERSION; tag v$VERSION is commit $COMMIT"
+          {
+            echo "version=$VERSION"
+            echo "commit=$COMMIT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: SLSA v1 provenance from release.yml at the tag, built from that commit
+        id: check
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+          COMMIT: ${{ steps.target.outputs.commit }}
+        run: bash .github/scripts/check-provenance.sh "$VERSION" "$COMMIT"
+
+      # A real run alerts on any failure: a latest with no provenance, or none that can be read,
+      # is one users cannot trace to this repository. A control alerts only when the check failed.
+      - name: Open or comment on the provenance alert issue
+        if: failure() && (env.CONTROL != 'true' || steps.check.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.target.outputs.version }}
+          COMMIT: ${{ steps.target.outputs.commit }}
+          TARGET: ${{ steps.target.outcome }}
+          CHECK: ${{ steps.check.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BODY="$RUNNER_TEMP/alert.md"
+          {
+            if [ "$CONTROL" = true ]; then
+              echo "**CONTROL RUN. Not a real failure.** This run checked \`$PACKAGE@$CONTROL_VERSION\`, which was published without provenance, to prove this alert fires. Close this issue if it has no other comments."
+              echo
+            fi
+            echo "This run could not confirm that \`$PACKAGE@${VERSION:-latest}\` carries SLSA v1 provenance from \`.github/workflows/release.yml\` at \`refs/tags/v${VERSION:-?}\`."
+            echo
+            echo "- Version checked: \`${VERSION:-unknown}\`"
+            echo "- Tag's commit: \`${COMMIT:-unknown}\`"
+            echo "- Find the version and its tag: $TARGET"
+            echo "- Provenance check: ${CHECK:-skipped}"
+            echo "- Run: $RUN_URL"
+            echo
+            echo "An attestation is attached when a version is published and cannot be added later. If the check says the version has none, it was not published by release.yml; the way out is a new version released through release.yml."
+          } > "$BODY"
+          # Matched by exact title among open issues, as the test suite's alert is.
+          NUMBER="$(gh issue list --state open --limit 1000 --json number,title \
+            | node -e 'let r="";process.stdin.on("data",(d)=>r+=d).on("end",()=>{const m=JSON.parse(r).filter((i)=>i.title===process.env.ISSUE_TITLE).sort((a,b)=>a.number-b.number)[0];process.stdout.write(m?String(m.number):"")})')"
+          if [ -n "$NUMBER" ]; then
+            gh issue comment "$NUMBER" --body-file "$BODY"
+            echo "commented on #$NUMBER"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body-file "$BODY"
+          fi
+
+      - name: Close the provenance alert issue after a green run
+        if: success() && env.CONTROL != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.target.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          NUMBERS="$(gh issue list --state open --limit 1000 --json number,title \
+            | node -e 'let r="";process.stdin.on("data",(d)=>r+=d).on("end",()=>{process.stdout.write(JSON.parse(r).filter((i)=>i.title===process.env.ISSUE_TITLE).map((i)=>i.number).join(" "))})')"
+          if [ -z "$NUMBERS" ]; then
+            echo "no open provenance alert; nothing to close"
+            exit 0
+          fi
+          for N in $NUMBERS; do
+            gh issue close "$N" --comment "This run found that \`$PACKAGE@latest\` (\`$VERSION\`) carries SLSA v1 provenance from \`.github/workflows/release.yml\` at \`refs/tags/v$VERSION\`: $RUN_URL. Closing: the failure this issue reported no longer reproduces. A later failure opens a new issue."
+            echo "closed #$N"
+          done
+
+      - name: "Control: the provenance check must have failed"
+        if: always() && env.CONTROL == 'true' && steps.check.outcome == 'success'
+        run: |
+          echo "::error::CONTROL FAILED: the provenance check PASSED for $PACKAGE@$CONTROL_VERSION, which was published without provenance. This job cannot detect a latest without provenance."
           exit 1

@@ -9,10 +9,14 @@ name: Release
 #   publish  holds id-token: write. Downloads the tested tarball, checks it is byte for byte
 #            the one build tested, and publishes it with a provenance attestation.
 #   verify   reads the registry until it serves the version, and checks it serves the tested
-#            tarball with a provenance attestation that `npm audit signatures` verifies.
+#            tarball with a provenance attestation that `npm audit signatures` verifies, and that
+#            names this workflow at this tag and this commit (.github/scripts/check-provenance.sh).
 #
 # npm versions are immutable and cannot be taken back, only superseded. Every check that can
 # refuse a release runs before the publish.
+#
+# A tag whose version npm already has publishes nothing, and its run passes only if that version
+# carries provenance from this workflow at this tag (see "Is the version on npm yet").
 
 on:
   push:
@@ -88,12 +92,15 @@ jobs:
             echo "::error::$GITHUB_SHA is not on main. Release from a commit that main contains."; exit 1; }
           echo "$GITHUB_SHA is on main"
 
-      # Until trusted publishing is configured (#2317 in the maintainers' tracker), a release is
-      # published by the maintainers' script, and its tag is pushed here afterwards so the source
-      # of every published version is public. For such a tag this job still builds, tests and
-      # packs, and then PROVES the registry serves exactly what this commit packs (the step after
-      # Pack) instead of publishing; publish and verify are skipped. A tag whose version is not on
-      # npm yet publishes as before.
+      # A tag whose version npm already has publishes nothing: publish and verify are skipped. That
+      # is a re-run of a release, or a version published before trusted publishing, when the
+      # maintainers' script published with a token and pushed the tag afterwards (2.3.2 and
+      # earlier). For such a tag this job still builds, tests and packs, PROVES the registry serves
+      # exactly what this commit packs (the step after Pack), and FAILS unless the version carries
+      # SLSA v1 provenance from this workflow at this tag, built from this commit (the step after
+      # this one). So a green run always means a version with provenance. Before that check, 2.3.2's
+      # tag ran green with publish and verify skipped, and 2.3.2 has no attestation. A tag whose
+      # version is not on npm yet is published by the jobs below.
       - name: Is the version on npm yet
         id: registry
         env:
@@ -106,6 +113,13 @@ jobs:
             200) echo "::notice::$PACKAGE@$VERSION is already on npm: this run checks that the registry serves exactly what this commit packs, and publishes nothing"; echo "already=true" >> "$GITHUB_OUTPUT" ;;
             *)   echo "::error::the registry answered $CODE for $PACKAGE/$VERSION, not a clear yes or no. Not proceeding on an unclear answer."; exit 1 ;;
           esac
+
+      # Before the build: a version without provenance fails however well it builds.
+      - name: An already-published version carries provenance from this workflow at this tag
+        if: steps.registry.outputs.already == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash .github/scripts/check-provenance.sh "$VERSION" "$GITHUB_SHA"
 
       # No dependency declares an install script; --ignore-scripts keeps it that way for the
       # release build even if one starts to.
@@ -245,6 +259,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # For .github/scripts/check-provenance.sh only; nothing from the checkout is built or run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -252,7 +271,7 @@ jobs:
 
       # The registry lags a publish: `npm publish` has printed success while the version
       # document answered 404 for about six minutes. Poll for up to 10 minutes, then check
-      # the registry serves the tarball the build job tested, with a provenance attestation.
+      # the registry serves the tarball the build job tested, and says it has an attestation.
       # If this step fails, do NOT re-publish: the version may exist, and versions are immutable.
       - name: The registry serves the tested tarball with provenance
         env:
@@ -313,3 +332,11 @@ jobs:
             if (pt !== "https://slsa.dev/provenance/v1") { console.log(`::error::npm audit signatures did not verify a provenance attestation for ${name}@${version}`); process.exit(1); }
             console.log(`OK: npm audit signatures verified ${name}@${version}: registry signature and provenance attestation (${pt})`);
           ' "$DIR/audit.json" "$PACKAGE" "$VERSION"
+
+      # The signature above says the attestation is genuine; this says what it attests: SLSA v1
+      # provenance from this workflow at this tag, built from this commit, about the tarball npm
+      # serves. After the audit step, whose install retries have outlasted the registry's lag.
+      - name: The provenance names this workflow at this tag and this commit
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash .github/scripts/check-provenance.sh "$VERSION" "$GITHUB_SHA"
