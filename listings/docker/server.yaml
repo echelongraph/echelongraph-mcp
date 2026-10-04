@@ -1,0 +1,26 @@
+# DRAFT for a PR to github.com/docker/mcp-registry as servers/echelongraph/server.yaml (#2723).
+# Not submitted. See ../README.md, "Docker MCP Catalog", for the steps.
+#
+# source.commit is a placeholder ON PURPOSE: it must be the 40-hex commit of
+# github.com/echelongraph/echelongraph-mcp whose root holds the Dockerfile (this directory's
+# Dockerfile, published there with the next release). The registry's validator refuses
+# anything else, so this draft cannot be merged by mistake before that commit exists.
+name: echelongraph
+image: mcp/echelongraph
+type: server
+meta:
+  category: security
+  tags:
+    - security
+    - cve
+    - vulnerability
+about:
+  title: EchelonGraph CVE & Exposure
+  description: CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.
+  icon: https://echelongraph.io/logo-mark.png
+source:
+  project: https://github.com/echelongraph/echelongraph-mcp
+  commit: REPLACE-WITH-PUBLIC-COMMIT-THAT-HOLDS-THE-DOCKERFILE
+run:
+  allowHosts:
+    - app.echelongraph.io:443

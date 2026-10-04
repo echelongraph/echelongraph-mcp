@@ -30,6 +30,7 @@ import path from "node:path";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
+import { BATCH_PATH, CALL_ANSWER, CALL_ANSWER_EMPTY } from "./fixtures/match-batch.mjs";
 
 // The era this run of the suite opens its connections with.
 const ERA = globalThis.MCP_TEST_ERA ?? MODERN;
@@ -325,15 +326,44 @@ const REMOVED_CLAIMS = /passive|no other|unique|real-?time|\blive\b|right now/i;
 // exposed_hosts are not matched: `_` is a word character.
 const HOST_UNIT = /\bhosts\b|\bhost\(s\)/i;
 
-// One representative call per tool. Every describe block below exercises all five.
+// #2719: the vendor-advisory routes (core-backend vendoradv handler.go), shaped as the API sends
+// them: the list with search_applied, the per-CVE rows with our_first_seen_at.
+const VADV_CVE = "CVE-2024-21412";
+const VADV_ID = "RHSA-2024:1234";
+const VADV_ROW = {
+  advisory_id: "6f1c7d2e-0000-4000-8000-000000000001", vendor: "redhat", vendor_display_name: "Red Hat", vendor_advisory_id: VADV_ID,
+  cve_ids: [VADV_CVE], title: "Important: kernel security update", severity: "High", cvss_v3_score: 7.8,
+  summary: "An update for kernel is now available.", affected_products: ["Red Hat Enterprise Linux 9"],
+  vendor_published_at: "2024-02-13T00:00:00Z", our_first_seen_at: "2024-02-13T06:12:44Z", withdrawn: false,
+};
+const VADV_DETAIL = {
+  ...VADV_ROW, known_cve_ids: [VADV_CVE], description: "An update for kernel is now available.", remediation: "Update the kernel packages.",
+  references: [{ url: "https://access.redhat.com/errata/RHSA-2024:1234" }], vendor_modified_at: "2024-02-14T00:00:00Z", withdrawn_at: "", withdrawn_reason: "",
+};
+
+// One representative call per tool. Every describe block below exercises all of them.
+// check_affected's own cases (every not_assessed_reason, header carriage, both paths) are in
+// check_affected.test.mjs; here it goes through every rule the other tools do.
 const CALLS = {
   cve_summary: {},
   search_cves: { search: "tomcat", limit: 2 },
   get_cve: { cve_id: CVE },
   cve_exposure: { cve_id: CVE },
   exposure_radar: {},
+  // #2718; its own cases are in epss_history.test.mjs.
+  epss_history: { cve_id: CVE },
+  check_affected: { product: "openssl", version: "3.0.0" },
+  // #2721: its own suite is check_sbom.test.mjs; here it meets every cross-tool rule.
+  check_sbom: { purls: ["pkg:npm/lodash@4.17.20", "pkg:deb/debian/openssl@3.0.11-1~deb12u1"] },
+  // #2719 (fixtures: VADV_* below; the tool-specific tests are in vendor-advisories.test.mjs).
+  vendor_advisories_for_cve: { cve_id: VADV_CVE },
+  get_vendor_advisory: { vendor: "redhat", advisory_id: VADV_ID },
+  search_vendor_advisories: { query: "exchange server", limit: 2 },
 };
 const TOOLS = Object.keys(CALLS);
+// What tools/list answers, in createServer()'s registration order. Tools registered from
+// src/tools/ that are not in CALLS have their own suites (kev_recent: kev_recent.test.mjs, #2717).
+const LISTED = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "cve_intel", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
 
 // #2535: score_assessed. A CVE EchelonGraph has not scored carries score_assessed false, and
 // any echelongraph_score it carries is a placeholder, not a rating (core-backend cve/store.go,
@@ -379,6 +409,8 @@ const PROD_CVE_SUMMARY = {
 // true, as every scored row on the API does (#2535). The summary carries unscored beside none,
 // equal to it, as core-backend cve/store.go Summary sends it (#2610).
 const BODIES = {
+  // #2721: check_sbom's POST (the stub answers by path, whatever the method).
+  [BATCH_PATH]: { ok: CALL_ANSWER, empty: CALL_ANSWER_EMPTY },
   "/api/v1/public/cves/summary": {
     ok: PROD_CVE_SUMMARY,
     empty: {
@@ -394,6 +426,23 @@ const BODIES = {
     ok: { cve_id: CVE, severity: "HIGH", cvss_v3_score: 7.5, echelongraph_score: 9, score_confidence: "HIGH", score_assessed: true, epss_score: 0.99999, kev_listed: true, kev_ransomware: false },
     // The live API answers an unknown CVE with HTTP 404 and its own JSON message.
     empty: { status: 404, body: { error: `CVE not found: ${CVE}` } },
+  },
+  // #2718: core-backend cve/epss_history.go's answer. `empty` is a CVE with no recorded change.
+  [`/api/v1/public/cves/${CVE}/epss-history`]: {
+    ok: {
+      cve_id: CVE, series_kind: "change_only", series_starts_at: "2026-05-27T03:00:00Z",
+      current: { epss_score: 0.94358, epss_percentile: 0.99911, epss_updated_at: "2026-10-01T03:00:00Z" },
+      points: [
+        { at: "2026-06-01T03:00:00Z", epss_score: 0.81022, epss_percentile: 0.99012 },
+        { at: "2026-10-01T03:00:00Z", epss_score: 0.94358, epss_percentile: 0.99911 },
+      ],
+      history_rows: 3, points_truncated: false, latest_point_matches_current: true,
+    },
+    empty: {
+      cve_id: CVE, series_kind: "change_only", series_starts_at: "2026-05-27T03:00:00Z",
+      current: { epss_score: 0.94358, epss_percentile: 0.99911, epss_updated_at: "2026-05-20T03:00:00Z" },
+      points: [], history_rows: 0, points_truncated: false, latest_point_matches_current: null,
+    },
   },
   // The contract shape: the old fields plus tracked, kev_catalog_listed,
   // kev_seen_in_observations, method, and last_seen null when there is no observation.
@@ -443,6 +492,29 @@ const BODIES = {
   // visible_by_category (2,000 here, as on 2026-09-27 against a total of 36,222).
   // Keyed by the whole request URL: a request without ?service=mcp gets the router's 404.
   [MCP_PATH]: { ok: MCP_STATS, empty: MCP_EMPTY },
+  // check_affected (#2716): the typed values travel in X-EG-* headers, so the path is the whole
+  // URL. ok is an assessed CPE hit, shaped as production answered openssl 3.0.0 on 2026-10-03
+  // (trimmed to one match); empty is the not_assessed answer production gives spring-boot.
+  "/api/v1/public/cves/match": {
+    ok: {
+      assessed: true, candidate_count: 319, candidates_capped: false, capped: false, count: 1, excluded: [], excluded_count: 0, match_layer: "cpe", not_assessed_reason: "",
+      product: "openssl", product_named_count: 318, undecidable_excluded_count: 0, undecided_candidate_count: 4, vendor: "", vendor_advisory_count: 0, version: "3.0.0",
+      matches: [{ cve_id: "CVE-2026-45447", severity: "HIGH", cvss_v3_score: 8.8, description: "A use-after-free during PKCS#7 signature verification.", kev_listed: false, ransomware: false, epss_score: 0.04002, cvss_v2_score: 0, cvss_v4_score: 0, echelongraph_score: 9.8, echelongraph_severity: "CRITICAL", effective_score: 9.8, effective_severity: "CRITICAL", score_assessed: true, matched_criteria: "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*", match_method: "product-name heuristic", match_confidence: 0.5, cpe_vendor: "openssl", vendor_unknown: true }],
+    },
+    empty: { assessed: false, candidate_count: 0, candidates_capped: false, capped: false, count: 0, excluded: [], excluded_count: 0, match_layer: "cpe", matches: [], not_assessed_reason: "product_not_in_cpe_corpus", product: "openssl", product_named_count: 0, undecidable_excluded_count: 0, undecided_candidate_count: 0, vendor: "", vendor_advisory_count: 0, version: "3.0.0" },
+  },
+  [`/api/v1/public/vendor-advisories/by-cve/${VADV_CVE}`]: {
+    ok: { cve_id: VADV_CVE, advisories: [VADV_ROW], total: 1 },
+    empty: { cve_id: VADV_CVE, advisories: [], total: 0 },
+  },
+  [`/api/v1/public/vendor-advisories/redhat/${encodeURIComponent(VADV_ID)}`]: {
+    ok: VADV_DETAIL,
+    empty: { status: 404, body: { error: "advisory not found" } },
+  },
+  "/api/v1/public/vendor-advisories": {
+    ok: { advisories: [VADV_ROW], total: 1, limit: 2, offset: 0, search_applied: true },
+    empty: { advisories: [], total: 0, limit: 2, offset: 0, search_applied: true },
+  },
   "/api/v1/public/shadow-ai-radar/stats": {
     ok: { stats: PROD_SHADOW_STATS, poller: FOLLOWER_POLLER },
     empty: { stats: { total: 0, by_category: {}, visible_by_category: {}, last_24h_count: 0, last_24h_visible_count: 0, auth_confirmed: 0, auth_undetermined: 0 }, poller: FOLLOWER_POLLER },
@@ -2588,14 +2660,14 @@ describe(`against a stub API [${ERA}]`, () => {
       }
     });
     it("every tool has a title, the four annotations, and an outputSchema", () => {
-      assert.deepEqual(tools.map((t) => t.name), TOOLS);
+      assert.deepEqual(tools.map((t) => t.name), LISTED);
       for (const t of tools) {
         assert.equal(typeof t.title, "string", `${t.name}: no title`);
         assert.ok(t.title.trim().length > 0, `${t.name}: empty title`);
         assert.deepEqual(t.annotations, ANNOTATIONS, `${t.name}: annotations`);
         assert.ok(t.outputSchema && typeof t.outputSchema === "object", `${t.name}: no outputSchema`);
       }
-      assert.equal(new Set(tools.map((t) => t.title)).size, TOOLS.length, "two tools share a title");
+      assert.equal(new Set(tools.map((t) => t.title)).size, LISTED.length, "two tools share a title");
     });
     it("every outputSchema is an object schema with a success branch that carries data and a failure branch that carries error", () => {
       for (const t of tools) {
@@ -2642,7 +2714,7 @@ describe(`against a stub API [${ERA}]`, () => {
     // #1880: descriptions listed fields the tools do not return (CWE on get_cve). A description
     // may name a field only if its own outputSchema holds it.
     it("#1880: every field a tool description names is a field, or a value, of that tool's outputSchema", () => {
-      const toolNames = new Set(TOOLS);
+      const toolNames = new Set(LISTED);
       for (const t of tools) {
         const names = schemaNames(t.outputSchema);
         const tokens = [...new Set(t.description.match(FIELD_TOKEN) ?? [])];
@@ -2653,7 +2725,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.doesNotMatch(tools.find((t) => t.name === "get_cve").description, /\bCWE\b/, "get_cve returns no CWE");
     });
     it("#1880: every field the README names is a field, or a value, of some tool's outputSchema", () => {
-      const names = new Set([...TOOLS, ...tools.flatMap((t) => [...schemaNames(t.outputSchema)])]);
+      const names = new Set([...LISTED, ...tools.flatMap((t) => [...schemaNames(t.outputSchema)])]);
       const readme = readPkgFile("README.md").replace(/\b[\w.-]+\.json\b/g, "");
       const unknown = [...new Set(readme.match(FIELD_TOKEN) ?? [])].filter((x) => !names.has(x));
       assert.deepEqual(unknown, [], "the README names fields no outputSchema holds");
@@ -3536,16 +3608,21 @@ describe(`against a stub API [${ERA}]`, () => {
     // answer of 09:45Z), so the bound of 1,259 had never been measured against what a production
     // client receives. The note gains the four sentences that say the nvd_ counts are NVD's label, as
     // provenance, and what summary.nvd_none and summary.rejected count (764 characters, from 421 to
-    // 1,185); the envelope block is unchanged at 563. The other bounds are unchanged.
+    // 1,185); the envelope block is unchanged at 563. At #2720 (2026-10-04) get_cve was re-measured
+    // on purpose, from 835 to 1,063 and, not yet scored, from 1,355 to 1,583: its envelope's own
+    // notes gained the sentence saying that an answer without cpe_configurations holds no stored NVD
+    // configuration tree, which is not a finding that no product is affected (228 characters, the
+    // sentence and its JSON quoting); the note in content[1] is unchanged. The other bounds are
+    // unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_338],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
-      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 835],
+      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_063],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
       ["search_cves, failed (an edge's HTTP 403 page)", "search_cves", CALLS.search_cves, "403", {}, { state: "failed" }, 705],
-      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_355],
+      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_583],
       ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 1_803],
     ];
     // #2531: the check itself, one function, so the control below runs the predicate the cases
@@ -3625,9 +3702,9 @@ describe(`against a stub API [${ERA}]`, () => {
         assert.equal(ua, `echelongraph-mcp/${PKG.version} (+https://echelongraph.io/pulse/mcp)`);
       }
     });
-    it("tools/list answers the five tools in a fixed order", async () => {
+    it("tools/list answers every tool in a fixed order", async () => {
       const { tools } = await client.listTools();
-      assert.deepEqual(tools.map((t) => t.name), TOOLS);
+      assert.deepEqual(tools.map((t) => t.name), LISTED);
     });
     it("server.json and package.json agree for the MCP registry's npm ownership check", () => {
       const sj = JSON.parse(readPkgFile("server.json"));
@@ -3708,6 +3785,11 @@ describe(`#2313: every structuredContent the suite received validates against it
       get_cve: ["measured", "failed", "invalid_input"],
       cve_exposure: ["not_assessed", "failed", "invalid_input"],
       exposure_radar: ["not_assessed", "failed"],
+      // invalid_input is exercised in check_affected.test.mjs.
+      check_affected: ["measured", "not_assessed", "failed"],
+      vendor_advisories_for_cve: ["measured", "failed"],
+      get_vendor_advisory: ["measured", "failed"],
+      search_vendor_advisories: ["measured", "failed"],
     };
     for (const [name, states] of Object.entries(expected)) {
       for (const st of states) assert.ok(seen[name]?.has(st), `${name}: no result in state ${st} (seen: ${[...(seen[name] ?? [])].join(", ")})`);

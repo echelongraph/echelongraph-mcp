@@ -8,12 +8,18 @@
     "url": "https://github.com/echelongraph/echelongraph-mcp",
     "source": "github"
   },
-  "version": "2.3.4",
+  "version": "2.4.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.echelongraph.io/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "echelongraph-mcp",
-      "version": "2.3.4",
+      "version": "2.4.0",
       "transport": {
         "type": "stdio"
       },

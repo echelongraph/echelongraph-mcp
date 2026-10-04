@@ -1,0 +1,55 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "echelongraph-mcp",
+  "display_name": "EchelonGraph CVE & Exposure",
+  "version": "2.4.0",
+  "description": "CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.",
+  "long_description": "CVE and internet-exposure data for Claude, Cursor, Cline, and any MCP client, from EchelonGraph's free public feed: NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, plus a per-CVE internet-exposure footprint: how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to the CVE. Exposure counts are derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan).\n\nFree and keyless: no API key, no auth, read-only. The server makes no request other than the API call a tool needs to answer. Every result carries a structured envelope (state, measured_at, method, coverage, freshness, notes), and a CVE outside the exposure radar's tracked set is reported as not assessed, not as zero.",
+  "author": {
+    "name": "EchelonGraph",
+    "url": "https://echelongraph.io"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/echelongraph/echelongraph-mcp"
+  },
+  "homepage": "https://echelongraph.io/pulse/mcp",
+  "documentation": "https://github.com/echelongraph/echelongraph-mcp#readme",
+  "support": "https://github.com/echelongraph/echelongraph-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {}
+    }
+  },
+  "tools": [
+    { "name": "cve_summary", "description": "CVE feed summary" },
+    { "name": "search_cves", "description": "Search CVEs" },
+    { "name": "get_cve", "description": "CVE detail" },
+    { "name": "cve_exposure", "description": "Internet exposure for one CVE" },
+    { "name": "exposure_radar", "description": "Exposure radar totals" },
+    { "name": "kev_recent", "description": "Recent CISA KEV additions" },
+    { "name": "epss_history", "description": "EPSS change history for one CVE" },
+    { "name": "check_affected", "description": "Am I affected? (product or package at a version)" },
+    { "name": "check_sbom", "description": "Check an SBOM against the advisory corpus" },
+    { "name": "cve_intel", "description": "CVE weakness, exploits and packages" },
+    { "name": "get_cwe", "description": "CWE and its CVEs" },
+    { "name": "vendor_advisories_for_cve", "description": "Vendor advisories for one CVE" },
+    { "name": "get_vendor_advisory", "description": "Vendor advisory detail" },
+    { "name": "search_vendor_advisories", "description": "Search vendor advisories" }
+  ],
+  "keywords": ["mcp", "cve", "vulnerability", "security", "kev", "epss", "exposure", "echelongraph"],
+  "license": "MIT",
+  "privacy_policies": ["https://echelongraph.io/privacy"],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20"
+    }
+  }
+}

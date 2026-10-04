@@ -13,7 +13,7 @@ import http from "node:http";
 import { connect, MODERN, RpcError, StdioMcpClient, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
 import { PKG, serverCommand } from "./server-under-test.mjs";
 
-const TOOLS = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar"];
+const TOOLS = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "cve_intel", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
 // The legacy revisions this server negotiates through initialize (SDK 2.1.0
 // SUPPORTED_PROTOCOL_VERSIONS): a client asking for one of them gets it back.
 const LEGACY = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -36,18 +36,36 @@ const EXPOSURE = {
   last_seen: "2026-09-27T21:52:34.976885Z",
   generated_at: "2026-09-27T22:06:13.516192827Z",
 };
+// #2717: GET /api/v1/public/kev/recent, shaped as core-backend kevrecent answers it.
+const KEV_RECENT = {
+  kev: [{ cve_id: "CVE-2026-0002", kev_added_date: "2026-10-02", kev_due_date: "2026-10-23", kev_vendor: "Ivanti", kev_product: "Connect Secure", kev_vuln_name: "Ivanti Connect Secure Authentication Bypass", kev_ransomware: false, severity: "CRITICAL", cvss_v3_score: 9.8, epss_score: 0.42, epss_percentile: 0.97, eg_kev_tier: 1, our_first_seen_kev: "2026-10-02T17:04:12Z" }],
+  count: 1,
+  total: 1,
+  kev_listed_total: 1452,
+  limit: 50,
+  next_cursor: null,
+  order: "kev_added_date DESC, cve_id ASC",
+  filters: { since: null, until: null, ransomware: null, vendor: null },
+  catalog: { source: "CISA KEV catalog", feed_url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", last_successful_fetch_at: "2026-10-03T11:55:01Z", catalog_version: "2026.10.02", date_released: "2026-10-02T17:00:41.1622Z", catalog_count: 1452 },
+  method: "EchelonGraph polls CISA's known_exploited_vulnerabilities.json every 5 minutes.",
+  notes: ["CISA's requiredAction and shortDescription are not stored, so they are not served."],
+  generated_at: "2026-10-03T12:00:00Z",
+};
 const ANSWERS = {
   "/api/v1/public/cves/summary": SUMMARY,
   [`/api/v1/public/kev-exposure/cve/${EXPOSURE_CVE}`]: EXPOSURE,
+  "/api/v1/public/kev/recent": KEV_RECENT,
 };
-// One call per tool: two successes (cve_summary measured, cve_exposure not_assessed) and three
-// failures (the stub answers every other path 404), so both result shapes reach every era.
+// One call per tool: three successes (cve_summary and kev_recent measured, cve_exposure
+// not_assessed) and three failures (the stub answers every other path 404), so both result
+// shapes reach every era.
 const CALLS = [
   ["cve_summary", {}],
   ["search_cves", { search: "tomcat", limit: 2 }],
   ["get_cve", { cve_id: "CVE-2023-44487" }],
   ["cve_exposure", { cve_id: EXPOSURE_CVE }],
   ["exposure_radar", {}],
+  ["kev_recent", { vendor: "Ivanti", ransomware: false }],
 ];
 
 let stub;
@@ -90,7 +108,7 @@ describe("#2311: the modern era (2026-07-28): server/discover and the per-reques
     assert.equal(d.resultType, "complete");
     assert.deepEqual(d._meta?.[SERVER_INFO_META_KEY], identity);
   });
-  it("tools/list lists the five tools in order, each with a title, annotations and an outputSchema", async () => {
+  it("tools/list lists every tool in order, each with a title, annotations and an outputSchema", async () => {
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name), TOOLS);
     for (const t of tools) assert.ok(t.title && t.annotations && t.outputSchema, t.name);
@@ -185,7 +203,7 @@ describe("#2311: the legacy era: initialize, as 1.x clients open", () => {
       client = await open("2025-06-18");
     });
     after(() => client?.close());
-    it("tools/list lists the five tools in order, each with a title, annotations and an outputSchema", async () => {
+    it("tools/list lists every tool in order, each with a title, annotations and an outputSchema", async () => {
       const { tools } = await client.listTools();
       assert.deepEqual(tools.map((t) => t.name), TOOLS);
       for (const t of tools) assert.ok(t.title && t.annotations && t.outputSchema, t.name);
@@ -267,7 +285,7 @@ describe("#2440: in every protocol version, every tool's text carries its struct
           states[name] = sc.state;
         }
         assert.equal(methodQuoted, 1, `${era}: cve_exposure's note quotes its method, so its envelope block leaves it out`);
-        assert.deepEqual(states, { cve_summary: "measured", search_cves: "failed", get_cve: "failed", cve_exposure: "not_assessed", exposure_radar: "failed" });
+        assert.deepEqual(states, { cve_summary: "measured", search_cves: "failed", get_cve: "failed", cve_exposure: "not_assessed", exposure_radar: "failed", kev_recent: "measured" });
       } finally {
         await client.close();
       }

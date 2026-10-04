@@ -1,0 +1,1779 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.2",
+  "serialNumber": "urn:uuid:1f860713-54b9-4253-ba5a-9554851904af",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2020-08-03T03:20:53.771Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "Node.js module",
+        "version": "2.0.0"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "pkg:npm/juice-shop@11.1.2",
+      "name": "juice-shop",
+      "version": "11.1.2",
+      "description": "Probably the most modern and sophisticated insecure web application",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/juice-shop@11.1.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://owasp-juice.shop"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/bkimminich/juice-shop/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/bkimminich/juice-shop.git"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/jsonwebtoken@0.1.0",
+      "name": "jsonwebtoken",
+      "version": "0.1.0",
+      "description": "JSON Web Token implementation (symmetric and asymmetric)",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "505628492092fe35d08b600fa6768cd06711aaa2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/jsonwebtoken@0.1.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/auth0/node-jsonwebtoken#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/auth0/node-jsonwebtoken/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/auth0/node-jsonwebtoken.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/sanitize-html@1.4.2",
+      "name": "sanitize-html",
+      "version": "1.4.2",
+      "description": "Clean up user-submitted HTML, preserving whitelisted elements and whitelisted attributes on a per-element basis",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "0bcc3dc92ba79d8b5dbea8b851c13d50d5ed3d58"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/sanitize-html@1.4.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/punkave/sanitize-html#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/punkave/sanitize-html/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/punkave/sanitize-html.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/marsdb@0.6.11",
+      "name": "marsdb",
+      "version": "0.6.11",
+      "description": "MarsDB is a lightweight client-side MongoDB-like database, Promise based, written in ES6",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "005b4af67e41df4efe73efed577adf29135d9712"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/marsdb@0.6.11",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/c58/marsdb"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/c58/marsdb/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+ssh://git@github.com/c58/marsdb.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lodash@4.17.19",
+      "name": "lodash",
+      "version": "4.17.19",
+      "description": "Lodash modular utilities.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "e48ddedbe30b3321783c5b4301fbd353bc1e4a4b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/lodash@4.17.19",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://lodash.com/"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/lodash/lodash/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/lodash/lodash.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/moment@2.0.0",
+      "name": "moment",
+      "version": "2.0.0",
+      "description": "Parse, manipulate, and display dates.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "2bbc5b44c321837693ab6efcadbd46ed946211fe"
+        }
+      ],
+      "purl": "pkg:npm/moment@2.0.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://momentjs.com"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/timrwood/moment/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/timrwood/moment.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/express-jwt@0.1.3",
+      "name": "express-jwt",
+      "version": "0.1.3",
+      "description": "JWT authentication middleware.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "7c78221f8b9d72106aff556a8a5b8e852d41b12f"
+        }
+      ],
+      "purl": "pkg:npm/express-jwt@0.1.3",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/auth0/express-jwt#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "http://github.com/auth0/express-jwt/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/auth0/express-jwt.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/notevil@1.3.3",
+      "name": "notevil",
+      "version": "1.3.3",
+      "description": "Evalulate javascript like the built-in eval() method but safely",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "56b8a935d8978e0c000749621aca3928b823cb01"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/notevil@1.3.3",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/mmckegg/notevil#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/mmckegg/notevil/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/mmckegg/notevil.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/minimist@0.2.1",
+      "name": "minimist",
+      "version": "0.2.1",
+      "description": "parse argument options",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "827ba4e7593464e7c221e8c5bed930904ee2c455"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/minimist@0.2.1",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/substack/minimist"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/substack/minimist/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/substack/minimist.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/kind-of@3.2.2",
+      "name": "kind-of",
+      "version": "3.2.2",
+      "description": "Get the native type of a value.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "31ea21a734bab9bbb0f32466d893aea51e4a3c64"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/kind-of@3.2.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jonschlinkert/kind-of"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jonschlinkert/kind-of/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jonschlinkert/kind-of.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/js-yaml@3.14.0",
+      "name": "js-yaml",
+      "version": "3.14.0",
+      "description": "YAML 1.2 parser and serializer",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "a7a34170f26a21bb162424d8adacb4113a69e482"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/js-yaml@3.14.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/nodeca/js-yaml"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/nodeca/js-yaml/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/nodeca/js-yaml.git"
+        }
+      ]
+    },
+    {
+      "type": "framework",
+      "bom-ref": "pkg:npm/socket.io@2.3.0",
+      "name": "socket.io",
+      "version": "2.3.0",
+      "description": "node.js realtime framework server",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "cd762ed6a4faeca59bc1f3e243c0969311eb73fb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/socket.io@2.3.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/socketio/socket.io#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/socketio/socket.io/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/socketio/socket.io.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/sequelize@5.22.3",
+      "name": "sequelize",
+      "version": "5.22.3",
+      "description": "Multi dialect ORM for Node.JS",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "7e7a92ddd355d883c9eb11cdb106d874d0d2636f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/sequelize@5.22.3",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://sequelize.org/"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/sequelize/sequelize/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/sequelize/sequelize.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/request@2.88.2",
+      "name": "request",
+      "version": "2.88.2",
+      "description": "Simplified HTTP request client.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "d73c918731cb5a87da047e207234146f664d12b3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "purl": "pkg:npm/request@2.88.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/request/request#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "http://github.com/request/request/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/request/request.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/unzipper@0.9.15",
+      "name": "unzipper",
+      "version": "0.9.15",
+      "description": "Unzip cross-platform streaming API ",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "97d99203dad17698ee39882483c14e4845c7549c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/unzipper@0.9.15",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/ZJONSSON/node-unzipper#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/ZJONSSON/node-unzipper/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/ZJONSSON/node-unzipper.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/z85@0.0.2",
+      "name": "z85",
+      "version": "0.0.2",
+      "description": "ZeroMQ Base-85 Encoding",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "45d353b13e4ee3d376c3fbd37dcda85feed8b0d3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/z85@0.0.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/msealand/z85.node"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/msealand/z85.node/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/msealand/z85.node.git"
+        }
+      ]
+    },
+    {
+      "type": "framework",
+      "bom-ref": "pkg:npm/express@4.17.1",
+      "name": "express",
+      "version": "4.17.1",
+      "description": "Fast, unopinionated, minimalist web framework",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "4491fc38605cf51f8629d39c2b5d026f98a4c134"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/express@4.17.1",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://expressjs.com/"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/expressjs/express/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/expressjs/express.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/helmet@3.23.3",
+      "name": "helmet",
+      "version": "3.23.3",
+      "description": "help secure Express/Connect apps with various HTTP headers",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "5ba30209c5f73ded4ab65746a3a11bedd4579ab7"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/helmet@3.23.3",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://helmetjs.github.io/"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/helmetjs/helmet/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/helmetjs/helmet.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/morgan@1.10.0",
+      "name": "morgan",
+      "version": "1.10.0",
+      "description": "HTTP request logger middleware for node.js",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "091778abc1fc47cd3509824653dae1faab6b17d7"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/morgan@1.10.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/expressjs/morgan#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/expressjs/morgan/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/expressjs/morgan.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/multer@1.4.2",
+      "name": "multer",
+      "version": "1.4.2",
+      "description": "Middleware for handling `multipart/form-data`.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "2f1f4d12dbaeeba74cb37e623f234bf4d3d2057a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/multer@1.4.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/expressjs/multer#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/expressjs/multer/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/expressjs/multer.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/body-parser@1.19.0",
+      "name": "body-parser",
+      "version": "1.19.0",
+      "description": "Node.js body parsing middleware",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "96b2709e57c9c4e09a6fd66a8fd979844f69f08a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/body-parser@1.19.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/expressjs/body-parser#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/expressjs/body-parser/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/expressjs/body-parser.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/sqlite3@4.2.0",
+      "name": "sqlite3",
+      "version": "4.2.0",
+      "description": "Asynchronous, non-blocking SQLite3 bindings",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "49026d665e9fc4f922e56fb9711ba5b4c85c4901"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "purl": "pkg:npm/sqlite3@4.2.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/mapbox/node-sqlite3"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/mapbox/node-sqlite3/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/mapbox/node-sqlite3.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/libxmljs2@0.25.5",
+      "name": "libxmljs2",
+      "version": "0.25.5",
+      "description": "libxml bindings for v8 javascript engine",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "71f491af11a9df29e04648ea46b14a41b256fe66"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/libxmljs2@0.25.5",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/marudor/libxmljs2#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "http://github.com/marudor/libxmljs2/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+ssh://git@github.com/marudor/libxmljs2.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pdfkit@0.11.0",
+      "name": "pdfkit",
+      "version": "0.11.0",
+      "description": "A PDF generation library for Node.js",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "9cdb2fc42bd2913587fe3ddf48cc5bbb3c36f7de"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/pdfkit@0.11.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://pdfkit.org/"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/foliojs/pdfkit/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/foliojs/pdfkit.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/yargs-parser@13.1.2",
+      "name": "yargs-parser",
+      "version": "13.1.2",
+      "description": "the mighty option parser used by yargs",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "130f09702ebaeef2650d54ce6e3e5706f7a4fb38"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "purl": "pkg:npm/yargs-parser@13.1.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/yargs/yargs-parser#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/yargs/yargs-parser/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+ssh://git@github.com/yargs/yargs-parser.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/dottie@2.0.2",
+      "name": "dottie",
+      "version": "2.0.2",
+      "description": "Fast and safe nested object access and manipulation in JavaScript",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "cc91c0726ce3a054ebf11c55fbc92a7f266dd154"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/dottie@2.0.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/mickhansen/dottie.js#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/mickhansen/dottie.js/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/mickhansen/dottie.js.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/cookie-parser@1.4.5",
+      "name": "cookie-parser",
+      "version": "1.4.5",
+      "description": "Parse HTTP request cookies",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "3e572d4b7c0c80f9c61daf604e4336831b5d1d49"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/cookie-parser@1.4.5",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/expressjs/cookie-parser#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/expressjs/cookie-parser/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/expressjs/cookie-parser.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/node-pre-gyp@0.15.0",
+      "name": "node-pre-gyp",
+      "version": "0.15.0",
+      "description": "Node.js native addon binary install tool",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "c2fc383276b74c7ffa842925241553e8b40f1087"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "purl": "pkg:npm/node-pre-gyp@0.15.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/mapbox/node-pre-gyp#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/mapbox/node-pre-gyp/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/mapbox/node-pre-gyp.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/bytes@3.1.0",
+      "name": "bytes",
+      "version": "3.1.0",
+      "description": "Utility to parse a string bytes to bytes and vice-versa",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "f6cf7933a360e0588fa9fde85651cdc7f805d1f6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/bytes@3.1.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/visionmedia/bytes.js#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/visionmedia/bytes.js/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/visionmedia/bytes.js.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/content-type@1.0.4",
+      "name": "content-type",
+      "version": "1.0.4",
+      "description": "Create and parse HTTP Content-Type header",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "e138cc75e040c727b1966fe5e5f8c9aee256fe3b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/content-type@1.0.4",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/content-type#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/content-type/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/content-type.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/debug@2.6.9",
+      "name": "debug",
+      "version": "2.6.9",
+      "description": "small debugging utility",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "5d128515df134ff327e90a4c93f4e077a536341f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/debug@2.6.9",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/visionmedia/debug#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/visionmedia/debug/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/visionmedia/debug.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/ms@2.0.0",
+      "name": "ms",
+      "version": "2.0.0",
+      "description": "Tiny milisecond conversion utility",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "5608aeadfc00be6c2901df5f9861788de0d597c8"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/ms@2.0.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/zeit/ms#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/zeit/ms/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/zeit/ms.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/depd@1.1.2",
+      "name": "depd",
+      "version": "1.1.2",
+      "description": "Deprecate all the things",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "9bcd52e14c097763e749b274c4346ed2e560b5a9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/depd@1.1.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/dougwilson/nodejs-depd#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/dougwilson/nodejs-depd/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/dougwilson/nodejs-depd.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/http-errors@1.7.2",
+      "name": "http-errors",
+      "version": "1.7.2",
+      "description": "Create HTTP error objects",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "4f5029cf13239f31036e5b2e55292bcfbcc85c8f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/http-errors@1.7.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/http-errors#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/http-errors/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/http-errors.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/inherits@2.0.3",
+      "name": "inherits",
+      "version": "2.0.3",
+      "description": "Browser-friendly inheritance fully compatible with standard node.js inherits()",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "633c2c83e3da42a502f52466022480f4208261de"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "purl": "pkg:npm/inherits@2.0.3",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/isaacs/inherits#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/isaacs/inherits/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/isaacs/inherits.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/setprototypeof@1.1.1",
+      "name": "setprototypeof",
+      "version": "1.1.1",
+      "description": "A small polyfill for Object.setprototypeof",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "7e95acb24aa92f5885e0abef5ba131330d4ae683"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "purl": "pkg:npm/setprototypeof@1.1.1",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/wesleytodd/setprototypeof"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/wesleytodd/setprototypeof/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/wesleytodd/setprototypeof.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/statuses@1.5.0",
+      "name": "statuses",
+      "version": "1.5.0",
+      "description": "HTTP status utility",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "161c7dac177659fd9811f43771fa99381478628c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/statuses@1.5.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/statuses#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/statuses/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/statuses.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/toidentifier@1.0.0",
+      "name": "toidentifier",
+      "version": "1.0.0",
+      "description": "Convert a string of words to a JavaScript identifier",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "7e1be3470f1e77948bc43d94a3c8f4d7752ba553"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/toidentifier@1.0.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/component/toidentifier#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/component/toidentifier/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/component/toidentifier.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/iconv-lite@0.4.24",
+      "name": "iconv-lite",
+      "version": "0.4.24",
+      "description": "Convert character encodings in pure javascript.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "2022b4b25fbddc21d2f524974a474aafe733908b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/iconv-lite@0.4.24",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/ashtuchkin/iconv-lite"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/ashtuchkin/iconv-lite/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git://github.com/ashtuchkin/iconv-lite.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/safer-buffer@2.1.2",
+      "name": "safer-buffer",
+      "version": "2.1.2",
+      "description": "Modern Buffer API polyfill without footguns",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "44fa161b0187b9549dd84bb91802f9bd8385cd6a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/safer-buffer@2.1.2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/ChALkeR/safer-buffer#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/ChALkeR/safer-buffer/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/ChALkeR/safer-buffer.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/on-finished@2.3.0",
+      "name": "on-finished",
+      "version": "2.3.0",
+      "description": "Execute a callback when a request closes, finishes, or errors",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "20f1336481b083cd75337992a16971aa2d906947"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/on-finished@2.3.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/on-finished#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/on-finished/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/on-finished.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/ee-first@1.1.1",
+      "name": "ee-first",
+      "version": "1.1.1",
+      "description": "return the first event in a set of ee/event pairs",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "590c61156b0ae2f4f0255732a158b266bc56b21d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/ee-first@1.1.1",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jonathanong/ee-first#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jonathanong/ee-first/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jonathanong/ee-first.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/qs@6.7.0",
+      "name": "qs",
+      "version": "6.7.0",
+      "description": "A querystring parser that supports nesting and arrays, with a depth limit",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "41dc1a015e3d581f1621776be31afb2876a9b1bc"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "purl": "pkg:npm/qs@6.7.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/ljharb/qs"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/ljharb/qs/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/ljharb/qs.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/raw-body@2.4.0",
+      "name": "raw-body",
+      "version": "2.4.0",
+      "description": "Get and validate the raw body of a readable stream.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "a1ce6fb9c9bc356ca52e89256ab59059e13d0332"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/raw-body@2.4.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/stream-utils/raw-body#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/stream-utils/raw-body/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/stream-utils/raw-body.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/unpipe@1.0.0",
+      "name": "unpipe",
+      "version": "1.0.0",
+      "description": "Unpipe a stream from all destinations",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "b2bf4ee8514aae6165b4817829d21b2ef49904ec"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/unpipe@1.0.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/stream-utils/unpipe#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/stream-utils/unpipe/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/stream-utils/unpipe.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/type-is@1.6.18",
+      "name": "type-is",
+      "version": "1.6.18",
+      "description": "Infer the content-type of a request.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "4e552cd05df09467dcbc4ef739de89f2cf37c131"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/type-is@1.6.18",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/type-is#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/type-is/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/type-is.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/media-typer@0.3.0",
+      "name": "media-typer",
+      "version": "0.3.0",
+      "description": "Simple RFC 6838 media type parser and formatter",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "8710d7af0aa626f8fffa1ce00168545263255748"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/media-typer@0.3.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/media-typer#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/media-typer/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/media-typer.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/mime-types@2.1.27",
+      "name": "mime-types",
+      "version": "2.1.27",
+      "description": "The ultimate javascript content-type utility.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "47949f98e279ea53119f5722e0f34e529bec009f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/mime-types@2.1.27",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/mime-types#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/mime-types/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/mime-types.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/mime-db@1.44.0",
+      "name": "mime-db",
+      "version": "1.44.0",
+      "description": "Media Type Database",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "fa11c5eb0aca1334b4233cb4d52f10c5a6272f92"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/mime-db@1.44.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/jshttp/mime-db#readme"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/jshttp/mime-db/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/jshttp/mime-db.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/check-dependencies@1.1.0",
+      "name": "check-dependencies",
+      "version": "1.1.0",
+      "description": "Checks if currently installed npm/bower dependencies are installed in the exact same versions that are specified in package.json/bower.json",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "3aa2df4061770179d8e88e8bf9315c53722ddff4"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/check-dependencies@1.1.0",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/mgol/check-dependencies"
+        },
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/mgol/check-dependencies/issues"
+        },
+        {
+          "type": "vcs",
+          "url": "git+https://github.com/mgol/check-dependencies.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/bower-config@1.4.3",
+      "name": "bower-config",
+      "version": "1.4.3",
+      "description": "The Bower config reader and writer.",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "3454fecdc5f08e7aa9cc6d556e492be0669689ae"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/bower-config@1.4.3",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://bower.io"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/bower/bower/tree/master/packages/bower-config"
+        }
+      ]
+    }
+  ]
+}

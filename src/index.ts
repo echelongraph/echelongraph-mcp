@@ -5,7 +5,8 @@
 // that EchelonGraph's KEV-exposure radar derives from Shodan data. Every figure is as fresh as
 // the schedule that refreshes it, and the tool texts say which schedule that is.
 // stdio transport; no auth required; read-only. It makes no request other than the API call a
-// tool needs to answer.
+// tool needs to answer. The hosted Streamable HTTP endpoint (mcp.echelongraph.io, #2316) is
+// http.ts, which serves this file's createServer — one tool module for both.
 //
 // Result contract (#1874). A tool answers in exactly one of two shapes, and they never blur:
 //   - success: content[0] is the API's JSON verbatim; content[1] is a one-line note saying
@@ -45,6 +46,14 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod";
+import { registerKevRecent } from "./tools/kev_recent.js";
+import { registerEPSSHistory } from "./tools/epss_history.js";
+import { registerCheckAffected } from "./tools/check_affected.js";
+import { registerCheckSbom } from "./tools/check_sbom.js";
+import { registerCveIntel } from "./tools/cve_intel.js";
+import { registerGetCwe } from "./tools/get_cwe.js";
+import { isHttpEntrypoint, upstreamHeaders } from "./runtime.js";
+import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
 
 // The package actually running, read from the package.json that ships beside dist/. The MCP
 // handshake (serverInfo) and the User-Agent both carry its name and version, so the API's
@@ -65,14 +74,28 @@ const NAME = pkgField("name", "echelongraph-mcp");
 const VERSION = pkgField("version", "unknown");
 
 const BASE = (process.env.ECHELONGRAPH_API_BASE || "https://app.echelongraph.io").replace(/\/+$/, "");
-const UA = `${NAME}/${VERSION} (+https://echelongraph.io/pulse/mcp)`;
+// ECHELONGRAPH_MCP_UA (#2724): one product token, such as echelongraph-mcp-synthetic/1.0, put
+// AHEAD of the package's own User-Agent. The API's access log reads the family from the leading
+// token, so a caller that is not a user (our production synthetic) is filed under its own family
+// and never counted as MCP adoption, while the package and version stay readable after it.
+// Unset by default. A value that is not a single token (spaces, control characters, a name over 64
+// or a version over 32 characters) is ignored, with one line on stderr naming its length, not its text.
+const UA_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
+const UA_PREFIX = (() => {
+  const v = process.env.ECHELONGRAPH_MCP_UA;
+  if (v === undefined || v === "") return "";
+  if (UA_TOKEN.test(v)) return `${v} `;
+  process.stderr.write(`echelongraph-mcp: ECHELONGRAPH_MCP_UA ignored: not a single product token (${v.length} characters)\n`);
+  return "";
+})();
+const UA = `${UA_PREFIX}${NAME}/${VERSION} (+https://echelongraph.io/pulse/mcp)`;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT_MS = (() => {
   const n = Number(process.env.ECHELONGRAPH_API_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_TIMEOUT_MS;
 })();
 // The base as quoted in tool results. A proxy credential in the URL's userinfo is dropped.
-const SHOWN_BASE = (() => {
+export const SHOWN_BASE = (() => {
   try {
     const u = new URL(BASE);
     if (!u.username && !u.password) return BASE;
@@ -88,10 +111,12 @@ type Failure = {
   ok: false;
   kind: "network" | "timeout" | "http" | "not_json" | "not_object" | "unexpected_shape";
   path: string;
+  // The request's method when it was not GET (check_sbom's POST, #2721); describeFailure names it.
+  method?: string;
   status?: number;
   detail: string;
 };
-type ApiResult = { ok: true; status: number; data: object } | Failure;
+export type ApiResult = { ok: true; status: number; data: object } | Failure;
 
 // Collapse a response body to something quotable: one line, at most 160 characters.
 function snippet(body: string): string {
@@ -135,43 +160,50 @@ function apiMessage(body: string): string {
   return snippet(body);
 }
 
-// One GET against the API. Never throws: every way the call can fail comes back as a typed
-// Failure so the tool renders it as an error result. A 2xx whose body is not a JSON object
-// (an SPA shell, an edge challenge page, a literal null) is a failure too — it is not data.
-async function api(path: string): Promise<ApiResult> {
+// One request against the API, a GET unless init says otherwise. Never throws: every way the call
+// can fail comes back as a typed Failure so the tool renders it as an error result. A 2xx whose
+// body is not a JSON object (an SPA shell, an edge challenge page, a literal null) is a failure
+// too — it is not data. init.headers carries what a caller typed (#1983: X-EG-* headers, never
+// the URL); the User-Agent and Accept are this server's and are not overridden.
+export async function api(path: string, init?: { headers?: Record<string, string>; method?: string; body?: string }): Promise<ApiResult> {
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     ctrl.abort();
   }, TIMEOUT_MS);
-  const timeout = (): Failure => ({ ok: false, kind: "timeout", path, detail: `no response within ${TIMEOUT_MS} ms` });
+  const m = init?.method && init.method.toUpperCase() !== "GET" ? { method: init.method.toUpperCase() } : {};
+  const timeout = (): Failure => ({ ok: false, kind: "timeout", path, ...m, detail: `no response within ${TIMEOUT_MS} ms` });
   try {
     let res: Response;
     try {
       res = await fetch(`${BASE}${path}`, {
-        headers: { "User-Agent": UA, Accept: "application/json" },
+        method: init?.method,
+        body: init?.body,
+        // upstreamHeaders: empty on stdio; on the hosted endpoint, the forward token and the
+        // end client's address (runtime.ts, #2316).
+        headers: { ...upstreamHeaders(`${BASE}${path}`), ...(init?.headers ?? {}), "User-Agent": UA, Accept: "application/json" },
         signal: ctrl.signal,
       });
     } catch (e) {
-      return timedOut ? timeout() : { ok: false, kind: "network", path, detail: describeError(e) };
+      return timedOut ? timeout() : { ok: false, kind: "network", path, ...m, detail: describeError(e) };
     }
     let body: string;
     try {
       body = await res.text();
     } catch (e) {
-      return timedOut ? timeout() : { ok: false, kind: "network", path, detail: `reading the body failed: ${describeError(e)}` };
+      return timedOut ? timeout() : { ok: false, kind: "network", path, ...m, detail: `reading the body failed: ${describeError(e)}` };
     }
-    if (!res.ok) return { ok: false, kind: "http", path, status: res.status, detail: apiMessage(body) };
+    if (!res.ok) return { ok: false, kind: "http", path, ...m, status: res.status, detail: apiMessage(body) };
     let data: unknown;
     try {
       data = JSON.parse(body);
     } catch {
       const ctype = res.headers.get("content-type") ?? "no content-type";
-      return { ok: false, kind: "not_json", path, status: res.status, detail: `${ctype}; body starts: ${snippet(body)}` };
+      return { ok: false, kind: "not_json", path, ...m, status: res.status, detail: `${ctype}; body starts: ${snippet(body)}` };
     }
     if (data === null || typeof data !== "object") {
-      return { ok: false, kind: "not_object", path, status: res.status, detail: `body was ${snippet(body)}` };
+      return { ok: false, kind: "not_object", path, ...m, status: res.status, detail: `body was ${snippet(body)}` };
     }
     return { ok: true, status: res.status, data };
   } finally {
@@ -182,7 +214,7 @@ async function api(path: string): Promise<ApiResult> {
 type Text = { type: "text"; text: string };
 // structuredContent is an object keyed by field name; ToolResult keeps it that loose so the
 // SDK's CallToolResult accepts it. Its shape is each tool's outputSchema (see Envelope below).
-type ToolResult = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
+export type ToolResult = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
 const text = (t: string): Text => ({ type: "text", text: t });
 
 // ── The result envelope (#2313) ──
@@ -226,23 +258,24 @@ type Envelope = {
 
 // A note, one sentence per entry. Sentences end in ".", "!" or "?" before whitespace, so a URL,
 // a version or a field path (observed.total, crt.sh) does not split one.
-const sentences = (t: string): string[] =>
+export const sentences = (t: string): string[] =>
   t
     .replace(/\s+/g, " ")
     .trim()
     .split(/(?<=[.!?])\s+/)
     .filter(Boolean);
 // A timestamp worth relaying as one: see realInstant below.
-const instantOrNull = (s: string | undefined): string | null => (realInstant(s) ? s : null);
+export const instantOrNull = (s: string | undefined): string | null => (realInstant(s) ? s : null);
 
 // One sentence per failure kind: where we looked, for what, and what came back.
 function describeFailure(f: Failure): string {
-  const where = `from ${SHOWN_BASE} for GET ${f.path}`;
+  const verb = f.method ?? "GET";
+  const where = `from ${SHOWN_BASE} for ${verb} ${f.path}`;
   switch (f.kind) {
     case "network":
-      return `EchelonGraph at ${SHOWN_BASE} could not be reached for GET ${f.path}: ${f.detail}.`;
+      return `EchelonGraph at ${SHOWN_BASE} could not be reached for ${verb} ${f.path}: ${f.detail}.`;
     case "timeout":
-      return `EchelonGraph at ${SHOWN_BASE} did not answer GET ${f.path} within ${TIMEOUT_MS} ms.`;
+      return `EchelonGraph at ${SHOWN_BASE} did not answer ${verb} ${f.path} within ${TIMEOUT_MS} ms.`;
     case "http":
       return `EchelonGraph answered HTTP ${f.status} ${where} — the API said: ${f.detail}.`;
     case "not_json":
@@ -255,7 +288,7 @@ function describeFailure(f: Failure): string {
 }
 
 // What a model must not conclude from a failure.
-const NOT_A_FINDING =
+export const NOT_A_FINDING =
   "The lookup did not complete, so this is not a finding: do not report it as zero, none found, absent, or unexposed. Retry later or check ECHELONGRAPH_API_BASE.";
 // A 404 is the one non-2xx that carries an answer of its own — the API's not-found message,
 // quoted in the sentence before it — so it is worded as "no record", not as an outage.
@@ -294,20 +327,20 @@ const envelopeText = (structured: Record<string, unknown>, said: string, own: re
 // structuredContent and again as the last text block. The error quotes only what
 // describeFailure already quotes (a redacted cause, the API's own message). Every note is a
 // sentence of the message, so the text envelope carries none.
-const failure = (state: "failed" | "invalid_input", message: string, error: ErrorInfo, coverage: Record<string, unknown> | null = null): ToolResult => {
+export const failure = (state: "failed" | "invalid_input", message: string, error: ErrorInfo, coverage: Record<string, unknown> | null = null): ToolResult => {
   const structuredContent = { state, measured_at: null, method: null, coverage, freshness: null, notes: sentences(message), error };
   return { content: [text(message), envelopeText(structuredContent, message, [])], structuredContent, isError: true };
 };
 const errorOf = (f: Failure): ErrorInfo => ({ kind: f.kind, path: f.path, status: f.status ?? null, message: f.detail });
 
-const failed = (tool: string, f: Failure): ToolResult => {
+export const failed = (tool: string, f: Failure): ToolResult => {
   if (f.kind === "http" && f.status === 400) {
     return failure("invalid_input", `${tool} FAILED ${INVALID_INPUT}: ${describeFailure(f)} ${REJECTED_INPUT}`, errorOf(f));
   }
   return failure("failed", `${tool} FAILED: ${describeFailure(f)} ${f.kind === "http" && f.status === 404 ? NO_RECORD : NOT_A_FINDING}`, errorOf(f));
 };
 
-const badInput = (tool: string, why: string): ToolResult =>
+export const badInput = (tool: string, why: string): ToolResult =>
   failure("invalid_input", `${tool} FAILED ${INVALID_INPUT}: ${why}. Nothing was looked up, so this is not a finding.`, {
     kind: "invalid_input",
     path: null,
@@ -316,7 +349,7 @@ const badInput = (tool: string, why: string): ToolResult =>
   });
 
 // A bug in this server is still not a finding — it must never surface as an empty success.
-const crashed = (tool: string, e: unknown): ToolResult =>
+export const crashed = (tool: string, e: unknown): ToolResult =>
   failure("failed", `${tool} FAILED inside the MCP server while querying ${SHOWN_BASE}: ${describeError(e)}. ${NOT_A_FINDING}`, {
     kind: "internal",
     path: null,
@@ -342,7 +375,7 @@ function unexpectedShape(tool: string, error: z.ZodError): ToolResult {
 }
 
 // Every success is checked against the tool's own outputSchema before it is returned.
-const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolResult => {
+export const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolResult => {
   if (r.isError) return r;
   const p = schema.safeParse(r.structuredContent);
   return p.success ? r : unexpectedShape(tool, p.error);
@@ -350,38 +383,38 @@ const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolResult => 
 
 // A success: content[0] is the data, content[1] the note, content[2] the envelope less both;
 // the envelope carries both, the note as sentences after any the envelope adds about itself.
-const succeeded = (data: object, note: string, env: Omit<Envelope, "notes"> & { notes?: string[] }): ToolResult => {
+export const succeeded = (data: object, note: string, env: Omit<Envelope, "notes"> & { notes?: string[] }): ToolResult => {
   const own = env.notes ?? [];
   const structuredContent = { ...env, notes: [...own, ...sentences(note)], data };
   return { content: [text(JSON.stringify(data, null, 2)), text(note), envelopeText(structuredContent, note, own)], structuredContent };
 };
-const okHead = (tool: string, status?: number) =>
+export const okHead = (tool: string, status?: number) =>
   `${tool} OK: EchelonGraph answered${status === undefined ? "" : ` HTTP ${status}`} from ${SHOWN_BASE}.`;
 
 // Tolerant readers for the note: a missing or renamed field degrades the sentence, never
 // the result — content[0] still carries whatever the API sent.
-const field = (o: unknown, ...keys: string[]): unknown =>
+export const field = (o: unknown, ...keys: string[]): unknown =>
   keys.reduce<unknown>((v, k) => (v !== null && typeof v === "object" ? (v as Record<string, unknown>)[k] : undefined), o);
-const numAt = (o: unknown, ...keys: string[]): number | undefined => {
+export const numAt = (o: unknown, ...keys: string[]): number | undefined => {
   const v = field(o, ...keys);
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 };
-const strAt = (o: unknown, ...keys: string[]): string | undefined => {
+export const strAt = (o: unknown, ...keys: string[]): string | undefined => {
   const v = field(o, ...keys);
   return typeof v === "string" && v ? v : undefined;
 };
-const lenAt = (o: unknown, ...keys: string[]): number | undefined => {
+export const lenAt = (o: unknown, ...keys: string[]): number | undefined => {
   const v = field(o, ...keys);
   return Array.isArray(v) ? v.length : undefined;
 };
-const boolAt = (o: unknown, ...keys: string[]): boolean | undefined => {
+export const boolAt = (o: unknown, ...keys: string[]): boolean | undefined => {
   const v = field(o, ...keys);
   return typeof v === "boolean" ? v : undefined;
 };
 // A timestamp worth repeating as prose. The API has been seen answering the Go zero time
 // (0001-01-01T00:00:00Z) where it had no instant to give; that is not a time, so it is never
 // presented as one.
-const realInstant = (s: string | undefined): s is string => s !== undefined && Date.parse(s) > 0;
+export const realInstant = (s: string | undefined): s is string => s !== undefined && Date.parse(s) > 0;
 
 // ── The CVE feed tools: cve_summary, search_cves, get_cve ──
 //
@@ -460,7 +493,7 @@ function cveScoreNote(cve: string, rec: object): string {
 
 // search_cves' sentences about its rows' scores, naming each row a sentence is about, each
 // starting with a space; none when every row says it is scored.
-function rowsScoreNote(d: object): string {
+export function rowsScoreNote(d: object): string {
   const rows = field(d, "cves");
   if (!Array.isArray(rows) || rows.length === 0) return "";
   const n = rows.length;
@@ -654,6 +687,17 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
   }
 }
 
+// #2720: cpe_configurations is NVD's configuration tree, stored since migration 152 and filled
+// as the NVD poller next writes each CVE, so an answer without it is "not stored", never "no
+// product affected". Said in the envelope's own notes, so the note in content[1] is unchanged.
+function cpeConfigurationsNote(rec: object): string {
+  const cfg = field(rec, "cpe_configurations");
+  if (Array.isArray(cfg)) {
+    return `cpe_configurations is NVD's configurations array as sent (${cfg.length}): a cpeMatch with vulnerable false in an AND configuration is a platform, not an affected product.`;
+  }
+  return "No cpe_configurations in the answer: EchelonGraph holds no stored NVD configuration tree for this CVE, which does not mean no product is affected; cpe_match lists its CPE criteria flattened, without the AND/OR operators.";
+}
+
 async function getCVE(cve_id: string): Promise<ToolResult> {
   const tool = "get_cve";
   const id = cve_id.trim();
@@ -674,6 +718,7 @@ async function getCVE(cve_id: string): Promise<ToolResult> {
           ? "measured_at is the record's updated_at: when EchelonGraph last wrote this record."
           : "measured_at is null: the record carries no real updated_at.",
         NO_FEED_FRESHNESS,
+        cpeConfigurationsNote(r.data),
       ],
     });
   } catch (e) {
@@ -702,7 +747,7 @@ async function getCVE(cve_id: string): Promise<ToolResult> {
 // stored.
 // Every text calls last_seen a write or refresh time, never a sighting ("last seen listening",
 // "re-seen", "most recently seen"), and it is never measured_at (see observedAt).
-const CVE_ID = /^CVE-\d{4}-\d{4,}$/i;
+export const CVE_ID = /^CVE-\d{4}-\d{4,}$/i;
 // Quoted when the API does not send its own `method` string.
 const EXPOSURE_METHOD =
   "Shodan banner match on the radar's tracked products; up to 100 ip:port services per product query; searched every 12 h when Shodan query credits allow";
@@ -1832,7 +1877,7 @@ const ErrorSchema = z.strictObject({
   status: z.number().int().nullable().describe("The HTTP status, when the API answered one."),
   message: z.string().describe("The cause: the API's own message, or what went wrong."),
 });
-const NOTES = z.array(z.string()).describe("Caveats, one sentence each.");
+export const NOTES = z.array(z.string()).describe("Caveats, one sentence each.");
 // The success states (#2465). 2.1.0 described not_assessed as no dated measurement whose numbers
 // were all denied the status of findings, on the same schema as a cve_exposure answer relaying
 // services on record for a CISA-KEV CVE, which is not_assessed because its count is undated
@@ -1843,7 +1888,7 @@ const NOTES = z.array(z.string()).describe("Caveats, one sentence each.");
 const SUCCESS_STATE =
   "measured: a measurement of what was asked; an exposure count is measured only with measured_at and method. not_assessed: the answer holds no dated measurement of what was asked, so no count in it is presented as one; it can still relay a count, as what the source holds on record, undated, and its notes (and exposure_state, where the result carries it) say what each count is.";
 
-function envelopeSchema(o: {
+export function envelopeSchema(o: {
   data: z.ZodType;
   coverage: z.ZodType | null;
   freshness: z.ZodType | null;
@@ -1875,7 +1920,13 @@ function envelopeSchema(o: {
 }
 
 // A field of the API's JSON: optional, and null where the Go type can marshal null.
-const opt = <T extends z.ZodType>(t: T) => t.nullable().optional();
+export const opt = <T extends z.ZodType>(t: T) => t.nullable().optional();
+// #2720: what cpe_match and cpe_configurations are, one constant string each (the site's
+// tool-claims check folds only constant strings).
+const CPE_MATCH_DESCRIPTION =
+  "The record's CPE match criteria as one flat list, every configuration's cpeMatch entries together: the AND/OR operator and negate of each configuration and node, versionStartExcluding and matchCriteriaId are not in it, so a CPE that is only a platform a product runs on reads as one more entry.";
+const CPE_CONFIGURATIONS_DESCRIPTION =
+  "NVD's configurations array as NVD sent it: each configuration and node with its operator (AND, OR) and negate, and each cpeMatch with criteria, vulnerable, versionStartIncluding, versionStartExcluding, versionEndIncluding, versionEndExcluding and matchCriteriaId. A cpeMatch with vulnerable false inside an AND configuration is the platform the vulnerable product runs on, not an affected product. Absent: EchelonGraph holds no stored NVD configuration for the CVE, which is not a finding that no product is affected.";
 const CVERecord = z.looseObject({
   cve_id: opt(z.string()),
   description: opt(z.string()),
@@ -1901,6 +1952,9 @@ const CVERecord = z.looseObject({
   kev_added_date: opt(z.string()),
   ghsa_id: opt(z.string()),
   references: z.unknown().optional(),
+  // #2720: NVD's configurations, losslessly, beside the flat list (see cpeConfigurationsNote).
+  cpe_match: z.unknown().optional().describe(CPE_MATCH_DESCRIPTION),
+  cpe_configurations: opt(z.array(z.unknown())).describe(CPE_CONFIGURATIONS_DESCRIPTION),
   published: opt(z.string()),
   modified: opt(z.string()),
   updated_at: opt(z.string()),
@@ -2104,7 +2158,7 @@ const INSTRUCTIONS = [
   "exposure_radar's mcp_servers counts use no Shodan data: their hostnames come from EchelonGraph's own Certificate Transparency feed.",
 ].join(" ");
 
-const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
+export const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
 
 // What each description says about its structured result, naming only fields its schema holds.
@@ -2128,9 +2182,13 @@ const SUMMARY_REJECTED_DESCRIPTION =
 const SCORE_ASSESSED_DESCRIPTION =
   "echelongraph_score, echelongraph_severity and echelongraph_risk are EchelonGraph's score only when score_assessed is true. With score_assessed false the CVE is NOT YET SCORED, not scored 0: any of those three it carries (0, NONE, 0) is a placeholder, not a rating, and does not mean the CVE is harmless; the API may leave them out instead, score_confidence is NONE, and score_unassessed_reason says why (a rejected record, withdrawn by its numbering authority, is never scored, and the note says NOT SCORED). The note labels each such CVE NOT YET SCORED: report it that way, never as a score of 0. An answer with no score_assessed (an API older than that field) does not say whether the CVE was scored, the note says so, and a 0 there is not a rating either.";
 
-// One server, built per connection by serveStdio for whichever era the client opens with.
+// The shared helpers a tool in src/tools/ is handed (#2718), so its file holds its own logic.
+const TOOL_KIT = { api, succeeded, failed, badInput, crashed, checked, okHead, envelopeSchema, annotations: ANNOTATIONS, cveIdArg: CVE_ID_ARG, instant: Instant };
+
+// One server, built per connection by serveStdio for whichever era the client opens with, and
+// per request by the hosted HTTP entrypoint (http.ts, #2316): one tool module for both.
 // tools/list answers in registration order, which is the order below.
-function createServer(): McpServer {
+export function createServer(): McpServer {
   const server = new McpServer({ name: NAME, version: VERSION }, { instructions: INSTRUCTIONS, capabilities: { tools: { listChanged: false } } });
 
   server.registerTool(
@@ -2166,7 +2224,7 @@ function createServer(): McpServer {
     "get_cve",
     {
       title: "CVE detail",
-      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE}`,
+      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE}`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,
@@ -2197,10 +2255,32 @@ function createServer(): McpServer {
     async () => checked("exposure_radar", EXPOSURE_RADAR_OUTPUT, await exposureRadar()),
   );
 
+  registerKevRecent(server, { api, succeeded, failed, badInput, crashed, checked, envelopeSchema, okHead, annotations: ANNOTATIONS });
+  registerEPSSHistory(server, TOOL_KIT);
+  // #2716: its logic, schemas and description live in tools/check_affected.ts.
+  registerCheckAffected(server, { api, succeeded, failed, badInput, crashed, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
+
+  // #2721: tools/check_sbom.ts, on this file's api(), envelope and failure contract.
+  registerCheckSbom(server, { api, failed, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS });
+
+  registerCveIntel(server);
+  registerGetCwe(server);
+
+  // #2719: vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
+  registerVendorAdvisoryTools(server, { api, failed, badInput, crashed, succeeded, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
+
   return server;
 }
 
+// The package identity and API settings, for the hosted HTTP entrypoint's health answer and
+// start-up line (http.ts).
+export { NAME, VERSION, TIMEOUT_MS }; // SHOWN_BASE is exported where it is declared.
+
 // Both eras on stdio: a 2026-07-28 client's server/discover, and a 2025-era client's initialize.
-serveStdio(createServer, { legacy: "serve" });
-// MCP uses stdout for the protocol — diagnostics go to stderr.
-console.error(`EchelonGraph CVE MCP server ${NAME}@${VERSION} running (API: ${SHOWN_BASE}, timeout ${TIMEOUT_MS} ms)`);
+// Not when the hosted HTTP entrypoint loaded this module (runtime.ts): it serves createServer
+// itself, and a stdio transport there would read the container's stdin.
+if (!isHttpEntrypoint()) {
+  serveStdio(createServer, { legacy: "serve" });
+  // MCP uses stdout for the protocol — diagnostics go to stderr.
+  console.error(`EchelonGraph CVE MCP server ${NAME}@${VERSION} running (API: ${SHOWN_BASE}, timeout ${TIMEOUT_MS} ms)`);
+}

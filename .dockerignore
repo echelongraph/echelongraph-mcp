@@ -1,0 +1,10 @@
+node_modules
+dist
+test
+# The synthetic job image (synthetic/Dockerfile, #2724) builds from this directory too and
+# copies the suite's wire-level client.
+!test/mcp-stdio-client.mjs
+listings
+*.tgz
+*.log
+.buildstamp

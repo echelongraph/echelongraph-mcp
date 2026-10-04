@@ -41,7 +41,11 @@ export class StdioMcpClient {
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (chunk) => this.onData(chunk));
     this.exited.then(({ code, signal }) => {
-      for (const [, p] of this.pending) p.reject(new Error(`the server exited (code ${code}, signal ${signal}) before answering ${p.method}`));
+      this.exitStatus = { code, signal };
+      for (const [, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(new Error(`the server exited (code ${code}, signal ${signal}) before answering ${p.method}`));
+      }
       this.pending.clear();
     });
   }
@@ -88,6 +92,11 @@ export class StdioMcpClient {
   rawRequest(method, params) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
+      // A server that has already exited answers nothing: say so now rather than at the timeout.
+      if (this.exitStatus) {
+        reject(new Error(`the server exited (code ${this.exitStatus.code}, signal ${this.exitStatus.signal}) before answering ${method}`));
+        return;
+      }
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method}: no answer within ${this.requestTimeoutMs} ms`));
