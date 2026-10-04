@@ -11,6 +11,7 @@ import { isIP } from "node:net";
 export const ORIGIN_REFUSED_CODE = -32000; // the SDK's own code for an Origin refusal (originValidationResponse)
 export const RATE_LIMITED_CODE = -32029; // implementation-defined server error range (-32000..-32099); "429"
 export const BODY_TOO_LARGE_CODE = -32600; // Invalid Request
+export const BUSY_CODE = -32030; // implementation-defined server error range; "503", no large-body slot free (#2747)
 
 export function rpcError(code: number, message: string, data?: Record<string, unknown>): string {
   return JSON.stringify({ jsonrpc: "2.0", id: null, error: { code, message, ...(data ? { data } : {}) } });
@@ -212,6 +213,78 @@ export class FixedWindowLimiter {
   }
 }
 
+// ── Request-body caps (#2747) ──
+//
+// Two caps, because one tool's input is a document and every other tool's is a CVE ID or a short
+// search.
+//
+//   - 64 KiB for every request: far above any real request but an SBOM's, and the cap the
+//     endpoint shipped with (#2316).
+//   - 6 MiB for one tools/call of check_sbom, or one prompts/get of sbom_review, which takes the
+//     same document to hand to check_sbom (LARGE_BODY_TARGETS). The sbom argument is up to MAX_SBOM_CHARS
+//     (5,000,000) characters, and over this endpoint that document IS the JSON-RPC body: JSON
+//     text passed as a string is escaped once more (every '"' and newline doubles), which for a
+//     pretty-printed CycloneDX document is about 10% (a 4,998,809-character one is a 5,470,320-byte
+//     body; test/http.test.mjs holds the cap above it). Below Cloud Run's 32 MiB HTTP/1 request
+//     limit. OWASP Juice Shop 11.1.2's 0.74 MB SBOM, which the 64 KiB cap refused, fits eight
+//     times over; a 2,000-component one in the same shape is a ~2 MB body.
+//
+// Which request may be large is decided before it is read where the client says so (a
+// 2026-07-28 client sends Mcp-Method and Mcp-Name; another value is held to 64 KiB without
+// reading on), and from the body itself otherwise: a body past 64 KiB that is not one of
+// LARGE_BODY_TARGETS is refused 413 once read.
+//
+// Memory, not the cap, is what bounds this. An instance has 256 MiB and serves up to 250
+// requests at once (deploy-all.sh SVC_MEMORY / SVC_CONCURRENCY); a check_sbom call holds the raw
+// body, its JSON parse here, the SDK's own parse, the tool's parse of the document and the answer.
+// Measured 2026-10-04 on dist/http.js, Node 22, peak RSS (VmHWM) over an idle ~80 MB: one
+// 2,000-purl ~2 MB body +62 MB; one 5.47 MB body +76 MB; two 5.47 MB bodies at once 209 MB in
+// all, also with V8's old space held to 64 MB: ~59 MB of 256 MiB left for everything else, so
+// not a third. So a body past 64 KiB must hold one of DEFAULT_LARGE_BODY_SLOTS (2) slots per
+// instance for as long as it is read and served; with none free it is answered 503 with
+// Retry-After, never queued. The per-client limit still counts each large request as one
+// request, before its body is read.
+export const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
+export const DEFAULT_MAX_SBOM_BODY_BYTES = 6 * 1024 * 1024;
+export const DEFAULT_LARGE_BODY_SLOTS = 2;
+/** The requests whose body may pass DEFAULT_MAX_BODY_BYTES: JSON-RPC method → the one tool or prompt name. */
+export const LARGE_BODY_TARGETS: Readonly<Record<string, string>> = { "tools/call": "check_sbom", "prompts/get": "sbom_review" };
+/** LARGE_BODY_TARGETS in words, for the refusals. */
+export const LARGE_BODY_TARGETS_TEXT = Object.entries(LARGE_BODY_TARGETS)
+  .map(([m, n]) => `a ${m} of ${n}`)
+  .join(" or ");
+
+/** Whether a request's own Mcp-Method / Mcp-Name headers leave it free to be one of LARGE_BODY_TARGETS. Absent headers do (a 2025-era client sends neither). */
+export function largeBodyAdmissible(mcpMethod: string | undefined, mcpName: string | undefined): boolean {
+  const name = mcpName?.trim();
+  if (mcpMethod === undefined) return name === undefined || Object.values(LARGE_BODY_TARGETS).includes(name);
+  const want = Object.hasOwn(LARGE_BODY_TARGETS, mcpMethod.trim()) ? LARGE_BODY_TARGETS[mcpMethod.trim()] : undefined;
+  return want !== undefined && (name === undefined || name === want);
+}
+
+/** Whether a read body is one of LARGE_BODY_TARGETS, by its bodyFacts. */
+export function isLargeBodyTarget(facts: BodyFacts): boolean {
+  const name = facts.rpc_method === "tools/call" ? facts.tool : facts.rpc_method === "prompts/get" ? facts.prompt : undefined;
+  return name !== undefined && Object.hasOwn(LARGE_BODY_TARGETS, facts.rpc_method) && LARGE_BODY_TARGETS[facts.rpc_method] === name;
+}
+
+/** A counting semaphore that never waits: tryAcquire answers at once. */
+export class Slots {
+  private used = 0;
+  constructor(readonly max: number) {}
+  tryAcquire(): boolean {
+    if (this.used >= this.max) return false;
+    this.used++;
+    return true;
+  }
+  release(): void {
+    if (this.used > 0) this.used--;
+  }
+  get inUse(): number {
+    return this.used;
+  }
+}
+
 // ── Bounded access-log fields ──
 //
 // The access line carries no body, no query string, no argument and no client address: only
@@ -222,8 +295,10 @@ const TOOL_NAME = /^[a-z][a-z0-9_]{0,39}$/;
 const REVISION = /^\d{4}-\d{2}-\d{2}$/;
 const UA_FAMILY = /^[A-Za-z0-9._-]{1,40}$/;
 
-/** The JSON-RPC method and, for tools/call, the tool name, shape-checked; never anything else from the body. */
-export function bodyFacts(body: Buffer | undefined): { rpc_method: string; tool?: string } {
+export type BodyFacts = { rpc_method: string; tool?: string; prompt?: string };
+
+/** The JSON-RPC method and, for tools/call, the tool name (for prompts/get, the prompt name), shape-checked; never anything else from the body. */
+export function bodyFacts(body: Buffer | undefined): BodyFacts {
   if (!body || body.length === 0) return { rpc_method: "(none)" };
   let parsed: unknown;
   try {
@@ -236,9 +311,10 @@ export function bodyFacts(body: Buffer | undefined): { rpc_method: string; tool?
   const m = (parsed as { method?: unknown }).method;
   if (typeof m !== "string") return { rpc_method: "(response)" };
   if (!RPC_METHOD.test(m)) return { rpc_method: "(other)" };
-  if (m !== "tools/call") return { rpc_method: m };
+  if (m !== "tools/call" && m !== "prompts/get") return { rpc_method: m };
   const name = (parsed as { params?: { name?: unknown } }).params?.name;
-  return { rpc_method: m, tool: typeof name === "string" && TOOL_NAME.test(name) ? name : "(other)" };
+  const shaped = typeof name === "string" && TOOL_NAME.test(name) ? name : "(other)";
+  return m === "tools/call" ? { rpc_method: m, tool: shaped } : { rpc_method: m, prompt: shaped };
 }
 
 export function revisionLabel(v: string | undefined): string {

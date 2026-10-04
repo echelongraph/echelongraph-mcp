@@ -166,13 +166,16 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.deepEqual(stub.state.seen.map((s) => s.eg), [{}, { "x-eg-ransomware": "false" }]);
     });
 
-    // #2736: get_cve gives kev_added_date as RFC 3339; since and until take that too, as its UTC date.
-    it("an RFC 3339 since or until is sent as its UTC date", async () => {
+    // #2736: get_cve gives kev_added_date as RFC 3339; since and until take that too, as the date written
+    // in it. kev_added_date is a calendar date, so an offset never moves it to the UTC day either side.
+    it("an RFC 3339 since or until is sent as the date written in it", async () => {
       stub.state.body = answer();
       for (const [since, until, want] of [
         ["2024-04-12T00:00:00Z", "2024-04-12T00:00:00Z", ["2024-04-12", "2024-04-12"]],
-        ["2026-09-01T23:30:00-05:00", "2026-10-03T00:00:00.123z", ["2026-09-02", "2026-10-03"]],
-        ["2026-09-01T01:00:00+02:00", "2026-10-03", ["2026-08-31", "2026-10-03"]],
+        ["2026-09-01T23:30:00-05:00", "2026-10-03T00:00:00.123z", ["2026-09-01", "2026-10-03"]],
+        ["2026-09-01T01:00:00+02:00", "2026-10-03", ["2026-09-01", "2026-10-03"]],
+        // #2755: measured on 2.6.1: UTC conversion sent 2024-04-11 and 2024-04-13
+        ["2024-04-12T00:00:00+02:00", "2024-04-12T23:30:00-05:00", ["2024-04-12", "2024-04-12"]],
       ]) {
         stub.state.seen.length = 0;
         const res = await call({ since, until });

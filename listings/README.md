@@ -332,7 +332,14 @@ notes (for example "whether external lookups are cached or live"), which ask a q
 nothing about the product; and the summary of a different server, `purify-feeds-mcp` by
 `eason4kim-rocket`, in the page's "Related Servers" list ("MCP server for querying live CISA KEV,
 EPSS, and enriched vulnerability feeds with full provenance"). That is the sentence #2706 quoted;
-it now sits under another author's server. What is still wrong: the page's latest release is
+it now sits under another author's server. **Re-checked 2026-10-04:** the page's description
+of this server (Glama's own, generated from the repo) matches no `REMOVED_CLAIMS` term; the
+sentence now appears under `Agam-S/Vulnary-MCP` in "Related Servers", which Glama rotates. What
+Glama indexes from us carries none either: the public repo's README is byte-identical to
+`../README.md` (held to `REMOVED_CLAIMS` by `test/tools.test.mjs`), its description and topics
+are `github-repo-settings.json`'s (held by `test/listings.test.mjs`), and `glama.json` can carry
+only `maintainers`. So there is no source text left to fix; claiming the listing is what remains.
+What is still wrong: the page's latest release is
 v1.0.3 (observed 2026-09-27), not 2.3.4, and its generated summary says the server "distinguishes
 verified zeros from unassessed or failed lookups", which is Glama's wording, not ours.
 

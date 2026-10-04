@@ -444,7 +444,8 @@ export const realInstant = (s: string | undefined): s is string => s !== undefin
 // get_cve, and none for a search page, whose rows each carry their own. None of them serves a
 // fleet-wide time at which the feed's pollers last completed, so freshness is null: the
 // summary's poller.last_poll_at is the answering instance's own NVD poller (cve/poller.go
-// Stats, in memory), and is relayed in data but not presented as the feed's freshness.
+// Stats, in memory), and is relayed in data but not presented as the feed's freshness; the note
+// says what the whole poller block is (summaryPollerNote, #2647).
 const CVE_FEED_METHOD =
   "EchelonGraph's CVE Pulse feed: CVE records compiled from NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, each polled from its source on a schedule.";
 const NO_FEED_FRESHNESS =
@@ -599,6 +600,29 @@ function summaryRejectedNote(d: object): string {
   return ` summary.rejected (${rejected}) counts CVE records rejected (withdrawn) by their numbering authority, not active CVEs: report them as withdrawn records, never as vulnerabilities.`;
 }
 
+// ── poller, one instance's counters (#2647) ──
+//
+// The summary answer carries a poller block beside summary: cves_ingested, cves_skipped,
+// http_retries, interval, last_poll_at, last_poll_dur_ms, poll_count and poll_errors. They are
+// core-backend cve/poller.go Stats: the in-memory counters of the NVD poller of the ONE API
+// instance that answered, since that instance last started, and every restart zeroes them. So
+// cves_ingested 7195 (production, 2026-09-30T10:02:13Z) is what that instance ingested since it
+// started, not the feed's size or intake, and poll_errors is not the feed's reliability. Through
+// 2.6.1 the tool relayed the block with no word about it. The JSON is still relayed as sent; the
+// outputSchema describes the block, and whenever the answer carries one the note says what it is,
+// with the counters a model would quote, and an answer without it gets no sentence.
+const POLLER_QUOTED = ["cves_ingested", "poll_count", "poll_errors"] as const;
+function summaryPollerNote(d: object): string {
+  const poller = field(d, "poller");
+  if (!isPlainObject(poller) || Object.keys(poller).length === 0) return "";
+  const quoted = POLLER_QUOTED.flatMap((k) => {
+    const n = numAt(poller, k);
+    return n === undefined ? [] : [`poller.${k} ${n}`];
+  });
+  const counters = quoted.length > 0 ? ` (${quoted.join(", ")})` : "";
+  return ` poller is one API instance's NVD poller, counted in that instance's memory since it last started and zeroed on every restart: report its counters${counters} as that instance's, never as the feed's size, intake or reliability, and poller.last_poll_at as that instance's last poll, never as the feed's freshness.`;
+}
+
 async function cveSummary(): Promise<ToolResult> {
   const tool = "cve_summary";
   try {
@@ -620,8 +644,9 @@ async function cveSummary(): Promise<ToolResult> {
       ],
     };
     const total = numAt(r.data, "summary", "total");
-    // What summary.none (#2610), the NVD histogram and summary.rejected (#2641) count.
-    const labels = `${summaryNoneNote(r.data)}${summaryNVDNote(r.data)}${summaryRejectedNote(r.data)}`;
+    // What summary.none (#2610), the NVD histogram and summary.rejected (#2641) count, and what
+    // the poller block is (#2647).
+    const labels = `${summaryNoneNote(r.data)}${summaryNVDNote(r.data)}${summaryRejectedNote(r.data)}${summaryPollerNote(r.data)}`;
     if (total === undefined) return succeeded(r.data, `${head}${labels}`, env);
     if (total === 0) {
       return succeeded(r.data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.${labels}`, env);
@@ -1981,6 +2006,12 @@ const CVERecord = z.looseObject({
   updated_at: opt(z.string()),
 });
 
+// #2647: what cve_summary says the poller block is (summaryPollerNote). Like the #2641 strings
+// beside SUMMARY_NONE_DESCRIPTION, it uses none of #2610's six words ("any", "not", "rating",
+// "scored", "source", "yet"). Declared here, before the outputSchema that describes poller with it.
+const SUMMARY_POLLER_DESCRIPTION =
+  "poller holds the in-memory counters of the NVD poller of the one API instance that answered (cves_ingested, cves_skipped, http_retries, poll_count, poll_errors, last_poll_at, last_poll_dur_ms, interval), counted since that instance last started and zeroed on every restart: they describe that instance, never the feed's size, intake, reliability or freshness. Whenever the answer carries poller the note says so.";
+
 // One of the NVD histogram's four labelled buckets (#2641).
 const nvdBand = (label: string) =>
   opt(z.number()).describe(`Of the active CVEs total counts, those whose NVD CVSS severity label is ${label}: NVD's label, as provenance, never EchelonGraph's severity band.`);
@@ -2009,6 +2040,21 @@ const CVE_SUMMARY_OUTPUT = envelopeSchema({
         last_updated: opt(z.string()),
       })
       .optional(),
+    // #2647: one instance's counters, never the feed's (see summaryPollerNote).
+    poller: z
+      .looseObject({
+        cves_ingested: opt(z.number()).describe("CVE records this instance's NVD poller wrote since the instance last started: never the feed's size or intake."),
+        cves_skipped: opt(z.number()).describe("CVE records this instance's NVD poller skipped since the instance last started."),
+        http_retries: opt(z.number()).describe("HTTP retries this instance's NVD poller made since the instance last started."),
+        interval: opt(z.string()).describe("How often this instance's NVD poller polls."),
+        last_poll_at: opt(z.string()).describe("When this instance's NVD poller last polled: never the feed's freshness."),
+        last_poll_dur_ms: opt(z.number()).describe("How long that poll took, in milliseconds."),
+        poll_count: opt(z.number()).describe("Polls this instance's NVD poller made since the instance last started."),
+        poll_errors: opt(z.number()).describe("Polls of this instance's NVD poller that failed since the instance last started: never the feed's reliability."),
+      })
+      .nullable()
+      .optional()
+      .describe(SUMMARY_POLLER_DESCRIPTION),
   }),
   coverage: null,
   freshness: null,
@@ -2216,7 +2262,7 @@ export function createServer(): McpServer {
     "cve_summary",
     {
       title: "CVE feed summary",
-      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
+      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} ${SUMMARY_POLLER_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
       outputSchema: CVE_SUMMARY_OUTPUT,
       annotations: ANNOTATIONS,
     },

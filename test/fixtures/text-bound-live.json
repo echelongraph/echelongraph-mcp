@@ -1,0 +1,12 @@
+{
+  "about": "#2616: each production-wide tool's text, measured on production's answers. Written by test/text-bound-live.mjs --record, which also keeps the answers in fixtures/prod-answers/. exposure_radar's entry is #2616's own measurement (2026-09-30, answers not kept), until the first --record replaces it.",
+  "tools": {
+    "exposure_radar": {
+      "measured_at": "2026-09-30",
+      "package_version": null,
+      "total": 39359,
+      "blocks": [20930, 15910, 2519],
+      "answers_kept": false
+    }
+  }
+}

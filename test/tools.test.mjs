@@ -31,6 +31,7 @@ import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, CALL_ANSWER, CALL_ANSWER_EMPTY } from "./fixtures/match-batch.mjs";
+import { CEILING, LIVE_TOOLS, MARGIN, PROD_BASE, assertBoundUnderCeiling, keptAnswers, readLiveRecord, shareOfCeiling, textSize } from "./text-bound.mjs";
 
 // The era this run of the suite opens its connections with.
 const ERA = globalThis.MCP_TEST_ERA ?? MODERN;
@@ -3322,6 +3323,12 @@ describe(`against a stub API [${ERA}]`, () => {
     return { ...ok, summary: Object.fromEntries(Object.entries(ok.summary).filter(([k]) => !keys.includes(k))) };
   };
   const NVD_HISTOGRAM = ["nvd_critical", "nvd_high", "nvd_medium", "nvd_low", "nvd_none"];
+  // #2647: the answer without its poller block, so a note pinned word for word before #2647 still
+  // is (the poller sentence is #2647's, pinned in its own block below).
+  const withoutPoller = ({ poller, ...rest }) => rest;
+  const pollerNote = (counters) =>
+    `poller is one API instance's NVD poller, counted in that instance's memory since it last started and zeroed on every restart: report its counters${counters} as that instance's, never as the feed's size, intake or reliability, and poller.last_poll_at as that instance's last poll, never as the feed's freshness.`;
+  const POLLER_PROD = pollerNote(" (poller.cves_ingested 7195, poller.poll_count 4, poller.poll_errors 0)");
 
   // #2610: cve_summary relays summary.none as the API sends it, and says what it counts. core-backend
   // cve/store.go Summary buckets the active CVEs on effectiveSeverityExpr (the EchelonGraph band,
@@ -3386,7 +3393,7 @@ describe(`against a stub API [${ERA}]`, () => {
     // #2641: production's answer carries the NVD histogram and rejected too, which the note labels
     // (the block below). An API older than those fields sends the shape 2.3.1 was written against.
     it("a populated feed whose summary.none is 0, from an API with no NVD histogram and no rejected: the note is 2.3.1's, word for word", async () => {
-      const older = cveSummaryWithout(...NVD_HISTOGRAM, "rejected");
+      const older = withoutPoller(cveSummaryWithout(...NVD_HISTOGRAM, "rejected"));
       const n = noteOf(await summary({ ...older, summary: { ...older.summary, none: 0, unscored: 0, total: BANDED } }));
       assert.equal(n, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds ${BANDED} active CVEs (last updated ${STAMP}).`);
     });
@@ -3482,7 +3489,7 @@ describe(`against a stub API [${ERA}]`, () => {
       const n = noteOf(res);
       assert.equal(
         n,
-        `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE} ${addsUp(381274)} ${nvdNoneLabel(75962)} ${NVD_REPORT} ${rejectedLabel(884)}`,
+        `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE} ${addsUp(381274)} ${nvdNoneLabel(75962)} ${NVD_REPORT} ${rejectedLabel(884)} ${POLLER_PROD}`,
       );
       assertNVDNoneLabelled("cve_summary", n, 75962);
       assertRejectedLabelled("cve_summary", n, 884);
@@ -3511,19 +3518,19 @@ describe(`against a stub API [${ERA}]`, () => {
     });
 
     it("an API older than the NVD histogram and rejected: the note names neither and invents no count, and is 2.3.2's, word for word", async () => {
-      const n = noteOf(await summary(cveSummaryWithout(...NVD_HISTOGRAM, "rejected")));
+      const n = noteOf(await summary(withoutPoller(cveSummaryWithout(...NVD_HISTOGRAM, "rejected"))));
       assert.equal(n, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE}`);
       assert.doesNotMatch(n, /nvd|NVD|rejected|withdrawn/, n);
     });
 
     it("a zero is not labelled: summary.nvd_none 0 gets no NVD sentence, summary.rejected 0 no rejected one, each apart from the other", async () => {
-      const noNVD = noteOf(await summary(withSummary({ nvd_none: 0 })));
+      const noNVD = noteOf(await summary(withoutPoller(withSummary({ nvd_none: 0 }))));
       assert.doesNotMatch(noNVD, /nvd_|NVD/, noNVD);
       assertRejectedLabelled("cve_summary", noNVD, 884);
       const noRejected = noteOf(await summary(withSummary({ rejected: 0 })));
       assertNVDNoneLabelled("cve_summary", noRejected, 75962);
       assert.doesNotMatch(noRejected, /rejected|withdrawn/, noRejected);
-      const neither = noteOf(await summary(withSummary({ nvd_none: 0, rejected: 0 })));
+      const neither = noteOf(await summary(withoutPoller(withSummary({ nvd_none: 0, rejected: 0 }))));
       assert.equal(neither, `cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds 381274 active CVEs (last updated ${STAMP}). ${NONE_NOTE}`);
     });
 
@@ -3596,6 +3603,73 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2647: cve_summary relays the poller block as the API sends it, and says what it is: the
+  // in-memory counters of the NVD poller of the one API instance that answered (core-backend
+  // cve/poller.go Stats), since that instance last started, zeroed on every restart. Production's
+  // cves_ingested 7195 (2026-09-30T10:02:13Z) is that instance's count, not the feed's intake.
+  // Through 2.6.1 the block went to the model with no word about it and no description.
+  describe("#2647: cve_summary says the poller block is one instance's since-restart counters, never the feed's", () => {
+    const OK = BODIES["/api/v1/public/cves/summary"].ok;
+    // The property: a note relaying a poller block says it is one instance's, since restart, with
+    // the counters the answer carries.
+    function assertPollerLabelled(where, note, counters) {
+      assert.ok(note.includes(pollerNote(counters)), `${where}: the note does not say what the poller block is: ${note}`);
+    }
+    it("production's answer: the poller block is relayed as sent, and the note says it is one instance's counters, with cves_ingested, poll_count and poll_errors", async () => {
+      const res = await cveSummaryWith(OK);
+      assert.deepEqual(res.structuredContent.data.poller, OK.poller);
+      const n = noteOf(res);
+      assert.ok(n.endsWith(` ${POLLER_PROD}`), n);
+      assertPollerLabelled("cve_summary", n, " (poller.cves_ingested 7195, poller.poll_count 4, poller.poll_errors 0)");
+      assert.ok(res.structuredContent.notes.includes(POLLER_PROD), res.structuredContent.notes.join(" | "));
+    });
+    it("a poller block with none of the quoted counters is still labelled, with no counter invented", async () => {
+      const n = noteOf(await cveSummaryWith({ ...OK, poller: { interval: "20m0s", last_poll_at: "2026-09-30T09:46:50Z" } }));
+      assertPollerLabelled("cve_summary", n, "");
+      assert.doesNotMatch(n, /cves_ingested|poll_count|poll_errors/, n);
+    });
+    it("an answer with no poller block, or an empty one, gets no poller sentence", async () => {
+      for (const body of [withoutPoller(OK), { ...OK, poller: {} }, { ...OK, poller: null }]) {
+        const n = noteOf(await cveSummaryWith(body));
+        assert.doesNotMatch(n, /poller/, n);
+      }
+    });
+    it("the description says what poller is, and the outputSchema describes the block and each counter as the instance's", async () => {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "cve_summary");
+      assert.ok(
+        t.description.includes(
+          "poller holds the in-memory counters of the NVD poller of the one API instance that answered (cves_ingested, cves_skipped, http_retries, poll_count, poll_errors, last_poll_at, last_poll_dur_ms, interval), counted since that instance last started and zeroed on every restart: they describe that instance, never the feed's size, intake, reliability or freshness. Whenever the answer carries poller the note says so.",
+        ),
+        t.description,
+      );
+      // #2610's control on the site: these words are backed by SUMMARY_NONE_DESCRIPTION alone.
+      const pollerSentence = t.description.slice(t.description.indexOf("poller holds"), t.description.indexOf("Whenever the answer carries poller"));
+      assert.doesNotMatch(pollerSentence, /\b(any|not|rating|scored|source|yet)\b/i, pollerSentence);
+      const pollerOuter = branchOf(t.outputSchema, "measured").properties.data.properties.poller;
+      assert.match(pollerOuter.description, /one API instance/);
+      // poller is an object or null: its fields are on the object branch.
+      const pollerSchema = pollerOuter.anyOf?.find((b) => b.type === "object") ?? pollerOuter;
+      assert.deepEqual(Object.keys(pollerSchema.properties).sort(), Object.keys(OK.poller).sort(), "a counter the answer carries is undescribed");
+      for (const [k, v] of Object.entries(pollerSchema.properties)) assert.match(v.description, /this instance|that poll/, k);
+      assert.match(pollerSchema.properties.cves_ingested.description, /never the feed's size or intake/);
+      assert.match(pollerSchema.properties.poll_errors.description, /never the feed's reliability/);
+      assert.match(pollerSchema.properties.last_poll_at.description, /never the feed's freshness/);
+    });
+    it("the label check can fail: 2.6.1's note, the sentence removed, another count, and the counters called the feed's, are caught", async () => {
+      const n = noteOf(await cveSummaryWith(OK));
+      const counters = " (poller.cves_ingested 7195, poller.poll_count 4, poller.poll_errors 0)";
+      assertPollerLabelled("control", n, counters);
+      for (const [what, mutant] of [
+        ["2.6.1's note", n.replace(` ${POLLER_PROD}`, "")],
+        ["another count", n.replace("poller.cves_ingested 7195", "poller.cves_ingested 7194")],
+        ["the counters called the feed's", n.replace(POLLER_PROD, "The feed has ingested 7195 CVEs in 4 polls with 0 errors.")],
+      ]) {
+        assert.throws(() => assertPollerLabelled(what, mutant, counters), /the note does not say/, what);
+      }
+    });
+  });
+
   // #2467: what each result costs in the channel a model reads. 2.1.0's envelope block repeated
   // the note before it sentence for sentence (82% of exposure_radar's block on production's
   // answers) and nothing measured it, so the fold was silent. Each case below is one of the
@@ -3608,10 +3682,15 @@ describe(`against a stub API [${ERA}]`, () => {
   // fixtures: exposure_radar 32,606, cve_exposure 6,165, cve_summary 1,141, search_cves 1,231,
   // get_cve 940, the get_cve failure 910 and the search_cves failure 1,133. Raise a measurement on
   // purpose, to a new measurement, never to make a run pass.
+  //
+  // #2617: every bound sits under CEILING, #2467's 60,000-character trip-wire, named once in
+  // text-bound.mjs; a re-measure that would take a bound past it fails, and the run prints each
+  // case's share of it. #2616: the fixtures are not production. text-bound-live.mjs measures the
+  // production-wide tools on production's answers and records them (fixtures/text-bound-live.json);
+  // the block after this one holds the record under the ceiling, prints it beside the fixture
+  // bound, and measures the kept answers against it.
   describe("#2467: every tool's text stays within its measured size", () => {
-    const PROD_BASE = "https://app.echelongraph.io";
     const PROD_CVE_PATH = `/api/v1/public/kev-exposure/cve/${CVE_PROD_WRITE_STAMPED}`;
-    const MARGIN = 50;
     // [case, tool, arguments, stub mode, overrides, what the case must be, characters of text
     // measured at 2.2.0 (2026-09-28)]. exposure_radar was raised on purpose at 2.3.0 (2026-09-29,
     // #2315), from 22,883 to 30,949: the fifth radar, mcp_servers, adds 8,066 characters, which are
@@ -3635,12 +3714,15 @@ describe(`against a stub API [${ERA}]`, () => {
     // on purpose, from 835 to 1,063 and, not yet scored, from 1,355 to 1,583: its envelope's own
     // notes gained the sentence saying that an answer without cpe_configurations holds no stored NVD
     // configuration tree, which is not a finding that no product is affected (228 characters, the
-    // sentence and its JSON quoting); the note in content[1] is unchanged. The other bounds are
-    // unchanged.
+    // sentence and its JSON quoting); the note in content[1] is unchanged. At #2647 (2026-10-04)
+    // cve_summary was re-measured on purpose, from 2,338 to 2,709: its note gained the sentence that
+    // says the poller block is one API instance's since-restart counters, with the three a model
+    // would quote (371 characters); data and the envelope block (563) are unchanged. The other
+    // bounds are unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
-      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_338],
+      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_709],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
       ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_063],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
@@ -3650,10 +3732,7 @@ describe(`against a stub API [${ERA}]`, () => {
     ];
     // #2531: the check itself, one function, so the control below runs the predicate the cases
     // run. The text is every text block, with the stub's base URL counted as production's.
-    const sizeOf = (res) => {
-      const blocks = textBlocks(res).map((t) => t.split(stub.base).join(PROD_BASE));
-      return { total: blocks.reduce((n, t) => n + t.length, 0), envelope: blocks.at(-1).length };
-    };
+    const sizeOf = (res) => textSize(res, stub.base);
     function assertWithinBound(label, res, size) {
       const { total } = sizeOf(res);
       const bound = size + MARGIN;
@@ -3709,6 +3788,55 @@ describe(`against a stub API [${ERA}]`, () => {
         assert.throws(() => assertWithinBound(what, withNote(oversized), size), /over its bound of/, what);
       }
     });
+    // #2617: the ceiling, as a number every run prints.
+    it(`#2617: every case's bound is under #2467's ceiling of ${CEILING} characters`, (t) => {
+      for (const [label, , , , , , size] of CASES) {
+        assertBoundUnderCeiling(label, size);
+        t.diagnostic(shareOfCeiling(label, size));
+      }
+    });
+    it("#2617: the ceiling can fail: a bound one character past it is refused, and one at it is not", () => {
+      assert.equal(assertBoundUnderCeiling("control, at the ceiling", CEILING - MARGIN), CEILING);
+      assert.throws(() => assertBoundUnderCeiling("control, past the ceiling", CEILING - MARGIN + 1), /past #2467's ceiling of 60000/);
+      // The ceiling is #2467's number, not one a run may move.
+      assert.equal(CEILING, 60_000);
+    });
+  });
+
+  describe("#2616: production's text, recorded, under the ceiling and measured on its kept answers", () => {
+    const rec = readLiveRecord();
+    it("every recorded production total is a production-wide tool's, under the ceiling, and printed beside its fixture bound", (t) => {
+      assert.ok(Object.keys(rec.tools).length > 0, "the record is empty");
+      for (const [tool, r] of Object.entries(rec.tools)) {
+        assert.ok(LIVE_TOOLS[tool], `${tool} is recorded but is not a production-wide tool`);
+        assert.equal(r.blocks.reduce((n, b) => n + b, 0), r.total, `${tool}: its blocks do not add up to its total`);
+        assert.ok(r.total <= CEILING, `${tool}: production's text, ${r.total} characters (${r.measured_at}), is past #2467's ceiling of ${CEILING}`);
+        t.diagnostic(`${shareOfCeiling(`${tool}, production ${r.measured_at}`, r.total)}; blocks ${r.blocks.join(" + ")}`);
+      }
+    });
+    for (const tool of Object.keys(LIVE_TOOLS)) {
+      it(`${tool}: on production's kept answers, its text is within ${MARGIN} of the record`, async (t) => {
+        const r = rec.tools[tool];
+        const overrides = keptAnswers(tool);
+        if (r?.answers_kept) assert.ok(overrides, `${tool}: the record says its answers are kept, and fixtures/prod-answers/ lacks one`);
+        if (!r || !overrides) {
+          t.skip(`no kept production answers for ${tool}: run node test/text-bound-live.mjs --record`);
+          return;
+        }
+        Object.assign(stub.state.overrides, overrides);
+        let res;
+        try {
+          stub.state.mode = "ok";
+          res = await client.callTool({ name: tool, arguments: {} });
+        } finally {
+          for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+        }
+        assert.notEqual(res.isError, true, `${tool}: the kept answers did not produce an answer`);
+        const { total } = textSize(res, stub.base);
+        t.diagnostic(`${tool}: ${total} characters on production's answers of ${r.measured_at}; recorded ${r.total}`);
+        assert.ok(Math.abs(total - r.total) <= MARGIN, `${tool}: ${total} characters on production's kept answers, recorded ${r.total} (${r.measured_at}): the text changed; re-run text-bound-live.mjs --record on purpose`);
+      });
+    }
   });
 
   // 1.0.1: the version is read from package.json, so adoption per release is countable.

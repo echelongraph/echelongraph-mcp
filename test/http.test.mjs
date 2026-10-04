@@ -16,12 +16,15 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
 import { legacy, modern, post } from "./mcp-http-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
+import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
 
 const HTTP_ENTRY = path.join(PKG_DIR, "dist", "http.js");
 const FIVE = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar"];
@@ -35,6 +38,7 @@ const validator = new AjvJsonSchemaValidator();
 // ── the stub API ──
 let stub;
 const seen = []; // { path, url, clientIp, token }
+const batchPurls = []; // every purl check_sbom sent the batch route
 before(async () => {
   stub = http.createServer((req, res) => {
     const u = new URL(req.url, "http://stub");
@@ -42,6 +46,17 @@ before(async () => {
     if (u.pathname === "/api/v1/public/cves/summary") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(SUMMARY));
+      return;
+    }
+    if (u.pathname === BATCH_PATH && req.method === "POST") {
+      let b = "";
+      req.on("data", (c) => (b += c));
+      req.on("end", () => {
+        const { components } = JSON.parse(b);
+        batchPurls.push(...components.map((c) => c.purl));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(batchAnswer(components.map((c, i) => ROWS.notAffected(i, c.purl, "x", "1")))));
+      });
       return;
     }
     res.writeHead(404, { "content-type": "text/plain" });
@@ -352,6 +367,131 @@ describe("done means 6: the per-client limit answers with OUR JSON-RPC error", (
     const throttles = srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_rate_limited");
     assert.ok(throttles.some((t) => t.client === "203.0.113.10"), JSON.stringify(throttles));
     assert.ok(accessLines(srv).some((l) => l.status === 429 && l.throttled === true));
+  });
+});
+
+// #2747: a realistic CycloneDX SBOM over the hosted endpoint. The 64 KiB cap refused any real
+// document, so a remote-only client could pass check_sbom only a purl list. The document here is
+// Juice Shop 11.1.2's 50 real components (check_sbom.test.mjs's fixture), each field kept, cycled
+// to 2,000 distinct purls (check_sbom's own maximum), pretty-printed as an SBOM tool writes it:
+// ~1.75 M characters, a ~2 MB request body.
+describe("#2747: check_sbom takes a real SBOM document over the hosted endpoint", () => {
+  const CDX = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "juice-shop-11.1.2-50.cdx.json"), "utf8"));
+  const cdxOf = (n) => {
+    const components = Array.from({ length: n }, (_, i) => {
+      const t = CDX.components[i % CDX.components.length];
+      const name = `${t.name}-r${i}`;
+      return { ...t, name, "bom-ref": `pkg:npm/${name}@${t.version}`, purl: `pkg:npm/${name}@${t.version}` };
+    });
+    return { ...CDX, components };
+  };
+  const SBOM_2000 = JSON.stringify(cdxOf(2000), null, 2);
+  const call = { name: "check_sbom", arguments: { sbom: SBOM_2000 } };
+  const bodyBytes = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: call }));
+  let srv;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000" });
+  });
+  after(() => srv?.stop());
+
+  it("control: the document is far past the 64 KiB cap that refused it", () => {
+    assert.ok(bodyBytes > 1_500_000, `${bodyBytes}`);
+  });
+  for (const era of ["modern", "legacy 2025-06-18"]) {
+    it(`${era}: tools/call check_sbom with a 2,000-component CycloneDX document answers measured, every purl checked`, async () => {
+      const before = batchPurls.length;
+      const r = era === "modern" ? await modern(srv.url, "tools/call", call) : await legacy(srv.url, "tools/call", call, { revision: "2025-06-18" });
+      assert.equal(r.status, 200, r.text.slice(0, 500));
+      const sc = r.message.result.structuredContent;
+      assert.notEqual(r.message.result.isError, true, r.text.slice(0, 500));
+      assert.equal(sc.state, "measured");
+      assert.equal(sc.coverage.input, "cyclonedx");
+      assert.deepEqual([sc.coverage.components_in_document, sc.coverage.distinct_purls, sc.coverage.sent, sc.coverage.not_sent], [2000, 2000, 2000, 0]);
+      assert.equal(batchPurls.length - before, 2000, "the batch route did not receive every purl");
+    });
+  }
+  it("the access line names the tool and the size, and holds nothing from the document", async () => {
+    await new Promise((r) => setTimeout(r, 100));
+    const big = accessLines(srv).filter((l) => l.tool === "check_sbom" && l.body_bytes > 64 * 1024);
+    assert.equal(big.length, 2, JSON.stringify(accessLines(srv)));
+    for (const line of srv.lines) assert.ok(!line.includes("juice") && !line.includes("pkg:npm"), `a log line carries the document: ${line.slice(0, 300)}`);
+  });
+  it("a body past 64 KiB that is not check_sbom is still refused 413, read or not", async () => {
+    const pad = "x".repeat(70 * 1024);
+    // A modern client names its method: refused on the declared length, before the body is read.
+    const named = await modern(srv.url, "tools/call", { name: "search_cves", arguments: { search: pad } });
+    // A legacy client does not: refused once the body says what it is.
+    const unnamed = await legacy(srv.url, "tools/call", { name: "search_cves", arguments: { search: pad } }, { revision: "2025-06-18" });
+    const listed = await legacy(srv.url, "tools/list", { pad }, { revision: "2025-06-18" });
+    for (const r of [named, unnamed, listed]) {
+      assert.equal(r.status, 413, r.text);
+      assert.equal(r.message.error.code, -32600);
+      assert.equal(r.message.error.data.max_bytes, 64 * 1024);
+      assert.match(r.message.error.message, /tools\/call of check_sbom/);
+    }
+  });
+  it("a check_sbom document at the tool's own 5,000,000-character cap fits the large cap", async () => {
+    const P = await import(pathToFileURL(path.join(PKG_DIR, "dist", "httpPolicy.js")).href);
+    // Pad the 2,000-component document with more components (no purl, not checked) to the cap.
+    const filler = { type: "library", name: "filler", description: "x".repeat(200), licenses: [{ license: { id: "MIT" } }] };
+    const doc = cdxOf(2000);
+    const padded = (n) => JSON.stringify({ ...doc, components: [...doc.components, ...Array(n).fill(filler)] }, null, 2);
+    const per = padded(1).length - SBOM_2000.length;
+    const text = padded(Math.floor((5_000_000 - SBOM_2000.length) / per));
+    assert.ok(text.length <= 5_000_000 && text.length > 4_900_000, `${text.length}`);
+    const bytes = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "check_sbom", arguments: { sbom: text } } }));
+    assert.ok(bytes < P.DEFAULT_MAX_SBOM_BODY_BYTES, `${bytes} bytes`);
+  });
+});
+
+describe("#2747: the large-body cap and slots", () => {
+  let srv;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_SBOM_BODY_BYTES: "300000", MCP_LARGE_BODY_SLOTS: "1" });
+  });
+  after(() => srv?.stop());
+  // 2,000 purls of ~45 bytes: a body past 64 KiB that is not a document.
+  const purlsCall = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+
+  it("a check_sbom body over MCP_MAX_SBOM_BODY_BYTES is 413", async () => {
+    const r = await legacy(srv.url, "tools/call", { name: "check_sbom", arguments: { sbom: "x".repeat(310_000) } }, { revision: "2025-06-18" });
+    assert.equal(r.status, 413, r.text);
+    assert.equal(r.message.error.data.max_bytes_sbom, 300000);
+  });
+  it("with every slot held, a second large body is 503 JSON-RPC -32030 with Retry-After; once released, it is served", async () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: purlsCall });
+    assert.ok(body.length > 64 * 1024 && body.length < 300_000, `${body.length}`);
+    // The first holds the only slot: it sends past 64 KiB, then stalls before its last bytes.
+    const u = new URL(srv.url);
+    let release;
+    const first = new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18", "Content-Length": Buffer.byteLength(body) } },
+        (res) => {
+          let t = "";
+          res.setEncoding("utf8").on("data", (d) => (t += d)).on("end", () => resolve({ status: res.statusCode, text: t }));
+        },
+      );
+      req.on("error", reject);
+      req.write(body.slice(0, body.length - 10));
+      release = () => req.end(body.slice(body.length - 10));
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const busy = await post(srv.url, body, { "MCP-Protocol-Version": "2025-06-18" });
+    assert.equal(busy.status, 503, busy.text);
+    assert.equal(busy.message.error.code, -32030);
+    assert.equal(busy.headers.get("retry-after"), "5");
+    // A small request is never held behind the slot.
+    assert.equal((await modern(srv.url, "tools/list")).status, 200);
+    release();
+    const f = await first;
+    assert.equal(f.status, 200, f.text.slice(0, 300));
+    const again = await post(srv.url, body, { "MCP-Protocol-Version": "2025-06-18" });
+    assert.equal(again.status, 200, "the slot was not released after the first was served");
+    // And a refused large body gives its slot back too.
+    const refused = await legacy(srv.url, "tools/list", { pad: "x".repeat(70 * 1024) }, { revision: "2025-06-18" });
+    assert.equal(refused.status, 413);
+    assert.equal((await post(srv.url, body, { "MCP-Protocol-Version": "2025-06-18" })).status, 200, "a refused large body kept its slot");
   });
 });
 

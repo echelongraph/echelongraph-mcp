@@ -26,7 +26,13 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { forwardToken, markHttpEntrypoint, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
 import {
   BODY_TOO_LARGE_CODE,
+  BUSY_CODE,
+  DEFAULT_LARGE_BODY_SLOTS,
+  DEFAULT_MAX_BODY_BYTES,
+  DEFAULT_MAX_SBOM_BODY_BYTES,
   DEFAULT_RATE_LIMIT_PER_MIN,
+  LARGE_BODY_TARGETS_TEXT,
+  Slots,
   FixedWindowLimiter,
   ORIGIN_REFUSED_CODE,
   RATE_LIMITED_CODE,
@@ -35,6 +41,8 @@ import {
   resolveClient,
   revisionLabel,
   rpcError,
+  isLargeBodyTarget,
+  largeBodyAdmissible,
   uaFamily,
 } from "./httpPolicy.js";
 
@@ -51,9 +59,12 @@ const PORT = (() => {
   return Number.isInteger(n) && n >= 0 && n < 65536 && process.env.PORT !== "" && process.env.PORT !== undefined ? n : 8080;
 })();
 const RATE_LIMIT_PER_MIN = positiveInt(process.env.MCP_RATE_LIMIT_PER_MIN, DEFAULT_RATE_LIMIT_PER_MIN);
-// Tool arguments are a CVE ID or a short search; 64 KiB is far above any real request and far
-// below the SDK's 4 MiB default.
-const MAX_BODY_BYTES = positiveInt(process.env.MCP_MAX_BODY_BYTES, 64 * 1024);
+// The body caps and the large-body slots (#2747): see httpPolicy.ts "Request-body caps".
+const MAX_BODY_BYTES = positiveInt(process.env.MCP_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES);
+const MAX_SBOM_BODY_BYTES = Math.max(MAX_BODY_BYTES, positiveInt(process.env.MCP_MAX_SBOM_BODY_BYTES, DEFAULT_MAX_SBOM_BODY_BYTES));
+const LARGE_BODY_SLOTS = positiveInt(process.env.MCP_LARGE_BODY_SLOTS, DEFAULT_LARGE_BODY_SLOTS);
+// A large body's wait for a slot is not queued: the client is told to come back.
+const BUSY_RETRY_AFTER_SEC = 5;
 const MCP_PATH = "/mcp";
 const HEALTH_PATH = "/health";
 
@@ -75,12 +86,14 @@ const handler = createMcpHandler(createServer, {
   // responseMode stays the SDK default, "auto": a modern request is answered with one JSON body
   // unless a handler emits something before its result (none of these tools does). The legacy
   // leg answers over SSE, as a 2025-era streamable HTTP server does.
-  maxRequestBodySize: MAX_BODY_BYTES,
+  // The largest body readBody can hand on; which request may be that large is decided here first.
+  maxRequestBodySize: MAX_SBOM_BODY_BYTES,
   // Names only: an SDK error message can quote what the client sent.
   onerror: (e) => log("WARNING", "mcp_handler_error", { error_name: e.name }),
 });
 
 const limiter = new FixedWindowLimiter(RATE_LIMIT_PER_MIN);
+const largeBodies = new Slots(LARGE_BODY_SLOTS);
 
 // CORS for a browser client on an https Origin (the Origin policy has already admitted it).
 // A wildcard is safe here because nothing is credentialed: no cookies, no auth.
@@ -106,37 +119,88 @@ function send(res: http.ServerResponse, status: number, body: string, headers: R
 // forward headers. false on an /mcp request means its calls went WITHOUT them and core-backend
 // keyed them on this service: the one innocent reason core-backend's forward-token-mismatch alert
 // can fire (infrastructure/monitoring/create-mcp-remote-monitoring.sh).
-type Outcome = { status: number; body?: Buffer; throttled?: boolean; refused?: string; clientPublic?: boolean };
+type Outcome = {
+  status: number;
+  body?: Buffer;
+  facts?: ReturnType<typeof bodyFacts>;
+  throttled?: boolean;
+  refused?: string;
+  clientPublic?: boolean;
+};
 
-// Reads the body up to MAX_BODY_BYTES. Over the cap: "too_large", and the rest is discarded
-// unread (the response closes the connection).
-function readBody(req: http.IncomingMessage): Promise<Buffer | "too_large"> {
+// Reads the body. Up to MAX_BODY_BYTES it is read for any request. Past it, only a request that
+// may be one of LARGE_BODY_TARGETS (largeBodyAdmissible: its Mcp-Method / Mcp-Name headers,
+// when sent, say so) reads on, up to MAX_SBOM_BODY_BYTES, and only while it holds one of this
+// instance's large-body slots: none free is "busy". Over the cap that applies: "too_large".
+// Either way the rest is discarded unread (the response closes the connection). A body that
+// crossed MAX_BODY_BYTES returns holding its slot; the caller releases it.
+type BodyRead = { body: Buffer; slot: boolean } | "too_large" | "busy";
+function readBody(req: http.IncomingMessage): Promise<BodyRead> {
+  const mayBeLarge = largeBodyAdmissible(header(req, "mcp-method"), header(req, "mcp-name"));
+  const cap = mayBeLarge ? MAX_SBOM_BODY_BYTES : MAX_BODY_BYTES;
   const declared = Number(req.headers["content-length"]);
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+  if (Number.isFinite(declared) && declared > cap) {
     req.resume();
     return Promise.resolve("too_large");
+  }
+  let slot = false;
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    if (!largeBodies.tryAcquire()) {
+      req.resume();
+      return Promise.resolve("busy");
+    }
+    slot = true;
   }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let done = false;
+    const stop = (r: "too_large" | "busy"): void => {
+      done = true;
+      chunks.length = 0;
+      if (slot) largeBodies.release();
+      slot = false;
+      resolve(r);
+    };
     req.on("data", (chunk: Buffer) => {
       if (done) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        done = true;
-        resolve("too_large");
-        return;
+      if (size > cap) return stop("too_large");
+      if (size > MAX_BODY_BYTES && !slot) {
+        if (!largeBodies.tryAcquire()) return stop("busy");
+        slot = true;
       }
       chunks.push(chunk);
     });
     req.on("end", () => {
-      if (!done) resolve(Buffer.concat(chunks));
+      if (!done) resolve({ body: Buffer.concat(chunks), slot });
     });
     req.on("error", (e) => {
-      if (!done) reject(e);
+      if (done) return;
+      done = true;
+      if (slot) largeBodies.release();
+      reject(e);
     });
   });
+}
+
+function header(req: http.IncomingMessage, name: string): string | undefined {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v.join(", ") : v;
+}
+
+function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outcome {
+  send(
+    res,
+    413,
+    rpcError(
+      BODY_TOO_LARGE_CODE,
+      `Request body too large: at most ${MAX_BODY_BYTES} bytes, or ${MAX_SBOM_BODY_BYTES} bytes for ${LARGE_BODY_TARGETS_TEXT}. A larger SBOM can be passed to check_sbom as its purls.`,
+      { max_bytes: MAX_BODY_BYTES, max_bytes_sbom: MAX_SBOM_BODY_BYTES },
+    ),
+    { ...cors, Connection: "close" },
+  );
+  return { status: 413, refused: "body_size" };
 }
 
 async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<Outcome> {
@@ -175,15 +239,53 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
   }
 
   let body: Buffer | undefined;
+  let facts: ReturnType<typeof bodyFacts> | undefined;
+  let slot = false;
   if (method === "POST") {
     const read = await readBody(req);
-    if (read === "too_large") {
-      send(res, 413, rpcError(BODY_TOO_LARGE_CODE, `Request body too large: at most ${MAX_BODY_BYTES} bytes.`), { ...cors, Connection: "close" });
-      return { status: 413, refused: "body_size" };
+    if (read === "too_large") return tooLarge(res, cors);
+    if (read === "busy") {
+      send(
+        res,
+        503,
+        rpcError(
+          BUSY_CODE,
+          `Server busy: this instance is already reading its ${LARGE_BODY_SLOTS} large request bodies at once. Retry after ${BUSY_RETRY_AFTER_SEC} s, or pass check_sbom the SBOM's purls.`,
+          { retry_after_seconds: BUSY_RETRY_AFTER_SEC },
+        ),
+        { ...cors, "Retry-After": String(BUSY_RETRY_AFTER_SEC), Connection: "close" },
+      );
+      log("WARNING", "mcp_large_body_busy", { slots: LARGE_BODY_SLOTS });
+      return { status: 503, refused: "large_body_busy" };
     }
-    body = read;
+    body = read.body;
+    slot = read.slot;
+    facts = bodyFacts(body);
+    // Past the general cap, the body itself must be what the headers (if any) said: one of
+    // LARGE_BODY_TARGETS. A 2025-era client sends no Mcp-Method, so this is where its large body
+    // is held to that.
+    if (body.length > MAX_BODY_BYTES && !isLargeBodyTarget(facts)) {
+      if (slot) largeBodies.release();
+      return { ...tooLarge(res, cors), body, facts };
+    }
   }
+  try {
+    return { ...(await relay(req, res, pathname, method, cors, client, body)), facts };
+  } finally {
+    if (slot) largeBodies.release();
+  }
+}
 
+// Hands one admitted request to the SDK's handler and streams its answer back.
+async function relay(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  pathname: string,
+  method: string,
+  cors: Record<string, string>,
+  client: ReturnType<typeof resolveClient>,
+  body: Buffer | undefined,
+): Promise<Outcome> {
   const headers = new Headers();
   for (const [k, v] of Object.entries(req.headers)) {
     if (v === undefined || HOP_BY_HOP.has(k)) continue;
@@ -227,7 +329,7 @@ const server = http.createServer((req, res) => {
   const method = req.method ?? "GET";
 
   const finish = (o: Outcome): void => {
-    const facts = o.body ? bodyFacts(o.body) : { rpc_method: "(none)" };
+    const facts = o.facts ?? (o.body ? bodyFacts(o.body) : { rpc_method: "(none)" });
     log("INFO", "mcp_request", {
       method,
       path: pathname === MCP_PATH || pathname === HEALTH_PATH ? pathname : "(other)",
@@ -275,6 +377,8 @@ server.listen(PORT, () => {
     forward_token_configured: forwardToken() !== "",
     rate_limit_per_min: RATE_LIMIT_PER_MIN,
     max_body_bytes: MAX_BODY_BYTES,
+    max_sbom_body_bytes: MAX_SBOM_BODY_BYTES,
+    large_body_slots: LARGE_BODY_SLOTS,
   });
 });
 

@@ -98,3 +98,47 @@ describe("bounded access-log fields", () => {
     assert.equal(P.uaFamily(undefined), "(none)");
   });
 });
+
+describe("#2747: the request-body caps and the large-body slots", () => {
+  it("the large cap is for check_sbom alone, above its document cap and below Cloud Run's 32 MiB", async () => {
+    const S = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
+    assert.deepEqual(P.LARGE_BODY_TARGETS, { "tools/call": S.CHECK_SBOM, "prompts/get": "sbom_review" });
+    assert.equal(P.DEFAULT_MAX_BODY_BYTES, 64 * 1024);
+    assert.ok(P.DEFAULT_MAX_SBOM_BODY_BYTES > S.MAX_SBOM_CHARS, "a document at check_sbom's own cap could never arrive");
+    assert.ok(P.DEFAULT_MAX_SBOM_BODY_BYTES < 32 * 1024 * 1024, "over Cloud Run's HTTP/1 request limit");
+  });
+  it("largeBodyAdmissible: absent headers, or a target named by them, may be large; any other named method or name may not", () => {
+    assert.equal(P.largeBodyAdmissible(undefined, undefined), true);
+    assert.equal(P.largeBodyAdmissible("tools/call", "check_sbom"), true);
+    assert.equal(P.largeBodyAdmissible("tools/call", undefined), true);
+    assert.equal(P.largeBodyAdmissible("prompts/get", "sbom_review"), true);
+    assert.equal(P.largeBodyAdmissible("tools/call", "cve_summary"), false);
+    assert.equal(P.largeBodyAdmissible("tools/call", "sbom_review"), false);
+    assert.equal(P.largeBodyAdmissible("prompts/get", "check_sbom"), false);
+    assert.equal(P.largeBodyAdmissible("tools/list", undefined), false);
+    assert.equal(P.largeBodyAdmissible("initialize", "check_sbom"), false);
+    assert.equal(P.largeBodyAdmissible("toString", undefined), false);
+    assert.equal(P.largeBodyAdmissible(undefined, "cve_summary"), false);
+  });
+  it("isLargeBodyTarget reads the body's own method and name", () => {
+    const b = (o) => P.bodyFacts(Buffer.from(JSON.stringify(o)));
+    assert.equal(P.isLargeBodyTarget(b({ method: "tools/call", params: { name: "check_sbom" } })), true);
+    assert.equal(P.isLargeBodyTarget(b({ method: "prompts/get", params: { name: "sbom_review" } })), true);
+    assert.equal(P.isLargeBodyTarget(b({ method: "tools/call", params: { name: "sbom_review" } })), false);
+    assert.equal(P.isLargeBodyTarget(b({ method: "tools/list" })), false);
+    assert.equal(P.isLargeBodyTarget(b([{ method: "tools/call", params: { name: "check_sbom" } }])), false, "a batch");
+  });
+  it("Slots never waits: past max, tryAcquire is false until a release", () => {
+    const s = new P.Slots(2);
+    assert.equal(s.tryAcquire(), true);
+    assert.equal(s.tryAcquire(), true);
+    assert.equal(s.tryAcquire(), false);
+    s.release();
+    assert.equal(s.inUse, 1);
+    assert.equal(s.tryAcquire(), true);
+    s.release();
+    s.release();
+    s.release();
+    assert.equal(s.inUse, 0, "a release past zero went negative");
+  });
+});

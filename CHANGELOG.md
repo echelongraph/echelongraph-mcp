@@ -6,6 +6,28 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.6.2 — 2026-10-04
+
+- `kev_recent` reads an RFC 3339 `since` or `until` as the date written in it, dropping the time
+  and offset. It used to convert the timestamp to UTC first, so `2024-04-12T00:00:00+02:00` was
+  answered for 2024-04-11, and `2024-04-12T23:30:00-05:00` for 2024-04-13, while still reporting
+  a measured result. `kev_added_date` is a calendar date, so the written date is the one meant.
+  `Z` timestamps, such as those `get_cve` returns, are unaffected (#2755).
+- Hosted endpoint only: a `tools/call` of `check_sbom`, or a `prompts/get` of `sbom_review`, may
+  now send a request body of up to 6 MiB, so a real CycloneDX or SPDX document (up to the tool's
+  5,000,000-character cap) is accepted over `https://mcp.echelongraph.io/mcp`; before, any body
+  over 64 KiB was refused, and only a purl list fit. Every other request keeps the 64 KiB cap.
+  Each server instance serves at most two such large bodies at once; a third is answered HTTP 503
+  with `Retry-After` and JSON-RPC error `-32030`. The per-client limit is unchanged (120 requests
+  a minute). New settings `MCP_MAX_SBOM_BODY_BYTES` and `MCP_LARGE_BODY_SLOTS`. The `check_sbom`
+  description and the README say that over the hosted endpoint the document reaches
+  EchelonGraph's server, which reads the purls from it and neither logs nor keeps it (#2747).
+- `cve_summary` says what the answer's `poller` block is: the in-memory counters of the NVD
+  poller of the one API instance that answered, since it last started, zeroed on every restart,
+  never the feed's size, intake, reliability or freshness. The note says so whenever the block is
+  present, quoting `cves_ingested`, `poll_count` and `poll_errors`; the description and the
+  outputSchema describe the block and each counter. The JSON is still relayed as sent (#2647).
+
 ## 2.6.1 — 2026-10-04
 
 - Hosted endpoint only: when the production synthetic calls `https://mcp.echelongraph.io/mcp`, the
