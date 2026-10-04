@@ -626,13 +626,15 @@ type SearchArgs = { search?: string; severity?: "CRITICAL" | "HIGH" | "MEDIUM" |
 async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
   const tool = "search_cves";
   try {
+    // #1983: the free-text search travels percent-encoded in X-EG-Search, never in the URL. Cloud
+    // Run keeps every request URL in its trace spans for 30 days and no request header; core-backend
+    // (cve/handler.go listSearchTerm) reads the header first and decodes it with url.PathUnescape.
     const q = new URLSearchParams();
-    if (a.search) q.set("search", a.search);
     if (a.severity) q.set("severity", a.severity);
     if (a.min_cvss !== undefined) q.set("min_cvss", String(a.min_cvss));
     if (a.sort) q.set("sort", a.sort);
     q.set("limit", String(a.limit ?? 20));
-    const r = await api(`/api/v1/public/cves?${q.toString()}`);
+    const r = await api(`/api/v1/public/cves?${q.toString()}`, a.search ? { headers: { "X-EG-Search": encodeURIComponent(a.search) } } : undefined);
     if (!r.ok) return failed(tool, r);
     const head = okHead(tool, r.status);
     const shown = lenAt(r.data, "cves");

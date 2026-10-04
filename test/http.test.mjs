@@ -38,7 +38,7 @@ const seen = []; // { path, url, clientIp, token }
 before(async () => {
   stub = http.createServer((req, res) => {
     const u = new URL(req.url, "http://stub");
-    seen.push({ path: u.pathname, url: req.url, clientIp: req.headers["x-eg-client-ip"], token: req.headers["x-eg-mcp-forward"] });
+    seen.push({ path: u.pathname, url: req.url, clientIp: req.headers["x-eg-client-ip"], token: req.headers["x-eg-mcp-forward"], search: req.headers["x-eg-search"] });
     if (u.pathname === "/api/v1/public/cves/summary") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(SUMMARY));
@@ -292,9 +292,10 @@ describe("#2316: the hosted endpoint over Streamable HTTP", () => {
     it("a search and a query string leave no trace of what was typed, and every line is bounded JSON", async () => {
       await modern(srv.url, "tools/call", { name: "search_cves", arguments: { search: MARKER } });
       await post(`${srv.url}?q=${MARKER}q`, { jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }, { "MCP-Protocol-Version": MODERN });
-      // The API call itself carries the term (its query string is core-backend's to keep out of
-      // its logs, #1983): a control that the term really was sent.
-      assert.ok(seen.some((s) => s.url.includes(MARKER)), "control: the search never reached the stub");
+      // The API call carries the term in X-EG-Search, never in its URL (#1983): a control that the
+      // term really was sent, and that no hop's URL holds it.
+      assert.ok(seen.some((s) => s.search === MARKER), "control: the search never reached the stub");
+      assert.ok(!seen.some((s) => s.url.includes(MARKER)), "the term is in the API URL");
       // Let the last lines flush.
       await new Promise((r) => setTimeout(r, 100));
       for (const line of srv.lines) {

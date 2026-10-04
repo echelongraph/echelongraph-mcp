@@ -626,7 +626,7 @@ Where each tool's input travels:
 | Input | Where it is sent |
 |---|---|
 | A CVE ID (`get_cve`, `cve_exposure`, `epss_history`, `cve_intel`, `vendor_advisories_for_cve`), a CWE ID and page (`get_cwe`), a vendor and advisory ID (`get_vendor_advisory`) | The URL path. |
-| `search_cves`: the search text, severity, minimum CVSS, sort and limit | The URL query string. |
+| `search_cves`: `search` | The `X-EG-Search` request header, never the URL. Its severity, minimum CVSS, sort and limit go in the query string. |
 | `search_vendor_advisories`: `query` | The `X-EG-Advisory-Search` request header, never the URL. Its vendor, severity, CVE filter, limit and offset go in the query string. |
 | `check_affected`: `product`, `version`, `ecosystem`, `package` | The `X-EG-Product`, `X-EG-Version`, `X-EG-Ecosystem` and `X-EG-Package` request headers, never the URL. |
 | `kev_recent`: `since`, `until`, `ransomware`, `vendor`, `limit`, `cursor` | The `X-EG-Since`, `X-EG-Until`, `X-EG-Ransomware`, `X-EG-Vendor`, `X-EG-Limit` and `X-EG-Cursor` request headers, never the URL. |

@@ -6,6 +6,12 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.5.1 — 2026-10-04
+
+- `search_cves` sends its search text in the `X-EG-Search` request header instead of the URL
+  query string, so the text is kept out of request URLs, which the hosting platform's tracing
+  records (#1983). Severity, minimum CVSS, sort and limit stay in the query string.
+
 ## 2.5.0 — 2026-10-04
 
 - Four prompts (`triage_cve`, `kev_weekly_brief`, `am_i_affected`, `sbom_review`) and three

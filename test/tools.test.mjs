@@ -540,6 +540,7 @@ async function startStub() {
   const server = http.createServer((req, res) => {
     state.seen.push(req.url);
     state.userAgents.push(req.headers["user-agent"]);
+    (state.searchHeaders ??= []).push(req.headers["x-eg-search"]);
     const { pathname } = new URL(req.url, "http://stub");
     switch (state.mode) {
       case "403":
@@ -1156,7 +1157,10 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(JSON.parse(results.cve_summary.content[0].text).summary.total, 381274);
     });
     it("search_cves forwards the filters and returns the rows", () => {
-      assert.ok(stub.state.seen.includes("/api/v1/public/cves?search=tomcat&limit=2"), `seen: ${stub.state.seen}`);
+      // #1983: the term travels in X-EG-Search, never in the URL (Cloud Run keeps URLs in traces).
+      assert.ok(stub.state.seen.includes("/api/v1/public/cves?limit=2"), `seen: ${stub.state.seen}`);
+      assert.ok(!stub.state.seen.some((u) => u.includes("tomcat")), `the term is in a URL: ${stub.state.seen}`);
+      assert.ok((stub.state.searchHeaders ?? []).includes("tomcat"), "the term did not arrive in X-EG-Search");
       const data = JSON.parse(results.search_cves.content[0].text);
       assert.equal(data.total, 1);
       assert.equal(data.cves[0].cve_id, CVE);
