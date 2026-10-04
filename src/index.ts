@@ -52,7 +52,7 @@ import { registerCheckAffected } from "./tools/check_affected.js";
 import { registerCheckSbom } from "./tools/check_sbom.js";
 import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerGetCwe } from "./tools/get_cwe.js";
-import { isHttpEntrypoint, upstreamHeaders } from "./runtime.js";
+import { isHttpEntrypoint, upstreamHeaders, upstreamUserAgent } from "./runtime.js";
 import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
@@ -196,8 +196,9 @@ export async function api(path: string, init?: { headers?: Record<string, string
         method: init?.method,
         body: init?.body,
         // upstreamHeaders: empty on stdio; on the hosted endpoint, the forward token and the
-        // end client's address (runtime.ts, #2316).
-        headers: { ...upstreamHeaders(`${BASE}${path}`), ...(init?.headers ?? {}), "User-Agent": UA, Accept: "application/json" },
+        // end client's address (runtime.ts, #2316). upstreamUserAgent: UA, unless the hosted
+        // endpoint is answering the production synthetic (#2737).
+        headers: { ...upstreamHeaders(`${BASE}${path}`), ...(init?.headers ?? {}), "User-Agent": upstreamUserAgent(UA), Accept: "application/json" },
         signal: ctrl.signal,
       });
     } catch (e) {

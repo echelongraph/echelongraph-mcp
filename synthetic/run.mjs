@@ -18,7 +18,7 @@
 //   not_published a tool probes.mjs names that this version does not list (a planned tool).
 //
 // OUTPUT: one JSON line per tool per era on stdout, message "mcp tool probe", which Cloud Run
-// stores as jsonPayload; the log-based metric mcp_tool_probe_total{tool,era,outcome} counts
+// stores as jsonPayload; the log-based metric mcp_tool_probe_total{tool,era,outcome,transport} counts
 // them and mcp_tool_probe_latency_ms reads latency_ms (infrastructure/monitoring/
 // create-mcp-synthetic-monitoring.sh). Then one "mcp synthetic run complete" line, the
 // liveness signal. Every line has the one severity of its message, INFO: the outcome is a
@@ -26,6 +26,24 @@
 //
 // The session itself can fail (install, spawn, handshake, tools/list): that is a probe line
 // with tool "(install)" or "(session)" and outcome failure, so the same alert sees it.
+//
+// THE HOSTED LEG (#2737). With MCP_SYNTHETIC_REMOTE_URL set (deploy.sh sets
+// https://mcp.echelongraph.io/mcp; unset, there is no hosted leg), the same run then speaks
+// Streamable HTTP to that endpoint (test/mcp-http-client.mjs's HttpMcpClient, the wire the
+// endpoint's own tests use) on both eras: lists the tools, calls every one with the same probe
+// table, judged the same way against the outputSchema the ENDPOINT advertises, then one
+// prompts/get (triage_cve with a CVE) and one resources/read (echelongraph://methodology), tools
+// "prompt:triage_cve" and "resource:methodology" (probes.mjs). Every line carries `transport`,
+// "stdio" or "http", the metric's fourth label, so a hosted outage is its own series and its own
+// alert; package_version on an http line is the version the endpoint reports in its handshake.
+// The hosted leg runs even when the npm install failed: they are independent products.
+// An answer that is not JSON-RPC (a platform 5xx, a 403 from the Origin policy, a 404) is reason
+// http_status with the status in http_status.
+//
+// Its IDENTITY: every request to the endpoint carries User-Agent echelongraph-mcp-synthetic/1.0,
+// and the endpoint (src/http.ts, runtime.ts upstreamUserAgent) leads its own API calls with that
+// token for such a request, so core-backend files them under echelongraph-mcp-synthetic, never as
+// hosted adoption (mcp_forwarded=true, ua_family echelongraph-mcp).
 //
 // IDENTITY: the package is run with ECHELONGRAPH_MCP_UA=echelongraph-mcp-synthetic/1.0 and,
 // unless --direct, behind forwarder.mjs, which puts that token ahead of the user-agent of a
@@ -48,6 +66,9 @@
 //                                          version lists.
 //   --eras     / MCP_SYNTHETIC_ERAS      comma list (2026-07-28,2025-06-18)
 //   --timeout-ms / MCP_SYNTHETIC_CALL_TIMEOUT_MS  per request (90000)
+//   --remote-url / MCP_SYNTHETIC_REMOTE_URL  the hosted endpoint for the http leg (unset: no
+//                                          http leg). https, or http on a loopback host (tests).
+//   --no-stdio / MCP_SYNTHETIC_STDIO=0     skip the npm stdio leg (a hosted-only local check)
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -57,10 +78,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
-import { AFTER, PROBES } from "./probes.mjs";
+import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
+import { AFTER, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
+export const STDIO = "stdio";
+export const HTTP = "http";
 export const DEFAULT_ERAS = [MODERN, LEGACY];
 export const UA_TOKEN = "echelongraph-mcp-synthetic/1.0";
 export const PROBE_MESSAGE = "mcp tool probe";
@@ -147,27 +171,86 @@ export function judge(res, tool) {
   return { outcome: "success", state };
 }
 
+// How a prompts/get answer is judged (#2737): at least one message, every one a user or
+// assistant message with a content block, and a text block naming the CVE that was sent.
+export function judgePrompt(res, expect) {
+  const msgs = res?.messages;
+  if (!Array.isArray(msgs) || msgs.length === 0) return { outcome: "failure", reason: "prompt_no_messages" };
+  for (const m of msgs) {
+    if (!m || !["user", "assistant"].includes(m.role) || !m.content || typeof m.content !== "object" || typeof m.content.type !== "string") {
+      return { outcome: "failure", reason: "prompt_invalid_message" };
+    }
+  }
+  const named = msgs.some((m) => m.content.type === "text" && typeof m.content.text === "string" && m.content.text.includes(expect));
+  return named ? { outcome: "success" } : { outcome: "failure", reason: "prompt_argument_not_applied" };
+}
+
+// How a resources/read answer is judged (#2737): an entry for the URI that was read, with a
+// non-empty text.
+export function judgeResource(res, uri) {
+  const contents = res?.contents;
+  if (!Array.isArray(contents) || contents.length === 0) return { outcome: "failure", reason: "resource_no_contents" };
+  const hit = contents.find((c) => c && c.uri === uri);
+  if (!hit) return { outcome: "failure", reason: "resource_uri_missing" };
+  if (typeof hit.text !== "string" || hit.text.trim() === "") return { outcome: "failure", reason: "resource_empty" };
+  return { outcome: "success" };
+}
+
 function errorReason(e) {
   if (e instanceof RpcError) return { reason: "rpc_error", rpc_code: e.code };
+  if (e instanceof HttpStatusError) return { reason: "http_status", http_status: e.status };
   const msg = String(e?.message ?? e);
   if (/no answer within/.test(msg)) return { reason: "timeout" };
   if (/exited/.test(msg)) return { reason: "server_exited" };
   return { reason: "error" };
 }
 
-// Probe one era: one line per tool.
-export async function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {} }) {
+const CLIENT_INFO = { name: "echelongraph-mcp-synthetic", version: "1.0.0" };
+
+// Probe one era of the npm package over stdio: one line per tool.
+export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {} }) {
+  const open = () =>
+    connect({ era, command: process.execPath, args: [serverJs], env, stderr: "ignore", clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
+  return probeSession({ era, open, force, emit, onServerInfo });
+}
+
+// Probe one era of the hosted endpoint over Streamable HTTP (#2737): one line per tool, then the
+// prompt and the resource.
+export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {} }) {
+  const open = () => connectHttp({ era, url, userAgent: UA_TOKEN, clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
+  return probeSession({ era, open, force, emit, onServerInfo, extras: true });
+}
+
+// One prompt or resource probe: listed? then called and judged.
+async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
+  let items;
+  try {
+    items = await list();
+  } catch (e) {
+    emit({ tool: label, era, outcome: "failure", step: "list", ...errorReason(e) });
+    return;
+  }
+  if (!items.some(listed)) {
+    emit({ tool: label, era, outcome: "not_published" });
+    return;
+  }
+  const t0 = performance.now();
+  let res;
+  try {
+    res = await call();
+  } catch (e) {
+    emit({ tool: label, era, outcome: "failure", latency_ms: Math.round(performance.now() - t0), ...errorReason(e) });
+    return;
+  }
+  emit({ tool: label, era, latency_ms: Math.round(performance.now() - t0), ...judgeIt(res) });
+}
+
+// Probe one era of one session, however it is opened: one line per tool (and, with extras, one
+// for the prompt and one for the resource).
+export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, extras = false }) {
   let client;
   try {
-    client = await connect({
-      era,
-      command: process.execPath,
-      args: [serverJs],
-      env,
-      stderr: "ignore",
-      clientInfo: { name: "echelongraph-mcp-synthetic", version: "1.0.0" },
-      requestTimeoutMs: timeoutMs,
-    });
+    client = await open();
   } catch (e) {
     emit({ tool: "(session)", era, outcome: "failure", step: "open", ...errorReason(e) });
     return;
@@ -208,11 +291,48 @@ export async function probeEra({ era, serverJs, env, force, timeoutMs, emit, onS
       if (verdict.outcome === "success") seen[name] = res.structuredContent;
       emit({ tool: name, era, latency_ms: latency, input: choice.index, ...verdict });
     }
+    if (extras) {
+      await probeExtra({
+        era,
+        emit,
+        label: PROMPT_PROBE.label,
+        list: async () => (await client.listPrompts()).prompts,
+        listed: (p) => p?.name === PROMPT_PROBE.name,
+        call: () => client.getPrompt({ name: PROMPT_PROBE.name, arguments: PROMPT_PROBE.arguments }),
+        judgeIt: (res) => judgePrompt(res, PROMPT_PROBE.expect),
+      });
+      await probeExtra({
+        era,
+        emit,
+        label: RESOURCE_PROBE.label,
+        list: async () => (await client.listResources()).resources,
+        listed: (r) => r?.uri === RESOURCE_PROBE.uri,
+        call: () => client.readResource({ uri: RESOURCE_PROBE.uri }),
+        judgeIt: (res) => judgeResource(res, RESOURCE_PROBE.uri),
+      });
+    }
     if (client.protocolViolation) emit({ tool: "(session)", era, outcome: "failure", step: "stdout", reason: "protocol_violation" });
   } finally {
     await client.close().catch(() => {});
   }
 }
+
+// The hosted endpoint the http leg may be pointed at: https anywhere, or plain http on a loopback
+// host (the tests' local server), never with credentials in it. Anything else is refused before
+// a request is sent.
+export function remoteUrlAllowed(u) {
+  let url;
+  try {
+    url = new URL(u);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password) return false;
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+}
+
+const VERSION_SHAPE = /^[0-9A-Za-z.+-]{1,40}$/;
 
 export async function runSynthetic(opts = {}) {
   const runId = opts.runId ?? randomUUID();
@@ -220,16 +340,42 @@ export async function runSynthetic(opts = {}) {
   const started = Date.now();
   const eras = opts.eras ?? DEFAULT_ERAS;
   const force = (opts.force ?? []).filter((n) => TOOL_NAME.test(n));
+  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const stdio = opts.stdio !== false;
+  const remoteUrl = opts.remoteUrl || undefined;
+  if (remoteUrl && !remoteUrlAllowed(remoteUrl)) throw new Error("refusing the remote URL: not https (or http on a loopback host), or it carries credentials");
+  const transports = [...(stdio ? [STDIO] : []), ...(remoteUrl ? [HTTP] : [])];
   const counts = { success: 0, failure: 0, not_published: 0 };
   let version = opts.version ?? "unknown";
-  const emit = (fields) => {
+  let remoteVersion = "unknown";
+  const emitter = (transport) => (fields) => {
     counts[fields.outcome] = (counts[fields.outcome] ?? 0) + 1;
-    write({ severity: "INFO", message: PROBE_MESSAGE, run_id: runId, package_version: version, ...fields });
+    const v = transport === HTTP ? remoteVersion : version;
+    write({ severity: "INFO", message: PROBE_MESSAGE, run_id: runId, package_version: v, transport, ...fields });
   };
 
   let tmp;
   let forwarder;
   try {
+    if (stdio) await stdioLeg();
+    if (remoteUrl) {
+      const emit = emitter(HTTP);
+      // The version the endpoint reports in its handshake: what is deployed, not what npm has.
+      const onServerInfo = (info) => {
+        if (remoteVersion === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) remoteVersion = info.version;
+      };
+      for (const era of eras) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo });
+    }
+    return finish();
+  } finally {
+    await forwarder?.close();
+    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // The npm package over stdio. An install that fails is an (install) line per era, and the
+  // hosted leg still runs.
+  async function stdioLeg() {
+    const emit = emitter(STDIO);
     let serverJs = opts.serverJs;
     if (!serverJs) {
       tmp = fs.mkdtempSync(path.join(os.tmpdir(), "eg-mcp-synthetic-"));
@@ -239,7 +385,7 @@ export async function runSynthetic(opts = {}) {
         version = installed.version;
       } catch (e) {
         for (const era of eras) emit({ tool: "(install)", era, outcome: "failure", reason: "install_failed", detail: String(e?.message ?? e).split("\n")[0].slice(0, 300) });
-        return finish();
+        return;
       }
     }
     const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
@@ -253,13 +399,9 @@ export async function runSynthetic(opts = {}) {
     };
     // The version the server reports in its handshake, when it was not installed by spec here.
     const onServerInfo = (info) => {
-      if (version === "unknown" && typeof info?.version === "string" && /^[0-9A-Za-z.+-]{1,40}$/.test(info.version)) version = info.version;
+      if (version === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) version = info.version;
     };
-    for (const era of eras) await probeEra({ era, serverJs, env, force, timeoutMs: opts.timeoutMs ?? 90_000, emit, onServerInfo });
-    return finish();
-  } finally {
-    await forwarder?.close();
-    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+    for (const era of eras) await probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo });
   }
 
   function finish() {
@@ -269,6 +411,8 @@ export async function runSynthetic(opts = {}) {
       run_id: runId,
       package_version: version,
       eras,
+      transports,
+      ...(remoteUrl ? { remote_version: remoteVersion } : {}),
       ...counts,
       duration_ms: Date.now() - started,
       // Which mechanism identified the requests: requests that already led with the token
@@ -292,6 +436,8 @@ function optionsFromCli(argv, env) {
       "force-tool": { type: "string", multiple: true },
       eras: { type: "string" },
       "timeout-ms": { type: "string" },
+      "remote-url": { type: "string" },
+      "no-stdio": { type: "boolean" },
     },
   });
   const list = (s) => (s ? s.split(",").map((x) => x.trim()).filter(Boolean) : undefined);
@@ -304,6 +450,8 @@ function optionsFromCli(argv, env) {
     force: values["force-tool"]?.flatMap(list) ?? list(env.MCP_SYNTHETIC_FORCE_TOOLS) ?? [],
     eras: list(values.eras ?? env.MCP_SYNTHETIC_ERAS) ?? DEFAULT_ERAS,
     timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 90_000,
+    remoteUrl: values["remote-url"] ?? (env.MCP_SYNTHETIC_REMOTE_URL || undefined),
+    stdio: !(values["no-stdio"] ?? env.MCP_SYNTHETIC_STDIO === "0"),
   };
 }
 

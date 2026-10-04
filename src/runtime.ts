@@ -25,10 +25,28 @@ export function isHttpEntrypoint(): boolean {
 // The client a tool call is being answered for. http.ts runs each request inside
 // withClient(), and the SDK dispatches the tool handler inside that same async context, so
 // api() can read it without the tool module passing it through every function.
-const clientStore = new AsyncLocalStorage<{ clientIp?: string }>();
+const clientStore = new AsyncLocalStorage<{ clientIp?: string; synthetic?: boolean }>();
 
-export function withClient<T>(clientIp: string | undefined, fn: () => T): T {
-  return clientStore.run({ clientIp }, fn);
+export function withClient<T>(clientIp: string | undefined, fn: () => T, opts: { synthetic?: boolean } = {}): T {
+  return clientStore.run({ clientIp, synthetic: opts.synthetic === true }, fn);
+}
+
+// #2737: the production MCP synthetic probes this endpoint too, and its calls must reach the API
+// under its own family, never as hosted MCP adoption. The synthetic names itself to this service
+// with this family as its User-Agent's leading token; http.ts marks such a request (synthetic:
+// true) and upstreamUserAgent() then puts this FIXED token ahead of the service's own user-agent,
+// exactly as ECHELONGRAPH_MCP_UA does for the npm package. The client's text is never relayed: a
+// request either carries this one constant or nothing. Anyone can claim the family, as anyone can
+// send it to the API directly; the consequence is an undercounted adoption number, never a bypass
+// (core-backend: user-agent classification is for counting only).
+export const SYNTHETIC_UA_FAMILY = "echelongraph-mcp-synthetic";
+export const SYNTHETIC_UA_TOKEN = `${SYNTHETIC_UA_FAMILY}/1.0`;
+
+/** The User-Agent for one API call: `ua`, led by the synthetic's token when the request is the synthetic's. */
+export function upstreamUserAgent(ua: string): string {
+  if (!httpEntrypoint || clientStore.getStore()?.synthetic !== true) return ua;
+  const lead = ua.split(/[/\s]/, 1)[0];
+  return lead === SYNTHETIC_UA_FAMILY ? ua : `${SYNTHETIC_UA_TOKEN} ${ua}`;
 }
 
 /** The header that carries the forward token, and the one that names the client (core-backend waf/mcpforward.go). */

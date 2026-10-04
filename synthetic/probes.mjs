@@ -53,7 +53,9 @@ export const PROBES = {
   get_cve: [{ cve_id: CVE }],
   cve_exposure: [{ cve_id: EXPOSURE_CVE }],
   exposure_radar: [{}],
-  kev_recent: [{ limit: 5 }],
+  // #2742: the heavy, filtered shape that timed out (limit 200 with a filter, read cold), not the
+  // warm default page that hid the 503s.
+  kev_recent: [{ limit: 200, ransomware: true }],
   epss_history: [{ cve_id: CVE }],
   // The registry path (ecosystem, package, version), then the CPE path (product, version).
   check_affected: [
@@ -71,3 +73,12 @@ export const PROBES = {
 // Probes that read another tool's answer run after it: get_vendor_advisory after
 // vendor_advisories_for_cve.
 export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
+
+// The hosted leg's prompt and resource probes (#2737), one each per era, after the tools. `label`
+// is the line's `tool` (the metric label): a fixed string, so it stays bounded. A prompt or
+// resource the endpoint does not list is not_published, as a planned tool is.
+//   triage_cve           prompts/get with a CVE: the answer must be messages whose text names that
+//                        CVE, which proves the argument reached the prompt.
+//   echelongraph://methodology  resources/read: the answer must carry that URI with a non-empty text.
+export const PROMPT_PROBE = { label: "prompt:triage_cve", name: "triage_cve", arguments: { cve_id: CVE }, expect: CVE };
+export const RESOURCE_PROBE = { label: "resource:methodology", uri: "echelongraph://methodology" };

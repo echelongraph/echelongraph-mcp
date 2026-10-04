@@ -6,6 +6,14 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.6.1 — 2026-10-04
+
+- Hosted endpoint only: when the production synthetic calls `https://mcp.echelongraph.io/mcp`, the
+  endpoint marks its own API calls with a fixed `echelongraph-mcp-synthetic/1.0` token, so the
+  synthetic is never counted as hosted use. The client's own text is never passed through. The
+  `mcp_request` log line gains `client_public` (#2737).
+- stdio behaviour is unchanged.
+
 ## 2.6.0 — 2026-10-04
 
 - `check_sbom` checks up to 2,000 distinct purls per call, instead of refusing more than 200: it

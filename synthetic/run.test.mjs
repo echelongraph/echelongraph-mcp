@@ -18,11 +18,13 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { MODERN } from "../test/mcp-stdio-client.mjs";
-import { chooseInput, COMPLETE_MESSAGE, judge, LEGACY, probeOrder, PROBE_MESSAGE, runSynthetic, UA_TOKEN } from "./run.mjs";
+import { modern } from "../test/mcp-http-client.mjs";
+import { chooseInput, COMPLETE_MESSAGE, HTTP, judge, judgePrompt, judgeResource, LEGACY, probeOrder, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
-import { AFTER, PROBES } from "./probes.mjs";
+import { AFTER, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
 import { BATCH_PATH, CALL_ANSWER } from "../test/fixtures/match-batch.mjs";
 
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
@@ -402,5 +404,257 @@ describe("the forwarder", () => {
     } finally {
       await dead.close();
     }
+  });
+});
+
+// ── #2737: the hosted leg, against this package's own dist/http.js on 127.0.0.1 ──────────────
+// The endpoint is started the way test/http.test.mjs starts it (an ephemeral port, the stub API
+// behind it, a forward token for the stub's host) and the synthetic is pointed at it with
+// remoteUrl. What must hold: both eras, every tool judged against the outputSchema the ENDPOINT
+// advertises, one prompts/get and one resources/read, every line labelled transport "http", the
+// endpoint's API calls filed under the synthetic's family, and a broken endpoint or API read as
+// failure, never as silence or success.
+const HTTP_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "http.js");
+
+async function startHttpEntry(apiBase) {
+  const env = {
+    ...process.env,
+    PORT: "0",
+    ECHELONGRAPH_API_BASE: apiBase,
+    ECHELONGRAPH_API_TIMEOUT_MS: "5000",
+    ECHELONGRAPH_FORWARD_TOKEN: "forward-token-for-tests-2737",
+    ECHELONGRAPH_FORWARD_HOST: "127.0.0.1",
+    MCP_RATE_LIMIT_PER_MIN: "1000",
+  };
+  const proc = spawn(process.execPath, [HTTP_ENTRY], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const lines = [];
+  let stderr = "";
+  proc.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
+  const exited = new Promise((resolve) => proc.once("exit", (code) => resolve(code)));
+  const port = await new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(() => reject(new Error(`http.js did not start: ${stderr}`)), 15_000);
+    proc.stdout.setEncoding("utf8").on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        lines.push(line);
+        try {
+          const j = JSON.parse(line);
+          if (j.message === "mcp_remote_listening") {
+            clearTimeout(timer);
+            resolve(j.port);
+          }
+        } catch {
+          // not JSON: kept
+        }
+      }
+    });
+    exited.then((code) => {
+      clearTimeout(timer);
+      reject(new Error(`http.js exited ${code} before listening: ${stderr}`));
+    });
+  });
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    lines,
+    async stop() {
+      proc.kill("SIGTERM");
+      const t = setTimeout(() => proc.kill("SIGKILL"), 5000);
+      await exited;
+      clearTimeout(t);
+    },
+  };
+}
+
+const EXTRAS = [PROMPT_PROBE.label, RESOURCE_PROBE.label];
+
+describe("#2737: the hosted leg over Streamable HTTP", () => {
+  let stub, srv;
+  before(async () => {
+    stub = await startStub();
+    srv = await startHttpEntry(stub.base);
+  });
+  after(async () => {
+    await srv?.stop();
+    await stub?.close();
+  });
+  const runHttp = (opts = {}) => run(stub, { stdio: false, remoteUrl: srv.url, ...opts });
+
+  describe("a healthy endpoint, run beside the stdio leg", () => {
+    let r;
+    before(async () => {
+      stub.state.mode = "ok";
+      stub.state.userAgents.length = 0;
+      stub.state.seen.length = 0;
+      r = await run(stub, { remoteUrl: srv.url });
+    });
+    it("every published tool, the prompt and the resource succeed on both eras over http", () => {
+      for (const era of [MODERN, LEGACY]) {
+        for (const tool of [...PUBLISHED, ...EXTRAS]) {
+          const l = r.probes.find((p) => p.transport === HTTP && p.tool === tool && p.era === era);
+          assert.ok(l, `${tool} [${era}] http: no line`);
+          assert.equal(l.outcome, "success", `${tool} [${era}] http: ${JSON.stringify(l)}`);
+          assert.ok(Number.isInteger(l.latency_ms) && l.latency_ms >= 0);
+        }
+      }
+      assert.equal(r.exitCode, 0);
+    });
+    it("tools are judged against the endpoint's outputSchema: each http tool line carries the state it validated", () => {
+      for (const tool of PUBLISHED) {
+        const l = r.probes.find((p) => p.transport === HTTP && p.tool === tool && p.era === MODERN);
+        assert.ok(["measured", "not_assessed"].includes(l.state), `${tool}: ${l.state}`);
+      }
+    });
+    it("every line names its transport; the stdio leg is unchanged and no (tool, era, transport) repeats", () => {
+      for (const l of r.probes) assert.ok([STDIO, HTTP].includes(l.transport), JSON.stringify(l));
+      const keys = r.probes.map((l) => `${l.tool}|${l.era}|${l.transport}`);
+      assert.equal(new Set(keys).size, keys.length, "a (tool, era, transport) reported twice");
+      const stdio = r.probes.filter((l) => l.transport === STDIO);
+      assert.equal(stdio.length, 2 * PUBLISHED.length);
+      assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the prompt and resource probes are the hosted leg's");
+      const http = r.probes.filter((l) => l.transport === HTTP);
+      assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length));
+      const c = r.complete[0];
+      assert.deepEqual(c.transports, [STDIO, HTTP]);
+      assert.deepEqual([c.success, c.failure], [2 * PUBLISHED.length + 2 * (PUBLISHED.length + EXTRAS.length), 0]);
+    });
+    it("an http line carries the version the endpoint reports in its handshake", async () => {
+      const { PKG } = await import("../test/server-under-test.mjs");
+      for (const l of r.probes.filter((p) => p.transport === HTTP)) assert.equal(l.package_version, PKG.version);
+      assert.equal(r.complete[0].remote_version, PKG.version);
+    });
+    it("the endpoint's API calls for the synthetic carry the synthetic's family, never plain echelongraph-mcp", () => {
+      assert.ok(stub.state.userAgents.length >= 4 * PUBLISHED.length, "control: both legs reached the API");
+      for (const ua of stub.state.userAgents) assert.equal(uaFamilyOf(ua), "echelongraph-mcp-synthetic", ua);
+    });
+    it("the endpoint's access log files the synthetic under its own family", () => {
+      const access = srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.path === "/mcp");
+      assert.ok(access.length > 0);
+      for (const a of access) {
+        assert.equal(a.ua_family, "echelongraph-mcp-synthetic");
+        assert.equal(typeof a.client_public, "boolean");
+      }
+    });
+  });
+
+  it("the hosted leg alone: every API call the endpoint made for it leads with the synthetic's fixed token", async () => {
+    stub.state.mode = "ok";
+    const before = stub.state.seen.length;
+    const r = await runHttp({ eras: [LEGACY] });
+    assert.equal(r.exitCode, 0);
+    const calls = stub.state.seen.slice(before);
+    assert.ok(calls.length >= PUBLISHED.length, `control: the endpoint called the API (${calls.length})`);
+    for (const s of calls) assert.match(s.headers["user-agent"], /^echelongraph-mcp-synthetic\/1\.0 echelongraph-mcp\/\S+ \(\+https:\/\/echelongraph\.io\/pulse\/mcp\)$/);
+  });
+
+  it("a hosted client that is NOT the synthetic reaches the API under the endpoint's own user-agent; a claimed family adds only the fixed token", async () => {
+    stub.state.mode = "ok";
+    const before = stub.state.seen.length;
+    const r = await modern(srv.url, "tools/call", { name: "cve_summary", arguments: {} }, { headers: { "User-Agent": "SomeAgent/1.0" } });
+    assert.equal(r.status, 200, r.text);
+    const calls = stub.state.seen.slice(before);
+    assert.equal(calls.length, 1);
+    assert.equal(uaFamilyOf(calls[0].headers["user-agent"]), "echelongraph-mcp");
+    // Nothing the client wrote reaches the API's user-agent: only the fixed token is ever added.
+    const spoof = await modern(srv.url, "tools/call", { name: "cve_summary", arguments: {} }, { headers: { "User-Agent": "echelongraph-mcp-synthetic/9.9 injected-text" } });
+    assert.equal(spoof.status, 200);
+    const sent = stub.state.seen.at(-1).headers["user-agent"];
+    assert.match(sent, /^echelongraph-mcp-synthetic\/1\.0 echelongraph-mcp\//);
+    assert.ok(!sent.includes("injected") && !sent.includes("9.9"), sent);
+  });
+
+  it("an API answering 500 fails every published tool over http with state_failed; the prompt and resource make no API call and still pass", async () => {
+    stub.state.mode = "500";
+    const r = await runHttp();
+    stub.state.mode = "ok";
+    for (const era of [MODERN, LEGACY]) {
+      for (const tool of PUBLISHED) {
+        const l = r.of(tool, era);
+        assert.equal(l.transport, HTTP);
+        assert.equal(l.outcome, "failure", `${tool} [${era}]`);
+        assert.equal(l.reason, AFTER[tool] ? "no_valid_probe_input" : "state_failed", `${tool} [${era}]: ${JSON.stringify(l)}`);
+      }
+      for (const x of EXTRAS) assert.equal(r.of(x, era).outcome, "success");
+    }
+    assert.equal(r.exitCode, 2);
+    assert.deepEqual(r.complete[0].transports, [HTTP]);
+  });
+
+  it("the deliberate-failure canary fails over http on both eras too", async () => {
+    stub.state.mode = "ok";
+    const r = await runHttp({ force: ["canary_deliberate_failure"] });
+    for (const era of [MODERN, LEGACY]) {
+      const l = r.of("canary_deliberate_failure", era);
+      assert.equal(l.transport, HTTP);
+      assert.equal(l.outcome, "failure", JSON.stringify(l));
+      for (const tool of PUBLISHED) assert.equal(r.of(tool, era).outcome, "success");
+    }
+    assert.equal(r.exitCode, 2);
+  });
+
+  it("an endpoint that is down is a (session) failure per era over http, and the run completes", async () => {
+    const dead = http.createServer();
+    await new Promise((resolve) => dead.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${dead.address().port}/mcp`;
+    await new Promise((resolve) => dead.close(resolve));
+    const r = await run(stub, { stdio: false, remoteUrl: url });
+    for (const era of [MODERN, LEGACY]) {
+      const l = r.of("(session)", era);
+      assert.equal(l?.outcome, "failure", JSON.stringify(r.probes));
+      assert.equal(l.transport, HTTP);
+      assert.equal(l.step, "open");
+    }
+    assert.equal(r.complete.length, 1);
+    assert.equal(r.exitCode, 2);
+  });
+
+  it("an endpoint answering a platform error page is reason http_status with the status", async () => {
+    const broken = http.createServer((req, res) => {
+      res.writeHead(503, { "content-type": "text/html" });
+      res.end("<html>Service Unavailable</html>");
+    });
+    await new Promise((resolve) => broken.listen(0, "127.0.0.1", resolve));
+    try {
+      const r = await run(stub, { stdio: false, remoteUrl: `http://127.0.0.1:${broken.address().port}/mcp` });
+      for (const era of [MODERN, LEGACY]) {
+        const l = r.of("(session)", era);
+        assert.equal(l.reason, "http_status", JSON.stringify(l));
+        assert.equal(l.http_status, 503);
+      }
+      assert.equal(r.exitCode, 2);
+    } finally {
+      broken.closeAllConnections();
+      await new Promise((resolve) => broken.close(resolve));
+    }
+  });
+
+  it("refuses a remote URL that is not https (or loopback http) before sending anything", async () => {
+    assert.equal(remoteUrlAllowed("https://mcp.echelongraph.io/mcp"), true);
+    assert.equal(remoteUrlAllowed("http://127.0.0.1:8080/mcp"), true);
+    assert.equal(remoteUrlAllowed("http://mcp.echelongraph.io/mcp"), false);
+    assert.equal(remoteUrlAllowed("https://user:pw@mcp.echelongraph.io/mcp"), false);
+    assert.equal(remoteUrlAllowed("not a url"), false);
+    await assert.rejects(runSynthetic({ stdio: false, remoteUrl: "http://example.com/mcp", write: () => {} }), /refusing the remote URL/);
+  });
+});
+
+describe("#2737: judging a prompt and a resource", () => {
+  const text = (t, role = "user") => ({ role, content: { type: "text", text: t } });
+  it("a prompt must answer messages whose text names the CVE that was sent", () => {
+    assert.deepEqual(judgePrompt({ messages: [text("Triage CVE-2021-44228 using these tools")] }, "CVE-2021-44228"), { outcome: "success" });
+    assert.equal(judgePrompt({ messages: [text("Triage the CVE using these tools")] }, "CVE-2021-44228").reason, "prompt_argument_not_applied");
+    assert.equal(judgePrompt({ messages: [] }, "CVE-2021-44228").reason, "prompt_no_messages");
+    assert.equal(judgePrompt({}, "CVE-2021-44228").reason, "prompt_no_messages");
+    assert.equal(judgePrompt({ messages: [{ role: "system", content: { type: "text", text: "CVE-2021-44228" } }] }, "CVE-2021-44228").reason, "prompt_invalid_message");
+  });
+  it("a resource must answer an entry for the URI read, with a non-empty text", () => {
+    const uri = RESOURCE_PROBE.uri;
+    assert.deepEqual(judgeResource({ contents: [{ uri, mimeType: "text/markdown", text: "# How" }] }, uri), { outcome: "success" });
+    assert.equal(judgeResource({ contents: [{ uri: "echelongraph://other", text: "x" }] }, uri).reason, "resource_uri_missing");
+    assert.equal(judgeResource({ contents: [{ uri, text: "  " }] }, uri).reason, "resource_empty");
+    assert.equal(judgeResource({ contents: [] }, uri).reason, "resource_no_contents");
   });
 });

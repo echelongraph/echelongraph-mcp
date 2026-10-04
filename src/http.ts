@@ -23,7 +23,7 @@
 // token fatal at start-up, because without it every remote user would share one API budget.
 import http from "node:http";
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { forwardToken, markHttpEntrypoint, withClient } from "./runtime.js";
+import { forwardToken, markHttpEntrypoint, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
 import {
   BODY_TOO_LARGE_CODE,
   DEFAULT_RATE_LIMIT_PER_MIN,
@@ -102,7 +102,11 @@ function send(res: http.ServerResponse, status: number, body: string, headers: R
   res.end(body);
 }
 
-type Outcome = { status: number; body?: Buffer; throttled?: boolean; refused?: string };
+// clientPublic (#2737): this request named a public client address, so its API calls carried the
+// forward headers. false on an /mcp request means its calls went WITHOUT them and core-backend
+// keyed them on this service: the one innocent reason core-backend's forward-token-mismatch alert
+// can fire (infrastructure/monitoring/create-mcp-remote-monitoring.sh).
+type Outcome = { status: number; body?: Buffer; throttled?: boolean; refused?: string; clientPublic?: boolean };
 
 // Reads the body up to MAX_BODY_BYTES. Over the cap: "too_large", and the rest is discarded
 // unread (the response closes the connection).
@@ -194,7 +198,11 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
     signal: abort.signal,
   });
 
-  const response = await withClient(client.forwardAddress, () => handler.fetch(request));
+  // #2737: the production synthetic names itself by its user-agent family; its API calls then
+  // carry the synthetic's fixed token (runtime.ts upstreamUserAgent), so they are never counted
+  // as hosted adoption.
+  const synthetic = uaFamily(req.headers["user-agent"]) === SYNTHETIC_UA_FAMILY;
+  const response = await withClient(client.forwardAddress, () => handler.fetch(request), { synthetic });
   const out: Record<string, string> = { ...cors };
   response.headers.forEach((v, k) => {
     out[k] = v;
@@ -204,7 +212,7 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
     for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
   }
   res.end();
-  return { status: response.status, body };
+  return { status: response.status, body, clientPublic: client.forwardAddress !== undefined };
 }
 
 const server = http.createServer((req, res) => {
@@ -232,6 +240,7 @@ const server = http.createServer((req, res) => {
       throttled: o.throttled === true,
       refused: o.refused ?? "",
       ua_family: uaFamily(req.headers["user-agent"]),
+      client_public: o.clientPublic === true,
     });
   };
 

@@ -12,7 +12,8 @@
 # The runner's own dependencies are this package's lockfile, production only: the MCP SDK's
 # ajv validator (the one tools.test.mjs validates outputSchema with). test/mcp-stdio-client.mjs
 # is the wire-level client the tests use, copied as is, so the synthetic speaks both eras the way
-# the suite does.
+# the suite does; test/mcp-http-client.mjs is its Streamable HTTP counterpart, for the hosted leg
+# against mcp.echelongraph.io (#2737).
 FROM node:22-bookworm-slim
 
 WORKDIR /synthetic
@@ -20,7 +21,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && node -e 'import("@modelcontextprotocol/server/validators/ajv").then(() => console.log("ajv validator resolves"))'
 
-COPY test/mcp-stdio-client.mjs test/mcp-stdio-client.mjs
+COPY test/mcp-stdio-client.mjs test/mcp-http-client.mjs test/
 COPY synthetic/run.mjs synthetic/probes.mjs synthetic/forwarder.mjs synthetic/
 
 # Cloud Run's filesystem is in memory; npm's cache and the install go under /tmp (the runner
