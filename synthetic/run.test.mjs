@@ -24,7 +24,7 @@ import { MODERN } from "../test/mcp-stdio-client.mjs";
 import { modern } from "../test/mcp-http-client.mjs";
 import { chooseInput, COMPLETE_MESSAGE, HTTP, judge, judgePrompt, judgeResource, LEGACY, probeOrder, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
-import { AFTER, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
+import { AFTER, EXPECT, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
 import { BATCH_PATH, CALL_ANSWER } from "../test/fixtures/match-batch.mjs";
 
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
@@ -116,7 +116,11 @@ BODIES["/api/v1/public/ai-exposure/stats?service=mcp"] = {
 
 // mode: ok (BODIES, else the router's 404), 500 (every request a 500).
 async function startStub() {
-  const state = { mode: "ok", userAgents: [], seen: [] };
+  // batches: the component count of each POST to the batch route (#2757). refuseSecondBatch:
+  // every second one is answered 429 without Retry-After, as a spent per-minute budget would be, so
+  // check_sbom answers partial with one batch sent. batchCap: a batch of more components is refused
+  // 400 TOO_MANY_COMPONENTS, as the route answers one over cveBatchMaxComponents (a lowered cap).
+  const state = { mode: "ok", userAgents: [], seen: [], batches: [], refuseSecondBatch: false, batchCap: null };
   const server = http.createServer((req, res) => {
     state.userAgents.push(req.headers["user-agent"]);
     state.seen.push({ method: req.method, url: req.url, headers: req.headers });
@@ -131,6 +135,23 @@ async function startStub() {
       req.on("end", () => {
         res.writeHead(201, { "content-type": "application/json", "x-eg-echo": req.headers["x-eg-product"] ?? "" });
         res.end(JSON.stringify({ method: req.method, url: req.url, body: Buffer.concat(chunks).toString() }));
+      });
+      return;
+    }
+    if (req.method === "POST" && req.url === BATCH_PATH) {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        const n = JSON.parse(Buffer.concat(chunks).toString()).components.length;
+        state.batches.push(n);
+        if (state.batchCap !== null && n > state.batchCap) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: `${n} components sent; at most ${state.batchCap} per call. Nothing was looked up: split the list`, code: "TOO_MANY_COMPONENTS" }));
+          return;
+        }
+        const refused = state.refuseSecondBatch && state.batches.length % 2 === 0;
+        res.writeHead(refused ? 429 : 200, { "content-type": "application/json" });
+        res.end(JSON.stringify(refused ? { error: "component budget exceeded", code: "RATE_LIMIT_EXCEEDED" } : BODIES[BATCH_PATH]));
       });
       return;
     }
@@ -180,7 +201,12 @@ describe("the synthetic against the stub API", () => {
     before(async () => {
       stub.state.mode = "ok";
       stub.state.userAgents.length = 0;
+      stub.state.batches.length = 0;
       r = await run(stub);
+    });
+    it("#2757: check_sbom is probed with 201 purls, so each era sends two batches, 200 and 1, and both are answered", () => {
+      assert.deepEqual(stub.state.batches, [200, 1, 200, 1]);
+      for (const era of [MODERN, LEGACY]) assert.equal(r.of("check_sbom", era).outcome, "success");
     });
     it("calls every published tool once per era and reports each a success", () => {
       for (const era of [MODERN, LEGACY]) {
@@ -272,6 +298,46 @@ describe("the synthetic against the stub API", () => {
     assert.equal(r.complete[0].failure, 2 * PUBLISHED.length);
   });
 
+  it("#2757: an API that refuses check_sbom's second batch fails the probe, expectation_unmet, though the answer fits its schema", async () => {
+    stub.state.mode = "ok";
+    stub.state.batches.length = 0;
+    stub.state.refuseSecondBatch = true;
+    let r;
+    try {
+      r = await run(stub, { eras: [LEGACY] });
+    } finally {
+      stub.state.refuseSecondBatch = false;
+    }
+    assert.deepEqual(stub.state.batches, [200, 1], "control: the second batch was sent, and refused");
+    const l = r.of("check_sbom", LEGACY);
+    assert.equal(l.outcome, "failure", JSON.stringify(l));
+    assert.equal(l.reason, "expectation_unmet");
+    assert.equal(l.state, "measured", "the answer itself was a valid partial one");
+    assert.equal(l.detail, 'coverage.batches_sent 1, want at least 2 (not_sent_reason "rate_limited")');
+    for (const tool of PUBLISHED.filter((t) => t !== "check_sbom")) assert.equal(r.of(tool, LEGACY).outcome, "success", tool);
+    assert.equal(r.exitCode, 2);
+  });
+
+  it("#2757: a lowered batch cap fails check_sbom's probe as state_invalid_input, not expectation_unmet: its first batch is refused", async () => {
+    // What the EXPECT comment (probes.mjs) and the alert's runbook say: expectation_unmet is the
+    // SECOND batch going unanswered; a cap below 200 refuses the first, and nothing is answered.
+    stub.state.mode = "ok";
+    stub.state.batches.length = 0;
+    stub.state.batchCap = 100;
+    let r;
+    try {
+      r = await run(stub, { eras: [LEGACY] });
+    } finally {
+      stub.state.batchCap = null;
+    }
+    assert.deepEqual(stub.state.batches, [200], "control: the first batch was sent, refused, and nothing after it");
+    const l = r.of("check_sbom", LEGACY);
+    assert.equal(l.outcome, "failure", JSON.stringify(l));
+    // A 400 is the API refusing the input (index.ts failed()), so the state is invalid_input.
+    assert.equal(l.reason, "state_invalid_input", JSON.stringify(l));
+    assert.equal(r.exitCode, 2);
+  });
+
   it("the deliberate-failure canary: a forced tool name no version lists is a failure on both eras", async () => {
     const r = await run(stub, { force: ["canary_deliberate_failure"] });
     for (const era of [MODERN, LEGACY]) {
@@ -303,6 +369,27 @@ describe("the synthetic against the stub API", () => {
     const r = await runSynthetic({ serverJs: undefined, packageSpec: "not-our-package@1.0.0", apiBase: stub.base, write: () => {} });
     assert.equal(r.summary.failure, 2);
     assert.equal(r.exitCode, 2);
+  });
+});
+
+describe("#2757: what check_sbom's probe must show", () => {
+  it("201 distinct purls: one more than a batch, so two batches", () => {
+    const purls = PROBES.check_sbom[0].purls;
+    assert.equal(purls.length, 201);
+    assert.equal(new Set(purls).size, 201, "a duplicate is sent once, and would leave one batch");
+  });
+  it("EXPECT holds batches_sent at least 2, and says what it saw otherwise", () => {
+    const sc = (batches_sent, not_sent_reason = null) => ({ coverage: { batches_sent, not_sent_reason } });
+    assert.equal(EXPECT.check_sbom(sc(2)), undefined);
+    assert.equal(EXPECT.check_sbom(sc(1, "rate_limited")), 'coverage.batches_sent 1, want at least 2 (not_sent_reason "rate_limited")');
+    assert.equal(EXPECT.check_sbom({}), "coverage.batches_sent null, want at least 2 (not_sent_reason null)");
+  });
+  it("judge applies it only to a result that is otherwise a success", () => {
+    const tool = { name: "t", inputSchema: { type: "object" }, outputSchema: { type: "object" } };
+    const expect = (sc) => (sc.ok ? undefined : "saw not ok");
+    assert.deepEqual(judge({ structuredContent: { state: "measured", ok: true } }, tool, expect), { outcome: "success", state: "measured" });
+    assert.deepEqual(judge({ structuredContent: { state: "measured" } }, tool, expect), { outcome: "failure", reason: "expectation_unmet", state: "measured", detail: "saw not ok" });
+    assert.equal(judge({ isError: true, structuredContent: { state: "failed" } }, tool, expect).reason, "state_failed");
   });
 });
 

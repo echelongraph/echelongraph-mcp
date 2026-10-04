@@ -6,6 +6,71 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.6.3 — 2026-10-04
+
+- `exposure_radar` relays the observation window each count was measured over, where the API now
+  serves one: `exposed_databases.window` (when our verifier last confirmed each host),
+  `leaked_credentials.window` (when each key was last seen) and `shadow_ai.confirmed_exposed.window`
+  (when our verifier's deciding probe ran). A window is relayed only when no counted row is undated;
+  otherwise the note says how many are, and a malformed window is left out and named. KEV-exposure
+  carries no observation time yet. `exposure_radar` stays `not_assessed` with `measured_at` null:
+  a window's end is not one observation time (#2438).
+- `vendor_advisories_for_cve`, `search_vendor_advisories` and `get_vendor_advisory` read each
+  vendor's window from `GET /api/v1/public/vendor-advisories/coverage` beside their own request,
+  and relay it in `coverage` (`vendor_windows`, or `vendor_window` for the detail): the advisories
+  held, `earliest_vendor_published_at`, `latest_vendor_published_at` and `history_backfill`.
+  `vendor_advisories_for_cve` adds `cve_year` and `vendors_not_fully_held`, the vendors with no
+  advisory in the answer of which EchelonGraph holds none, whose earliest held advisory is dated
+  after 1 January of the year in the CVE ID, or whose history is still being read, and its note
+  names each with its window: an empty answer for CVE-2024-3400 can no longer be read as Palo Alto
+  having published none. Its description no longer says an empty answer means none of the polled
+  feeds names the CVE: it means none of the advisories EchelonGraph holds does. The search
+  and the detail name the vendors whose history is still being read. When the windows cannot be
+  read, the answer is still relayed, measured, with the windows null and a note saying so (#2729).
+- `search_vendor_advisories`: a query of 1 or 2 characters matches whole words only
+  (`search_match` `word`), as the API now answers it, and the description and the note say so; a
+  search's total is counted to at most 1,000, and a capped total (`total_capped` true) is written
+  "1,000+" in the note, never as a count. `coverage` gains `total_capped` and `search_match`
+  (#2728).
+- `check_sbom`'s 50-second budget bounds the whole call, not only when a batch may start: each
+  batch's request may take only what is left of it, and a batch still unanswered when the budget
+  runs out is cut off and its purls answered as not sent (`not_sent_reason` `time_budget`). Before,
+  a batch started at 49.9 s could run for the 15-second request timeout, past the 60-second limits
+  of the SDK's client and the hosted endpoint, which then answered nothing at all. A Retry-After
+  wait that ends at the budget's end, before any batch was answered, answers that 429 instead of
+  sending a request with no time left (#2756).
+- Repository only, not in the package: the production synthetic probes `check_sbom` with 201
+  purls, so every run sends two batches, and fails the probe (`expectation_unmet`) unless both
+  were answered; core-backend's tests fail when `MAX_COMPONENTS`, `MAX_PURL_LEN` or
+  `API_COMPONENTS_PER_MINUTE` disagree with the API's own values, and every core-backend deploy runs
+  them before it builds (`scripts/check-outbound-identity.sh`'s table), refusing on drift (#2757).
+- A success's first text block is cut to fit 30,000 characters when the API's JSON is longer, and
+  `structuredContent.data` still carries the answer whole. Through 2.6.2 that block was the JSON
+  whatever its size: on production's answers of 2026-10-04 a default `search_cves` for "openssl"
+  was 133,300 characters of text, `get_cve` CVE-2021-44228 80,897, `check_affected` openssl 3.0.0
+  156,058 (the Linux kernel at 5.10.0, 364,408), `check_sbom` on a 50-component SBOM 112,820,
+  `kev_recent` at limit 200 105,925 and `search_vendor_advisories` at limit 50 103,147, against
+  the 60,000-character ceiling; the same calls now measure 13,513, 22,960, 25,951 (27,717),
+  28,733, 31,588 and 19,917. The JSON is first laid out one row a line, which loses nothing; past
+  that, a list tool cuts each row to the fields it names (the description cut to 200 characters,
+  every long string ending in "…"), then to fewer, and leaves rows out only when its leanest cut
+  is still too long (`check_sbom` leaves out `not_affected` rows first); `get_cve` keeps the first
+  entries of `cpe_match` and `references`. The note then ends with a sentence starting
+  `TEXT CUT` that names what the first text block leaves out, which tool returns a row whole, and,
+  when rows are left out, the `offset` or page size at which they fit. An answer that fits is sent
+  as before. Every tool description, the server instructions and the methodology resource say so
+  (#2783).
+- `search_cves` takes `offset` (0 to 10,000), so the next page a cut text names can be read (#2783).
+- A list beside the rows is cut before the rows are: `check_affected`'s `excluded` and
+  `undetermined` samples keep each entry's `cve_id` and `reason`, and `cve_ids` (each match's
+  `cve_id`, in order) its first 10, so every match stays in the text (`flash_player` 10.0.0, 200
+  matches and 50 excluded entries, had 75 matches left out of it, two of them KEV-listed), and `check_sbom`'s `not_sent_purls` keeps its first 10, with the note
+  saying from which position of the input the purls not sent run. A 2,000-purl `check_sbom` call
+  that the API's budget stops after 1,200 now keeps the affected rows before the clean ones in the
+  text. A cut `check_affected` match keeps `match_reason` (a registry match's advisory interval,
+  which names the fixed version) where it fits, and the note names `cve_intel` for fixed versions
+  (#2783).
+
 ## 2.6.2 — 2026-10-04
 
 - `kev_recent` reads an RFC 3339 `since` or `until` as the date written in it, dropping the time

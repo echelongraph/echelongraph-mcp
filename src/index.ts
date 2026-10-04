@@ -15,7 +15,9 @@
 //     relays each radar's answer cut to the fields it can label by what they count, and names
 //     what it left out (readKEVExposure, readExposedDatabases, readLeakedCredentials,
 //     readShadowAI and readMCPServers; #2307, #2313, #2315). content[2] is the envelope below,
-//     as JSON, less what content[0] and the note already say.
+//     as JSON, less what content[0] and the note already say. Past 30,000 characters of JSON,
+//     content[0] is that JSON cut to fit and the note ends by saying how (TEXT CUT); the
+//     envelope's data is always the answer whole (textBudget.ts, #2783).
 //   - failure (isError: true): the lookup did not complete — unreachable host, non-2xx,
 //     timeout, or a 2xx whose body is not a JSON object — named by tool, cause and base URL,
 //     in content[0]; content[1] is the envelope below, as JSON, less the message's sentences.
@@ -56,6 +58,7 @@ import { isHttpEntrypoint, upstreamHeaders, upstreamUserAgent } from "./runtime.
 import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
+import { dataText, TEXT_BUDGET_DESCRIPTION, type TextCut } from "./textBudget.js";
 
 // The package actually running, read from the package.json that ships beside dist/. The MCP
 // handshake (serverInfo) and the User-Agent both carry its name and version, so the API's
@@ -119,6 +122,9 @@ type Failure = {
   // A non-2xx's Retry-After, in whole seconds, when it sent one (check_sbom honours it between
   // batches, #2734). Never part of the failure text or envelope.
   retryAfter?: number;
+  // A timeout's own limit, when the caller set one under TIMEOUT_MS (check_sbom, #2756);
+  // describeFailure names it.
+  timeoutMs?: number;
   detail: string;
 };
 export type ApiResult = { ok: true; status: number; data: object } | Failure;
@@ -179,16 +185,20 @@ function retryAfterSeconds(v: string | null): number | undefined {
 // can fail comes back as a typed Failure so the tool renders it as an error result. A 2xx whose
 // body is not a JSON object (an SPA shell, an edge challenge page, a literal null) is a failure
 // too — it is not data. init.headers carries what a caller typed (#1983: X-EG-* headers, never
-// the URL); the User-Agent and Accept are this server's and are not overridden.
-export async function api(path: string, init?: { headers?: Record<string, string>; method?: string; body?: string }): Promise<ApiResult> {
+// the URL); the User-Agent and Accept are this server's and are not overridden. init.timeoutMs
+// can only shorten the request's timeout below TIMEOUT_MS, never lengthen it: check_sbom passes
+// what is left of its call's budget, so a slow batch cannot carry the call past it (#2756).
+export async function api(path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number }): Promise<ApiResult> {
+  const limitMs = init?.timeoutMs === undefined ? TIMEOUT_MS : Math.max(0, Math.min(TIMEOUT_MS, Math.floor(init.timeoutMs)));
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     ctrl.abort();
-  }, TIMEOUT_MS);
+  }, limitMs);
   const m = init?.method && init.method.toUpperCase() !== "GET" ? { method: init.method.toUpperCase() } : {};
-  const timeout = (): Failure => ({ ok: false, kind: "timeout", path, ...m, detail: `no response within ${TIMEOUT_MS} ms` });
+  const own = limitMs === TIMEOUT_MS ? {} : { timeoutMs: limitMs };
+  const timeout = (): Failure => ({ ok: false, kind: "timeout", path, ...m, ...own, detail: `no response within ${limitMs} ms` });
   try {
     let res: Response;
     try {
@@ -294,7 +304,7 @@ export function describeFailure(f: Failure): string {
     case "network":
       return `EchelonGraph at ${SHOWN_BASE} could not be reached for ${verb} ${f.path}: ${f.detail}.`;
     case "timeout":
-      return `EchelonGraph at ${SHOWN_BASE} did not answer ${verb} ${f.path} within ${TIMEOUT_MS} ms.`;
+      return `EchelonGraph at ${SHOWN_BASE} did not answer ${verb} ${f.path} within ${f.timeoutMs ?? TIMEOUT_MS} ms.`;
     case "http":
       return `EchelonGraph answered HTTP ${f.status} ${where} — the API said: ${f.detail}.`;
     case "not_json":
@@ -400,12 +410,15 @@ export const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolRes
   return p.success ? r : unexpectedShape(tool, p.error);
 };
 
-// A success: content[0] is the data, content[1] the note, content[2] the envelope less both;
-// the envelope carries both, the note as sentences after any the envelope adds about itself.
-export const succeeded = (data: object, note: string, env: Omit<Envelope, "notes"> & { notes?: string[] }): ToolResult => {
+// A success: content[0] is the data (cut to DATA_TEXT_BUDGET when it is larger, #2783), content[1]
+// the note, content[2] the envelope less both; the envelope carries both, the note as sentences
+// after any the envelope adds about itself. structuredContent.data is the data whole.
+export const succeeded = (data: object, note: string, env: Omit<Envelope, "notes"> & { notes?: string[] }, cut?: TextCut): ToolResult => {
   const own = env.notes ?? [];
-  const structuredContent = { ...env, notes: [...own, ...sentences(note)], data };
-  return { content: [text(JSON.stringify(data, null, 2)), text(note), envelopeText(structuredContent, note, own)], structuredContent };
+  const shown = dataText(data, cut);
+  const said = shown.said ? `${note} ${shown.said}` : note;
+  const structuredContent = { ...env, notes: [...own, ...sentences(said)], data };
+  return { content: [text(shown.text), text(said), envelopeText(structuredContent, said, own)], structuredContent };
 };
 export const okHead = (tool: string, status?: number) =>
   `${tool} OK: EchelonGraph answered${status === undefined ? "" : ` HTTP ${status}`} from ${SHOWN_BASE}.`;
@@ -664,7 +677,26 @@ async function cveSummary(): Promise<ToolResult> {
 // total means nothing) or is a floor (total_is_lower_bound); search_relaxed, true when a phrase
 // was relaxed to all of its words so the rows are a superset of the phrase's; and the limit and
 // offset the page was built with. An older API sends none of the three flags, and null says so.
-type SearchArgs = { search?: string; severity?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"; min_cvss?: number; sort?: string; limit?: number };
+type SearchArgs = { search?: string; severity?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"; min_cvss?: number; sort?: string; limit?: number; offset?: number };
+// #2783: a page of production rows is about 6,600 characters a row as pretty JSON (38 fields, the
+// description, cpe_match, references and score_factors among them), so the default page of 20 was
+// 133,300 characters of text. Past DATA_TEXT_BUDGET each row in the first text block keeps the
+// fields the description promises and a few more a triage reads, the description cut to 200
+// characters; then, for a page of 50, the fields the description promises with the description cut
+// to 100. structuredContent.data keeps every field of every row; get_cve returns one record whole.
+const SEARCH_CVES_TEXT: TextCut = {
+  rows: "cves",
+  levels: [
+    {
+      keep: ["cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "echelongraph_risk", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "kev_ransomware", "published", "vuln_status", "patch_available", "exploit_poc_available"],
+      clip: 200,
+    },
+    { keep: ["cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "published"], clip: 100 },
+  ],
+  whole: "get_cve returns any one of these CVEs' records whole.",
+  page: (shown, _rows, d) =>
+    `To read the rows left out in the text, call search_cves again with the same arguments and offset ${(numAt(d, "offset") ?? 0) + shown}; a page of ${shown} rows or fewer like these fits the text without leaving rows out.`,
+};
 async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
   const tool = "search_cves";
   try {
@@ -676,6 +708,7 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
     if (a.min_cvss !== undefined) q.set("min_cvss", String(a.min_cvss));
     if (a.sort) q.set("sort", a.sort);
     q.set("limit", String(a.limit ?? 20));
+    if (a.offset) q.set("offset", String(a.offset));
     const r = await api(`/api/v1/public/cves?${q.toString()}`, a.search ? { headers: { "X-EG-Search": encodeURIComponent(a.search) } } : undefined);
     if (!r.ok) return failed(tool, r);
     const head = okHead(tool, r.status);
@@ -719,15 +752,16 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
           ? `${head} The query returned 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${tail}`
           : `${head} The API did not count the matches (total_counted is false), so its total is not a count${shown === undefined ? "" : `; ${shown} returned in this page`}.${tail}`,
         env,
+        SEARCH_CVES_TEXT,
       );
     }
     const total = numAt(r.data, "total") ?? shown;
-    if (total === undefined) return succeeded(r.data, `${head}${tail}`, env);
+    if (total === undefined) return succeeded(r.data, `${head}${tail}`, env, SEARCH_CVES_TEXT);
     if (total === 0 && floor !== true) {
-      return succeeded(r.data, `${head} The query matched 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${tail}`, env);
+      return succeeded(r.data, `${head} The query matched 0 CVEs — a measured empty result: EchelonGraph was queried successfully and nothing matched these filters (we looked and found nothing). This is not a lookup failure.${tail}`, env, SEARCH_CVES_TEXT);
     }
     const matched = floor === true ? `at least ${total} CVEs (total_is_lower_bound is true: the count stopped at that floor)` : `${total} CVEs`;
-    return succeeded(r.data, `${head} The query matched ${matched}${shown === undefined ? "" : `; ${shown} returned in this page`}.${tail}`, env);
+    return succeeded(r.data, `${head} The query matched ${matched}${shown === undefined ? "" : `; ${shown} returned in this page`}.${tail}`, env, SEARCH_CVES_TEXT);
   } catch (e) {
     return crashed(tool, e);
   }
@@ -999,6 +1033,7 @@ const SHADOW_AI_STATS = new Set([
   "total",
   "by_category",
   "visible_by_category",
+  "confirmed_window",
   "last_observation",
   "last_24h_count",
   "last_24h_visible_count",
@@ -1096,8 +1131,52 @@ type RadarSpec = {
   counts: readonly string[];
   rows: Readonly<Record<string, RowSpec>>;
   instants: readonly string[];
+  // The API's observation-window field (#2438), relayed as `window`; absent for a radar whose
+  // answer serves none.
+  window?: string;
 };
-type RadarRead = { data: Record<string, unknown>; unknown: string[]; unusable: string[] };
+type RadarRead = { data: Record<string, unknown>; unknown: string[]; unusable: string[]; undated?: number };
+
+// ── observation windows (#2438) ──
+//
+// Since #2438 the exposed-databases and leaked-credentials stats answers carry observed_window,
+// and the shadow-AI one stats.confirmed_window: {from, to, undated}, the earliest and latest
+// observation time over the rows the counts count, read in the same statement as the counts
+// (core-backend exposeddb store.go Stats: verified_at, when EchelonGraph's own check last
+// confirmed a service open; leakedcreds store.go Stats: last_seen, when the detector last found
+// a pair; shadowctlog store.go visibleByCategory: last_checked_at, when the verifier's deciding
+// probe ran). undated counts counted rows with no such time. kev_exposure serves none: its
+// last_seen is our write time and Shodan's banner time is not stored (#2439).
+//
+// A window is relayed as {from, to} only when both are real instants and undated is 0, so it
+// describes every row counted; with undated above 0 it describes only some of them, so it is
+// not relayed and the note says how many rows carry no time. Like mcp_servers.window, it is a
+// span of observations made at different times, not one observation time, so it never becomes
+// measured_at (see the envelope comment above RADAR_METHOD).
+type WindowRead = { window?: { from: string; to: string }; undated?: number; bad: boolean };
+function readWindow(v: unknown): WindowRead {
+  if (v === undefined || v === null) return { bad: false };
+  if (!isPlainObject(v)) return { bad: true };
+  const from = strAt(v, "from");
+  const to = strAt(v, "to");
+  const undated = v.undated;
+  if (!isCount(undated) || undated < 0 || !Number.isInteger(undated)) return { bad: true };
+  if (undated > 0) return { undated, bad: false };
+  if (v.from === null && v.to === null) return { bad: false }; // nothing counted, so nothing dated
+  if (!realInstant(from) || !realInstant(to) || Date.parse(from) > Date.parse(to)) return { bad: true };
+  return { window: { from, to }, bad: false };
+}
+
+// The sentence for a radar's window, or for the rows it leaves undated.
+function windowSentences(prefix: string, w: WindowRead, what: string): string[] {
+  if (w.window) {
+    return [`${prefix}.window.from (${w.window.from}) and ${prefix}.window.to (${w.window.to}) are timestamps, not counts: ${what}. They span observations made at different times, not one observation time.`];
+  }
+  if (w.undated !== undefined) {
+    return [`${prefix} carries no window: ${w.undated} of the rows it counts have no observation time on record, so a window over the rest would not describe them.`];
+  }
+  return [];
+}
 
 function readRadar(body: unknown, spec: RadarSpec): RadarRead {
   const src = isPlainObject(body) ? body : {};
@@ -1122,9 +1201,16 @@ function readRadar(body: unknown, spec: RadarSpec): RadarRead {
     if (realInstant(s)) data[k] = s;
     else if (present(k) && typeof src[k] !== "string") unusable.push(k);
   }
-  const known = new Set([...spec.counts, ...Object.keys(spec.rows), ...spec.instants]);
+  let undated: number | undefined;
+  if (spec.window) {
+    const w = readWindow(src[spec.window]);
+    if (w.window) data.window = w.window;
+    else if (w.bad) unusable.push(spec.window);
+    undated = w.undated;
+  }
+  const known = new Set([...spec.counts, ...Object.keys(spec.rows), ...spec.instants, ...(spec.window ? [spec.window] : [])]);
   unknown.unshift(...Object.keys(src).filter((k) => !known.has(k)));
-  return { data, unknown, unusable };
+  return { data, unknown, unusable, undated };
 }
 
 // ── last_run_at: when a radar last COMPLETED a check (#2335) ──
@@ -1348,10 +1434,11 @@ const EXPOSED_DB_SPEC: RadarSpec = {
     top_countries: { required: { country: "string", hosts: "number" } },
   },
   instants: ["generated_at", "last_run_at"],
+  window: "observed_window",
 };
 
 function readExposedDatabases(body: unknown): { data: object; sentences: string[] } {
-  const { data, unknown, unusable } = readRadar(body, EXPOSED_DB_SPEC);
+  const { data, unknown, unusable, undated } = readRadar(body, EXPOSED_DB_SPEC);
   const sentences: string[] = [];
   const n = (k: string) => numIn(data, k);
   const totals = [
@@ -1374,6 +1461,13 @@ function readExposedDatabases(body: unknown): { data: object; sentences: string[
       `${gated.join("; ")}. The names are index, database, table or field names in the Shodan or LeakIX banner or in the check's response, never record values, and the gate passes one unambiguous term (such as ssn or cardholder) or two distinct indicators. It is precision-first: a service whose names do not pass it is not counted, whatever it holds, so the other services are not shown to hold no personal or card data.`,
     );
   }
+  sentences.push(
+    ...windowSentences(
+      "exposed_databases",
+      { window: data.window as WindowRead["window"], undated, bad: false },
+      "when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication",
+    ),
+  );
   sentences.push(...lastCheck("exposed_databases", data));
   sentences.push(...leftOut("exposed_databases", unknown, unusable));
   return { data, sentences };
@@ -1398,10 +1492,11 @@ const LEAKED_CREDS_SPEC: RadarSpec = {
     top_types: { required: { secret_type: "string", count: "number" } },
   },
   instants: ["generated_at", "last_run_at"],
+  window: "observed_window",
 };
 
 function readLeakedCredentials(body: unknown): { data: object; sentences: string[] } {
-  const { data, unknown, unusable } = readRadar(body, LEAKED_CREDS_SPEC);
+  const { data, unknown, unusable, undated } = readRadar(body, LEAKED_CREDS_SPEC);
   const sentences: string[] = [];
   const n = (k: string) => numIn(data, k);
   const totals = [
@@ -1421,6 +1516,13 @@ function readLeakedCredentials(body: unknown): { data: object; sentences: string
       "None of these is validated: each is a credential-shaped string in a public commit that passed EchelonGraph's filters, at most structurally checked (a checksum or format decode) and never tested against its provider, so none of them is a count of working credentials.",
     );
   }
+  sentences.push(
+    ...windowSentences(
+      "leaked_credentials",
+      { window: data.window as WindowRead["window"], undated, bad: false },
+      "when EchelonGraph's detector last found the oldest and the newest of the (repository, secret) pairs counted in a public commit",
+    ),
+  );
   sentences.push(...lastCheck("leaked_credentials", data));
   sentences.push(...leftOut("leaked_credentials", unknown, unusable));
   return { data, sentences };
@@ -1445,6 +1547,11 @@ function readShadowAI(sa: object): { data: object; sentences: string[] } {
   }
   const last24Visible = take("last_24h_visible_count", numAt(stats, "last_24h_visible_count"));
   if (last24Visible !== undefined) confirmed.last_24h = last24Visible;
+  // When the confirmed rows were observed (#2438): the verifier's deciding probe times, over the
+  // rows visible_by_category counts. Relayed only beside the count it dates.
+  const confirmedWindow = readWindow(field(stats, "confirmed_window"));
+  if (!confirmedWindow.bad && field(stats, "confirmed_window") !== undefined) used.add("confirmed_window");
+  if (confirmedWindow.window && confirmed.total !== undefined) confirmed.window = confirmedWindow.window;
 
   // Observed: every row of shadow_ct_observations, whatever its liveness.
   const observed: Record<string, unknown> = {};
@@ -1479,6 +1586,15 @@ function readShadowAI(sa: object): { data: object; sentences: string[] } {
       ? `Shadow AI: the answer carries no usable stats.visible_by_category, so it does not say how many services are confirmed exposed${last24Visible === undefined ? "" : `; confirmed_exposed.last_24h (${last24Visible}) counts confirmed-exposed services first recorded in the last 24 h`}.`
       : `Shadow AI confirmed exposed: ${confirmed.total} (confirmed_exposed.total, the sum of confirmed_exposed.by_category: services EchelonGraph's probes found answering without an authentication gate, with liveness active or, during a re-check, rechecking)${last24Visible === undefined ? "" : `, ${last24Visible} of them first recorded in the last 24 h (confirmed_exposed.last_24h)`}. Of the shadow_ai numbers, only confirmed_exposed counts exposed services.`,
   );
+  if (confirmed.total !== undefined) {
+    sentences.push(
+      ...windowSentences(
+        "shadow_ai.confirmed_exposed",
+        { window: confirmedWindow.window, undated: confirmedWindow.undated, bad: false },
+        "when EchelonGraph's verifier ran the probe that last decided the oldest and the newest of the services confirmed_exposed counts",
+      ),
+    );
+  }
   if (total !== undefined) {
     sentences.push(
       `Shadow AI observed: ${total} (observed.total) counts every Certificate Transparency or Shodan observation on record, whatever its verification state: that many observed, not that many exposed.`,
@@ -1800,9 +1916,9 @@ function readMCPServers(src: Record<string, unknown>): { data: object; sentences
 const EXPOSURE_RADAR_DESCRIPTION =
   `Aggregate totals from EchelonGraph's internet-exposure radars, each refreshed on its own schedule: internet-facing services running actively-exploited (CISA-KEV) CVEs, plus the ransomware-linked subset, derived from Shodan data; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check (not a pure read: on Redis it names its client, and on ClickHouse its query is recorded in the server's query log); leaked credentials sampled from public GitHub push events; and shadow AI services found through Certificate Transparency logs and Shodan and then checked by EchelonGraph's identified probes. It also gives MCP-server counts: hostnames named like an MCP server in EchelonGraph's own Certificate Transparency feed (no Shodan data), each counted once by its latest verdict from EchelonGraph's identified MCP probe, which never sends tools/call. Every number in the result is labelled here and in the result's note by what it counts; a field this version cannot label is left out and named in the note. ` +
     `kev_exposure: kev_exposure.distinct_hosts counts distinct ip:port services, not machines (a machine answering on two ports counts twice), with at least one CISA-KEV-listed CVE on record, and kev_exposure.ransomware_hosts those with a ransomware-linked one; kev_exposure.kev_cves_exposed and kev_exposure.ransomware_cves count distinct CVEs with at least one such service; kev_exposure.correlations counts service×CVE pairs, not services, so a service with three KEV CVEs counts three times. kev_exposure.top_products, kev_exposure.top_countries and kev_exposure.top_cves rank up to 12 products, 10 countries and 12 CVEs by those services; kev_exposure.top_cves[].cvss_v3_score and kev_exposure.top_cves[].epss_score are the highest CVSS v3 base score and EPSS probability recorded on that CVE's observations. kev_exposure.trend counts service×CVE pairs still on record by the week in which each was first recorded, over 12 weeks, so earlier weeks read low. kev_exposure.newest_kev lists the 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed, each with an exposure_state: exposed, where kev_exposure.newest_kev[].exposed_hosts counts distinct ip:port services on record with it; or not_assessed, where the API's answer holds no measurement for that CVE (its 0 is not one) and no count is relayed, and cve_exposure says per CVE whether the radar tracks it. kev_exposure.newest_kev[].cvss_v3_score and kev_exposure.newest_kev[].epss_score are the CVE record's CVSS v3 base score and EPSS probability. ` +
-    `exposed_databases: exposed_databases.distinct_hosts counts distinct ip:port services the check confirmed answering without authentication, and exposed_databases.engines the distinct engine types among them; exposed_databases.top_engines and exposed_databases.top_countries rank up to 15 engines and 10 countries by those services. exposed_databases.pii_likely and exposed_databases.pci_likely count services whose schema names (never record values) pass a high-confidence, precision-first gate for personal or payment-card data, so a service outside them is not shown to hold no such data. ` +
-    `leaked_credentials: leaked_credentials.total counts (repository, secret) pairs, not distinct secrets, so one secret in three repositories counts three times; leaked_credentials.distinct_secrets counts each secret once and leaked_credentials.distinct_repos counts repositories; leaked_credentials.top_providers and leaked_credentials.top_types rank up to 15 providers and secret types by those pairs. None is validated: each is a credential-shaped string that passed EchelonGraph's filters, at most structurally checked and never tested against its provider. Each of those three radars also carries generated_at, when the API computed its totals, and, when the API can tell, last_run_at. kev_exposure.last_run_at, exposed_databases.last_run_at and leaked_credentials.last_run_at are timestamps, not counts: each is when that radar last completed a check, a cycle whose reads succeeded, among them a Shodan search (for exposed_databases, or its LeakIX fallback) that answered at least one query, or for leaked_credentials a read of the public GitHub event stream. A cycle that read nothing does not move it, and it is not the time of every record a radar's numbers count, which cover everything still on record, not only what the last check found. A radar whose answer carries no last_run_at has none in the result, and the note says nothing about it. ` +
-    `shadow_ai: the result is regrouped by what each number counts. shadow_ai.confirmed_exposed counts services EchelonGraph's probes found answering without an authentication gate (liveness active, or rechecking during a re-check): confirmed_exposed.total is the sum of confirmed_exposed.by_category, and confirmed_exposed.last_24h counts those first recorded in the last 24 h. Of the shadow_ai numbers, only confirmed_exposed counts exposed services. shadow_ai.observed counts every Certificate Transparency or Shodan observation on record, whatever its verification state: its numbers are observed, not exposed. They are observed.total; observed.by_category (the same observations by category); observed.last_24h (those first recorded in the last 24 h); observed.trend_30d (observations per UTC day over the last 30 days); and observed.top_products, observed.top_countries and observed.top_issuers (up to ten products, countries and issuers ranked by observations, where an issuer is the certificate's CA for a Certificate Transparency observation and the hosting operator Shodan reports for a Shodan one). shadow_ai.authentication counts observations by probe outcome: authentication.observed where a probe observed an authentication gate (a 401/403, a login page or an auth marker), and authentication.not_determined where the service answered but no probe could tell. Neither authentication count is part of confirmed_exposed, and observed.total minus confirmed_exposed.total is not a count of secured services. The shadow-AI poller block carries only running and last_run_at: last_run_at is when the radar's leader last completed a Certificate Transparency (crt.sh) cycle, and its running is true only when that was within ${SHADOW_AI_SILENT_AFTER} of the answer. ` +
+    `exposed_databases: exposed_databases.distinct_hosts counts distinct ip:port services the check confirmed answering without authentication, and exposed_databases.engines the distinct engine types among them; exposed_databases.top_engines and exposed_databases.top_countries rank up to 15 engines and 10 countries by those services. exposed_databases.pii_likely and exposed_databases.pci_likely count services whose schema names (never record values) pass a high-confidence, precision-first gate for personal or payment-card data, so a service outside them is not shown to hold no such data. exposed_databases.window.from and exposed_databases.window.to are timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted, a span of checks made at different times; with a counted service that has no such time on record there is no window. ` +
+    `leaked_credentials: leaked_credentials.total counts (repository, secret) pairs, not distinct secrets, so one secret in three repositories counts three times; leaked_credentials.distinct_secrets counts each secret once and leaked_credentials.distinct_repos counts repositories; leaked_credentials.top_providers and leaked_credentials.top_types rank up to 15 providers and secret types by those pairs. None is validated: each is a credential-shaped string that passed EchelonGraph's filters, at most structurally checked and never tested against its provider. leaked_credentials.window.from and leaked_credentials.window.to are timestamps, not counts: when EchelonGraph's detector last found the oldest and the newest of the pairs counted. Each of those three radars also carries generated_at, when the API computed its totals, and, when the API can tell, last_run_at. kev_exposure.last_run_at, exposed_databases.last_run_at and leaked_credentials.last_run_at are timestamps, not counts: each is when that radar last completed a check, a cycle whose reads succeeded, among them a Shodan search (for exposed_databases, or its LeakIX fallback) that answered at least one query, or for leaked_credentials a read of the public GitHub event stream. A cycle that read nothing does not move it, and it is not the time of every record a radar's numbers count, which cover everything still on record, not only what the last check found. A radar whose answer carries no last_run_at has none in the result, and the note says nothing about it. ` +
+    `shadow_ai: the result is regrouped by what each number counts. shadow_ai.confirmed_exposed counts services EchelonGraph's probes found answering without an authentication gate (liveness active, or rechecking during a re-check): confirmed_exposed.total is the sum of confirmed_exposed.by_category, and confirmed_exposed.last_24h counts those first recorded in the last 24 h. Of the shadow_ai numbers, only confirmed_exposed counts exposed services. confirmed_exposed.window.from and confirmed_exposed.window.to are timestamps, not counts: when EchelonGraph's verifier ran the probe that last decided the oldest and the newest of those services, a span of probes made at different times. shadow_ai.observed counts every Certificate Transparency or Shodan observation on record, whatever its verification state: its numbers are observed, not exposed. They are observed.total; observed.by_category (the same observations by category); observed.last_24h (those first recorded in the last 24 h); observed.trend_30d (observations per UTC day over the last 30 days); and observed.top_products, observed.top_countries and observed.top_issuers (up to ten products, countries and issuers ranked by observations, where an issuer is the certificate's CA for a Certificate Transparency observation and the hosting operator Shodan reports for a Shodan one). shadow_ai.authentication counts observations by probe outcome: authentication.observed where a probe observed an authentication gate (a 401/403, a login page or an auth marker), and authentication.not_determined where the service answered but no probe could tell. Neither authentication count is part of confirmed_exposed, and observed.total minus confirmed_exposed.total is not a count of secured services. The shadow-AI poller block carries only running and last_run_at: last_run_at is when the radar's leader last completed a Certificate Transparency (crt.sh) cycle, and its running is true only when that was within ${SHADOW_AI_SILENT_AFTER} of the answer. ` +
     `mcp_servers: counts and timestamps only, no hostname. mcp_servers.total counts hostnames the AI-exposure radar has checked for an MCP server, each once by its latest verdict on record, and not every one is an MCP server; EchelonGraph's own control servers are left out, and mcp_servers.own_controls_excluded counts them. mcp_servers.total is mcp_servers.protected plus mcp_servers.pending_readjudication plus mcp_servers.not_assessed. mcp_servers.protected counts hostnames whose /mcp endpoint asked for credentials and whose OAuth protected-resource metadata validated under RFC 9728; mcp_servers.prm_via divides them by where that document was found: mcp_servers.prm_via.header, mcp_servers.prm_via.wellknown_path and mcp_servers.prm_via.wellknown_root. mcp_servers.pending_readjudication counts verdicts of a rule since replaced, not yet re-checked. mcp_servers.not_assessed counts the rest, whose protection the radar could not assess (not assessed does not mean unprotected), and mcp_servers.not_assessed_by_reason puts each in one bucket. mcp_servers.not_assessed_by_reason.identified_no_challenge holds servers that identified themselves as MCP servers and did not ask for credentials at the handshake. That is normal in MCP: authorization is optional in the spec, and a server can enforce it at tools/call instead, which EchelonGraph never sends, so this bucket is not a finding of exposure. ${MCP_CHALLENGE_REASON_FIELDS} hold endpoints that asked for credentials but whose RFC 9728 metadata did not validate, by why, so none of them is shown to lack protection; mcp_servers.not_assessed_by_reason.challenge_unadjudicated holds endpoints that asked for credentials before that check existed, not yet re-checked. mcp_servers.not_assessed_by_reason.no_http_answer holds hostnames that gave no HTTP answer, and mcp_servers.not_assessed_by_reason.not_identified_as_mcp hostnames whose HTTP answer identified no MCP server. mcp_servers.era divides every counted hostname by protocol era: mcp_servers.era.legacy; mcp_servers.era.dual, a lower bound; mcp_servers.era.modern, not proven modern-only; mcp_servers.era.unknown; and mcp_servers.era.not_measured, recorded before the era probe and not re-checked since. mcp_servers.transport divides them by transport: mcp_servers.transport.streamable_http, mcp_servers.transport.legacy_sse, mcp_servers.transport.unknown and mcp_servers.transport.not_measured. mcp_servers.window.from and mcp_servers.window.to are when the oldest and the newest of the verdicts counted were last checked. mcp_servers.last_run_at is a timestamp, not a count: when the AI-exposure radar, which checks other AI services too, last completed a check; mcp_servers.enabled is whether one completed within ${MCP_ENABLED_WITHIN} of the answer, and mcp_servers.counted_at is when the API read the counts. A partition whose buckets do not add up to the count it divides is left out and named; an answer that does not say it is the MCP-server counts, or whose mcp_servers.total, mcp_servers.protected, mcp_servers.pending_readjudication and mcp_servers.not_assessed are missing or contradict each other, is a failure. ${SHODAN_OWNERSHIP}`;
 
 // exposure_radar's envelope. Every radar answered, but no stats answer says when the services
@@ -1828,7 +1944,7 @@ const RADAR_METHOD =
   "Aggregate counts over what each radar holds on record: kev_exposure, Shodan banners whose version maps to a CISA-KEV-listed CVE; exposed_databases, services found through Shodan (LeakIX when Shodan query credits run low) and confirmed by EchelonGraph's own identified check; leaked_credentials, credential-shaped strings in public GitHub push events; shadow_ai, services found through Certificate Transparency logs and Shodan and checked by EchelonGraph's identified probes; mcp_servers, the latest verdict on record per hostname named like an MCP server in EchelonGraph's own Certificate Transparency feed, from EchelonGraph's identified MCP probe (server/discover, and initialize only if that is refused; never tools/call), where protected means the endpoint's RFC 9728 protected-resource metadata validated.";
 const RADAR_NAMES = RADARS.map(([name]) => name);
 const RADAR_STATE_NOTE =
-  "state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure, exposed_databases, leaked_credentials and shadow_ai give none, and mcp_servers dates its verdicts at most by a window (mcp_servers.window), from the oldest check among them to the newest, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, and the note labels each one by what it counts.";
+  "state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure gives none, and exposed_databases, leaked_credentials, shadow_ai's confirmed_exposed and mcp_servers date what they count at most by a window (exposed_databases.window, leaked_credentials.window, shadow_ai.confirmed_exposed.window, mcp_servers.window), from the oldest observation among the rows counted to the newest, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, and the note labels each one by what it counts.";
 const RADAR_FRESHNESS_NOTE =
   "freshness gives each radar's last completed check where the API serves one (freshness.kev_exposure.last_run_at, freshness.exposed_databases.last_run_at, freshness.leaked_credentials.last_run_at, freshness.shadow_ai.last_run_at with freshness.shadow_ai.running, and freshness.mcp_servers.last_run_at with freshness.mcp_servers.enabled), and null where it does not.";
 
@@ -2122,11 +2238,14 @@ const zRow = (spec: RowSpec) =>
     ...Object.fromEntries(Object.entries(spec.required).map(([k, kind]) => [k, zKind(kind)])),
     ...Object.fromEntries(Object.entries(spec.optional ?? {}).map(([k, kind]) => [k, zKind(kind).optional()])),
   });
+// A relayed observation window (#2438): two instants, never a count.
+const Window = z.strictObject({ from: Instant, to: Instant });
 const zRadar = (spec: RadarSpec, rows: Record<string, z.ZodType> = {}) =>
   z.strictObject({
     ...Object.fromEntries(spec.counts.map((k) => [k, z.number().optional()])),
     ...Object.fromEntries(Object.entries(spec.rows).map(([k, rs]) => [k, (rows[k] ?? z.array(zRow(rs))).optional()])),
     ...Object.fromEntries(spec.instants.map((k) => [k, Instant.optional()])),
+    ...(spec.window ? { window: Window.optional() } : {}),
   });
 // A newest_kev row as newestKEVRow relays it: `tracked` is read, not relayed, and a count only
 // when the row's exposure_state is not not_assessed.
@@ -2140,7 +2259,9 @@ const NewestKEVRow = z.strictObject({
 const CountMap = z.record(z.string(), z.number());
 const countRowsOf = (label: string) => z.array(z.strictObject({ [label]: z.string(), count: z.number() }));
 const ShadowAIData = z.strictObject({
-  confirmed_exposed: z.strictObject({ total: z.number().optional(), by_category: CountMap.optional(), last_24h: z.number().optional() }).optional(),
+  confirmed_exposed: z
+    .strictObject({ total: z.number().optional(), by_category: CountMap.optional(), last_24h: z.number().optional(), window: Window.optional() })
+    .optional(),
   observed: z
     .strictObject({
       total: z.number().optional(),
@@ -2210,6 +2331,7 @@ const INSTRUCTIONS = [
   "Everything these tools return is public: EchelonGraph's CVE Pulse feed, and aggregate, host-redacted totals from its exposure radars.",
   "Every result says how it was measured: state, measured_at, method, coverage, freshness and notes, in its structuredContent and again in its text.",
   "Its last text block is that structuredContent as JSON, less what an earlier text block already gives verbatim: data, which is a success's first text block; the sentences of the text block just before it (the note, or a failure's message), with which structuredContent's notes end; and method, where that block quotes it.",
+  "Past 30,000 characters of JSON, that first text block holds data cut to fit, and the note says what the cut leaves out and where to read it (TEXT CUT); structuredContent's data always holds it whole.",
   "state is measured, not_assessed, failed or invalid_input.",
   "not_assessed means the answer holds no dated measurement of what was asked, so no count in it is presented as one.",
   "It can still relay a count, as what the source holds on record, undated, and its notes say what each count is: cve_exposure's exposed_hosts when its exposure_state is exposed, and exposure_radar's labelled totals, are such counts.",
@@ -2262,7 +2384,7 @@ export function createServer(): McpServer {
     "cve_summary",
     {
       title: "CVE feed summary",
-      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} ${SUMMARY_POLLER_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE}`,
+      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} ${SUMMARY_POLLER_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION}`,
       outputSchema: CVE_SUMMARY_OUTPUT,
       annotations: ANNOTATIONS,
     },
@@ -2273,13 +2395,15 @@ export function createServer(): McpServer {
     "search_cves",
     {
       title: "Search CVEs",
-      description: `Search/list CVEs from EchelonGraph's CVE feed (NVD + MITRE-CNA pre-NVD + CISA-KEV + EPSS + GitHub GHSA, each polled on a schedule). Filter by severity, minimum CVSS, free text, and sort. Returns cves, each with cve_id, severity, cvss_v3_score, echelongraph_score and score_assessed (whether EchelonGraph has scored it), epss_score and kev_listed where the record has them, and the list's total, total_counted (false: the matches were not counted, so total is not a count), total_is_lower_bound (true: at least total), search_relaxed (true: a phrase was relaxed to all of its words), limit and offset. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} coverage repeats total, total_counted, total_is_lower_bound, search_relaxed, limit and offset, and gives returned, the rows in this page.`,
+      description: `Search/list CVEs from EchelonGraph's CVE feed (NVD + MITRE-CNA pre-NVD + CISA-KEV + EPSS + GitHub GHSA, each polled on a schedule). Filter by severity, minimum CVSS, free text, and sort; page with limit and offset. Returns cves, each with cve_id, severity, cvss_v3_score, echelongraph_score and score_assessed (whether EchelonGraph has scored it), epss_score and kev_listed where the record has them, and the list's total, total_counted (false: the matches were not counted, so total is not a count), total_is_lower_bound (true: at least total), search_relaxed (true: a phrase was relaxed to all of its words), limit and offset. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} coverage repeats total, total_counted, total_is_lower_bound, search_relaxed, limit and offset, and gives returned, the rows in this page. ${TEXT_BUDGET_DESCRIPTION} Cut, each row keeps at least the fields named above and the first 200 characters of its description (100 on a page too long for that), or rows are left out and the note gives the offset to call next.`,
       inputSchema: z.object({
         search: z.string().optional().describe("free-text search (product, vendor, or keyword, e.g. 'tomcat')"),
         severity: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]).optional().describe("filter to one severity"),
         min_cvss: z.number().min(0).max(10).optional().describe("minimum CVSS score"),
         sort: z.enum(["published", "modified", "nvd", "echelongraph", "epss"]).optional().describe("sort order (default: published)"),
         limit: z.number().int().min(1).max(50).optional().describe("page size (default 20, max 50)"),
+        // #2783: the next page, which the note names when the text leaves rows out.
+        offset: z.number().int().min(0).max(10000).optional().describe("rows to skip (default 0)"),
       }),
       outputSchema: SEARCH_CVES_OUTPUT,
       annotations: ANNOTATIONS,
@@ -2291,7 +2415,7 @@ export function createServer(): McpServer {
     "get_cve",
     {
       title: "CVE detail",
-      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE}`,
+      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,
@@ -2303,7 +2427,7 @@ export function createServer(): McpServer {
     "cve_exposure",
     {
       title: "Internet exposure for one CVE",
-      description: `${CVE_EXPOSURE_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: the per-CVE answer says when EchelonGraph last wrote a row (last_seen), not when any counted service was observed, so no count is presented as a dated measurement; the count is still relayed, labelled, as what the radar holds on record. exposure_state says what the count is: exposed, measured_zero, not_assessed or tracking_unknown; coverage.in_scope is the API's tracked verdict; freshness is null, since the per-CVE answer carries no last completed check; data is the API's JSON. The result's last text block repeats the structured result without data (the first text block), without the note's sentences (the text block before it), with which notes ends, and without method where the note quotes it verbatim ("Method: …").`,
+      description: `${CVE_EXPOSURE_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: the per-CVE answer says when EchelonGraph last wrote a row (last_seen), not when any counted service was observed, so no count is presented as a dated measurement; the count is still relayed, labelled, as what the radar holds on record. exposure_state says what the count is: exposed, measured_zero, not_assessed or tracking_unknown; coverage.in_scope is the API's tracked verdict; freshness is null, since the per-CVE answer carries no last completed check; data is the API's JSON. The result's last text block repeats the structured result without data (the first text block), without the note's sentences (the text block before it), with which notes ends, and without method where the note quotes it verbatim ("Method: …"). ${TEXT_BUDGET_DESCRIPTION}`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: CVE_EXPOSURE_OUTPUT,
       annotations: ANNOTATIONS,
@@ -2315,7 +2439,7 @@ export function createServer(): McpServer {
     "exposure_radar",
     {
       title: "Exposure radar totals",
-      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: every radar answered, but none gives one time at which what it counts was observed (mcp_servers dates its verdicts at most by a window, mcp_servers.window), so no count is presented as a dated measurement; each count is still relayed, labelled, as what that radar holds on record. freshness gives each radar's last_run_at (and running for shadow_ai, enabled for mcp_servers) where the API serves one; coverage names the radars that answered; data is the relayed result above. The result's last text block repeats the structured result without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.`,
+      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null: every radar answered, but none gives one time at which what it counts was observed (mcp_servers dates its verdicts at most by a window, mcp_servers.window), so no count is presented as a dated measurement; each count is still relayed, labelled, as what that radar holds on record. freshness gives each radar's last_run_at (and running for shadow_ai, enabled for mcp_servers) where the API serves one; coverage names the radars that answered; data is the relayed result above. The result's last text block repeats the structured result without data (the first text block) and without the note's sentences (the text block before it), with which notes ends. ${TEXT_BUDGET_DESCRIPTION}`,
       outputSchema: EXPOSURE_RADAR_OUTPUT,
       annotations: ANNOTATIONS,
     },
@@ -2334,7 +2458,7 @@ export function createServer(): McpServer {
   registerGetCwe(server);
 
   // #2719: vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
-  registerVendorAdvisoryTools(server, { api, failed, badInput, crashed, succeeded, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
+  registerVendorAdvisoryTools(server, { api, failed, describeFailure, badInput, crashed, succeeded, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
 
   // #2722: prompts and resources, in prompts.ts and resources.ts. Both lists are fixed per
   // connection, so listChanged is false above.

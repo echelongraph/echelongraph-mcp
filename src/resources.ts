@@ -33,6 +33,8 @@ export const METHODOLOGY = `# How EchelonGraph MCP results are measured
 
 Every tool result carries an evidence envelope in its structuredContent, and repeats it in its last text block (less what an earlier text block already carries verbatim), so a client that passes text blocks alone still sees it.
 
+A success's first text block is the API's JSON, cut to fit 30,000 characters when it is longer: the note then says what the cut leaves out and how to read it (TEXT CUT), and structuredContent's data holds the answer whole.
+
 ## Envelope fields
 
 | Field | What it holds |

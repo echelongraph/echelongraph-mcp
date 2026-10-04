@@ -514,8 +514,19 @@ const BODIES = {
     empty: { status: 404, body: { error: "advisory not found" } },
   },
   "/api/v1/public/vendor-advisories": {
-    ok: { advisories: [VADV_ROW], total: 1, limit: 2, offset: 0, search_applied: true },
-    empty: { advisories: [], total: 0, limit: 2, offset: 0, search_applied: true },
+    ok: { advisories: [VADV_ROW], total: 1, limit: 2, offset: 0, search_applied: true, total_capped: false, search_match: "substring" },
+    empty: { advisories: [], total: 0, limit: 2, offset: 0, search_applied: true, total_capped: false, search_match: "substring" },
+  },
+  // #2729: each vendor's window, which the three vendor-advisory tools read beside their own
+  // request (vendor-advisories.test.mjs holds what they say of it).
+  "/api/v1/public/vendor-advisories/coverage": {
+    ok: {
+      vendors: [
+        { vendor: "microsoft", vendor_display_name: "Microsoft", advisories: 1311, earliest_vendor_published_at: "2016-01-12T08:00:00Z", latest_vendor_published_at: "2026-09-30T07:00:00Z", history_backfill: "complete", history_units_done: 193, history_completed_at: "2026-10-04T08:00:00Z" },
+        { vendor: "redhat", vendor_display_name: "Red Hat", advisories: 18420, earliest_vendor_published_at: "2001-03-29T00:00:00Z", latest_vendor_published_at: "2026-10-04T04:00:00Z", history_backfill: "not_supported", history_units_done: 0, history_completed_at: "" },
+      ],
+    },
+    empty: { vendors: [] },
   },
   "/api/v1/public/shadow-ai-radar/stats": {
     ok: { stats: PROD_SHADOW_STATS, poller: FOLLOWER_POLLER },
@@ -1182,6 +1193,14 @@ describe(`against a stub API [${ERA}]`, () => {
       const data = JSON.parse(results.search_cves.content[0].text);
       assert.equal(data.total, 1);
       assert.equal(data.cves[0].cve_id, CVE);
+    });
+    // #2783: the next page a cut text names is an offset, so search_cves takes one; 0 is not sent.
+    it("search_cves forwards offset when it is above 0, and only then", async () => {
+      stub.state.mode = "ok";
+      stub.state.seen.length = 0;
+      await client.callTool({ name: "search_cves", arguments: { search: "tomcat", limit: 2, offset: 20 } });
+      await client.callTool({ name: "search_cves", arguments: { search: "tomcat", limit: 2, offset: 0 } });
+      assert.deepEqual(stub.state.seen, ["/api/v1/public/cves?limit=2&offset=20", "/api/v1/public/cves?limit=2"]);
     });
     it("get_cve returns the record", () => {
       const data = JSON.parse(results.get_cve.content[0].text);
@@ -2190,6 +2209,76 @@ describe(`against a stub API [${ERA}]`, () => {
   // radar's poller.go checkCompleted / recordCheck). 1.0.4 as first written could not label it,
   // so it named last_run_at as left out. A timestamp is a string, so the numeric enumerator
   // above does not see it; the tests below enumerate the radars' timestamps instead.
+  // #2438: the exposed-databases, leaked-credentials and shadow-AI stats answers serve the window
+  // of observation times over the rows they count (core-backend store.go Stats, read in the same
+  // statement as the counts). exposure_radar relays it as `window` beside the counts it dates, only
+  // when it covers every counted row (undated 0), labels it as timestamps, not counts, and keeps
+  // the envelope not_assessed: a span of observations is not one observation time.
+  describe("#2438: exposure_radar relays each radar's observation window, and stays undated", () => {
+    const EDB = "/api/v1/public/exposed-databases/stats";
+    const LC = "/api/v1/public/leaked-credentials/stats";
+    const SA = "/api/v1/public/shadow-ai-radar/stats";
+    const W = (from, to, undated = 0) => ({ from, to, undated });
+    const run = async (overrides) => {
+      Object.assign(stub.state.overrides, overrides);
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        assert.notEqual(r.isError, true, brief(r));
+        return { r, relayed: JSON.parse(r.content[0].text), n: noteOf(r) };
+      } finally {
+        for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+      }
+    };
+    before(() => {
+      stub.state.mode = "ok";
+    });
+
+    it("a window over every counted row is relayed beside its counts and labelled, and the envelope stays not_assessed", async () => {
+      const { r, relayed, n } = await run({
+        [EDB]: { ...PROD_EXPOSED_DB_STATS, observed_window: W("2026-09-20T01:00:00Z", "2026-10-03T22:00:00Z") },
+        [LC]: { ...PROD_LEAKED_CREDS_STATS, observed_window: W("2026-09-05T00:00:00Z", "2026-10-03T23:00:00Z") },
+        [SA]: { stats: { ...PROD_SHADOW_STATS, confirmed_window: W("2026-10-01T10:00:00Z", "2026-10-04T06:00:00Z") }, poller: FOLLOWER_POLLER },
+      });
+      assert.deepEqual(relayed.exposed_databases.window, { from: "2026-09-20T01:00:00Z", to: "2026-10-03T22:00:00Z" });
+      assert.deepEqual(relayed.leaked_credentials.window, { from: "2026-09-05T00:00:00Z", to: "2026-10-03T23:00:00Z" });
+      assert.deepEqual(relayed.shadow_ai.confirmed_exposed.window, { from: "2026-10-01T10:00:00Z", to: "2026-10-04T06:00:00Z" });
+      assert.equal(relayed.kev_exposure.window, undefined, "kev_exposure serves no window, and none is made up");
+      assert.match(n, /exposed_databases\.window\.from \(2026-09-20T01:00:00Z\) and exposed_databases\.window\.to \(2026-10-03T22:00:00Z\) are timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication\./);
+      assert.match(n, /leaked_credentials\.window\.from \(2026-09-05T00:00:00Z\) and leaked_credentials\.window\.to \(2026-10-03T23:00:00Z\) are timestamps, not counts/);
+      assert.match(n, /shadow_ai\.confirmed_exposed\.window\.from \(2026-10-01T10:00:00Z\) and shadow_ai\.confirmed_exposed\.window\.to \(2026-10-04T06:00:00Z\) are timestamps, not counts/);
+      assert.doesNotMatch(n, /observed_window|confirmed_window/, "a served window was named as left out");
+      const sc = r.structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null, "a window's end is not measured_at");
+      // Not a number anywhere: the windows add no unlabelled numeric path.
+      assert.deepEqual(unlabelledIn(relayed), []);
+    });
+
+    it("a window that leaves counted rows undated is not relayed, and the note says how many", async () => {
+      const { relayed, n } = await run({ [EDB]: { ...PROD_EXPOSED_DB_STATS, observed_window: W("2026-09-20T01:00:00Z", "2026-10-03T22:00:00Z", 12) } });
+      assert.equal(relayed.exposed_databases.window, undefined);
+      assert.match(n, /exposed_databases carries no window: 12 of the rows it counts have no observation time on record/);
+    });
+
+    it("a malformed window is left out and named, never relayed", async () => {
+      for (const bad of [W("0001-01-01T00:00:00Z", "2026-10-03T22:00:00Z"), W("2026-10-04T00:00:00Z", "2026-10-03T00:00:00Z"), { from: "2026-10-01T00:00:00Z" }, "2026-10-01"]) {
+        const { relayed, n } = await run({ [LC]: { ...PROD_LEAKED_CREDS_STATS, observed_window: bad } });
+        assert.equal(relayed.leaked_credentials.window, undefined, JSON.stringify(bad));
+        assert.match(n, /observed_window/, `the malformed window ${JSON.stringify(bad)} was not named`);
+      }
+    });
+
+    it("the description and the README label every window", async () => {
+      const { tools } = await client.listTools();
+      const d = tools.find((t) => t.name === "exposure_radar").description;
+      const readme = readPkgFile("README.md");
+      for (const f of ["exposed_databases.window.from", "leaked_credentials.window.from", "confirmed_exposed.window.from"]) {
+        assert.ok(d.includes(f), `the description does not label ${f}`);
+        assert.ok(readme.includes(f), `the README does not label ${f}`);
+      }
+    });
+  });
+
   describe("#2335: exposure_radar relays and labels each radar's last completed check (last_run_at)", () => {
     const FLAT = ["kev_exposure", "exposed_databases", "leaked_credentials"];
     const PATHS = {
@@ -2469,7 +2558,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(sc.state, "not_assessed");
       assert.equal(sc.measured_at, null);
       assert.deepEqual(sc.freshness.mcp_servers, { last_run_at: MCP_STATS.last_run_at, enabled: true });
-      assert.match(sc.notes[0], /mcp_servers dates its verdicts at most by a window \(mcp_servers\.window\), from the oldest check among them to the newest, so no count here is presented as a dated measurement and measured_at is null\./);
+      assert.match(sc.notes[0], /mcp_servers date what they count at most by a window \(exposed_databases\.window, leaked_credentials\.window, shadow_ai\.confirmed_exposed\.window, mcp_servers\.window\), from the oldest observation among the rows counted to the newest, so no count here is presented as a dated measurement and measured_at is null\./);
       assert.match(sc.notes[1], /freshness\.mcp_servers\.last_run_at with freshness\.mcp_servers\.enabled/);
       assert.match(sc.method, /; mcp_servers, the latest verdict on record per hostname named like an MCP server in EchelonGraph's own Certificate Transparency feed, from EchelonGraph's identified MCP probe \(server\/discover, and initialize only if that is refused; never tools\/call\), where protected means the endpoint's RFC 9728 protected-resource metadata validated\.$/);
       assert.equal(assertEnvelopeInText("exposure_radar with mcp_servers", res).state, "not_assessed");
@@ -3036,7 +3125,8 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(sc.state, "not_assessed");
       assert.equal(sc.measured_at, null);
       // #2315: mcp_servers dates its verdicts by a window, which is not one observation time.
-      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure, exposed_databases, leaked_credentials and shadow_ai give none, and mcp_servers dates its verdicts at most by a window \(mcp_servers\.window\)/);
+      // #2438: three more radars date what they count by a window; kev_exposure gives none (#2439).
+      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure gives none, and exposed_databases, leaked_credentials, shadow_ai's confirmed_exposed and mcp_servers date what they count at most by a window/);
       assert.deepEqual(sc.freshness, {
         kev_exposure: { last_run_at: LAST_RUN.kev_exposure },
         exposed_databases: { last_run_at: LAST_RUN.exposed_databases },
@@ -3685,7 +3775,8 @@ describe(`against a stub API [${ERA}]`, () => {
   //
   // #2617: every bound sits under CEILING, #2467's 60,000-character trip-wire, named once in
   // text-bound.mjs; a re-measure that would take a bound past it fails, and the run prints each
-  // case's share of it. #2616: the fixtures are not production. text-bound-live.mjs measures the
+  // case's share of it. #2783: these cases are stub fixtures; every tool is also measured on
+  // production-shaped answers in text-bound.test.mjs. #2616: the fixtures are not production. text-bound-live.mjs measures the
   // production-wide tools on production's answers and records them (fixtures/text-bound-live.json);
   // the block after this one holds the record under the ceiling, prints it beside the fixture
   // bound, and measures the kept answers against it.
@@ -3720,7 +3811,7 @@ describe(`against a stub API [${ERA}]`, () => {
     // would quote (371 characters); data and the envelope block (563) are unchanged. The other
     // bounds are unchanged.
     const CASES = [
-      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 30_949],
+      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_079], // #2438: the state note names the windows
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_709],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
@@ -3788,11 +3879,15 @@ describe(`against a stub API [${ERA}]`, () => {
         assert.throws(() => assertWithinBound(what, withNote(oversized), size), /over its bound of/, what);
       }
     });
-    // #2617: the ceiling, as a number every run prints.
+    // #2617: the ceiling, as a number every run prints. #2783: these are stub fixtures, one or two
+    // rows, so their share says nothing about what production's answers cost (this printed
+    // "search_cves: 1,115 / 60,000 = 2%" while production's default page was 133,298); each share is
+    // labelled as a stub's, and the shares on production-shaped answers, every tool at its default
+    // call and largest page, are text-bound.test.mjs's.
     it(`#2617: every case's bound is under #2467's ceiling of ${CEILING} characters`, (t) => {
       for (const [label, , , , , , size] of CASES) {
         assertBoundUnderCeiling(label, size);
-        t.diagnostic(shareOfCeiling(label, size));
+        t.diagnostic(shareOfCeiling(`${label} [stub fixture, not production-shaped: see text-bound.test.mjs]`, size));
       }
     });
     it("#2617: the ceiling can fail: a bound one character past it is refused, and one at it is not", () => {

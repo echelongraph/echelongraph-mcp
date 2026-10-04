@@ -31,6 +31,7 @@ import {
   succeeded,
   type ToolResult,
 } from "../index.js";
+import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
 
 const TOOL = "get_cwe";
 const CWE_ARG = /^(?:CWE-)?0*(\d{1,6})$/i;
@@ -39,7 +40,16 @@ const MAX_PAGE = 200;
 const GET_CWE_METHOD =
   "EchelonGraph's per-CWE listing (GET /api/v1/public/cwes/:cwe_id): the CWE's name and description from the MITRE CWE catalog EchelonGraph embeds (catalog_version), and the active CVEs in EchelonGraph's CVE feed that an NVD, GitHub (GHSA) or CVE.org record classifies under it, rejected and reserved records left out, 50 to a page.";
 
-export const GET_CWE_DESCRIPTION = `One CWE (weakness class) and the CVEs classified under it. Returns cwe_id, name and description (from the MITRE CWE catalog EchelonGraph embeds, version catalog_version), total (the active CVEs in EchelonGraph's feed that an NVD, GitHub or CVE.org record classifies under it, rejected and reserved records left out), and cves, one page of 50: each with cve_id, severity, cvss_v3_score, echelongraph_score, echelongraph_severity, score_assessed, kev_listed, published and a shortened description. order says how the rows are sorted (CISA-KEV-listed first, then EchelonGraph score); an answer without order does not state its order, and the note says so. page is the page served, page_size its size and max_page the last page the API serves: a later page is answered as max_page, so past max_page pages total counts CVEs no page lists. echelongraph_score is EchelonGraph's score only when score_assessed is true; the note labels each row that is NOT YET SCORED. A total of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. Pass cwe_id like CWE-79 (or 79) and an optional page (1-${MAX_PAGE}). Its structured result carries state (measured), measured_at (null), method, coverage (total, returned, page, page_requested, page_size, max_page), freshness (null) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.`;
+export const GET_CWE_DESCRIPTION = `One CWE (weakness class) and the CVEs classified under it. Returns cwe_id, name and description (from the MITRE CWE catalog EchelonGraph embeds, version catalog_version), total (the active CVEs in EchelonGraph's feed that an NVD, GitHub or CVE.org record classifies under it, rejected and reserved records left out), and cves, one page of 50: each with cve_id, severity, cvss_v3_score, echelongraph_score, echelongraph_severity, score_assessed, kev_listed, published and a shortened description. order says how the rows are sorted (CISA-KEV-listed first, then EchelonGraph score); an answer without order does not state its order, and the note says so. page is the page served, page_size its size and max_page the last page the API serves: a later page is answered as max_page, so past max_page pages total counts CVEs no page lists. echelongraph_score is EchelonGraph's score only when score_assessed is true; the note labels each row that is NOT YET SCORED. A total of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. Pass cwe_id like CWE-79 (or 79) and an optional page (1-${MAX_PAGE}). Its structured result carries state (measured), measured_at (null), method, coverage (total, returned, page, page_requested, page_size, max_page), freshness (null) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends. ${TEXT_BUDGET_DESCRIPTION}`;
+
+// #2783: a page of 50 production rows is about 27,000 characters as pretty JSON (CWE-79, page 1),
+// under the budget once each row is on a line of its own. Past it, each row keeps the fields the
+// description names with its description cut to 120 characters, then rows are left out.
+const GET_CWE_TEXT: TextCut = {
+  rows: "cves",
+  levels: [{ keep: ["cve_id", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "score_assessed", "score_unassessed_reason", "kev_listed", "published", "description"], clip: 120 }],
+  whole: "get_cve returns any one of these CVEs' records whole.",
+};
 
 function schemas() {
   const row = z.looseObject({
@@ -154,7 +164,7 @@ export async function getCwe(cwe_id: string, page?: number): Promise<ToolResult>
         "measured_at is null: a page of CVEs has no single observation time; each row carries its own published date.",
         "freshness is null: the answer does not say when its cached page was computed.",
       ],
-    });
+    }, GET_CWE_TEXT);
   } catch (e) {
     return crashed(TOOL, e);
   }

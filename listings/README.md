@@ -334,7 +334,11 @@ nothing about the product; and the summary of a different server, `purify-feeds-
 EPSS, and enriched vulnerability feeds with full provenance"). That is the sentence #2706 quoted;
 it now sits under another author's server. **Re-checked 2026-10-04:** the page's description
 of this server (Glama's own, generated from the repo) matches no `REMOVED_CLAIMS` term; the
-sentence now appears under `Agam-S/Vulnary-MCP` in "Related Servers", which Glama rotates. What
+sentence is still `purify-feeds-mcp`'s: its card in "Related Servers" (which Glama rotates) runs
+name, tags, author, grades, then that description, and the page's embedded data pairs it with
+purify-feeds-mcp and the 2026-07-31 stamp #2706 cited. (A first re-check misread it as the next
+card's, `Agam-S/Vulnary-MCP`, whose own description is "MCP server for querying CVE and package
+vulnerability data from NVD and OSV.dev"; corrected by #2706's post-close review.) What
 Glama indexes from us carries none either: the public repo's README is byte-identical to
 `../README.md` (held to `REMOVED_CLAIMS` by `test/tools.test.mjs`), its description and topics
 are `github-repo-settings.json`'s (held by `test/listings.test.mjs`), and `glama.json` can carry

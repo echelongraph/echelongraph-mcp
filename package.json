@@ -1,6 +1,6 @@
 {
   "name": "echelongraph-mcp",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "mcpName": "io.echelongraph/echelongraph-mcp",
   "description": "MCP server for CVE and vulnerability lookups: CVE records with EchelonGraph multi-source scores, CISA KEV, EPSS history, CWE weaknesses, public exploits, version and SBOM checks against the vulnerability advisory corpus, vendor security advisories, and a per-CVE internet-exposure footprint derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan). Free and keyless, for Claude, Cursor and any MCP client.",
   "type": "module",

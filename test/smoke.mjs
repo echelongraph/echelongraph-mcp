@@ -1,6 +1,9 @@
 // Smoke test: spawn the built MCP server, list its tools, and call the cve_exposure tool
 // against the PRODUCTION EchelonGraph API. Run after `npm run build`: `npm run smoke`.
-// Its requests carry this package's User-Agent, so they are counted as external MCP adoption.
+// Its requests carry this package's User-Agent. From our workspace they are our own traffic
+// (first_party=true, first_party_by=egress: its egress address is on core-backend's
+// firstPartyEgress) and in no adoption panel. From any other machine they count as external MCP
+// adoption unless ECHELONGRAPH_MCP_UA names the run (#2760).
 // It opens over the 2026-07-28 era (server/discover); the tests cover both eras against a stub.
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 

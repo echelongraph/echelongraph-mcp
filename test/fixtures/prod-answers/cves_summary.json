@@ -1,0 +1,28 @@
+{
+  "poller": {
+    "cves_ingested": 0,
+    "cves_skipped": 0,
+    "http_retries": 0,
+    "interval": "20m0s",
+    "last_poll_at": "2026-10-04T09:58:55Z",
+    "last_poll_dur_ms": 146,
+    "poll_count": 1,
+    "poll_errors": 0
+  },
+  "summary": {
+    "critical": 43103,
+    "high": 152443,
+    "medium": 169304,
+    "low": 14525,
+    "none": 3330,
+    "unscored": 3330,
+    "total": 382705,
+    "nvd_critical": 39399,
+    "nvd_high": 122346,
+    "nvd_medium": 134768,
+    "nvd_low": 10336,
+    "nvd_none": 75856,
+    "rejected": 893,
+    "last_updated": "2026-10-04T09:16:39.64Z"
+  }
+}

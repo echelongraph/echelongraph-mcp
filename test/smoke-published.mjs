@@ -1,7 +1,10 @@
 // E2E against the PUBLISHED npm package — spawns `npx -y echelongraph-mcp` exactly like a
 // user's Claude Desktop / Cursor would, connects as an MCP client, lists tools, and calls
 // cve_exposure against the production API. Proves the published artifact works end to end.
-// Its requests carry the package's User-Agent, so they are counted as external MCP adoption.
+// Its requests carry the package's User-Agent. From our workspace they are our own traffic
+// (first_party=true, first_party_by=egress: its egress address is on core-backend's
+// firstPartyEgress) and in no adoption panel. From any other machine they count as external MCP
+// adoption unless ECHELONGRAPH_MCP_UA names the run (#2760).
 // It opens with a 2025-06-18 initialize, the handshake every published version answers (1.x is
 // legacy-only; 2.x serves both eras).
 import { connect } from "./mcp-stdio-client.mjs";

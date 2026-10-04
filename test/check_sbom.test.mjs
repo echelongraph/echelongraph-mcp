@@ -316,7 +316,14 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.equal(sc.data.summary.partial, true);
         assert.deepEqual(sc.data.results.map((r) => r.index), PURLS_840.map((_, i) => i));
         assert.equal(sc.data.not_sent_purls, undefined);
-        assert.deepEqual(JSON.parse(textBlocks(res)[0]), sc.data);
+        // #2783: 840 rows are past the first text block's budget, so that block is cut and the note
+        // says so (TEXT CUT); data keeps every row whole. Each row the text keeps is data's row, by
+        // index, with its purl and verdict.
+        const shown = JSON.parse(textBlocks(res)[0]).results;
+        const byIndex = new Map(sc.data.results.map((r) => [r.index, r]));
+        assert.ok(shown.length > 0);
+        for (const r of shown) assert.deepEqual([r.purl, r.verdict], [byIndex.get(r.index).purl, byIndex.get(r.index).verdict], `row ${r.index}`);
+        assert.match(noteOf(res), /TEXT CUT: the API's answer is \d+ characters of JSON/);
         assert.deepEqual(
           { ...sc.coverage, not_assessed: null },
           { input: "cyclonedx", components_in_document: 840, with_purl: 840, without_purl: 0, duplicates_removed: 0, distinct_purls: 840, batch_size: 200, batches: 5, batches_sent: 5, sent: 840, not_sent: 0, not_sent_reason: null, rate_limit_waits: 0, waited_ms: 0, not_assessed: null, partial: true },

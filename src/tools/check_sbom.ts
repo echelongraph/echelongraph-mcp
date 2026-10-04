@@ -18,6 +18,7 @@
 // rpm purl without a distro release is not assessed.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
+import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
 
 // What index.ts hands this module, so the tool uses the server's one api(), envelope and failure
 // contract instead of a copy (and index.ts stays the only place that defines them).
@@ -27,7 +28,8 @@ type ApiOk = { ok: true; status: number; data: object };
 // The part of index.ts's Failure this module reads: a 429's Retry-After (whole seconds), #2734.
 type FailureLike = { ok: false; kind: string; status?: number; retryAfter?: number };
 export type CheckSbomDeps<F extends FailureLike> = {
-  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string }) => Promise<ApiOk | F>;
+  // init.timeoutMs: what is left of the call's budget, the most this request may take (#2756).
+  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number }) => Promise<ApiOk | F>;
   failed: (tool: string, f: F) => ToolResult;
   // index.ts's one sentence for a failure: quoted when a batch after the first fails.
   describeFailure: (f: F) => string;
@@ -41,6 +43,7 @@ export type CheckSbomDeps<F extends FailureLike> = {
     data: object,
     note: string,
     env: { state: "measured" | "not_assessed"; measured_at: string | null; method: string; coverage: Record<string, unknown> | null; freshness: null; notes?: string[] },
+    cut?: TextCut,
   ) => ToolResult;
   okHead: (tool: string, status?: number) => string;
   envelopeSchema: (o: { data: z.ZodType; coverage: z.ZodType | null; freshness: z.ZodType | null }) => z.ZodType;
@@ -69,6 +72,10 @@ export const MAX_PURLS = 2000;
 // 60 s), and a call that outlives its client returns nothing at all — not even the partial answer
 // below. From a fresh budget, 1,200 purls (6 batches) go at once; a larger list answers partial
 // with the rest in data.not_sent_purls, for a call a minute later.
+// The budget bounds the whole call, not only when a batch may start (#2756): each batch's request
+// may take at most what is left of it (api()'s init.timeoutMs), so a batch started at 49.9 s is cut
+// off at 50 s and its purls answered as not sent (time_budget), instead of running on for the
+// request timeout (15 s) past the client's and the hosted endpoint's 60 s.
 export const TIME_BUDGET_MS = 50_000;
 // Retry-After 0 is waited this long; a 429 without Retry-After is not retried. At most MAX_WAITS
 // waits per call.
@@ -100,7 +107,50 @@ const FRESHNESS_NOTE = "freshness is null: the answer carries no time at which t
 
 export const CHECK_SBOM_TITLE = "Check an SBOM against the advisory corpus";
 export const CHECK_SBOM_DESCRIPTION =
-  "Check a dependency list against EchelonGraph's advisory corpus, one verdict per component. Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX JSON or SPDX JSON document, as JSON text or as an object, up to 5,000,000 characters). The purls are read from the document by this MCP server and only they are sent to the API, in POST bodies of at most 200 purls each, one after another, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. A component without a purl is counted and not checked. Each purl is mapped to its OSV ecosystem, package name and version and matched against the affected version ranges EchelonGraph holds from OSV.dev advisory records; there is no ranking and no score. data.results holds one row per component sent, in order (index counts across batches), with verdict (affected, not_affected, undetermined or not_assessed), assessed, not_assessed_reason, cve_ids, matches, count, not_affected_count and undetermined_count; data.summary counts the verdicts, summed over the batches (partial is true when any batch's was). not_affected is the only clean verdict. undetermined: advisories name the package but at least one could not be decided at this version and none matched. not_assessed: no verdict at all, because the package is not in the corpus, the purl type has no OSV ecosystem, a deb, apk or rpm purl carries no distro qualifier naming its release (EchelonGraph does not guess one), the version is missing, the lookup failed, or the batch's time budget ran out first (time_budget). Neither undetermined nor not_assessed is clean, and the note gives their counts. The API allows 1,200 components a minute per caller; when it answers 429 with Retry-After, the tool waits as asked and sends the batch again, within 50 seconds per call. When the next wait would pass that, or a batch after the first fails, the tool stops and answers what it has: coverage.not_sent counts the purls not sent and coverage.not_sent_reason says why (time_budget, rate_limited or request_failed), data.not_sent_purls lists them for a later call, and they are not checked and not clean. A list or document with more than 2,000 distinct purls is refused, not truncated: split it. Its structured result carries state (measured when at least one component got a verdict, else not_assessed), measured_at (null: the corpus is read through a cache, so no single read time exists), method, coverage (what the input held, what was sent in how many batches, and what was not sent and why), freshness (null) and notes, with data equal to the API's JSON (for more than one batch, the batches' answers merged); the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
+  "Check a dependency list against EchelonGraph's advisory corpus, one verdict per component. Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX JSON or SPDX JSON document, as JSON text or as an object, up to 5,000,000 characters). The purls are read from the document by this MCP server and only they are sent to the API, in POST bodies of at most 200 purls each, one after another, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. A component without a purl is counted and not checked. Each purl is mapped to its OSV ecosystem, package name and version and matched against the affected version ranges EchelonGraph holds from OSV.dev advisory records; there is no ranking and no score. data.results holds one row per component sent, in order (index counts across batches), with verdict (affected, not_affected, undetermined or not_assessed), assessed, not_assessed_reason, cve_ids, matches, count, not_affected_count and undetermined_count; data.summary counts the verdicts, summed over the batches (partial is true when any batch's was). not_affected is the only clean verdict. undetermined: advisories name the package but at least one could not be decided at this version and none matched. not_assessed: no verdict at all, because the package is not in the corpus, the purl type has no OSV ecosystem, a deb, apk or rpm purl carries no distro qualifier naming its release (EchelonGraph does not guess one), the version is missing, the lookup failed, or the batch's time budget ran out first (time_budget). Neither undetermined nor not_assessed is clean, and the note gives their counts. The API allows 1,200 components a minute per caller; when it answers 429 with Retry-After, the tool waits as asked and sends the batch again, within 50 seconds per call. When the next wait would pass that, or a batch after the first fails, the tool stops and answers what it has: coverage.not_sent counts the purls not sent and coverage.not_sent_reason says why (time_budget, rate_limited or request_failed), data.not_sent_purls lists them for a later call, and they are not checked and not clean. A list or document with more than 2,000 distinct purls is refused, not truncated: split it. Its structured result carries state (measured when at least one component got a verdict, else not_assessed), measured_at (null: the corpus is read through a cache, so no single read time exists), method, coverage (what the input held, what was sent in how many batches, and what was not sent and why), freshness (null) and notes, with data equal to the API's JSON (for more than one batch, the batches' answers merged); the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends." +
+  " " +
+  TEXT_BUDGET_DESCRIPTION +
+  " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least, and the rows whose verdict is not_affected, then not_assessed, are left out of the text before any other; not_sent_purls keeps its first 10, and the note says from which position of the input the purls not sent run.";
+
+// #2783: a production row is about 2,200 characters as pretty JSON, most of it its matches, each
+// a CVE with its description, so the 50-component Juice Shop document was 112,820 characters of
+// text, and 2,000 purls about 1,200,000. Past DATA_TEXT_BUDGET each row in the first text block
+// keeps its verdict, counts and cve_ids, and each match its scores, flags and match_reason (the
+// advisory interval the version falls inside, which names the fixed version) without the
+// description; then the same without match_reason; then only index, purl, verdict,
+// not_assessed_reason and cve_ids. When rows must still go, the clean ones (not_affected) leave
+// first, then the not_assessed ones, both counted in data.summary and the note, so the affected
+// and undetermined rows are the last to leave the text.
+// A call that stops early (a 2,000-purl call from a fresh budget answers 1,200 and is refused the
+// rest with a 429) lists the purls not sent in data.not_sent_purls: 800 of them are some 20,000
+// to 60,000 characters, which the text cannot hold beside the rows. Once the first level does not
+// fit with that list whole, the text keeps its first 10 and the note says which they are: the
+// input's distinct purls from position `sent` + 1 on, in input order, which is how check_sbom read
+// them (x.purls.slice(answers.length * MAX_COMPONENTS)), so a second call can send them without
+// reading the list.
+export function sbomText(sent: number): TextCut {
+  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed"];
+  const row = ["index", "purl", "ecosystem", "package", "version", "verdict", "assessed", "not_assessed_reason", "count", "not_affected_count", "undetermined_count", "cve_ids"];
+  return {
+    rows: "results",
+    levels: [
+      { keep: [...row, ["matches", [...matches, "match_reason"]]], clip: 200 },
+      { keep: [...row, ["matches", matches]], clip: 200 },
+      { keep: ["index", "purl", "verdict", "not_assessed_reason", "cve_ids"], clip: 100 },
+    ],
+    sides: [
+      {
+        list: "not_sent_purls",
+        cap: 10,
+        said: (_inText, total) =>
+          `The ${total} purls not sent are the input's distinct purls from position ${sent + 1} on, in the order this tool read them (the order of purls, or of the document's components, nested ones after their parent, each purl at its first place), so a second call can send them without reading the list.`,
+      },
+    ],
+    leaveOutFirst: { field: "verdict", values: ["not_affected", "not_assessed"], why: "data.summary counts every verdict" },
+    whole: "check_affected, given a row's ecosystem, package and version, returns that component's matches whole, and cve_intel a CVE's affected packages and fixed versions.",
+    page: (shown) => `To read every row in the text, check ${shown} or fewer purls per call.`,
+  };
+}
 
 // ── Reading the input ──
 
@@ -390,17 +440,27 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
     let waits = 0;
     let waitedMs = 0;
     let stop: { reason: NotSentReason; detail: string } | null = null;
+    // The 429 last waited out, for the one way the budget can be gone before anything answered.
+    let waitedFor: F | undefined;
     // One batch at a time, in order; a 429 with Retry-After is waited out and the same batch sent
     // again, while the wait fits in the call's budget.
     while (answers.length < batches.length) {
-      if (answers.length > 0 && now() - started >= TIME_BUDGET_MS) {
+      const left = TIME_BUDGET_MS - (now() - started);
+      if (left <= 0 && answers.length === 0 && waitedFor) {
+        // A wait that ended at the budget's end: no time is left to send the first batch again, and
+        // nothing was measured, so that 429 is the answer, not a request given no time at all.
+        return deps.failed(tool, waitedFor);
+      }
+      if (answers.length > 0 && left <= 0) {
         stop = { reason: "time_budget", detail: `the call's ${budgetS} s budget ran out after ${answers.length} of ${batches.length} batches` };
         break;
       }
+      // At most what is left of the budget (#2756): a slow batch is cut off at its end.
       const r = await deps.api(BATCH_PATH, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ components: batches[answers.length].map((purl) => ({ purl })) }),
+        timeoutMs: Math.max(0, left),
       });
       if (r.ok) {
         answers.push(r.data);
@@ -418,10 +478,14 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
             await sleep(waitMs);
             waits++;
             waitedMs += waitMs;
+            waitedFor = r;
             continue;
           }
           stop = { reason: "time_budget", detail: `the API answered 429 asking for a wait of ${r.retryAfter} s (Retry-After), which would pass the call's ${budgetS} s budget` };
         }
+      } else if (r.kind === "timeout" && now() - started >= TIME_BUDGET_MS) {
+        // Cut off by the budget, not by the API failing: the purls are not sent for want of time.
+        stop = { reason: "time_budget", detail: `the call's ${budgetS} s budget ran out while batch ${answers.length + 1} of ${batches.length} was unanswered, so it was cut off` };
       } else {
         stop = { reason: "request_failed", detail: deps.describeFailure(r).replace(/\.$/, "") };
       }
@@ -471,7 +535,7 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
       },
       freshness: null,
       notes: [DISTRO_NOTE, CLEAN_NOTE, MEASURED_AT_NOTE, FRESHNESS_NOTE],
-    });
+    }, sbomText(g.sent));
   } catch (e) {
     return deps.crashed(tool, e);
   }
@@ -560,7 +624,7 @@ export function checkSbomOutput(envelopeSchema: CheckSbomDeps<FailureLike>["enve
         .enum(["time_budget", "rate_limited", "request_failed"])
         .nullable()
         .describe(
-          "Why not_sent is above 0: time_budget (the call's 50 s budget ran out, or waiting out the API's Retry-After would pass it), rate_limited (a 429 without Retry-After, or a 429 after 10 waits), request_failed (a batch after the first failed; the note quotes how). null when every purl was sent.",
+          "Why not_sent is above 0: time_budget (the call's 50 s budget ran out, before a batch or while one was unanswered, which is then cut off; or waiting out the API's Retry-After would pass it), rate_limited (a 429 without Retry-After, or a 429 after 10 waits), request_failed (a batch after the first failed; the note quotes how). null when every purl was sent.",
         ),
       rate_limit_waits: z.number().int().describe("How many times the API answered 429 and the tool waited its Retry-After before sending the batch again."),
       waited_ms: z.number().int().describe("Milliseconds spent in those waits."),

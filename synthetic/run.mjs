@@ -11,7 +11,8 @@
 //                 (ajv, as the SDK ships it: the validator tools.test.mjs uses), isError is not
 //                 set, and state is measured or not_assessed. not_assessed is a success here:
 //                 the tool answered honestly that it could not assess; it is never read as
-//                 "clean", and it is not an outage.
+//                 "clean", and it is not an outage. A tool probes.mjs EXPECTs more of must also
+//                 show it (check_sbom: two batches answered, #2757), else reason expectation_unmet.
 //   failure       anything else: a JSON-RPC error, a timeout, isError, state failed or
 //                 invalid_input, no structuredContent, a structuredContent the schema refuses,
 //                 or no input the synthetic can send. `reason` says which.
@@ -79,7 +80,7 @@ import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
-import { AFTER, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
+import { AFTER, EXPECT, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
@@ -156,8 +157,9 @@ export function chooseInput(name, tool, seen) {
 }
 
 // How a tools/call answer is judged. `tool` is the tools/list entry, or undefined for a forced
-// name the package does not list.
-export function judge(res, tool) {
+// name the package does not list. `expect` is the tool's EXPECT entry (probes.mjs), if any: a
+// success it does not hold for is a failure, reason expectation_unmet, with what it saw as detail.
+export function judge(res, tool, expect) {
   const sc = res?.structuredContent;
   const state = sc && typeof sc === "object" ? sc.state : undefined;
   if (res?.isError === true) return { outcome: "failure", reason: FAILURE_STATES.has(state) ? `state_${state}` : "is_error", state };
@@ -168,6 +170,8 @@ export function judge(res, tool) {
   if (!v.valid) return { outcome: "failure", reason: "schema_invalid", state, detail: String(v.errorMessage ?? "").slice(0, 300) };
   if (FAILURE_STATES.has(state)) return { outcome: "failure", reason: `state_${state}_without_is_error`, state };
   if (!SUCCESS_STATES.has(state)) return { outcome: "failure", reason: "unknown_state", state };
+  const unmet = expect?.(sc);
+  if (unmet !== undefined) return { outcome: "failure", reason: "expectation_unmet", state, detail: String(unmet).slice(0, 300) };
   return { outcome: "success", state };
 }
 
@@ -287,7 +291,7 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
         continue;
       }
       const latency = Math.round(performance.now() - t0);
-      const verdict = judge(res, tool);
+      const verdict = judge(res, tool, EXPECT[name]);
       if (verdict.outcome === "success") seen[name] = res.structuredContent;
       emit({ tool: name, era, latency_ms: latency, input: choice.index, ...verdict });
     }

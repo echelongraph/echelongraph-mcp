@@ -1,0 +1,293 @@
+{
+  "attribution": "Observations whose source is \"shodan\", and every count that includes them, are derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan). EchelonGraph claims no ownership of it or copyright in it.",
+  "poller": {
+    "running": false,
+    "interval_seconds": 60,
+    "last_run_at": "2026-10-04T09:43:02.070279Z",
+    "shodan_enabled": true
+  },
+  "stats": {
+    "total": 35742,
+    "by_category": {
+      "AI-AGENT": 12,
+      "AI-WORKFLOW": 10384,
+      "ANNOTATION": 1301,
+      "EXPERIMENT": 3,
+      "INFERENCE-SRV": 540,
+      "LLM-PROXY": 8175,
+      "MCP-SERVER": 1445,
+      "ML-PIPELINE": 189,
+      "MODEL-REG": 396,
+      "MODEL-STORE": 8868,
+      "NOTEBOOK": 3610,
+      "VECTOR-DB": 819
+    },
+    "visible_by_category": {
+      "AI-WORKFLOW": 93,
+      "INFERENCE-SRV": 89,
+      "LLM-PROXY": 1767,
+      "MODEL-REG": 151,
+      "NOTEBOOK": 127,
+      "VECTOR-DB": 164
+    },
+    "last_observation": "2026-10-04T09:24:42.241146Z",
+    "last_24h_count": 1444,
+    "last_24h_visible_count": 203,
+    "confirmed_window": {
+      "from": "2026-09-30T04:28:15.649832Z",
+      "to": "2026-10-04T10:05:14.021229Z",
+      "undated": 0
+    },
+    "auth_confirmed": 8467,
+    "auth_undetermined": 9693,
+    "top_products": [
+      {
+        "product": "MinIO Server",
+        "count": 6660
+      },
+      {
+        "product": "LiteLLM",
+        "count": 6414
+      },
+      {
+        "product": "Streamlit",
+        "count": 2322
+      },
+      {
+        "product": "Jupyter Hub",
+        "count": 1740
+      },
+      {
+        "product": "LocalAI",
+        "count": 1558
+      },
+      {
+        "product": "Jupyter Server",
+        "count": 1407
+      },
+      {
+        "product": "nginx",
+        "count": 1303
+      },
+      {
+        "product": "Label Studio",
+        "count": 1140
+      },
+      {
+        "product": "ComfyUI",
+        "count": 408
+      },
+      {
+        "product": "Weaviate",
+        "count": 320
+      }
+    ],
+    "top_countries": [
+      {
+        "country": "United States",
+        "count": 7198
+      },
+      {
+        "country": "China",
+        "count": 6056
+      },
+      {
+        "country": "Germany",
+        "count": 2702
+      },
+      {
+        "country": "Singapore",
+        "count": 1295
+      },
+      {
+        "country": "Japan",
+        "count": 1213
+      },
+      {
+        "country": "India",
+        "count": 1183
+      },
+      {
+        "country": "Canada",
+        "count": 1131
+      },
+      {
+        "country": "Australia",
+        "count": 1100
+      },
+      {
+        "country": "Switzerland",
+        "count": 1050
+      },
+      {
+        "country": "France",
+        "count": 1001
+      }
+    ],
+    "top_issuers": [
+      {
+        "issuer": "Aliyun Computing Co., LTD (China)",
+        "count": 1243
+      },
+      {
+        "issuer": "Amazon Technologies Inc. (United States)",
+        "count": 1180
+      },
+      {
+        "issuer": "Linode (United States)",
+        "count": 897
+      },
+      {
+        "issuer": "Let's Encrypt",
+        "count": 866
+      },
+      {
+        "issuer": "Amazon.com, Inc. (United States)",
+        "count": 824
+      },
+      {
+        "issuer": "Tencent cloud computing (Beijing) Co., Ltd. (China)",
+        "count": 804
+      },
+      {
+        "issuer": "Amazon Data Services Canada (Canada)",
+        "count": 762
+      },
+      {
+        "issuer": "Hetzner Online GmbH (Germany)",
+        "count": 634
+      },
+      {
+        "issuer": "Tencent Cloud Computing (Beijing) Co., Ltd (China)",
+        "count": 590
+      },
+      {
+        "issuer": "Amazon Data Services India (India)",
+        "count": 583
+      }
+    ],
+    "trend_30d": [
+      {
+        "date": "2026-09-05",
+        "count": 597
+      },
+      {
+        "date": "2026-09-06",
+        "count": 1559
+      },
+      {
+        "date": "2026-09-07",
+        "count": 859
+      },
+      {
+        "date": "2026-09-08",
+        "count": 1466
+      },
+      {
+        "date": "2026-09-09",
+        "count": 1335
+      },
+      {
+        "date": "2026-09-10",
+        "count": 859
+      },
+      {
+        "date": "2026-09-11",
+        "count": 767
+      },
+      {
+        "date": "2026-09-12",
+        "count": 1281
+      },
+      {
+        "date": "2026-09-13",
+        "count": 1545
+      },
+      {
+        "date": "2026-09-14",
+        "count": 757
+      },
+      {
+        "date": "2026-09-15",
+        "count": 1461
+      },
+      {
+        "date": "2026-09-16",
+        "count": 1526
+      },
+      {
+        "date": "2026-09-17",
+        "count": 815
+      },
+      {
+        "date": "2026-09-18",
+        "count": 841
+      },
+      {
+        "date": "2026-09-19",
+        "count": 775
+      },
+      {
+        "date": "2026-09-20",
+        "count": 1581
+      },
+      {
+        "date": "2026-09-21",
+        "count": 764
+      },
+      {
+        "date": "2026-09-22",
+        "count": 1072
+      },
+      {
+        "date": "2026-09-23",
+        "count": 1538
+      },
+      {
+        "date": "2026-09-24",
+        "count": 1372
+      },
+      {
+        "date": "2026-09-25",
+        "count": 649
+      },
+      {
+        "date": "2026-09-26",
+        "count": 1585
+      },
+      {
+        "date": "2026-09-27",
+        "count": 1638
+      },
+      {
+        "date": "2026-09-28",
+        "count": 1146
+      },
+      {
+        "date": "2026-09-29",
+        "count": 899
+      },
+      {
+        "date": "2026-09-30",
+        "count": 1563
+      },
+      {
+        "date": "2026-10-01",
+        "count": 861
+      },
+      {
+        "date": "2026-10-02",
+        "count": 861
+      },
+      {
+        "date": "2026-10-03",
+        "count": 1487
+      },
+      {
+        "date": "2026-10-04",
+        "count": 717
+      }
+    ],
+    "generated_at": "2026-10-04T10:18:01.591525203Z"
+  }
+}

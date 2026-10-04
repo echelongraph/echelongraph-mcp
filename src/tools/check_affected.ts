@@ -28,6 +28,7 @@
 // epss_score, effective_score, effective_severity and score_assessed as the API sent them.
 import * as z from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
+import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
 
 // What this file needs from index.ts, passed in so it imports nothing from a module that starts
 // the stdio server when loaded.
@@ -45,7 +46,7 @@ type Env = {
 };
 export type CheckAffectedKit = {
   api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string }) => Promise<ApiResult>;
-  succeeded: (data: object, note: string, env: Env) => ToolResult;
+  succeeded: (data: object, note: string, env: Env, cut?: TextCut) => ToolResult;
   failed: (tool: string, f: Failure) => ToolResult;
   badInput: (tool: string, why: string) => ToolResult;
   crashed: (tool: string, e: unknown) => ToolResult;
@@ -166,7 +167,10 @@ const COVERAGE = z.strictObject({
 // this file.
 export const CHECK_AFFECTED_TITLE = "Am I affected? (product or package at a version)";
 export const CHECK_AFFECTED_DESCRIPTION =
-  "Whether a product or package at a given version is affected by known CVEs, from the same matcher as echelongraph.io/am-i-affected. Two lookup paths. The CPE path takes product (the NVD CPE product token, such as openssl or nginx) and version, and returns the CVEs whose NVD CPE match criteria name that product with a version range that includes the version; it matches the token across vendors, so each match names the vendor NVD asserts (cpe_vendor) and whether that vendor was verified (vendor_unknown). The registry path takes ecosystem (npm, PyPI, Maven and other OSV ecosystem names), package and version, and decides each OSV advisory record EchelonGraph holds for that package as affected, not affected or undetermined. Read assessed before count: assessed false means the lookup did not evaluate this component, not_assessed_reason says why (product_not_in_cpe_corpus, package_not_cpe_nameable, candidate_load_pending, candidate_window_truncated, package_not_in_advisory_corpus, no_decidable_advisory), the structured result's state is not_assessed, and a count of 0 there must never be reported as not affected. An advisory whose version range cannot be decided at this version is reported as undetermined (undetermined_count, and up to 50 of them in undetermined), never as safe. The answer also carries match_layer (which path answered), capped (the match list stopped at its cap), candidates_capped (not every candidate CVE was loaded), excluded_count (CPE candidates suppressed by the vendor or platform gate), not_affected_count (advisories decided in your favour) and degraded (the lookup ran out of time). Each match carries cve_id, kev_listed, ransomware, epss_score, effective_score, effective_severity and score_assessed (false: EchelonGraph has not scored the CVE yet, so its echelongraph_score is withheld). Product, version, ecosystem and package travel in request headers, never in the URL. Its structured result carries state (measured only when the answer says assessed true), measured_at (null), method (which matcher answered), coverage (assessed and not_assessed_reason first, then the lookup path and the counts above), freshness (null) and notes, with data equal to the API's JSON.";
+  "Whether a product or package at a given version is affected by known CVEs, from the same matcher as echelongraph.io/am-i-affected. Two lookup paths. The CPE path takes product (the NVD CPE product token, such as openssl or nginx) and version, and returns the CVEs whose NVD CPE match criteria name that product with a version range that includes the version; it matches the token across vendors, so each match names the vendor NVD asserts (cpe_vendor) and whether that vendor was verified (vendor_unknown). The registry path takes ecosystem (npm, PyPI, Maven and other OSV ecosystem names), package and version, and decides each OSV advisory record EchelonGraph holds for that package as affected, not affected or undetermined. Read assessed before count: assessed false means the lookup did not evaluate this component, not_assessed_reason says why (product_not_in_cpe_corpus, package_not_cpe_nameable, candidate_load_pending, candidate_window_truncated, package_not_in_advisory_corpus, no_decidable_advisory), the structured result's state is not_assessed, and a count of 0 there must never be reported as not affected. An advisory whose version range cannot be decided at this version is reported as undetermined (undetermined_count, and up to 50 of them in undetermined), never as safe. The answer also carries match_layer (which path answered), capped (the match list stopped at its cap), candidates_capped (not every candidate CVE was loaded), excluded_count (CPE candidates suppressed by the vendor or platform gate), not_affected_count (advisories decided in your favour) and degraded (the lookup ran out of time). Each match carries cve_id, kev_listed, ransomware, epss_score, effective_score, effective_severity and score_assessed (false: EchelonGraph has not scored the CVE yet, so its echelongraph_score is withheld). Product, version, ecosystem and package travel in request headers, never in the URL. Its structured result carries state (measured only when the answer says assessed true), measured_at (null), method (which matcher answered), coverage (assessed and not_assessed_reason first, then the lookup path and the counts above), freshness (null) and notes, with data equal to the API's JSON." +
+  " " +
+  TEXT_BUDGET_DESCRIPTION +
+  " Cut, each entry of the excluded and undetermined samples keeps its cve_id and reason, cve_ids keeps its first 10 (each match carries its cve_id), and each match keeps fewer fields, cve_id, kev_listed, effective_score, effective_severity and score_assessed at least, so that every match stays in the text.";
 
 export const CHECK_AFFECTED_INPUT = z.object({
   product: z.string().optional().describe("CPE path: the NVD CPE product token, such as openssl, nginx or linux_kernel. Leave out for the registry path."),
@@ -208,6 +212,56 @@ function matchesNote(matches: unknown[]): string {
   }
   return out;
 }
+
+// #2783: a production match is about 2,100 characters as pretty JSON, most of it the CVE's
+// description and match_reason, so openssl 3.0.0 (71 matches) was 156,058 characters of text and
+// linux_kernel 5.10.0 (200, the API's cap) 364,408. Past DATA_TEXT_BUDGET each match in the first
+// text block keeps its scores, flags, vendor attribution and match_reason (for a registry match,
+// the advisory interval its version falls inside, which names the fixed version) with the
+// description cut to 200 characters; then the same without the description; then only the fields
+// the description promises; and last, for a list at the cap, cve_id, the effective score and
+// band, kev_listed and score_assessed. The lists beside the matches, the excluded sample (up to 50
+// CPE candidates the vendor or platform gate suppressed, each with a sentence of detail, 13,861
+// characters for flash_player 10.0.0) and the undetermined sample (up to 50), keep each entry's
+// cve_id and reason once the first level does not fit with them whole, before any match field
+// that level keeps goes, and the registry path's cve_ids, which is each match's cve_id in the
+// order of matches (core-backend cve/handler.go), keeps its first 10, so that every match stays
+// in the text, 200 at the cap with 50 undetermined beside them: this tool has no page to read
+// more from. structuredContent.data keeps every list whole.
+const CHECK_AFFECTED_TEXT: TextCut = {
+  rows: "matches",
+  levels: [
+    {
+      keep: [
+        "cve_id", "severity", "cvss_v3_score", "description", "kev_listed", "ransomware", "epss_score", "echelongraph_score", "echelongraph_severity", "effective_score", "effective_severity",
+        "score_assessed", "score_unassessed_reason", "matched_criteria", "cpe_vendor", "vendor_unknown", "match_confidence", "match_reason", "version_evidence",
+      ],
+      clip: 200,
+    },
+    {
+      keep: [
+        "cve_id", "severity", "cvss_v3_score", "kev_listed", "ransomware", "epss_score", "echelongraph_score", "effective_score", "effective_severity", "score_assessed", "matched_criteria",
+        "cpe_vendor", "vendor_unknown", "match_reason",
+      ],
+      clip: 200,
+    },
+    {
+      keep: [
+        "cve_id", "severity", "cvss_v3_score", "kev_listed", "ransomware", "epss_score", "echelongraph_score", "effective_score", "effective_severity", "score_assessed", "matched_criteria",
+        "cpe_vendor", "vendor_unknown",
+      ],
+      clip: 100,
+    },
+    { keep: ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "effective_severity", "score_assessed", "cpe_vendor", "vendor_unknown"], clip: 100 },
+    { keep: ["cve_id", "kev_listed", "effective_score", "effective_severity", "score_assessed"], clip: 100 },
+  ],
+  sides: [
+    { list: "cve_ids", cap: 10, said: () => "cve_ids lists each match's cve_id, in the order of matches." },
+    { list: "excluded", keep: ["cve_id", "reason"], clip: 100 },
+    { list: "undetermined", keep: ["cve_id", "reason"], clip: 100 },
+  ],
+  whole: "get_cve returns any one of these CVEs' records whole, and cve_intel a CVE's affected packages and fixed versions.",
+};
 
 async function checkAffected(kit: CheckAffectedKit, a: Args): Promise<ToolResult> {
   const product = (a.product ?? "").trim();
@@ -286,7 +340,7 @@ async function checkAffected(kit: CheckAffectedKit, a: Args): Promise<ToolResult
       },
       freshness: null,
       notes: [NO_TIME, NO_FRESHNESS],
-    });
+    }, CHECK_AFFECTED_TEXT);
   } catch (e) {
     return kit.crashed(TOOL, e);
   }

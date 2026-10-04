@@ -1,0 +1,102 @@
+{
+  "distinct_hosts": 6975,
+  "engines": 11,
+  "pii_likely": 0,
+  "pci_likely": 0,
+  "top_engines": [
+    {
+      "engine": "redis",
+      "hosts": 2346
+    },
+    {
+      "engine": "prometheus",
+      "hosts": 2003
+    },
+    {
+      "engine": "memcached",
+      "hosts": 1821
+    },
+    {
+      "engine": "influxdb",
+      "hosts": 277
+    },
+    {
+      "engine": "kibana",
+      "hosts": 218
+    },
+    {
+      "engine": "jaeger",
+      "hosts": 157
+    },
+    {
+      "engine": "cassandra",
+      "hosts": 78
+    },
+    {
+      "engine": "grafana",
+      "hosts": 62
+    },
+    {
+      "engine": "mongodb",
+      "hosts": 6
+    },
+    {
+      "engine": "couchdb",
+      "hosts": 5
+    },
+    {
+      "engine": "neo4j",
+      "hosts": 2
+    }
+  ],
+  "top_countries": [
+    {
+      "country": "United States",
+      "hosts": 1570
+    },
+    {
+      "country": "Germany",
+      "hosts": 879
+    },
+    {
+      "country": "China",
+      "hosts": 778
+    },
+    {
+      "country": "France",
+      "hosts": 387
+    },
+    {
+      "country": "United Kingdom",
+      "hosts": 335
+    },
+    {
+      "country": "Singapore",
+      "hosts": 242
+    },
+    {
+      "country": "Indonesia",
+      "hosts": 219
+    },
+    {
+      "country": "India",
+      "hosts": 211
+    },
+    {
+      "country": "Netherlands",
+      "hosts": 180
+    },
+    {
+      "country": "Brazil",
+      "hosts": 165
+    }
+  ],
+  "observed_window": {
+    "from": "2026-07-18T00:40:07.29043Z",
+    "to": "2026-10-04T02:16:37.623258Z",
+    "undated": 0
+  },
+  "generated_at": "2026-10-04T10:18:08.645553316Z",
+  "last_run_at": "2026-10-04T02:17:52Z",
+  "attribution": "The services counted here come from Shodan data, or from LeakIX data when Shodan query credits run low. Shodan data is owned by Shodan, which holds its copyright (© Shodan). EchelonGraph claims no ownership of it or copyright in it."
+}

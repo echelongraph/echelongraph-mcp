@@ -46,6 +46,20 @@ export function advisoryFrom(sc) {
   return undefined;
 }
 
+// check_sbom's input (#2757): 201 distinct purls, one more than the API takes per request
+// (cveBatchMaxComponents, 200), so every probe sends two batches and the multi-batch path runs
+// against production on every run; EXPECT below fails the probe when it did not. The first two are
+// the known-vulnerable pair the probe always sent; the other 199 are versions of one package
+// (lodash 4.17.22 through 4.17.220, version numbers made up for the probe), so the batches read one
+// package's advisories. The budget it costs: 201 components of the API's 1,200 a minute per caller
+// (waf CVEMatchBatchComponentsPerWindow), 2 requests, on each of the run's four legs (two eras, over
+// stdio and over the hosted endpoint): 804 components and 8 requests every 15 minutes.
+export const SBOM_PROBE_PURLS = [
+  "pkg:npm/lodash@4.17.20",
+  "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+  ...Array.from({ length: 199 }, (_, i) => `pkg:npm/lodash@4.17.${22 + i}`),
+];
+
 // In createServer()'s registration order, which is tools/list's.
 export const PROBES = {
   cve_summary: [{}],
@@ -62,7 +76,7 @@ export const PROBES = {
     { ecosystem: "npm", package: "lodash", version: "4.17.20" },
     { product: "openssl", version: "3.0.0" },
   ],
-  check_sbom: [{ purls: ["pkg:npm/lodash@4.17.20", "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"] }],
+  check_sbom: [{ purls: SBOM_PROBE_PURLS }],
   cve_intel: [{ cve_id: CVE }],
   get_cwe: [{ cwe_id: "CWE-79" }],
   vendor_advisories_for_cve: [{ cve_id: CVE }],
@@ -73,6 +87,26 @@ export const PROBES = {
 // Probes that read another tool's answer run after it: get_vendor_advisory after
 // vendor_advisories_for_cve.
 export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
+
+// What a probe's answer must also show, beyond a result its outputSchema accepts: tool name →
+// a function of the structuredContent that returns undefined when it holds, else what it saw
+// (logged as the line's detail; the reason is expectation_unmet). A fixed string, never an input.
+//   check_sbom (#2757)  coverage.batches_sent at least 2: the 201 purls went as two batches and
+//                       the API answered both. One batch answered means the second was not: a 429
+//                       the call could not wait out (the per-minute budget spent; rate_limited or
+//                       time_budget), the call's 50 s budget ending while it was unanswered
+//                       (time_budget), or a request failure (request_failed); its purls came back
+//                       not sent, and detail quotes not_sent_reason. A lowered batch cap is NOT
+//                       this: the first batch of 200 is refused (400 TOO_MANY_COMPONENTS), nothing
+//                       is answered, and the probe fails as state_invalid_input (a 400 is the API
+//                       refusing the input, index.ts failed()).
+export const EXPECT = {
+  check_sbom: (sc) => {
+    const sent = sc?.coverage?.batches_sent;
+    if (typeof sent === "number" && sent >= 2) return undefined;
+    return `coverage.batches_sent ${JSON.stringify(sent ?? null)}, want at least 2 (not_sent_reason ${JSON.stringify(sc?.coverage?.not_sent_reason ?? null)})`;
+  },
+};
 
 // The hosted leg's prompt and resource probes (#2737), one each per era, after the tools. `label`
 // is the line's `tool` (the metric label): a fixed string, so it stays bounded. A prompt or

@@ -155,7 +155,7 @@ The example questions are ones a client can answer with that tool alone.
 | Tool | Title | What it answers | Example question |
 |---|---|---|---|
 | `cve_summary` | CVE feed summary | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), the same CVEs counted by NVD's severity label, as provenance (`summary.nvd_critical` to `summary.nvd_none`), the rejected (withdrawn) records outside the total (`summary.rejected`), and when the feed was last updated. | *How many critical CVEs does the feed hold, and when was it last updated?* |
-| `search_cves` | Search CVEs | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; the note names each row not yet scored. | *Find critical CVEs that mention Tomcat with a CVSS of 9 or more.* |
+| `search_cves` | Search CVEs | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; page with `limit` and `offset`; the note names each row not yet scored. | *Find critical CVEs that mention Tomcat with a CVSS of 9 or more.* |
 | `get_cve` | CVE detail | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. | *What are CVE-2024-3094's CVSS, EPSS and CISA-KEV status?* |
 | `cve_exposure` | Internet exposure for one CVE | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. | *How many exposed services does EchelonGraph's radar have on record for CVE-2023-44487?* |
 | `exposure_radar` | Exposure radar totals | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. | *How many unauthenticated data stores has EchelonGraph's radar confirmed?* |
@@ -312,6 +312,7 @@ A `newest_kev` row's `exposure_state` says whether its count is a measurement:
 | `exposed_databases.engines` | Distinct engine types among them (for example `redis` or `grafana`). |
 | `exposed_databases.top_engines`, `exposed_databases.top_countries` | Up to 15 engines and 10 countries, ranked by those services. |
 | `exposed_databases.pii_likely`, `exposed_databases.pci_likely` | Services whose schema names pass a high-confidence gate for personal data, or for payment-card data. The names are index, database, table or field names in the Shodan or LeakIX banner or in the check's response, never record values; the gate passes one unambiguous term (such as `ssn` or `cardholder`) or two distinct indicators. It is a precision-first schema gate, not a census: a service whose names do not pass it is not counted, whatever it holds, so the other services are not shown to hold no such data. |
+| `exposed_databases.window.from`, `exposed_databases.window.to` | Timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication, a span of checks made at different times. Relayed only when every counted service has such a time; otherwise the note says how many do not. |
 | `exposed_databases.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle in which its Shodan search, or the LeakIX fallback, answered at least one query (others may have failed), its list of services due for a re-check was read, and the scan opt-out register could be consulted. A cycle that searched nothing, or whose reads failed, does not move it. |
 
 #### `leaked_credentials`
@@ -322,6 +323,7 @@ A `newest_kev` row's `exposure_state` says whether its count is a measurement:
 | `leaked_credentials.distinct_secrets` | Each secret once. |
 | `leaked_credentials.distinct_repos` | Public GitHub repositories with at least one. |
 | `leaked_credentials.top_providers`, `leaked_credentials.top_types` | Up to 15 providers and secret types, ranked by (repository, secret) pairs. |
+| `leaked_credentials.window.from`, `leaked_credentials.window.to` | Timestamps, not counts: when EchelonGraph's detector last found the oldest and the newest of the (repository, secret) pairs counted in a public commit. |
 | `leaked_credentials.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle that read the public GitHub event stream (fetches of some of the commits it lists may have failed). A cycle whose read of that stream failed does not move it. |
 
 None of them is validated. Each is a credential-shaped string in a public commit that passed
@@ -339,6 +341,7 @@ labels each one. Only `shadow_ai.confirmed_exposed` counts exposed services.
 | `confirmed_exposed.total` | Confirmed exposed: services EchelonGraph's probes found answering without an authentication gate (liveness `active`, or `rechecking` during a re-check). It is the sum of `confirmed_exposed.by_category`. |
 | `confirmed_exposed.by_category` | The same services, by category. |
 | `confirmed_exposed.last_24h` | Confirmed-exposed services first recorded in the last 24 hours. |
+| `confirmed_exposed.window.from`, `confirmed_exposed.window.to` | Timestamps, not counts: when EchelonGraph's verifier ran the probe that last decided the oldest and the newest of the confirmed-exposed services, a span of probes made at different times. Relayed only when every one has such a time. |
 | `observed.total` | Every Certificate Transparency or Shodan observation on record, whatever its verification state: observed, not exposed. |
 | `observed.by_category` | The same observations, by category. |
 | `observed.last_24h` | Observations first recorded in the last 24 hours. |
@@ -485,7 +488,8 @@ never "not affected", and each figure cites its `measured_at`. A prompt makes no
 Every tool answers in one of two shapes, so a model reading the result cannot mistake an
 outage for an all-clear:
 
-- **Success** — the first text block is the API's JSON verbatim; the second is a one-line
+- **Success** — the first text block is the API's JSON verbatim (cut to fit 30,000 characters
+  when it is longer: see "Long answers" below); the second is a one-line
   note saying the call succeeded, which base URL answered, and what it found; the third is
   the structured result as JSON, less what the first two already say (below). When the
   feed genuinely holds nothing for the query the note says so in words ("we looked and
@@ -515,6 +519,37 @@ what an earlier block already says, so a client that passes only `content` to th
 sees how the answer was measured. The first text block (the API's JSON, or the failure) and the
 note after it are where 1.x put them.
 
+
+### Long answers
+
+A model pays for every character of text it reads, and some clients cap what they pass on:
+Claude Code warns past 10,000 tokens of tool output and, past 25,000, saves the result to a
+file and hands the model its path instead. Through 2.6.2 the first text block was the API's JSON
+whatever its size: on production's answers of 2026-10-04 a default `search_cves` page for
+"openssl" was 133,300 characters of text, `get_cve` for CVE-2021-44228 80,897, `check_affected`
+for the Linux kernel at 5.10.0 364,408, `kev_recent` at its largest page 105,925 and
+`search_vendor_advisories` at its largest page 103,147.
+
+So when the API's JSON is longer than 30,000 characters, the first text block holds it cut to
+fit, and `structuredContent`'s `data` still holds it whole. First the same JSON is laid out with
+each row on a line of its own, which drops no character of the answer but the indentation. If
+that is still too long, a tool that returns a list of rows cuts each row to the fields it names,
+most kept first (`search_cves` keeps `cve_id`, `severity`, `cvss_v3_score`, `echelongraph_score`,
+`score_assessed`, `epss_score`, `kev_listed` and the first 200 characters of the description,
+among others), with every long string ending in "…". A list beside the rows is cut before any
+row field the first level keeps, and before any row leaves the text: `check_affected`'s
+`excluded` and `undetermined` samples keep each entry's `cve_id` and `reason`, and its `cve_ids`
+(each match's `cve_id`, in order) its first 10, so that every match stays in the text, and `check_sbom`'s `not_sent_purls` keeps its first 10, the note saying from
+which position of the input the purls not sent run, so that a second call can send them without
+reading the list. When even the leanest cut is too long, rows are left out of the text
+(`check_sbom` leaves out the `not_affected` rows first, then the `not_assessed` ones), and the
+note says how to read them: the `offset` to call next, or a smaller `limit`. Any other answer
+keeps the first entries of each of its lists (`get_cve`'s `cpe_match` and `references`). The note
+then ends with one sentence starting `TEXT CUT` that says what the first text block leaves out
+and which tool returns a row whole (`get_cve`, `get_vendor_advisory`, `check_affected`, and
+`cve_intel` a CVE's fixed versions). An answer that fits is sent as before, pretty-printed and
+whole. The same answer is always cut the same way.
+
 ## Structured results
 
 Since 2.0.0 every result, success or failure, carries `structuredContent`, and every tool
@@ -530,7 +565,7 @@ declares its shape as an `outputSchema` in `tools/list`, with a title and the an
 | `coverage` | What the answer covers, where the tool can say: `in_scope` for `cve_exposure`, the list's own account of its count for `search_cves`, the radars that answered for `exposure_radar`, and `assessed`, `not_assessed_reason`, the lookup path and the match counts for `check_affected`. |
 | `freshness` | The producing radar's last completed check (`last_run_at`), where the API serves one; `null` where it serves none. |
 | `notes` | The caveats, one sentence each: what the envelope itself needs saying, then the note from the text block. |
-| `data` | On a success only: the same JSON as the first text block. |
+| `data` | On a success only: the API's JSON, whole: the first text block carries the same JSON, or, past 30,000 characters, a cut of it that the note names (`TEXT CUT`). |
 | `error` | On a failure only: `kind`, `path`, `status` and `message`. |
 
 The last text block of every result is this structured result serialized as JSON, less what
@@ -574,7 +609,8 @@ a note says so. Per tool:
   answer gives one time at which what it counts was observed, so no count is presented as a
   dated measurement. `mcp_servers` dates its verdicts only by a window, `mcp_servers.window.from`
   to `mcp_servers.window.to`, over checks made at different times, which is not one observation
-  time. Its numbers keep the labels above. `freshness` holds each radar's `last_run_at` where the
+  time; so, since #2438, do `exposed_databases.window`, `leaked_credentials.window` and
+  `shadow_ai.confirmed_exposed.window`. `kev_exposure` gives no observation time at all. Its numbers keep the labels above. `freshness` holds each radar's `last_run_at` where the
   API serves one, for `shadow_ai` also `running`, and for `mcp_servers` also `enabled`.
 - `check_affected` is `measured` only when the answer says `assessed` true, and `not_assessed`
   when it says false or does not say. Its `measured_at` and `freshness` are `null`: a match answer
@@ -626,7 +662,7 @@ Where each tool's input travels:
 | Input | Where it is sent |
 |---|---|
 | A CVE ID (`get_cve`, `cve_exposure`, `epss_history`, `cve_intel`, `vendor_advisories_for_cve`), a CWE ID and page (`get_cwe`), a vendor and advisory ID (`get_vendor_advisory`) | The URL path. |
-| `search_cves`: `search` | The `X-EG-Search` request header, never the URL. Its severity, minimum CVSS, sort and limit go in the query string. |
+| `search_cves`: `search` | The `X-EG-Search` request header, never the URL. Its severity, minimum CVSS, sort, limit and offset go in the query string. |
 | `search_vendor_advisories`: `query` | The `X-EG-Advisory-Search` request header, never the URL. Its vendor, severity, CVE filter, limit and offset go in the query string. |
 | `check_affected`: `product`, `version`, `ecosystem`, `package` | The `X-EG-Product`, `X-EG-Version`, `X-EG-Ecosystem` and `X-EG-Package` request headers, never the URL. |
 | `kev_recent`: `since`, `until`, `ransomware`, `vendor`, `limit`, `cursor` | The `X-EG-Since`, `X-EG-Until`, `X-EG-Ransomware`, `X-EG-Vendor`, `X-EG-Limit` and `X-EG-Cursor` request headers, never the URL. |
@@ -716,8 +752,12 @@ npm test           # build, then the behavioural suite over both protocol eras, 
 npm run smoke      # spawn the server + call cve_exposure against the production API
 ```
 
-`npm run smoke` calls the production API with this package's User-Agent, so its requests are
-counted as external MCP adoption. `npm test` never leaves the machine.
+`npm run smoke` calls the production API with this package's User-Agent. Run from our own
+workspace, whose egress address the API recognises as ours, its requests are counted as our own
+traffic and appear in no adoption count. Run from any other machine, they are counted as external
+MCP adoption unless you set `ECHELONGRAPH_MCP_UA` (for example
+`ECHELONGRAPH_MCP_UA=my-smoke/1.0 npm run smoke`), which files them under that token's family
+instead. `npm test` never leaves the machine.
 
 `npm test` runs the suite once over a 2026-07-28 `server/discover` and once over a 2025-06-18
 `initialize`, plus the era tests. To run it against an installed package rather than `dist/`,

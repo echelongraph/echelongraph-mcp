@@ -1,0 +1,376 @@
+{
+  "distinct_hosts": 23017,
+  "kev_cves_exposed": 58,
+  "correlations": 68191,
+  "ransomware_cves": 24,
+  "ransomware_hosts": 6298,
+  "top_products": [
+    {
+      "product": "tomcat",
+      "hosts": 5713
+    },
+    {
+      "product": "mongodb",
+      "hosts": 3831
+    },
+    {
+      "product": "netscaler_gateway",
+      "hosts": 3522
+    },
+    {
+      "product": "esxi",
+      "hosts": 2978
+    },
+    {
+      "product": "http_server",
+      "hosts": 2351
+    },
+    {
+      "product": "jenkins",
+      "hosts": 1602
+    },
+    {
+      "product": "nginx",
+      "hosts": 1398
+    },
+    {
+      "product": "wordpress",
+      "hosts": 1178
+    },
+    {
+      "product": "fortios",
+      "hosts": 276
+    },
+    {
+      "product": "internet_information_services",
+      "hosts": 131
+    },
+    {
+      "product": "pan-os",
+      "hosts": 46
+    }
+  ],
+  "top_cves": [
+    {
+      "cve_id": "CVE-2025-24813",
+      "hosts": 5713,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.99927
+    },
+    {
+      "cve_id": "CVE-2023-44487",
+      "hosts": 5450,
+      "severity": "HIGH",
+      "cvss_v3_score": 7.5,
+      "epss_score": 0.99999
+    },
+    {
+      "cve_id": "CVE-2016-8735",
+      "hosts": 5399,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.90338
+    },
+    {
+      "cve_id": "CVE-2025-14847",
+      "hosts": 3831,
+      "severity": "HIGH",
+      "cvss_v3_score": 7.5,
+      "epss_score": 0.83218
+    },
+    {
+      "cve_id": "CVE-2026-19490",
+      "hosts": 3486,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.23158
+    },
+    {
+      "cve_id": "CVE-2026-3055",
+      "hosts": 3486,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.87166
+    },
+    {
+      "cve_id": "CVE-2026-8452",
+      "hosts": 3486,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.01606
+    },
+    {
+      "cve_id": "CVE-2025-7775",
+      "hosts": 3340,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.19631
+    },
+    {
+      "cve_id": "CVE-2023-6548",
+      "hosts": 3309,
+      "severity": "MEDIUM",
+      "cvss_v3_score": 5.5,
+      "epss_score": 0.03191
+    },
+    {
+      "cve_id": "CVE-2023-6549",
+      "hosts": 3309,
+      "severity": "HIGH",
+      "cvss_v3_score": 8.2,
+      "epss_score": 0.57633
+    },
+    {
+      "cve_id": "CVE-2025-6543",
+      "hosts": 3301,
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.10562
+    },
+    {
+      "cve_id": "CVE-2025-5777",
+      "hosts": 3298,
+      "severity": "HIGH",
+      "cvss_v3_score": 7.5,
+      "epss_score": 0.99972,
+      "ransomware": true
+    }
+  ],
+  "top_countries": [
+    {
+      "country": "United States",
+      "hosts": 4431
+    },
+    {
+      "country": "China",
+      "hosts": 2895
+    },
+    {
+      "country": "Germany",
+      "hosts": 2796
+    },
+    {
+      "country": "Australia",
+      "hosts": 1524
+    },
+    {
+      "country": "France",
+      "hosts": 1090
+    },
+    {
+      "country": "Korea, Republic of",
+      "hosts": 798
+    },
+    {
+      "country": "Japan",
+      "hosts": 769
+    },
+    {
+      "country": "Brazil",
+      "hosts": 756
+    },
+    {
+      "country": "United Kingdom",
+      "hosts": 582
+    },
+    {
+      "country": "India",
+      "hosts": 579
+    }
+  ],
+  "newest_kev": [
+    {
+      "cve_id": "CVE-2026-102489",
+      "added_date": "2026-10-02",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.01396,
+      "vuln_name": "Zammad GmbH Zammad Session Fixation Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-102490",
+      "added_date": "2026-10-02",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.00629,
+      "vuln_name": "Zammad GmbH Zammad Improper Privilege Management Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-104286",
+      "added_date": "2026-10-01",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.02201,
+      "vuln_name": "Fortinet FortiMail Path Traversal Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-76504",
+      "added_date": "2026-09-30",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.01575,
+      "vuln_name": "Cisco Catalyst SD-WAN Manager Hex Encoding Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-86950",
+      "added_date": "2026-09-29",
+      "severity": "HIGH",
+      "cvss_v3_score": 8.8,
+      "epss_score": 0.01242,
+      "vuln_name": "Apple Multiple Products Out-of-Bounds Write Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-88771",
+      "added_date": "2026-09-27",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.01063,
+      "vuln_name": "Citrix NetScaler Improper Input Validation Vulnerability",
+      "exposed_hosts": 1451
+    },
+    {
+      "cve_id": "CVE-2026-88772",
+      "added_date": "2026-09-27",
+      "severity": "HIGH",
+      "cvss_v3_score": 8.1,
+      "epss_score": 0.01301,
+      "vuln_name": "Citrix NetScaler Improper Restriction of Operations within the Bounds of a Memory Buffer Vulnerability",
+      "exposed_hosts": 1451
+    },
+    {
+      "cve_id": "CVE-2026-65660",
+      "added_date": "2026-09-25",
+      "severity": "HIGH",
+      "cvss_v3_score": 8.8,
+      "epss_score": 0.02101,
+      "vuln_name": "Microsoft SharePoint Code Injection Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-87902",
+      "added_date": "2026-09-25",
+      "severity": "HIGH",
+      "cvss_v3_score": 8.1,
+      "epss_score": 0.45501,
+      "vuln_name": "WordPress Core Remote File Inclusion Vulnerability",
+      "exposed_hosts": 407
+    },
+    {
+      "cve_id": "CVE-2026-67279",
+      "added_date": "2026-09-25",
+      "severity": "MEDIUM",
+      "cvss_v3_score": 6.5,
+      "epss_score": 0.01027,
+      "vuln_name": "Mikrotik RouterOS Improper Enforcement of Behavioral Workflow Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-5430",
+      "added_date": "2026-09-24",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 10,
+      "epss_score": 0.00588,
+      "vuln_name": "WSO2 Multiple Products Path Traversal Vulnerability ",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-71362",
+      "added_date": "2026-09-24",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.1,
+      "epss_score": 0.87507,
+      "vuln_name": "Adobe Commerce and Magento Incorrect Authorization Vulnerability ",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-93952",
+      "added_date": "2026-09-22",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 10,
+      "epss_score": 0.01062,
+      "vuln_name": "Arista VeloCloud Orchestrator Improper Input Validation Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-85102",
+      "added_date": "2026-09-22",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.07546,
+      "vuln_name": "Check Point Multiple Products Improper Certificate Validation Vulnerability",
+      "exposed_hosts": 0
+    },
+    {
+      "cve_id": "CVE-2026-93616",
+      "added_date": "2026-09-22",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 9.8,
+      "epss_score": 0.19654,
+      "vuln_name": "Check Point Multiple Products Path Traversal Vulnerability",
+      "exposed_hosts": 0
+    }
+  ],
+  "trend": [
+    {
+      "week": "2026-07-06",
+      "new_exposures": 1
+    },
+    {
+      "week": "2026-07-13",
+      "new_exposures": 43
+    },
+    {
+      "week": "2026-07-20",
+      "new_exposures": 36
+    },
+    {
+      "week": "2026-07-27",
+      "new_exposures": 417
+    },
+    {
+      "week": "2026-08-03",
+      "new_exposures": 367
+    },
+    {
+      "week": "2026-08-10",
+      "new_exposures": 652
+    },
+    {
+      "week": "2026-08-17",
+      "new_exposures": 4040
+    },
+    {
+      "week": "2026-08-24",
+      "new_exposures": 3064
+    },
+    {
+      "week": "2026-08-31",
+      "new_exposures": 7507
+    },
+    {
+      "week": "2026-09-07",
+      "new_exposures": 6230
+    },
+    {
+      "week": "2026-09-14",
+      "new_exposures": 15929
+    },
+    {
+      "week": "2026-09-21",
+      "new_exposures": 16194
+    },
+    {
+      "week": "2026-09-28",
+      "new_exposures": 13522
+    }
+  ],
+  "generated_at": "2026-10-04T10:18:00.12223972Z",
+  "last_run_at": "2026-10-04T09:39:41Z",
+  "attribution": "The services counted here are derived from Shodan data: Shodan banner matches, re-checked against Shodan InternetDB. Shodan data is owned by Shodan, which holds its copyright (© Shodan). EchelonGraph claims no ownership of it or copyright in it."
+}
