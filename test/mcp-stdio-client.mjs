@@ -143,6 +143,38 @@ export class StdioMcpClient {
     return this.request("tools/call", { name, arguments: args ?? {} });
   }
 
+  // #2722: prompts and resources, each list followed through its pages.
+  async listAll(method, key) {
+    const out = [];
+    let cursor;
+    do {
+      const page = await this.request(method, cursor === undefined ? {} : { cursor });
+      out.push(...(page[key] ?? []));
+      cursor = page.nextCursor;
+    } while (cursor);
+    return { [key]: out };
+  }
+
+  listPrompts() {
+    return this.listAll("prompts/list", "prompts");
+  }
+
+  getPrompt({ name, arguments: args }) {
+    return this.request("prompts/get", args === undefined ? { name } : { name, arguments: args });
+  }
+
+  listResources() {
+    return this.listAll("resources/list", "resources");
+  }
+
+  listResourceTemplates() {
+    return this.listAll("resources/templates/list", "resourceTemplates");
+  }
+
+  readResource({ uri }) {
+    return this.request("resources/read", { uri });
+  }
+
   // Closing stdin is the stdio binding's shutdown signal; a server that does not exit on it
   // within the grace period is killed, so a test run never hangs on one.
   async close(graceMs = 5_000) {

@@ -54,6 +54,8 @@ import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerGetCwe } from "./tools/get_cwe.js";
 import { isHttpEntrypoint, upstreamHeaders } from "./runtime.js";
 import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
+import { registerPrompts } from "./prompts.js";
+import { registerResources } from "./resources.js";
 
 // The package actually running, read from the package.json that ships beside dist/. The MCP
 // handshake (serverInfo) and the User-Agent both carry its name and version, so the API's
@@ -2189,7 +2191,7 @@ const TOOL_KIT = { api, succeeded, failed, badInput, crashed, checked, okHead, e
 // per request by the hosted HTTP entrypoint (http.ts, #2316): one tool module for both.
 // tools/list answers in registration order, which is the order below.
 export function createServer(): McpServer {
-  const server = new McpServer({ name: NAME, version: VERSION }, { instructions: INSTRUCTIONS, capabilities: { tools: { listChanged: false } } });
+  const server = new McpServer({ name: NAME, version: VERSION }, { instructions: INSTRUCTIONS, capabilities: { tools: { listChanged: false }, prompts: { listChanged: false }, resources: { listChanged: false } } });
 
   server.registerTool(
     "cve_summary",
@@ -2268,6 +2270,11 @@ export function createServer(): McpServer {
 
   // #2719: vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
   registerVendorAdvisoryTools(server, { api, failed, badInput, crashed, succeeded, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
+
+  // #2722: prompts and resources, in prompts.ts and resources.ts. Both lists are fixed per
+  // connection, so listChanged is false above.
+  registerPrompts(server, { cveId: CVE_ID });
+  registerResources(server, { api, cveId: CVE_ID, shownBase: SHOWN_BASE, getCve: async (id) => checked("get_cve", GET_CVE_OUTPUT, await getCVE(id)) });
 
   return server;
 }

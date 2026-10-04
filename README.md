@@ -1,6 +1,6 @@
 # EchelonGraph MCP server
 
-**CVE and internet-exposure data** for Claude, Cursor, Cline, and any
+**CVE and internet-exposure data** for Claude, Cursor, VS Code, Cline, and any
 [MCP](https://modelcontextprotocol.io) client, straight from
 [EchelonGraph](https://echelongraph.io)'s free public feed.
 
@@ -10,27 +10,164 @@ internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar ha
 running a version that maps to the CVE. Exposure counts are derived from Shodan data.
 Shodan data is owned by Shodan, which holds its copyright (© Shodan).
 
+Its 14 tools look up one CVE (record, exploit code and fixed versions, EPSS history, vendor
+advisories, exposure footprint), list CISA's newest KEV additions, check whether a product or
+package version is affected, check an SBOM, and read a CWE and its CVEs. Every result says how
+it was measured (`state`, `measured_at`, `method`, `coverage`, `freshness`, `notes`), so a model
+cannot mistake an outage or an unassessed lookup for an all-clear.
+
+It also serves four prompts, ready-made workflows a client can show as slash commands
+(`triage_cve`, `kev_weekly_brief`, `am_i_affected`, `sbom_review`; see "Prompts"), and three
+resources (`echelongraph://methodology`, `echelongraph://sources` and `cve://{cve_id}`; see
+"Resources").
+
 Free and keyless: no API key, no auth, read-only. The server makes no request other than the
 API call a tool needs to answer.
 
+- npm: [`echelongraph-mcp`](https://www.npmjs.com/package/echelongraph-mcp) · Official MCP
+  Registry: `io.echelongraph/echelongraph-mcp` · Docs: <https://echelongraph.io/pulse/mcp>
+- Source: <https://github.com/echelongraph/echelongraph-mcp> · Changes:
+  [CHANGELOG.md](CHANGELOG.md) · Security: [SECURITY.md](SECURITY.md)
+
+## Quick start
+
+The local server runs through `npx` and needs Node.js 20 or later; nothing is installed
+globally. Add one of the blocks below to your client, restart it, then ask: *"Is
+CVE-2023-44487 actively exploited, and how many exposed services does EchelonGraph's radar
+have on record for it?"*
+
+### Claude Desktop
+
+Settings → Developer → Edit Config opens `claude_desktop_config.json`
+(macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`; Windows:
+`%APPDATA%\Claude\claude_desktop_config.json`). Add:
+
+```json
+{
+  "mcpServers": {
+    "echelongraph": {
+      "command": "npx",
+      "args": ["-y", "echelongraph-mcp"]
+    }
+  }
+}
+```
+
+### Claude Code
+
+```bash
+claude mcp add --transport stdio echelongraph -- npx -y echelongraph-mcp
+```
+
+Add `--scope user` before the `--` to make it available in every project, or `--scope project`
+to share it through the project's `.mcp.json`.
+
+### Cursor
+
+`~/.cursor/mcp.json` (every project) or `.cursor/mcp.json` (one project):
+
+```json
+{
+  "mcpServers": {
+    "echelongraph": {
+      "command": "npx",
+      "args": ["-y", "echelongraph-mcp"]
+    }
+  }
+}
+```
+
+### VS Code
+
+`.vscode/mcp.json` in the workspace (VS Code's key is `servers`, not `mcpServers`):
+
+```json
+{
+  "servers": {
+    "echelongraph": {
+      "command": "npx",
+      "args": ["-y", "echelongraph-mcp"]
+    }
+  }
+}
+```
+
+or from a terminal:
+
+```bash
+code --add-mcp '{"name":"echelongraph","command":"npx","args":["-y","echelongraph-mcp"]}'
+```
+
+### Windsurf, Cline and other clients
+
+Clients that read an `mcpServers` block (Windsurf's `mcp_config.json`, Cline's MCP settings,
+and most others) take the same block as Cursor above.
+
+### Remote (no install)
+
+The same 14 tools, four prompts and three resources are served over Streamable HTTP at:
+
+```text
+https://mcp.echelongraph.io/mcp
+```
+
+Keyless, no sign-in, stateless; both protocol eras. The hosted endpoint is being rolled out:
+until `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`, use the `npx` setup
+above.
+
+- **claude.ai** (Free, Pro, Max, Team and Enterprise plans):
+  Customize → Connectors → **+ Add** → **Add custom connector**. Name it `EchelonGraph`, paste
+  the URL, choose **No sign in**, and add it. On Team and Enterprise an Owner adds it for the
+  organization first, and each member then connects it. Free plans allow one custom connector.
+- **Claude Code**:
+
+  ```bash
+  claude mcp add --transport http echelongraph https://mcp.echelongraph.io/mcp
+  ```
+
+- **Cursor** (`mcp.json`):
+
+  ```json
+  { "mcpServers": { "echelongraph": { "url": "https://mcp.echelongraph.io/mcp" } } }
+  ```
+
+- **VS Code** (`.vscode/mcp.json`):
+
+  ```json
+  { "servers": { "echelongraph": { "type": "http", "url": "https://mcp.echelongraph.io/mcp" } } }
+  ```
+
+- **Windsurf** (`mcp_config.json`):
+
+  ```json
+  { "mcpServers": { "echelongraph": { "serverUrl": "https://mcp.echelongraph.io/mcp" } } }
+  ```
+
+The hosted endpoint runs this package's code (`dist/http.js`, below) against the same public
+API, so its answers are the npm package's answers. What it sees and logs is under "Privacy",
+and its per-client limit under "Rate limits".
+
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `cve_summary` | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), the same CVEs counted by NVD's severity label, as provenance (`summary.nvd_critical` to `summary.nvd_none`), the rejected (withdrawn) records outside the total (`summary.rejected`), and when the feed was last updated. |
-| `search_cves` | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; the note names each row not yet scored. |
-| `get_cve` | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. |
-| `cve_exposure` | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. |
-| `exposure_radar` | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. |
-| `kev_recent` | The CVEs CISA has added to its Known Exploited Vulnerabilities catalog, newest first (`kev_added_date`), from EchelonGraph's copy of the catalog, polled from CISA every 5 minutes: due date, vendor, product, known ransomware use, EchelonGraph's severity, CVSS, EPSS and `eg_kev_tier`, and `our_first_seen_kev`. Filter by date range, ransomware and vendor; page with `limit` and `next_cursor`. Dated by `last_successful_fetch_at`, our last successful fetch of CISA's feed; the filters travel as request headers, never in the URL. |
-| `epss_history` | How one CVE's EPSS score has changed, as EchelonGraph recorded it: one point per recorded change (`series_kind` `change_only`), never a daily series, with the value now and `series_starts_at`, when recording began; before it a missing point means not recorded, not unchanged. |
-| `check_affected` | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed`, and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. |
-| `check_sbom` | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 200 purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it on your machine and only they are sent, in a POST body; the document is not. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. |
-| `cve_intel` | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. |
-| `get_cwe` | One CWE (weakness class) and the CVEs classified under it: `name` and `description` from the MITRE CWE catalog EchelonGraph embeds, `total`, and one page of 50 `cves`, ordered as `order` states (CISA-KEV-listed first, then EchelonGraph score). A `total` of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. |
-| `vendor_advisories_for_cve` | The vendor-published advisories (Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks, GitHub GHSA and the other feeds EchelonGraph polls) that name one CVE, newest first, at most 20. |
-| `get_vendor_advisory` | One vendor advisory in full: description, severity, `cve_ids` and the subset with a CVE record here (`known_cve_ids`), `affected_products`, `remediation` and `references`. |
-| `search_vendor_advisories` | Search vendor advisories by text (title, description, vendor, advisory ID, products, CVE IDs), vendor, severity and whether they name a CVE. The search text is sent in a request header, never in the URL. |
+Every tool is read-only (`readOnlyHint: true`) and declares a title and an `outputSchema`.
+The example questions are ones a client can answer with that tool alone.
+
+| Tool | Title | What it answers | Example question |
+|---|---|---|---|
+| `cve_summary` | CVE feed summary | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), the same CVEs counted by NVD's severity label, as provenance (`summary.nvd_critical` to `summary.nvd_none`), the rejected (withdrawn) records outside the total (`summary.rejected`), and when the feed was last updated. | *How many critical CVEs does the feed hold, and when was it last updated?* |
+| `search_cves` | Search CVEs | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; the note names each row not yet scored. | *Find critical CVEs that mention Tomcat with a CVSS of 9 or more.* |
+| `get_cve` | CVE detail | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. | *What are CVE-2024-3094's CVSS, EPSS and CISA-KEV status?* |
+| `cve_exposure` | Internet exposure for one CVE | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. | *How many exposed services does EchelonGraph's radar have on record for CVE-2023-44487?* |
+| `exposure_radar` | Exposure radar totals | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. | *How many unauthenticated data stores has EchelonGraph's radar confirmed?* |
+| `kev_recent` | Recent CISA KEV additions | The CVEs CISA has added to its Known Exploited Vulnerabilities catalog, newest first (`kev_added_date`), from EchelonGraph's copy of the catalog, polled from CISA every 5 minutes: due date, vendor, product, known ransomware use, EchelonGraph's severity, CVSS, EPSS and `eg_kev_tier`, and `our_first_seen_kev`. Filter by date range, ransomware and vendor; page with `limit` and `next_cursor`. Dated by `last_successful_fetch_at`, our last successful fetch of CISA's feed; the filters travel as request headers, never in the URL. | *Which CVEs has CISA added to KEV since 1 September, and which have known ransomware use?* |
+| `epss_history` | EPSS change history for one CVE | How one CVE's EPSS score has changed, as EchelonGraph recorded it: one point per recorded change (`series_kind` `change_only`), never a daily series, with the value now and `series_starts_at`, when recording began; before it a missing point means not recorded, not unchanged. | *How has CVE-2023-44487's EPSS score changed, as EchelonGraph recorded it?* |
+| `check_affected` | Am I affected? (product or package at a version) | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed`, and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. | *Is openssl 3.0.0 affected by known CVEs? Is lodash 4.17.15 on npm?* |
+| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 200 purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it on your machine and only they are sent, in a POST body; the document is not. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
+| `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
+| `get_cwe` | CWE and its CVEs | One CWE (weakness class) and the CVEs classified under it: `name` and `description` from the MITRE CWE catalog EchelonGraph embeds, `total`, and one page of 50 `cves`, ordered as `order` states (CISA-KEV-listed first, then EchelonGraph score). A `total` of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. | *Which CVEs are classified under CWE-79, CISA-KEV-listed first?* |
+| `vendor_advisories_for_cve` | Vendor advisories for one CVE | The vendor-published advisories (Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks, GitHub GHSA and the other feeds EchelonGraph polls) that name one CVE, newest first, at most 20. | *Which vendor advisories name CVE-2024-3400?* |
+| `get_vendor_advisory` | Vendor advisory detail | One vendor advisory in full: description, severity, `cve_ids` and the subset with a CVE record here (`known_cve_ids`), `affected_products`, `remediation` and `references`. | *Show one of those advisories in full: affected products, remediation and references.* |
+| `search_vendor_advisories` | Search vendor advisories | Search vendor advisories by text (title, description, vendor, advisory ID, products, CVE IDs), vendor, severity and whether they name a CVE. The search text is sent in a request header, never in the URL. | *Search vendor advisories for FortiOS, critical severity only.* |
 
 The three vendor-advisory tools relay `vendor_published_at` (the vendor's date), `our_first_seen_at`
 (when EchelonGraph first recorded the advisory) and `withdrawn` (the vendor rescinded it; the note
@@ -321,6 +458,28 @@ keeps `kev_listed`, `ransomware`, `epss_score`, `effective_score`, `effective_se
 trace spans that record URLs do not hold what was looked up. The endpoint reads a CPE vendor
 from the URL only, so this tool takes none.
 
+## Prompts
+
+Ready-made workflows a client can show as slash commands. Each prompt names the tools to call, in
+order, and tells the model to read every result's `state`, `measured_at`, `method`, `coverage`
+and `notes`: `not_assessed` is never reported as clean, a count of 0 under `assessed: false` is
+never "not affected", and each figure cites its `measured_at`. A prompt makes no API request.
+
+| Prompt | Arguments | What it asks the model to do |
+|---|---|---|
+| `triage_cve` | `cve_id` | `get_cve`, `cve_intel`, `vendor_advisories_for_cve`, `epss_history` and `cve_exposure` (and `kev_recent` for the due date when the CVE is KEV-listed), then a decision template: exploited, likelihood, reachable, patch, deadline, decision. |
+| `kev_weekly_brief` | `days` (1 to 365, default 7) | Work out the start date from `days`, page through `kev_recent` from it, and write a brief grouped by vendor with ransomware flags and due dates. |
+| `am_i_affected` | `product`, or `ecosystem` and `package`; `version` | `check_affected`, read `assessed` before `count`, with the not-assessed wording. |
+| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom`, look up each affected CVE with `get_cve`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. |
+
+## Resources
+
+| Resource | What it holds |
+|---|---|
+| `echelongraph://methodology` | What each envelope field and `state` value means, and how each tool measures (Markdown). |
+| `echelongraph://sources` | What the API reports about its feeds when the resource is read: the NVD poller's interval and last poll (of the instance that answered, from `/api/v1/public/cves/summary`) and the CISA KEV catalog's last successful fetch and method (from `/api/v1/public/kev/recent`). It names the feeds no endpoint reports a schedule for, and states none for them (JSON). |
+| `cve://{cve_id}` | One CVE as `get_cve` returns it: the structured result, envelope and record, as JSON. An ID that is not a CVE ID is refused before any request; a CVE the API has no record of is not found. |
+
 ## What a result means
 
 Every tool answers in one of two shapes, so a model reading the result cannot mistake an
@@ -436,7 +595,7 @@ field the API adds later is still relayed by every tool that relays the API's JS
 The server answers both eras of the Model Context Protocol on stdio:
 
 - **2026-07-28**: a client that opens with `server/discover` receives a DiscoverResult listing
-  `2026-07-28`, the tools capability and the server instructions, and then sends each request
+  `2026-07-28`, the tools, prompts and resources capabilities and the server instructions, and then sends each request
   with the per-request `_meta` envelope.
 - **2025 and earlier**: a client that opens with `initialize`, as every 1.x SDK client does,
   negotiates `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`; a version the server does
@@ -452,51 +611,86 @@ Both handshakes also carry the server instructions: the data is public; what `st
 numbers are aggregate counts of ip:port services, not an internet-wide census; and that Shodan
 data is Shodan's.
 
-## Install
+## Privacy: what is sent where
 
-Requires Node.js 20 or later. Add it to your MCP client's config. It runs via `npx` — no global
-install needed.
+**The npm package (stdio).** The server runs on your machine and sends HTTPS requests to one
+host, `ECHELONGRAPH_API_BASE` (default `https://app.echelongraph.io`), one per API call a tool
+makes (`exposure_radar` makes five; every other tool makes one). No telemetry: it sends nothing
+else, to EchelonGraph or anyone. Every request carries the User-Agent
+`echelongraph-mcp/<version> (+https://echelongraph.io/pulse/mcp)`, with the
+`ECHELONGRAPH_MCP_UA` token ahead of it when you set one, so the API's access log can count use
+per version. Like any HTTPS request, it also reaches the API from your network address.
 
-### Claude Desktop
+Where each tool's input travels:
 
-`claude_desktop_config.json` → `mcpServers`:
+| Input | Where it is sent |
+|---|---|
+| A CVE ID (`get_cve`, `cve_exposure`, `epss_history`, `cve_intel`, `vendor_advisories_for_cve`), a CWE ID and page (`get_cwe`), a vendor and advisory ID (`get_vendor_advisory`) | The URL path. |
+| `search_cves`: the search text, severity, minimum CVSS, sort and limit | The URL query string. |
+| `search_vendor_advisories`: `query` | The `X-EG-Advisory-Search` request header, never the URL. Its vendor, severity, CVE filter, limit and offset go in the query string. |
+| `check_affected`: `product`, `version`, `ecosystem`, `package` | The `X-EG-Product`, `X-EG-Version`, `X-EG-Ecosystem` and `X-EG-Package` request headers, never the URL. |
+| `kev_recent`: `since`, `until`, `ransomware`, `vendor`, `limit`, `cursor` | The `X-EG-Since`, `X-EG-Until`, `X-EG-Ransomware`, `X-EG-Vendor`, `X-EG-Limit` and `X-EG-Cursor` request headers, never the URL. |
+| `check_sbom`: `purls`, or an `sbom` document | The purls, in a POST body. A CycloneDX or SPDX document is read on your machine and only the purls in it are sent; the document is not. |
+| `cve_summary`, `exposure_radar` | No input. |
 
-```json
-{
-  "mcpServers": {
-    "echelongraph": {
-      "command": "npx",
-      "args": ["-y", "echelongraph-mcp"]
-    }
-  }
-}
-```
+The API marks its answers to header-carried lookups `no-store`, so no shared cache keeps them,
+and request logs and trace spans that record URLs do not hold what was looked up there.
 
-### Cursor / Cline / Windsurf
+**The hosted endpoint.** A request to `https://mcp.echelongraph.io/mcp` reaches EchelonGraph's
+server first, which then calls the same API as above. Per request it logs the HTTP method and
+path, the status, the duration, the body size, the JSON-RPC method and (for `tools/call`) the
+tool name, the protocol version, whether an `Origin` header was sent, and the family of your
+client's User-Agent. It never logs tool arguments or a query string. When a client passes the
+per-client limit it logs that client's address key. It passes your client's public address to
+the API, in a header the API trusts only with a token it checks, so the API's rate limit counts
+you and not the hosted service.
 
-`~/.cursor/mcp.json` (or the client's MCP settings):
+EchelonGraph's privacy policy: <https://echelongraph.io/privacy>.
 
-```json
-{
-  "mcpServers": {
-    "echelongraph": {
-      "command": "npx",
-      "args": ["-y", "echelongraph-mcp"]
-    }
-  }
-}
-```
+## Rate limits
 
-Restart the client, then ask: *"Is CVE-2023-44487 actively exploited, and how many exposed
-services does EchelonGraph's radar have on record for it?"*
+No API key, so the API limits each caller, one IPv4 address or one IPv6 /64 network as its
+platform records it. Its WAF counts all your requests together in a 60-second window and
+refuses one once the count passes the ceiling for its path:
+
+| Path | Ceiling per minute | Tools |
+|---|---|---|
+| `/api/v1/public/cves` and every path under it | 12,000 | `cve_summary`, `search_cves`, `get_cve`, `epss_history`, `cve_intel`, `check_affected`, `check_sbom` |
+| `/api/v1/public/cwes`, `/api/v1/public/vendor-advisories`, `/api/v1/public/kev/recent`, `/api/v1/public/shadow-ai-radar` | 6,000 | `get_cwe`, the three vendor-advisory tools, `kev_recent`, and one of `exposure_radar`'s five calls |
+| any other `/api/v1/public` path | 600 | `cve_exposure`, and the rest of `exposure_radar`'s calls |
+
+Because the count is shared, heavy use of one path also uses up the lower ceilings. On top of
+that, 500 requests per second per caller is a burst cap on each serving instance, and
+`check_sbom`'s batch route is charged per component: 1,200 components a minute per caller.
+Over a limit the API answers 429 with `Retry-After`, and the tool returns a failure
+(`state` `failed`, `error.status` 429), never empty data. The API's own documentation of these
+limits: <https://echelongraph.io/pulse/api>.
+
+The hosted endpoint adds its own limit before the API's: 120 MCP requests a minute per client
+address, counted by each server instance, answered over it with HTTP 429, `Retry-After` and a
+JSON-RPC error (code `-32029`) that names the limit and the seconds to wait. A request body over
+64 KiB is refused.
 
 ## Configuration
 
+The npm package (stdio):
+
 | Env var | Default | Purpose |
 |---|---|---|
-| `ECHELONGRAPH_API_BASE` | `https://app.echelongraph.io` | Override the API base (self-host / proxy). |
+| `ECHELONGRAPH_API_BASE` | `https://app.echelongraph.io` | Override the API base (self-host / proxy). A credential in the URL is masked wherever a result quotes the base. |
 | `ECHELONGRAPH_API_TIMEOUT_MS` | `15000` | Per-request timeout. A slower answer is reported as a failed lookup, not as empty data. |
 | `ECHELONGRAPH_MCP_UA` | unset | One product token (for example `my-monitor/1.0`) put ahead of this package's own User-Agent, so automated callers such as monitors are told apart from people using the server. A value that is not a single token is ignored. |
+
+The HTTP entrypoint, `dist/http.js` (`npm run start:http`), serves the same tools over
+Streamable HTTP on `POST /mcp`, with a liveness check on `GET /health`. It reads the three
+variables above and:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `PORT` | `8080` | The port it listens on. |
+| `MCP_RATE_LIMIT_PER_MIN` | `120` | MCP requests a minute per client address, per instance. |
+| `MCP_MAX_BODY_BYTES` | `65536` | The largest request body it reads. |
+| `ECHELONGRAPH_FORWARD_TOKEN`, `ECHELONGRAPH_FORWARD_HOST`, `MCP_REQUIRE_FORWARD_TOKEN` | unset | EchelonGraph's hosted deployment only: the token with which it names each client to the API. Leave them unset when you run it yourself; the API then counts every request as coming from your server. |
 
 ## Develop
 
@@ -514,6 +708,19 @@ counted as external MCP adoption. `npm test` never leaves the machine.
 `initialize`, plus the era tests. To run it against an installed package rather than `dist/`,
 set `ECHELONGRAPH_MCP_BIN` to that package's `echelongraph-mcp` bin: the tests then run the bin
 directly, as `npx` does, and read that package's own files.
+
+## Versioning
+
+Semantic versioning: a major version changes protocol behaviour or drops a Node.js version, a
+minor version adds tools or fields, a patch fixes wording or behaviour without changing a tool's
+shape. Every release is published to npm with a provenance attestation by the public repo's
+release workflow, from the commit tagged `v<version>`. Changes per version:
+[CHANGELOG.md](CHANGELOG.md).
+
+## Security
+
+Report a vulnerability privately to **support@echelongraph.io**, not in a public issue. The
+policy, the supported versions and the scope are in [SECURITY.md](SECURITY.md).
 
 ## License
 

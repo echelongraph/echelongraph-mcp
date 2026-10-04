@@ -363,6 +363,7 @@ const CALLS = {
 const TOOLS = Object.keys(CALLS);
 // What tools/list answers, in createServer()'s registration order. Tools registered from
 // src/tools/ that are not in CALLS have their own suites (kev_recent: kev_recent.test.mjs, #2717).
+const PROMPT_NAMES = ["triage_cve", "kev_weekly_brief", "am_i_affected", "sbom_review"];
 const LISTED = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "cve_intel", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
 
 // #2535: score_assessed. A CVE EchelonGraph has not scored carries score_assessed false, and
@@ -2725,7 +2726,8 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.doesNotMatch(tools.find((t) => t.name === "get_cve").description, /\bCWE\b/, "get_cve returns no CWE");
     });
     it("#1880: every field the README names is a field, or a value, of some tool's outputSchema", () => {
-      const names = new Set([...LISTED, ...tools.flatMap((t) => [...schemaNames(t.outputSchema)])]);
+      // #2722: the README's Prompts table names the prompts, which prompts-resources.test.mjs holds.
+      const names = new Set([...LISTED, ...PROMPT_NAMES, ...tools.flatMap((t) => [...schemaNames(t.outputSchema)])]);
       const readme = readPkgFile("README.md").replace(/\b[\w.-]+\.json\b/g, "");
       const unknown = [...new Set(readme.match(FIELD_TOKEN) ?? [])].filter((x) => !names.has(x));
       assert.deepEqual(unknown, [], "the README names fields no outputSchema holds");

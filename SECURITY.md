@@ -30,6 +30,7 @@ is never changed in place. Upgrade to the latest version to receive a fix.
 
 ## Scope
 
-This repository holds the MCP server only: the stdio client that calls EchelonGraph's public
-API. A vulnerability in the EchelonGraph API or website (`echelongraph.io`,
+This repository holds the MCP server only: the stdio server that calls EchelonGraph's public
+API, and its HTTP entrypoint, which EchelonGraph runs as the hosted endpoint
+`https://mcp.echelongraph.io/mcp`. A vulnerability in the EchelonGraph API or website (`echelongraph.io`,
 `app.echelongraph.io`) is also welcome at the same address.

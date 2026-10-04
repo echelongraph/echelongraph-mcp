@@ -31,8 +31,9 @@ directory. Directory requirements change; re-read the source before you submit.
 | `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh` | public repo, `listings/mcpb/` | the `.mcpb` bundle for Smithery |
 | `docker/server.yaml` | copied into a `docker/mcp-registry` fork as `servers/echelongraph/server.yaml` | Docker MCP Catalog entry |
 
-None of these is in the npm package: `package.json` `files` is `dist`, `README.md` and
-`server.json`, and `test/listings.test.mjs` checks `npm pack --dry-run` for that.
+None of these is in the npm package: `package.json` `files` is `dist`, `README.md`,
+`CHANGELOG.md` and `server.json`, and `test/listings.test.mjs` checks `npm pack --dry-run` for
+that.
 
 **Releasing these files.** `mcp-server/` is published as the public repo's tree, so these files
 change that tree. Commit them with a version bump: `scripts/npm-publish-mcp.sh --check-public`
@@ -52,7 +53,7 @@ EchelonGraph CVE & Exposure
 One-line description (up to 200 characters):
 
 ```text
-CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.
+CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
 ```
 
 Long description (up to 2,000 characters):
@@ -62,9 +63,9 @@ CVE and internet-exposure data for Claude, Cursor, Cline, and any MCP client, fr
 
 Free and keyless: no API key, no auth, read-only. The server makes no request other than the API call a tool needs to answer. Every result carries a structured envelope (state, measured_at, method, coverage, freshness, notes), and a CVE outside the exposure radar's tracked set is reported as not assessed, not as zero.
 
-Tools: cve_summary (CVE feed summary), search_cves (Search CVEs), get_cve (CVE detail), cve_exposure (Internet exposure for one CVE), exposure_radar (Exposure radar totals).
+14 read-only tools: cve_summary (CVE feed summary), search_cves (Search CVEs), get_cve (CVE detail), cve_exposure (Internet exposure for one CVE), exposure_radar (Exposure radar totals), kev_recent (Recent CISA KEV additions), epss_history (EPSS change history for one CVE), check_affected (Am I affected? (product or package at a version)), check_sbom (Check an SBOM against the advisory corpus), cve_intel (CVE weakness, exploits and packages), get_cwe (CWE and its CVEs), vendor_advisories_for_cve (Vendor advisories for one CVE), get_vendor_advisory (Vendor advisory detail), search_vendor_advisories (Search vendor advisories).
 
-Install: npx -y echelongraph-mcp (Node.js 20 or later).
+Install: npx -y echelongraph-mcp (Node.js 20 or later), or connect a Streamable HTTP client to https://mcp.echelongraph.io/mcp with no install.
 ```
 
 Install configuration (for forms that ask for "connection information"):
@@ -78,6 +79,14 @@ Install configuration (for forms that ask for "connection information"):
     }
   }
 }
+```
+
+Remote server URL (for forms that take a remote MCP server; Streamable HTTP, no auth). It
+serves once `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`; submit it only
+after that:
+
+```text
+https://mcp.echelongraph.io/mcp
 ```
 
 Links:
@@ -115,7 +124,7 @@ its HTTPS URL. So this directory has `mcpb/manifest.json` in place of a `smither
 5. **Founder, signed in:** on the server's page, paste the one-line and long descriptions above
    where the page offers them, then open **Settings → Verification** and complete the checklist.
 6. Every release: rebuild the bundle and repeat step 4. Smithery does not read npm.
-7. Remote (after #2316): `smithery mcp publish https://<remote>/mcp -n echelongraph/echelongraph-mcp`
+7. Remote (once `https://mcp.echelongraph.io/health` answers): `smithery mcp publish https://mcp.echelongraph.io/mcp -n echelongraph/echelongraph-mcp`
    or smithery.ai/new. Smithery scans with User-Agent `SmitheryBot/1.0 (+https://smithery.ai)` from
    Cloudflare Workers; the edge in front of the remote must let that through.
 
@@ -160,9 +169,11 @@ npm: https://www.npmjs.com/package/echelongraph-mcp (MIT)
 Official MCP Registry: io.echelongraph/echelongraph-mcp
 Website: https://echelongraph.io/pulse/mcp
 
-Description: CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.
+Description: CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
 
-Tools: cve_summary, search_cves, get_cve, cve_exposure, exposure_radar. All read-only.
+Tools (14, all read-only): cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, cve_intel, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
+
+Remote (Streamable HTTP, no install): https://mcp.echelongraph.io/mcp
 
 Install (stdio, Node.js 20 or later):
 {
@@ -239,7 +250,7 @@ PR body:
 ```text
 Adds echelongraph: EchelonGraph CVE & Exposure.
 
-CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.
+CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
 
 - Source: https://github.com/echelongraph/echelongraph-mcp (MIT), pinned commit in server.yaml
 - Dockerfile at the repo root; the image runs the stdio server as uid 1000
@@ -258,7 +269,8 @@ https://docs.docker.com/ai/mcp-catalog-and-toolkit/catalog/ .
 
 ## Anthropic connector directory
 
-**Status:** not listed. Blocked by #2316.
+**Status:** not listed. Waits for the hosted endpoint, `https://mcp.echelongraph.io/mcp` (#2316), to
+answer.
 
 **Why blocked.** The directory takes remote MCP servers over HTTPS, submitted in the developer
 portal. It "no longer accepts local servers packaged as MCP Bundles (MCPB)"; a local server can be
@@ -272,12 +284,12 @@ documentation URL, a privacy policy URL, a support contact and an icon; a paid C
 (Pro, Max, Team or Enterprise; on Team and Enterprise, an Owner submits); seven policy
 acknowledgments; and the Software Directory Terms and Policy.
 
-**Steps (after #2316 ships)**
+**Steps (once `https://mcp.echelongraph.io/health` answers)**
 
 1. **Founder, signed in to claude.ai:** add the remote URL as a custom connector and call every
    tool from a conversation (the portal asks you to confirm this).
 2. **Founder, signed in:** https://claude.ai/directory/manage → **Submit new** → **MCP connector**.
-3. Connection: the remote's `https://` URL. Tools sync from the server.
+3. Connection: `https://mcp.echelongraph.io/mcp`. Tools sync from the server.
 4. Listing: name, one-line description and long description from "Paste text" above; categories
    Security (and Open Data if offered); the links table above. The URL slug is permanent:
    `echelongraph`.
@@ -294,13 +306,13 @@ acknowledgments; and the Software Directory Terms and Policy.
 Use cases:
 
 ```text
-Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Search and filter CVEs. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
+Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Read its weakness (CWE), public exploit code, affected packages, fixed versions, EPSS history and the vendor advisories that name it. List the CVEs CISA has added to its KEV catalog, newest first. Check whether a product or package at a version is affected by known CVEs, or check an SBOM's components against the advisory corpus. Search and filter CVEs and vendor advisories. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
 ```
 
 Test & launch:
 
 ```text
-No account is needed: the server is keyless and read-only. Connect the URL and call each tool, for example get_cve and cve_exposure with CVE-2023-44487, cve_summary and exposure_radar with no arguments, and search_cves with search "tomcat".
+No account is needed: the server is keyless and read-only. Connect the URL and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, and check_sbom with purls ["pkg:npm/lodash@4.17.15"].
 ```
 
 **Check after:** the listing page at claude.ai/directory shows the text above.
@@ -325,7 +337,11 @@ verified zeros from unassessed or failed lookups", which is Glama's wording, not
 
 **How claiming works.** `glama.json` at the repo root, with `$schema`
 `https://glama.ai/mcp/schemas/server.json`, lists the GitHub usernames allowed to maintain the
-listing (that schema defines `maintainers` and nothing else). `../glama.json` names
+listing (that schema defines `maintainers` and nothing else; re-read 2026-10-04, unchanged).
+For the hosted endpoint Glama also offers a domain claim: `https://glama.ai/mcp/schemas/connector.json`
+describes a `/.well-known/glama.json` served from a domain you control (`claim`, a token from
+Glama's claim panel, or `maintainers`). Not prepared here: it needs that token, and a file
+served on `mcp.echelongraph.io`. `../glama.json` names
 `AkshayDubey29`; change it before the release if someone else should hold the listing.
 
 **Steps**
@@ -340,6 +356,24 @@ listing (that schema defines `maintainers` and nothing else). `../glama.json` na
 
 Sources (fetched 2026-10-03): the listing page above, https://glama.ai/mcp/schemas/server.json ,
 https://glama.ai/mcp/faq .
+
+## Public repo settings
+
+`github-repo-settings.json` holds the description, homepage and topics for
+github.com/echelongraph/echelongraph-mcp, which directories (Glama among them) read from the
+repo. To apply them, someone with admin on the repo runs:
+
+```bash
+gh api -X PATCH repos/echelongraph/echelongraph-mcp \
+  -f description="$(jq -r .description listings/github-repo-settings.json)" \
+  -f homepage="$(jq -r .homepage listings/github-repo-settings.json)"
+jq '{names: .topics}' listings/github-repo-settings.json \
+  | gh api -X PUT repos/echelongraph/echelongraph-mcp/topics --input -
+```
+
+Check after: `gh api repos/echelongraph/echelongraph-mcp --jq '.description, .homepage, .topics'`
+prints the same values. The description follows the rules above (no "live", no "only"), and
+`test/listings.test.mjs` checks it.
 
 ## Version lag
 

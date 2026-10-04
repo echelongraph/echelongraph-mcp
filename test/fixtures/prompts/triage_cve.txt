@@ -1,0 +1,15 @@
+Triage CVE-2024-3400 using the EchelonGraph MCP tools. Call them in this order, each with cve_id CVE-2024-3400:
+1. get_cve: the record. Read score_assessed before echelongraph_score (false: not yet scored, which is not a score of 0); read severity, cvss_v3_score, epss_score and epss_percentile, and the CISA-KEV fields kev_listed, kev_added_date and kev_ransomware.
+2. cve_intel: weaknesses (cwes), public exploit code (exploits and exploits_total; verified_status is the label stored with each reference, not a guarantee that it works, and an empty list is not evidence that no exploit exists), affected_packages and fixed_versions.
+3. vendor_advisories_for_cve: the vendor advisories that name it. Call get_vendor_advisory for one whose remediation you need in full.
+4. epss_history: how its EPSS score changed, one point per recorded change (series_kind change_only): before series_starts_at a missing point means not recorded, not unchanged.
+5. cve_exposure: internet exposure on record. exposure_state says what the count is; exposed_hosts counts distinct ip:port services, not machines; the result is not_assessed with measured_at null, so present any count as undated and on record, and exposure_state not_assessed as not assessed.
+6. If get_cve says kev_listed is true: kev_recent with since and until both set to its kev_added_date, to read kev_due_date from the row for CVE-2024-3400.
+Before you use any figure, read that result's evidence envelope: its structuredContent (where your client shows text blocks alone, the last text block) carries state, measured_at, method, coverage, freshness and notes. state is measured, not_assessed, failed or invalid_input. Report not_assessed as not assessed: never as clean, safe, unaffected or none found. A count of 0 in a result whose coverage says assessed: false is not a finding of "not affected": say the lookup did not evaluate it, and give its not_assessed_reason. failed and invalid_input mean nothing was looked up: say the lookup did not complete, never zero, none found or unexposed. Cite the measured_at date behind each figure you report, and say so where measured_at is null. Quote the notes that qualify a figure, and keep each field's meaning as the result's notes give it. Do not add facts the results do not carry: where a result says nothing about a point, write that it does not say.
+Then answer with this template, one line each, naming the tool and the measured_at behind every line:
+- Exploited? CISA-KEV listing and its date, known ransomware use, and public exploit code on record.
+- Likelihood: EPSS score and percentile, and how it has moved.
+- Reachable? exposure_state and the count on record, or not assessed.
+- Patch: fixed versions and vendor advisories; where the results hold none, write "none on record", which is not a finding that no fix exists.
+- Deadline: kev_due_date when the CVE is KEV-listed (CISA's due date for US federal civilian agencies); otherwise write that the results give no CISA deadline.
+- Decision: patch now, schedule, or monitor, with a one-line reason drawn from the lines above.

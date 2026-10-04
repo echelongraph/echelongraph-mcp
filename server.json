@@ -2,13 +2,22 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.echelongraph/echelongraph-mcp",
   "title": "EchelonGraph CVE & Exposure",
-  "description": "CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.",
+  "description": "CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.",
   "websiteUrl": "https://echelongraph.io/pulse/mcp",
   "repository": {
     "url": "https://github.com/echelongraph/echelongraph-mcp",
     "source": "github"
   },
-  "version": "2.4.0",
+  "icons": [
+    {
+      "src": "https://echelongraph.io/logo-mark.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
+  "version": "2.5.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +28,7 @@
     {
       "registryType": "npm",
       "identifier": "echelongraph-mcp",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "transport": {
         "type": "stdio"
       },

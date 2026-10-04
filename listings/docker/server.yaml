@@ -16,7 +16,7 @@ meta:
     - vulnerability
 about:
   title: EchelonGraph CVE & Exposure
-  description: CVEs (NVD, CISA-KEV, EPSS, GHSA) and per-CVE exposure from Shodan data (© Shodan). Free, keyless.
+  description: CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
   icon: https://echelongraph.io/logo-mark.png
 source:
   project: https://github.com/echelongraph/echelongraph-mcp

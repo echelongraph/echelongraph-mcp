@@ -117,13 +117,30 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
     assert.deepEqual(wordingProblems("c", "Free and keyless: no API key, no auth, read-only."), []);
   });
 
+  // The public repo's About box: what the orchestrator applies with gh api (listings/README.md,
+  // "Public repo settings"). GitHub's limits: a description up to 350 characters; at most 20
+  // topics, each lowercase letters, digits and hyphens, up to 50 characters, starting with a
+  // letter or digit.
+  it("github-repo-settings.json carries our wording, server.json's homepage and valid GitHub topics", () => {
+    const gs = JSON.parse(read("listings/github-repo-settings.json"));
+    assert.equal(gs.repository, new URL(serverJson.repository.url).pathname.slice(1));
+    assert.equal(gs.homepage, serverJson.websiteUrl);
+    assert.ok(gs.description.length <= 350, `${gs.description.length} chars`);
+    assert.deepEqual(wordingProblems("github-repo-settings.json description", gs.description), []);
+    assert.match(gs.description, /Shodan data \(© Shodan\)/, "the description names Shodan without its ownership");
+    assert.ok(Array.isArray(gs.topics) && gs.topics.length > 0 && gs.topics.length <= 20, `${gs.topics?.length} topics`);
+    for (const t of gs.topics) assert.match(t, /^[a-z0-9][a-z0-9-]{0,49}$/, `not a GitHub topic: ${t}`);
+    assert.equal(new Set(gs.topics).size, gs.topics.length, "a topic is listed twice");
+    assert.deepEqual(Object.keys(gs).sort(), ["description", "homepage", "repository", "topics"]);
+  });
+
   it("the long description fits the Anthropic directory's 2,000 characters and the one-liner its 200", () => {
     assert.ok(manifest.long_description.length <= 2000, `${manifest.long_description.length} chars`);
     assert.ok(serverJson.description.length <= 200);
   });
 
   it("npm does not publish the listing files", () => {
-    for (const f of pkg.files) assert.ok(["dist", "README.md", "server.json"].includes(f), `package.json files gained ${f}: check it publishes no listing file`);
+    for (const f of pkg.files) assert.ok(["dist", "README.md", "CHANGELOG.md", "server.json"].includes(f), `package.json files gained ${f}: check it publishes no listing file`);
     const [packed] = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: REPO_PKG, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
     const leaked = packed.files.map((f) => f.path).filter((p) => /^(listings\/|Dockerfile(\.http)?$|\.dockerignore$|glama\.json$)/.test(p));
     assert.deepEqual(leaked, []);
