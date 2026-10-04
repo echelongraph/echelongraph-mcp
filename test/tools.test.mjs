@@ -1081,11 +1081,22 @@ describe(`failure polarity: connection refused [${ERA}]`, () => {
   }
 });
 
+// Two timeouts, on purpose. The "hangs past the timeout" block needs a short one: it
+// asserts the "within 500 ms" wording, and a hanging upstream fails at the timeout however busy
+// the machine is. Every other block asserts what the upstream ANSWERED (403, non-JSON, null, 200
+// …), and with a 500 ms budget the first request after the server spawns could miss it when
+// several test files run in parallel on a busy CPU — measured 3 failing runs in 10 on a 4-core
+// box, each "did not answer … within 500 ms" where HTTP 403 was expected. So the answer modes get
+// a budget no answer misses (the stub replies at once), and only the hang block runs against a
+// server spawned with the 500 ms budget its assertion names.
+const ANSWER_TIMEOUT_MS = "10000";
+const HANG_TIMEOUT_MS = "500";
+
 describe(`against a stub API [${ERA}]`, () => {
   let stub, client;
   before(async () => {
     stub = await startStub();
-    client = await spawnServer({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "500" });
+    client = await spawnServer({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: ANSWER_TIMEOUT_MS });
   });
   // The stub is closed even when the opening failed: an open listener would keep this file's
   // process alive after its last test, and node --test would wait on it forever.
@@ -1108,12 +1119,18 @@ describe(`against a stub API [${ERA}]`, () => {
   });
 
   describe("failure polarity: upstream hangs past the timeout", () => {
-    let results;
-    before(async () => { stub.state.mode = "hang"; results = await callAll(client); });
+    // Its own server, with the short budget the assertion names (see HANG_TIMEOUT_MS above).
+    let results, hangClient;
+    before(async () => {
+      hangClient = await spawnServer({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: HANG_TIMEOUT_MS });
+      stub.state.mode = "hang";
+      results = await callAll(hangClient);
+    });
+    after(async () => { await hangClient?.close(); });
     for (const name of TOOLS) {
       it(`${name} returns an error result`, () => assertErrorResult(name, results[name]));
       it(`${name} error text names the timeout and the base URL`, () =>
-        assertNames(name, results[name], stub.base, /did not answer/, /within 500 ms/));
+        assertNames(name, results[name], stub.base, /did not answer/, new RegExp(`within ${HANG_TIMEOUT_MS} ms`)));
     }
   });
 

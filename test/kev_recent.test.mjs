@@ -166,6 +166,23 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.deepEqual(stub.state.seen.map((s) => s.eg), [{}, { "x-eg-ransomware": "false" }]);
     });
 
+    // #2736: get_cve gives kev_added_date as RFC 3339; since and until take that too, as its UTC date.
+    it("an RFC 3339 since or until is sent as its UTC date", async () => {
+      stub.state.body = answer();
+      for (const [since, until, want] of [
+        ["2024-04-12T00:00:00Z", "2024-04-12T00:00:00Z", ["2024-04-12", "2024-04-12"]],
+        ["2026-09-01T23:30:00-05:00", "2026-10-03T00:00:00.123z", ["2026-09-02", "2026-10-03"]],
+        ["2026-09-01T01:00:00+02:00", "2026-10-03", ["2026-08-31", "2026-10-03"]],
+      ]) {
+        stub.state.seen.length = 0;
+        const res = await call({ since, until });
+        assert.notEqual(res.isError, true, `${since} ${until}: ${res.content[0].text}`);
+        assert.equal(res.structuredContent.state, "measured");
+        assert.deepEqual([stub.state.seen[0].eg["x-eg-since"], stub.state.seen[0].eg["x-eg-until"]], want, `${since} ${until}`);
+        assert.equal(stub.state.seen[0].url, PATH);
+      }
+    });
+
     it("a page with more rows: measured, dated by our last fetch, with coverage and freshness from the answer", async () => {
       stub.state.body = answer();
       const res = await call({ limit: 2 });
@@ -225,6 +242,13 @@ for (const era of [MODERN, "2025-06-18"]) {
       for (const args of [
         { since: "2026-9-1" },
         { until: "2026-02-30" },
+        { since: "2024-04-12T00:00:00" },
+        { since: "2024-04-12 00:00:00Z" },
+        { since: "2024-04-12T24:00:00Z" },
+        { until: "2026-02-30T00:00:00Z" },
+        { until: "2024-04-12Tnoon" },
+        { since: "April 12, 2024" },
+        { since: "2024-04-13T00:00:00Z", until: "2024-04-12" },
         { since: "2026-10-02", until: "2026-10-01" },
         { vendor: "x".repeat(129) },
         { vendor: "Micro\nsoft" },

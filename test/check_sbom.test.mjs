@@ -11,6 +11,10 @@
 //   fixtures/SPDXJSONExample-v2.3.spdx.json  the SPDX project's own SPDX 2.3 JSON example
 //       (spdx/tools-java testResources, fetched 2026-10-03; Apache-2.0), verbatim: 4 packages,
 //       one with a purl externalRef.
+//   CDX_840 (built here, #2734): the 50-component fixture's document with 790 synthetic npm
+//       components appended (pkg:npm/juice-synthetic-NNN@1.0.N, deterministic), so it has the
+//       full Juice Shop 11.1.2 SBOM's 840 distinct purls. The full 0.74 MB document is not in the
+//       repository; what batching needs is the count, and the first 50 stay real.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -28,6 +32,12 @@ const CDX_TEXT = fixture("juice-shop-11.1.2-50.cdx.json");
 const CDX = JSON.parse(CDX_TEXT);
 const SPDX = JSON.parse(fixture("SPDXJSONExample-v2.3.spdx.json"));
 const CDX_PURLS = CDX.components.map((c) => c.purl);
+const SYNTHETIC = Array.from({ length: 790 }, (_, i) => {
+  const n = String(i).padStart(3, "0");
+  return { type: "library", name: `juice-synthetic-${n}`, version: `1.0.${i}`, purl: `pkg:npm/juice-synthetic-${n}@1.0.${i}` };
+});
+const CDX_840 = { ...CDX, components: [...CDX.components, ...SYNTHETIC] };
+const PURLS_840 = CDX_840.components.map((c) => c.purl);
 const TOOL = "check_sbom";
 // What the shipped texts must never claim (tools.test.mjs REMOVED_CLAIMS), and the unit they must
 // never use for a count.
@@ -56,17 +66,20 @@ function answerFor(purls) {
 }
 
 async function startStub() {
-  const state = { mode: "ok", requests: [] };
+  // plan: answers by request number (1-based) that replace the mode's, e.g. a 429 on the third.
+  const state = { mode: "ok", requests: [], plan: {} };
   const pending = new Set();
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       state.requests.push({ method: req.method, url: req.url, headers: req.headers, body });
-      const send = (status, ctype, b) => {
-        res.writeHead(status, { "content-type": ctype });
+      const send = (status, ctype, b, headers = {}) => {
+        res.writeHead(status, { "content-type": ctype, ...headers });
         res.end(b);
       };
+      const planned = state.plan[state.requests.length];
+      if (planned) return send(planned.status, "application/json", JSON.stringify(planned.body), planned.headers);
       if (state.mode === "hang") {
         pending.add(res);
         return;
@@ -128,8 +141,9 @@ for (const era of [MODERN, "2025-06-18"]) {
         await stub?.close();
       }
     });
-    const fresh = (mode = "ok") => {
+    const fresh = (mode = "ok", plan = {}) => {
       stub.state.mode = mode;
+      stub.state.plan = plan;
       stub.state.requests.length = 0;
     };
 
@@ -142,6 +156,9 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.doesNotMatch(tool.description, /\bhosts\b/i);
       assert.match(tool.description, /not_affected is the only clean verdict/);
       assert.match(tool.description, /distro qualifier naming its release/);
+      assert.match(tool.description, /up to 2,000 distinct/);
+      assert.match(tool.description, /more than 2,000 distinct purls is refused, not truncated/);
+      assert.match(tool.description, /Retry-After/);
     });
 
     describe("a real CycloneDX SBOM (OWASP Juice Shop 11.1.2, 50 components)", () => {
@@ -171,7 +188,24 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.equal(sc.freshness, null);
         assert.deepEqual(JSON.parse(textBlocks(res)[0]), sc.data);
         assert.deepEqual(sc.data, answerFor(CDX_PURLS));
-        assert.deepEqual(sc.coverage, { input: "cyclonedx", components_in_document: 50, with_purl: 50, without_purl: 0, duplicates_removed: 0, sent: 50, not_assessed: sc.data.summary.not_assessed, partial: true });
+        assert.deepEqual(sc.coverage, {
+          input: "cyclonedx",
+          components_in_document: 50,
+          with_purl: 50,
+          without_purl: 0,
+          duplicates_removed: 0,
+          distinct_purls: 50,
+          batch_size: 200,
+          batches: 1,
+          batches_sent: 1,
+          sent: 50,
+          not_sent: 0,
+          not_sent_reason: null,
+          rate_limit_waits: 0,
+          waited_ms: 0,
+          not_assessed: sc.data.summary.not_assessed,
+          partial: true,
+        });
       });
       it("the note gives every verdict's count, names the affected components with their CVEs, and says what time_budget means", () => {
         const s = res.structuredContent.data.summary;
@@ -209,7 +243,24 @@ for (const era of [MODERN, "2025-06-18"]) {
       const res = await call({ sbom: SPDX });
       assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
       assert.deepEqual(JSON.parse(stub.state.requests[0].body), { components: [{ purl: "pkg:maven/org.apache.jena/apache-jena@3.12.0" }] });
-      assert.deepEqual(res.structuredContent.coverage, { input: "spdx", components_in_document: 4, with_purl: 1, without_purl: 3, duplicates_removed: 0, sent: 1, not_assessed: 1, partial: false });
+      assert.deepEqual(res.structuredContent.coverage, {
+        input: "spdx",
+        components_in_document: 4,
+        with_purl: 1,
+        without_purl: 3,
+        duplicates_removed: 0,
+        distinct_purls: 1,
+        batch_size: 200,
+        batches: 1,
+        batches_sent: 1,
+        sent: 1,
+        not_sent: 0,
+        not_sent_reason: null,
+        rate_limit_waits: 0,
+        waited_ms: 0,
+        not_assessed: 1,
+        partial: false,
+      });
       assert.match(noteOf(res), /Read 4 packages from the SPDX document: 1 with a purl, and 3 without one, which were not checked and are not clean; sent 1\./);
     });
 
@@ -238,11 +289,136 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.doesNotMatch(noteOf(res), /\bclean\b(?![^.]*not)/i);
     });
 
+    // #2734: more than 200 distinct purls go as consecutive batches of at most 200, merged.
+    describe("batches: an 840-purl CycloneDX SBOM (the full Juice Shop 11.1.2 count)", () => {
+      const RATE_LIMITED = { status: 429, body: { error: "component budget exceeded: this batch costs 200 components and this address has 0 left in the window. Nothing was looked up", code: "RATE_LIMIT_EXCEEDED", cost: 200, limit: 1200 } };
+      const sentPurls = () => stub.state.requests.map((r) => JSON.parse(r.body).components.map((c) => c.purl));
+      // What one 840-purl answer would be, with elapsed_ms the sum of the five batches'.
+      const merged = (purls, batches) => {
+        const all = answerFor(purls);
+        return { ...all, summary: { ...all.summary, elapsed_ms: 412 * batches } };
+      };
+
+      it("sends 5 POSTs of at most 200, in order, and answers measured with the merged summary: components 840", async () => {
+        fresh();
+        const res = await call({ sbom: CDX_840 });
+        assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+        assert.deepEqual(sentPurls().map((b) => b.length), [200, 200, 200, 200, 40]);
+        assert.deepEqual(sentPurls().flat(), PURLS_840);
+        for (const r of stub.state.requests) assert.equal(r.url, BATCH_PATH);
+        const sc = res.structuredContent;
+        assert.equal(sc.state, "measured");
+        assert.equal(sc.data.summary.components, 840);
+        assert.equal(sc.data.components, 840);
+        // Rows in input order, index counted across batches; counts and reasons summed; partial
+        // true because the first batch's was (sequelize hits the stub's time budget).
+        assert.deepEqual(sc.data, merged(PURLS_840, 5));
+        assert.equal(sc.data.summary.partial, true);
+        assert.deepEqual(sc.data.results.map((r) => r.index), PURLS_840.map((_, i) => i));
+        assert.equal(sc.data.not_sent_purls, undefined);
+        assert.deepEqual(JSON.parse(textBlocks(res)[0]), sc.data);
+        assert.deepEqual(
+          { ...sc.coverage, not_assessed: null },
+          { input: "cyclonedx", components_in_document: 840, with_purl: 840, without_purl: 0, duplicates_removed: 0, distinct_purls: 840, batch_size: 200, batches: 5, batches_sent: 5, sent: 840, not_sent: 0, not_sent_reason: null, rate_limit_waits: 0, waited_ms: 0, not_assessed: null, partial: true },
+        );
+        assert.equal(sc.coverage.not_assessed, sc.data.summary.not_assessed);
+        const note = noteOf(res);
+        assert.ok(note.includes("Read 840 components from the CycloneDX document: 840 with a purl; sent 840."), note);
+        assert.ok(note.includes("The 840 distinct purls make 5 batches of at most 200, sent one after another; the API answered 5 of them, and data.summary sums those answers."), note);
+        assert.ok(note.includes(`Of the 840 components checked: ${sc.data.summary.affected} affected,`), note);
+        assert.doesNotMatch(note, /NOT sent/);
+      });
+
+      it("a 429 mid-way: waits the Retry-After it names, sends the same batch again, and finishes", async () => {
+        fresh("ok", { 3: { ...RATE_LIMITED, headers: { "retry-after": "1" } } });
+        const t0 = Date.now();
+        const res = await call({ sbom: CDX_840 });
+        const took = Date.now() - t0;
+        assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+        const sent = sentPurls();
+        assert.deepEqual(sent.map((b) => b.length), [200, 200, 200, 200, 200, 40]);
+        assert.deepEqual(sent[2], sent[3], "the refused batch is sent again, unchanged");
+        assert.ok(took >= 1000, `answered in ${took} ms: the Retry-After of 1 s was not waited`);
+        const sc = res.structuredContent;
+        assert.equal(sc.state, "measured");
+        assert.deepEqual(sc.data, merged(PURLS_840, 5));
+        assert.equal(sc.coverage.rate_limit_waits, 1);
+        assert.equal(sc.coverage.waited_ms, 1000);
+        assert.equal(sc.coverage.not_sent, 0);
+        assert.match(noteOf(res), /ran out once: the tool waited 1 s in all, as its Retry-After asked, and sent the batch again\./);
+      });
+
+      it("a Retry-After past the 50 s budget: stops, answers measured but partial, and names what was not sent and why", async () => {
+        fresh("ok", { 3: { ...RATE_LIMITED, headers: { "retry-after": "600" } } });
+        const t0 = Date.now();
+        const res = await call({ sbom: CDX_840 });
+        assert.ok(Date.now() - t0 < 10_000, "it waited instead of stopping");
+        assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+        assert.equal(stub.state.requests.length, 3);
+        const sc = res.structuredContent;
+        assert.equal(sc.state, "measured");
+        assert.equal(sc.data.summary.components, 400);
+        assert.equal(sc.data.results.length, 400);
+        assert.deepEqual(sc.data.not_sent_purls, PURLS_840.slice(400));
+        assert.deepEqual(
+          [sc.coverage.batches, sc.coverage.batches_sent, sc.coverage.sent, sc.coverage.not_sent, sc.coverage.not_sent_reason, sc.coverage.partial, sc.coverage.rate_limit_waits],
+          [5, 2, 400, 440, "time_budget", true, 0],
+        );
+        const note = noteOf(res);
+        assert.ok(note.includes("; sent 400."), note);
+        assert.ok(
+          note.includes("440 purls were NOT sent (not_sent_reason time_budget: the API answered 429 asking for a wait of 600 s (Retry-After), which would pass the call's 50 s budget), so they are not checked and not clean;"),
+          note,
+        );
+        assert.match(note, /call check_sbom again with purls set to that list after a minute\./);
+        assert.ok(note.includes("Of the 400 components checked:"), note);
+      });
+
+      it("a 429 without Retry-After mid-way: partial, rate_limited", async () => {
+        fresh("ok", { 2: RATE_LIMITED });
+        const res = await call({ purls: PURLS_840 });
+        assert.notEqual(res.isError, true);
+        assert.equal(stub.state.requests.length, 2);
+        assert.deepEqual([res.structuredContent.coverage.sent, res.structuredContent.coverage.not_sent, res.structuredContent.coverage.not_sent_reason], [200, 640, "rate_limited"]);
+        assert.match(noteOf(res), /640 purls were NOT sent \(not_sent_reason rate_limited: the API answered 429 without a Retry-After to wait for\)/);
+      });
+
+      it("a batch after the first fails: partial, request_failed, quoting the failure", async () => {
+        fresh("ok", { 4: { status: 503, body: { error: "advisory store unavailable" } } });
+        const res = await call({ purls: PURLS_840 });
+        assert.notEqual(res.isError, true);
+        assert.equal(stub.state.requests.length, 4);
+        const sc = res.structuredContent;
+        assert.deepEqual([sc.coverage.batches_sent, sc.coverage.sent, sc.coverage.not_sent, sc.coverage.not_sent_reason], [3, 600, 240, "request_failed"]);
+        assert.deepEqual(sc.data.not_sent_purls, PURLS_840.slice(600));
+        assert.match(noteOf(res), /240 purls were NOT sent \(not_sent_reason request_failed: EchelonGraph answered HTTP 503 from .* for POST \/api\/v1\/public\/cves\/match\/batch — the API said: advisory store unavailable\), so they are not checked and not clean/);
+      });
+
+      it("a 429 on the first batch past the budget is a failure: nothing was measured", async () => {
+        fresh("ok", { 1: { ...RATE_LIMITED, headers: { "retry-after": "600" } } });
+        const res = await call({ purls: PURLS_840 });
+        assert.equal(res.isError, true);
+        assert.equal(res.structuredContent.state, "failed");
+        assert.equal(stub.state.requests.length, 1);
+        assert.match(textBlocks(res)[0], /answered HTTP 429 .* this is not a finding/);
+      });
+
+      it("exactly 2000 distinct purls (the cap) are checked, in 10 batches", async () => {
+        fresh();
+        const purls = Array.from({ length: 2000 }, (_, i) => `pkg:npm/cap-${i}@1.0.0`);
+        const res = await call({ purls });
+        assert.notEqual(res.isError, true);
+        assert.equal(stub.state.requests.length, 10);
+        assert.equal(res.structuredContent.data.summary.components, 2000);
+        assert.deepEqual([res.structuredContent.coverage.batches, res.structuredContent.coverage.sent, res.structuredContent.coverage.not_sent], [10, 2000, 0]);
+      });
+    });
+
     describe("refused locally: invalid_input, and no request is made", () => {
       const cases = [
         ["neither argument", {}, /exactly one of purls/],
         ["both arguments", { purls: ["pkg:npm/a@1"], sbom: CDX }, /exactly one of purls/],
-        ["201 distinct purls", { purls: Array.from({ length: 201 }, (_, i) => `pkg:npm/p${i}@1.0.0`) }, /201 distinct purls; at most 200 .* split the list/],
+        ["2001 distinct purls", { purls: Array.from({ length: 2001 }, (_, i) => `pkg:npm/p${i}@1.0.0`) }, /2001 distinct purls; at most 2000 are checked per call \(in batches of 200, within the API's budget of 1200 components a minute\), and none is dropped silently: split the list/],
         ["sbom that is not JSON", { sbom: "<bom xmlns='http://cyclonedx.org/schema/bom/1.5'/>" }, /sbom is not JSON/],
         ["a JSON object that is neither format", { sbom: { hello: "world" } }, /neither a CycloneDX JSON document .* nor an SPDX JSON document/],
         ["a CycloneDX document whose components carry no purl", { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "x", version: "1" }] } }, /holds 1 components and none carries a purl/],
@@ -292,7 +468,7 @@ for (const era of [MODERN, "2025-06-18"]) {
     });
 
     it("ajv: every structured result above validates against check_sbom's outputSchema", () => {
-      assert.ok(collected.length >= 16, `only ${collected.length} results collected`);
+      assert.ok(collected.length >= 23, `only ${collected.length} results collected`);
       const v = validator.getValidator(tool.outputSchema);
       for (const [args, res] of collected) {
         const r = v(res.structuredContent);

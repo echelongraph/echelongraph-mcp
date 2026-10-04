@@ -19,7 +19,7 @@ directory. Directory requirements change; re-read the source before you submit.
 | mcp.so | not listed | a GitHub issue on `chatmcp/mcpso` (free) or a $39 form | founder's choice of route |
 | PulseMCP | not listed; submissions paused | nothing to submit: it ingests the official registry | PulseMCP reopening |
 | Docker MCP Catalog | not listed | a PR to `docker/mcp-registry` (`docker/server.yaml`) | the next release (the Dockerfile must be in the public repo) |
-| Anthropic connector directory | not listed | a remote HTTPS server, submitted in the developer portal | #2316 |
+| Anthropic connector directory | not listed | a remote HTTPS server, submitted in the developer portal | founder's submission (the hosted endpoint, `https://mcp.echelongraph.io/mcp`, is in service) |
 | Glama | listed; shows release v1.0.3, not 2.3.4 | claim through `glama.json`, then edit the listing | the next release (the file must be in the public repo) |
 
 ## Files
@@ -269,13 +269,14 @@ https://docs.docker.com/ai/mcp-catalog-and-toolkit/catalog/ .
 
 ## Anthropic connector directory
 
-**Status:** not listed. Waits for the hosted endpoint, `https://mcp.echelongraph.io/mcp` (#2316), to
-answer.
+**Status:** not listed. The hosted endpoint, `https://mcp.echelongraph.io/mcp`, is in service
+(`https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`), so the listing waits only for
+the founder's submission below.
 
-**Why blocked.** The directory takes remote MCP servers over HTTPS, submitted in the developer
+**Why remote.** The directory takes remote MCP servers over HTTPS, submitted in the developer
 portal. It "no longer accepts local servers packaged as MCP Bundles (MCPB)"; a local server can be
-listed only inside a plugin, and #2304 rejected a plugin. So the listing waits for the hosted
-endpoint (#2316).
+listed only inside a plugin, and #2304 rejected a plugin. So the listing is of the hosted
+endpoint.
 
 **Requirements that apply** (from the submission page): every tool has a `title` and a
 `readOnlyHint` or `destructiveHint` (every tool carries a title and `readOnlyHint: true`;
@@ -284,7 +285,7 @@ documentation URL, a privacy policy URL, a support contact and an icon; a paid C
 (Pro, Max, Team or Enterprise; on Team and Enterprise, an Owner submits); seven policy
 acknowledgments; and the Software Directory Terms and Policy.
 
-**Steps (once `https://mcp.echelongraph.io/health` answers)**
+**Steps** (check first that `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`)
 
 1. **Founder, signed in to claude.ai:** add the remote URL as a custom connector and call every
    tool from a conversation (the portal asks you to confirm this).
@@ -374,6 +375,18 @@ jq '{names: .topics}' listings/github-repo-settings.json \
 Check after: `gh api repos/echelongraph/echelongraph-mcp --jq '.description, .homepage, .topics'`
 prints the same values. The description follows the rules above (no "live", no "only"), and
 `test/listings.test.mjs` checks it.
+
+## Release notes
+
+Every GitHub Release body of github.com/echelongraph/echelongraph-mcp, and every changelog entry,
+that cites issue numbers carries this sentence, word for word, as `CHANGELOG.md`'s preamble does:
+
+> Issue numbers (#NNNN) refer to EchelonGraph's internal issue tracker, which is not public: they are not issues of the public repository, and cannot be followed from it.
+
+`scripts/npm-publish-mcp.sh` does not write Release bodies, so this is a step of the release
+checklist: when a Release is created or edited, paste the sentence above its first `#NNNN`, or
+leave the numbers out. `test/readme.test.mjs` holds `CHANGELOG.md`'s preamble and this section
+to the same sentence.
 
 ## Version lag
 

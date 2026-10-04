@@ -111,9 +111,9 @@ The same 14 tools, four prompts and three resources are served over Streamable H
 https://mcp.echelongraph.io/mcp
 ```
 
-Keyless, no sign-in, stateless; both protocol eras. The hosted endpoint is being rolled out:
-until `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`, use the `npx` setup
-above.
+Keyless, no sign-in, stateless; both protocol eras. The hosted endpoint is in service:
+`https://mcp.echelongraph.io/health` answers `{"status":"ok","version":…}` with the package
+version it runs.
 
 - **claude.ai** (Free, Pro, Max, Team and Enterprise plans):
   Customize → Connectors → **+ Add** → **Add custom connector**. Name it `EchelonGraph`, paste
@@ -162,7 +162,7 @@ The example questions are ones a client can answer with that tool alone.
 | `kev_recent` | Recent CISA KEV additions | The CVEs CISA has added to its Known Exploited Vulnerabilities catalog, newest first (`kev_added_date`), from EchelonGraph's copy of the catalog, polled from CISA every 5 minutes: due date, vendor, product, known ransomware use, EchelonGraph's severity, CVSS, EPSS and `eg_kev_tier`, and `our_first_seen_kev`. Filter by date range, ransomware and vendor; page with `limit` and `next_cursor`. Dated by `last_successful_fetch_at`, our last successful fetch of CISA's feed; the filters travel as request headers, never in the URL. | *Which CVEs has CISA added to KEV since 1 September, and which have known ransomware use?* |
 | `epss_history` | EPSS change history for one CVE | How one CVE's EPSS score has changed, as EchelonGraph recorded it: one point per recorded change (`series_kind` `change_only`), never a daily series, with the value now and `series_starts_at`, when recording began; before it a missing point means not recorded, not unchanged. | *How has CVE-2023-44487's EPSS score changed, as EchelonGraph recorded it?* |
 | `check_affected` | Am I affected? (product or package at a version) | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed`, and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. | *Is openssl 3.0.0 affected by known CVEs? Is lodash 4.17.15 on npm?* |
-| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 200 purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it on your machine and only they are sent, in a POST body; the document is not. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
+| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 2,000 distinct purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it on your machine and only they are sent, in POST bodies of at most 200 each, one after another; the document is not. When the API's per-component rate limit answers 429, the tool waits the `Retry-After` it names, within 50 seconds per call; past that it answers what it has, with the purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and the list in `data.not_sent_purls`, never dropped silently. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
 | `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
 | `get_cwe` | CWE and its CVEs | One CWE (weakness class) and the CVEs classified under it: `name` and `description` from the MITRE CWE catalog EchelonGraph embeds, `total`, and one page of 50 `cves`, ordered as `order` states (CISA-KEV-listed first, then EchelonGraph score). A `total` of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. | *Which CVEs are classified under CWE-79, CISA-KEV-listed first?* |
 | `vendor_advisories_for_cve` | Vendor advisories for one CVE | The vendor-published advisories (Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks, GitHub GHSA and the other feeds EchelonGraph polls) that name one CVE, newest first, at most 20. | *Which vendor advisories name CVE-2024-3400?* |
@@ -630,7 +630,7 @@ Where each tool's input travels:
 | `search_vendor_advisories`: `query` | The `X-EG-Advisory-Search` request header, never the URL. Its vendor, severity, CVE filter, limit and offset go in the query string. |
 | `check_affected`: `product`, `version`, `ecosystem`, `package` | The `X-EG-Product`, `X-EG-Version`, `X-EG-Ecosystem` and `X-EG-Package` request headers, never the URL. |
 | `kev_recent`: `since`, `until`, `ransomware`, `vendor`, `limit`, `cursor` | The `X-EG-Since`, `X-EG-Until`, `X-EG-Ransomware`, `X-EG-Vendor`, `X-EG-Limit` and `X-EG-Cursor` request headers, never the URL. |
-| `check_sbom`: `purls`, or an `sbom` document | The purls, in a POST body. A CycloneDX or SPDX document is read on your machine and only the purls in it are sent; the document is not. |
+| `check_sbom`: `purls`, or an `sbom` document | The purls, in POST bodies of at most 200 each. A CycloneDX or SPDX document is read on your machine and only the purls in it are sent; the document is not. |
 | `cve_summary`, `exposure_radar` | No input. |
 
 The API marks its answers to header-carried lookups `no-store`, so no shared cache keeps them,
@@ -663,7 +663,13 @@ Because the count is shared, heavy use of one path also uses up the lower ceilin
 that, 500 requests per second per caller is a burst cap on each serving instance, and
 `check_sbom`'s batch route is charged per component: 1,200 components a minute per caller.
 Over a limit the API answers 429 with `Retry-After`, and the tool returns a failure
-(`state` `failed`, `error.status` 429), never empty data. The API's own documentation of these
+(`state` `failed`, `error.status` 429), never empty data. `check_sbom` is the exception: it
+sends a long list as batches of 200, waits out a 429's `Retry-After` and sends the batch again,
+within 50 seconds per call (MCP clients time a call out at about 60 s). From a fresh budget a
+list of up to 1,200 distinct purls finishes in one call; a longer one (the cap is 2,000) is
+checked in two calls a minute apart. When a wait would pass the 50 seconds, it
+answers the batches it has as `measured` with `coverage.partial` true and the rest counted in
+`coverage.not_sent` (`not_sent_reason` `time_budget`); only a 429 on the first batch is a failure. The API's own documentation of these
 limits: <https://echelongraph.io/pulse/api>.
 
 The hosted endpoint adds its own limit before the API's: 120 MCP requests a minute per client

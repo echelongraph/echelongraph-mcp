@@ -8,14 +8,18 @@
 //   * the hosted endpoint's URL and per-client limit are the ones server.json and the code use;
 //   * every JSON block in the README parses, and every MCP client config block names this
 //     package or the hosted URL;
-//   * CHANGELOG.md has an entry for package.json's version.
+//   * the hosted endpoint is described as in service, never as being rolled out (#2739), in
+//     agreement with /pulse/mcp's REMOTE_SERVING switch where the monorepo is present;
+//   * CHANGELOG.md has an entry for package.json's version, and its preamble says the issue
+//     numbers are an internal tracker's (#2740), in the words listings/README.md gives for
+//     Release bodies.
 //
 // Wording (REMOVED_CLAIMS, HOST_UNIT) is tools.test.mjs's, over the whole README.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { StdioMcpClient, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, serverCommand, readPkgFile } from "./server-under-test.mjs";
 
@@ -114,7 +118,36 @@ describe("README configuration and hosted endpoint", () => {
   });
 });
 
+describe("README hosted-endpoint state (#2739)", () => {
+  // /pulse/mcp's one switch for the hosted endpoint. Present in the monorepo; the public repo and
+  // the npm tarball carry no marketing-site, and there only the README's own wording is checked.
+  const PAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "marketing-site", "app", "pulse", "mcp", "page.tsx");
+  const remoteBlock = () => README.split(/^### Remote \(no install\)$/m)[1]?.split(/^##+ /m)[0] ?? "";
+
+  it("never says the hosted endpoint is being rolled out, and names server.json's remote URL in its Remote section", () => {
+    assert.doesNotMatch(README, /being rolled out/i);
+    assert.doesNotMatch(README, /until [^.]*\/health[^.]* answers/i, "the README still tells readers to wait for /health");
+    assert.ok(remoteBlock().includes(REMOTE), `the Remote section does not name ${REMOTE}`);
+    assert.match(remoteBlock(), /The hosted endpoint is in service/);
+  });
+  it("agrees with /pulse/mcp's REMOTE_SERVING switch", (t) => {
+    if (!fs.existsSync(PAGE)) return t.skip("no marketing-site beside this package (public repo or tarball)");
+    const m = fs.readFileSync(PAGE, "utf8").match(/^const REMOTE_SERVING = (true|false);$/m);
+    assert.ok(m, "marketing-site/app/pulse/mcp/page.tsx lost its REMOTE_SERVING switch: re-aim this check");
+    assert.equal(m[1], "true", "/pulse/mcp says the hosted endpoint is not serving, and the README says it is");
+  });
+});
+
 describe("CHANGELOG.md", () => {
+  // #2740: the numbers are EchelonGraph's internal tracker's; the public repo's issues are others.
+  const CAVEAT = "Issue numbers (#NNNN) refer to EchelonGraph's internal issue tracker, which is not public: they are not issues of the public repository, and cannot be followed from it.";
+  it("its preamble says the issue numbers are an internal tracker's, as listings/README.md asks of Release bodies", () => {
+    const log = readPkgFile("CHANGELOG.md");
+    const preamble = log.split(/^## /m)[0].replace(/\s+/g, " ");
+    assert.ok(preamble.includes(CAVEAT), preamble);
+    const listings = path.join(PKG_DIR, "listings", "README.md");
+    if (fs.existsSync(listings)) assert.ok(fs.readFileSync(listings, "utf8").replace(/\s+/g, " ").includes(CAVEAT), "listings/README.md's Release notes section lost the caveat");
+  });
   it("has an entry for package.json's version, and the README links it", () => {
     const log = readPkgFile("CHANGELOG.md");
     assert.match(log, new RegExp(`^## ${PKG.version.replace(/\./g, "\\.")} — \\d{4}-\\d{2}-\\d{2}$`, "m"));

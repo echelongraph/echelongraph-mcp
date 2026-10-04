@@ -39,7 +39,9 @@ const RECORD = {
   echelongraph_score: 9.9,
   score_assessed: true,
   kev_listed: true,
-  kev_added_date: "2024-04-12",
+  // As core-backend serves it (store.go KEVAddedDate is a *time.Time): RFC 3339, not a bare date.
+  kev_added_date: "2024-04-12T00:00:00Z",
+  kev_due_date: "2024-04-19T00:00:00Z",
   updated_at: "2026-10-01T08:00:00Z",
 };
 const POLLER = { poll_count: 12, cves_ingested: 40, cves_skipped: 0, poll_errors: 0, http_retries: 0, interval: "2h0m0s", last_poll_dur_ms: 900, last_poll_at: "2026-10-03T10:00:00Z" };
@@ -47,6 +49,9 @@ const SUMMARY = { summary: { critical: 1, high: 2, medium: 3, low: 4, none: 0, t
 const KEV_METHOD = "EchelonGraph polls CISA's known_exploited_vulnerabilities.json every 5 minutes with a conditional GET.";
 const CATALOG = { source: "CISA KEV catalog", feed_url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", last_successful_fetch_at: "2026-10-03T11:55:01Z", catalog_version: "2026.10.02", date_released: "2026-10-02T17:00:41.1622Z", catalog_count: 1452 };
 const KEV = { kev: [], count: 0, total: 0, kev_listed_total: 1452, limit: 1, next_cursor: null, catalog: CATALOG, method: KEV_METHOD, generated_at: "2026-10-03T12:00:00Z" };
+// kev_recent's answer for since = until = 2024-04-12 (#2736): the one row CISA added that day.
+const KEV_ROW_3400 = { cve_id: CVE, kev_added_date: "2024-04-12", kev_due_date: "2024-04-19", kev_vendor: "Palo Alto Networks", kev_product: "PAN-OS", kev_vuln_name: "Palo Alto Networks PAN-OS Command Injection Vulnerability", kev_ransomware: false, severity: "CRITICAL", cvss_v3_score: 10, epss_score: 0.94, epss_percentile: 0.99, eg_kev_tier: 1, our_first_seen_kev: null };
+const KEV_3400 = { ...KEV, kev: [KEV_ROW_3400], count: 1, total: 1, limit: 50 };
 const SBOM = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "lodash", version: "4.17.20", purl: "pkg:npm/lodash@4.17.20" }] });
 
 // The stub: `mode` switches the feed answers so one running server can be read healthy and down.
@@ -57,10 +62,11 @@ let env;
 before(async () => {
   stub = http.createServer((req, res) => {
     const url = new URL(req.url, "http://stub");
-    seen.push({ path: url.pathname, search: url.search, limit: req.headers["x-eg-limit"] });
+    seen.push({ path: url.pathname, search: url.search, limit: req.headers["x-eg-limit"], since: req.headers["x-eg-since"], until: req.headers["x-eg-until"] });
+    const day3400 = req.headers["x-eg-since"] === "2024-04-12" && req.headers["x-eg-until"] === "2024-04-12";
     const answers = {
       "/api/v1/public/cves/summary": mode === "up" ? SUMMARY : mode === "no-poller" ? { summary: SUMMARY.summary } : null,
-      "/api/v1/public/kev/recent": mode === "up" || mode === "no-poller" ? KEV : null,
+      "/api/v1/public/kev/recent": mode === "up" || mode === "no-poller" ? (day3400 ? KEV_3400 : KEV) : null,
       [`/api/v1/public/cves/${CVE}`]: RECORD,
     };
     const answer = answers[url.pathname];
@@ -297,6 +303,21 @@ for (const era of ERAS) {
       assert.deepEqual(s.data, RECORD);
       const call = await client.callTool({ name: "get_cve", arguments: { cve_id: CVE } });
       assert.deepEqual(s, call.structuredContent);
+    });
+    // #2736: triage_cve's step 6 feeds get_cve's kev_added_date to kev_recent. get_cve gives it as
+    // RFC 3339; the prompt says to pass its date part, and kev_recent reads either as the same date.
+    it("triage_cve step 6 composes: get_cve's kev_added_date, as given and as its date part, gets kev_recent's measured row and due date", async () => {
+      const added = (await client.callTool({ name: "get_cve", arguments: { cve_id: CVE } })).structuredContent.data.kev_added_date;
+      assert.equal(added, "2024-04-12T00:00:00Z");
+      for (const v of [added, added.slice(0, 10)]) {
+        seen.length = 0;
+        const r = await client.callTool({ name: "kev_recent", arguments: { since: v, until: v } });
+        assert.notEqual(r.isError, true, r.content[0].text);
+        assert.equal(r.structuredContent.state, "measured");
+        const req = seen.find((x) => x.path === "/api/v1/public/kev/recent");
+        assert.deepEqual([req.since, req.until, req.search], ["2024-04-12", "2024-04-12", ""], v);
+        assert.equal(r.structuredContent.data.kev.find((x) => x.cve_id === CVE)?.kev_due_date, "2024-04-19");
+      }
     });
     it("cve:// upper-cases a lower-case CVE ID", async () => {
       const s = JSON.parse((await client.readResource({ uri: "cve://cve-2024-3400" })).contents[0].text);

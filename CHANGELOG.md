@@ -1,10 +1,29 @@
 # Changelog
 
 Every version of `echelongraph-mcp` published to npm, newest first. Dates are the npm publish
-dates (UTC). Issue numbers refer to EchelonGraph's tracker. Since 2.3.3 each version is published
+dates (UTC). Issue numbers (#NNNN) refer to EchelonGraph's internal issue tracker, which is not public: they are not issues of the public repository, and cannot be followed from it. Since 2.3.3 each version is published
 with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
+
+## 2.6.0 — 2026-10-04
+
+- `check_sbom` checks up to 2,000 distinct purls per call, instead of refusing more than 200: it
+  sends them as consecutive batches of at most 200, merges the answers (rows in input order with
+  `index` counted across batches; summary counts and `not_assessed_by_reason` summed; `partial`
+  true when any batch's was), and waits out a 429's `Retry-After` within 50 seconds per call.
+  When a wait would pass that, or a batch after the first fails, it answers what it has, with the
+  purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and
+  the list in `data.not_sent_purls`, never dropped silently. More than 2,000 is refused. New
+  coverage fields: `distinct_purls`, `batch_size`, `batches`, `batches_sent`, `not_sent`,
+  `not_sent_reason`, `rate_limit_waits`, `waited_ms`. The `sbom_review` prompt says so (#2734).
+- `kev_recent` reads an RFC 3339 timestamp for `since` or `until` (such as the
+  `kev_added_date` `get_cve` returns, `2024-04-12T00:00:00Z`) as its UTC date; other text is still
+  refused. The `triage_cve` prompt's step 6 says to pass the date part of `kev_added_date` (#2736).
+- README: the hosted endpoint, `https://mcp.echelongraph.io/mcp`, is described as in service,
+  no longer as being rolled out (#2739).
+- This changelog's preamble says the issue numbers refer to EchelonGraph's internal tracker,
+  which is not public (#2740).
 
 ## 2.5.1 — 2026-10-04
 

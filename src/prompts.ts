@@ -9,7 +9,7 @@
 // the SDK as InvalidParams (-32602) before any text is built. A prompt makes no API request.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { MAX_COMPONENTS, MAX_SBOM_CHARS } from "./tools/check_sbom.js";
+import { MAX_COMPONENTS, MAX_PURLS, MAX_SBOM_CHARS } from "./tools/check_sbom.js";
 
 // What the prompts are handed by createServer: the CVE ID pattern the CVE tools validate with.
 export type PromptKit = { cveId: RegExp };
@@ -39,7 +39,7 @@ export function triageCveText(cve: string): string {
     "3. vendor_advisories_for_cve: the vendor advisories that name it. Call get_vendor_advisory for one whose remediation you need in full.",
     "4. epss_history: how its EPSS score changed, one point per recorded change (series_kind change_only): before series_starts_at a missing point means not recorded, not unchanged.",
     "5. cve_exposure: internet exposure on record. exposure_state says what the count is; exposed_hosts counts distinct ip:port services, not machines; the result is not_assessed with measured_at null, so present any count as undated and on record, and exposure_state not_assessed as not assessed.",
-    `6. If get_cve says kev_listed is true: kev_recent with since and until both set to its kev_added_date, to read kev_due_date from the row for ${cve}.`,
+    `6. If get_cve says kev_listed is true: kev_recent with since and until both set to the date part (YYYY-MM-DD) of its kev_added_date (for 2024-04-12T00:00:00Z, 2024-04-12), to read kev_due_date from the row for ${cve}.`,
     ENVELOPE_RULES,
     "Then answer with this template, one line each, naming the tool and the measured_at behind every line:",
     "- Exploited? CISA-KEV listing and its date, known ransomware use, and public exploit code on record.",
@@ -86,7 +86,7 @@ export function amIAffectedText(a: AffectedArgs): string {
 export function sbomReviewText(sbom: string): string {
   return [
     "Review the SBOM below for known vulnerabilities, using the EchelonGraph MCP tools.",
-    `1. Call check_sbom with sbom set to the document below, as given. It reads the document's purls and checks up to ${MAX_COMPONENTS} distinct purls per call; a document with more is refused, not truncated. If it is refused, say why from the result and do not guess at the components.`,
+    `1. Call check_sbom with sbom set to the document below, as given. It reads the document's purls and checks up to ${MAX_PURLS} distinct purls per call, sending them in batches of ${MAX_COMPONENTS}; a document with more is refused, not truncated. If it is refused, say why from the result and do not guess at the components. If coverage.not_sent is above 0, the API's rate limit or the call's time budget stopped it early: say how many purls were not sent and coverage.not_sent_reason, list them as not checked (never as clean), and call check_sbom again with purls set to data.not_sent_purls once, after a minute, merging what it returns.`,
     "2. For each distinct cve_id on a component whose verdict is affected, call get_cve, to read kev_listed, epss_score, score_assessed, echelongraph_score and cvss_v3_score. If there are more than 30 distinct CVEs, do this for 30 of them and list the rest as not looked up, unranked.",
     ENVELOPE_RULES,
     "Read each component's verdict: not_affected is the one clean verdict; undetermined and not_assessed are not clean, and not_assessed_reason says why (for example distro_release_unknown: a deb, apk or rpm purl without a distro qualifier, which EchelonGraph does not guess).",
@@ -167,7 +167,7 @@ export function registerPrompts(server: McpServer, kit: PromptKit): void {
     "sbom_review",
     {
       title: "SBOM review",
-      description: `Review an SBOM (CycloneDX JSON or SPDX JSON text, up to ${MAX_SBOM_CHARS} characters): it is passed to check_sbom, which checks up to ${MAX_COMPONENTS} distinct purls per call, then get_cve for each affected CVE, and a prioritised fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. undetermined and not_assessed components are listed as not checked, never as clean.`,
+      description: `Review an SBOM (CycloneDX JSON or SPDX JSON text, up to ${MAX_SBOM_CHARS} characters): it is passed to check_sbom, which checks up to ${MAX_PURLS} distinct purls per call in batches of ${MAX_COMPONENTS}, then get_cve for each affected CVE, and a prioritised fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. undetermined and not_assessed components are listed as not checked, never as clean.`,
       argsSchema: z.object({
         sbom: z
           .string()

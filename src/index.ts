@@ -116,6 +116,9 @@ type Failure = {
   // The request's method when it was not GET (check_sbom's POST, #2721); describeFailure names it.
   method?: string;
   status?: number;
+  // A non-2xx's Retry-After, in whole seconds, when it sent one (check_sbom honours it between
+  // batches, #2734). Never part of the failure text or envelope.
+  retryAfter?: number;
   detail: string;
 };
 export type ApiResult = { ok: true; status: number; data: object } | Failure;
@@ -162,6 +165,16 @@ function apiMessage(body: string): string {
   return snippet(body);
 }
 
+// A Retry-After header as whole seconds from now: delta-seconds, or an HTTP-date (RFC 9110
+// 10.2.3). undefined when absent or unreadable.
+function retryAfterSeconds(v: string | null): number | undefined {
+  const t = v?.trim();
+  if (!t) return undefined;
+  if (/^\d{1,9}$/.test(t)) return Number(t);
+  const at = Date.parse(t);
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : undefined;
+}
+
 // One request against the API, a GET unless init says otherwise. Never throws: every way the call
 // can fail comes back as a typed Failure so the tool renders it as an error result. A 2xx whose
 // body is not a JSON object (an SPA shell, an edge challenge page, a literal null) is a failure
@@ -196,7 +209,10 @@ export async function api(path: string, init?: { headers?: Record<string, string
     } catch (e) {
       return timedOut ? timeout() : { ok: false, kind: "network", path, ...m, detail: `reading the body failed: ${describeError(e)}` };
     }
-    if (!res.ok) return { ok: false, kind: "http", path, ...m, status: res.status, detail: apiMessage(body) };
+    if (!res.ok) {
+      const retryAfter = retryAfterSeconds(res.headers.get("retry-after"));
+      return { ok: false, kind: "http", path, ...m, status: res.status, ...(retryAfter === undefined ? {} : { retryAfter }), detail: apiMessage(body) };
+    }
     let data: unknown;
     try {
       data = JSON.parse(body);
@@ -270,7 +286,7 @@ export const sentences = (t: string): string[] =>
 export const instantOrNull = (s: string | undefined): string | null => (realInstant(s) ? s : null);
 
 // One sentence per failure kind: where we looked, for what, and what came back.
-function describeFailure(f: Failure): string {
+export function describeFailure(f: Failure): string {
   const verb = f.method ?? "GET";
   const where = `from ${SHOWN_BASE} for ${verb} ${f.path}`;
   switch (f.kind) {
@@ -2265,7 +2281,7 @@ export function createServer(): McpServer {
   registerCheckAffected(server, { api, succeeded, failed, badInput, crashed, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
 
   // #2721: tools/check_sbom.ts, on this file's api(), envelope and failure contract.
-  registerCheckSbom(server, { api, failed, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS });
+  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS });
 
   registerCveIntel(server);
   registerGetCwe(server);
