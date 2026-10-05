@@ -326,6 +326,39 @@ const REMOVED_CLAIMS = /passive|no other|unique|real-?time|\blive\b|right now/i;
 // The package's own words must not call that number hosts. Field names such as
 // exposed_hosts are not matched: `_` is a word character.
 const HOST_UNIT = /\bhosts\b|\bhost\(s\)/i;
+// #2779, #2780: package.json's description and keywords are what npm shows and ranks by, and are
+// held to more than the rules above: no "only" as an exclusivity claim ("read-only" says what the
+// tools do), and nothing comparative or superlative (#2304, #2706: no live, no only, nothing
+// comparative), the claim a "rank higher" push would reach for first.
+const ONLY = /(?<!read[- ])\bonly\b/i;
+const COMPARATIVE = /\b(?:best|better|top|fastest|faster|largest|leading|most|more|unmatched|unrivall?ed|ultimate|premier|number[- ]one)\b|#1\b/i;
+const packageWordingProblems = (where, text) => {
+  const out = [];
+  for (const [re, why] of [
+    [REMOVED_CLAIMS, "a barred claim (REMOVED_CLAIMS)"],
+    [HOST_UNIT, "a service count called hosts"],
+    [ONLY, '"only"'],
+    [COMPARATIVE, "a comparative or superlative claim"],
+  ]) {
+    const m = text.match(re);
+    if (m) out.push(`${where}: ${why}: "${m[0]}" in: ${text.slice(Math.max(0, m.index - 60), m.index + 60)}`);
+  }
+  return out;
+};
+// Keywords are slugs, so each is read as written and with its hyphens as spaces: "no-other-source"
+// is "no other source", and "real-time" is caught as written.
+const keywordsText = (ks) => `${ks.join(" ")} / ${ks.join(" ").replace(/-/g, " ")}`;
+// #2779: the registry's cap on a package's description (registry.npmjs.org serves no more).
+const NPM_DESCRIPTION_CAP = 255;
+// A text of whole sentences: each starts with a capital letter or a digit and the text ends on
+// ".", "!" or "?" (a closing parenthesis or quote may follow). Returns how many sentences it holds.
+function assertWholeSentences(where, t) {
+  assert.match(t, /[.!?]["')]?$/, `${where} does not end on a whole sentence: "…${t.slice(-40)}"`);
+  assert.match(t, /^\S/, `${where} starts with whitespace`);
+  const parts = t.split(/(?<=[.!?])\s+/);
+  for (const s of parts) assert.match(s, /^[A-Z0-9]/, `${where} has a sentence that does not start with a capital letter or a digit: "${s.slice(0, 40)}"`);
+  return parts.length;
+}
 
 // #2719: the vendor-advisory routes (core-backend vendoradv handler.go), shaped as the API sends
 // them: the list with search_applied, the per-CVE rows with our_first_seen_at.
@@ -1323,6 +1356,60 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.doesNotMatch(readPkgFile("README.md"), REMOVED_CLAIMS);
       assert.doesNotMatch(PKG.description, REMOVED_CLAIMS);
       assert.doesNotMatch(JSON.parse(readPkgFile("server.json")).description, REMOVED_CLAIMS);
+    });
+
+    // #2779: npm's registry serves a package's description cut to 255 characters (2.6.2's 443 went
+    // out as "…vendor security advisories, and a ", with neither the exposure footprint nor
+    // Shodan's attribution; of 750 npm search results none was longer and 45 were exactly 255). So
+    // the description is held to what npm serves: at most 255 characters, and 255 UTF-8 bytes in
+    // case the cap counts bytes (© is two), ending on a whole sentence, carrying the attribution
+    // and the ownership sentence whole, in our wording, and naming what server.json's description
+    // names.
+    it("#2779: package.json's description fits npm's 255-character cap, whole sentences, attribution and ownership intact", () => {
+      const d = PKG.description;
+      assert.ok(d.length <= NPM_DESCRIPTION_CAP, `package.json description is ${d.length} characters; npm serves ${NPM_DESCRIPTION_CAP}: "${d.slice(0, NPM_DESCRIPTION_CAP)}"`);
+      assert.ok(Buffer.byteLength(d, "utf8") <= NPM_DESCRIPTION_CAP, `package.json description is ${Buffer.byteLength(d, "utf8")} UTF-8 bytes`);
+      assertWholeSentences("package.json description", d);
+      // What npm serves is what is checked: the same claims, read on the served cut.
+      const served = d.slice(0, NPM_DESCRIPTION_CAP);
+      assert.match(served, /derived from Shodan data/);
+      assert.ok(served.includes(SHODAN_OWNERSHIP), served);
+      assert.deepEqual(packageWordingProblems("package.json description", served), []);
+      // The same claims as server.json's one-liner, which the registry and the listings carry.
+      const sj = JSON.parse(readPkgFile("server.json")).description;
+      for (const term of ["CVE", "KEV", "EPSS", "SBOM", "advisor", "per-CVE exposure", "Shodan data", "(© Shodan)", "Keyless"]) {
+        assert.ok(sj.includes(term), `server.json's description no longer names ${term}: re-aim this check`);
+        assert.ok(served.includes(term), `package.json's description does not name ${term}, which server.json's does: ${served}`);
+      }
+    });
+    it("#2779 control: 2.6.2's 443-character description, and a cut one, fail the checks", () => {
+      const v262 =
+        "MCP server for CVE and vulnerability lookups: CVE records with EchelonGraph multi-source scores, CISA KEV, EPSS history, CWE weaknesses, public exploits, version and SBOM checks against the vulnerability advisory corpus, vendor security advisories, and a per-CVE internet-exposure footprint derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan). Free and keyless, for Claude, Cursor and any MCP client.";
+      assert.equal(v262.length, 443);
+      assert.ok(v262.length > NPM_DESCRIPTION_CAP);
+      const cut = v262.slice(0, NPM_DESCRIPTION_CAP);
+      assert.ok(cut.endsWith("vendor security advisories, and a "), cut);
+      assert.throws(() => assertWholeSentences("cut", cut), /does not end on a whole sentence/);
+      assert.doesNotMatch(cut, /derived from Shodan data/);
+      assert.throws(() => assertWholeSentences("mid-word", "MCP server for CVE lookups. Shodan data is owned by Sho"), /does not end on a whole sentence/);
+      assert.throws(() => assertWholeSentences("lower-case start", "MCP server. and a per-CVE footprint."), /a sentence that does not start/);
+      assert.equal(assertWholeSentences("control", PKG.description) >= 2, true);
+    });
+
+    // #2780: package.json's keywords are shown on the npm page and weighted by npm's text-only
+    // ranking (#2703), the obvious lever for a "rank higher" push. Through 2.6.3 no wording guard
+    // read them: "real-time", "live-exploits" and "the-only-free-cve-api" passed the suite. They are
+    // package-authored text, held to the description's rules.
+    it("#2780: package.json's keywords make no removed claim, call no count hosts, and claim nothing exclusive or comparative", () => {
+      assert.ok(Array.isArray(PKG.keywords) && PKG.keywords.length >= 10, `package.json has ${PKG.keywords?.length} keywords: re-aim this check`);
+      for (const k of PKG.keywords) assert.match(k, /^[a-z0-9][a-z0-9-]*$/, `not a plain npm keyword: ${k}`);
+      assert.deepEqual(packageWordingProblems("package.json keywords", keywordsText(PKG.keywords)), []);
+    });
+    it("#2780 control: the keyword check catches #2780's three keywords and a comparative one, and passes the current ones", () => {
+      for (const bad of ["real-time", "realtime", "live-exploits", "the-only-free-cve-api", "best-cve-api", "fastest-cve-lookup", "exposed-hosts", "no-other-source", "unique-exposure-data"]) {
+        assert.notDeepEqual(packageWordingProblems("control", keywordsText([...PKG.keywords, bad])), [], `the keyword ${bad} passes`);
+      }
+      assert.deepEqual(packageWordingProblems("control", keywordsText(["read-only", ...PKG.keywords])), []);
     });
     it("cve_exposure's description names the method and attributes Shodan", () => {
       const d = tools.find((t) => t.name === "cve_exposure").description;
@@ -3757,6 +3844,116 @@ describe(`against a stub API [${ERA}]`, () => {
       ]) {
         assert.throws(() => assertPollerLabelled(what, mutant, counters), /the note does not say/, what);
       }
+    });
+  });
+
+  // #2771: 2.6.2 typed the poller block's eight fields, and checked() turns any mismatch into a
+  // failed result, so one counter core-backend sent in another JSON type (cve/poller.go Stats is a
+  // map[string]interface{}, so the change compiles) failed cve_summary outright and withheld
+  // summary.total from every client. The block is one instance's diagnostics: a field of another
+  // type is left out of data and named in the note, a poller that is neither a JSON object nor null
+  // is left out whole, and summary is relayed as sent. Both polarities: production's block is relayed whole
+  // with no such sentence, and each variant the #2771 probe served (interval as a Go Duration,
+  // last_poll_at as unix seconds, cves_ingested as a string, poller as an array) still answers
+  // measured with summary.total.
+  describe("#2771: a poller field of another JSON type is left out and named, never a failed cve_summary", () => {
+    const OK = BODIES["/api/v1/public/cves/summary"].ok;
+    const LEFT_OUT = /Left out of the data above because the answer sent|poller was left out of the data above/;
+    const RELAYED = "The rest of the answer, summary with it, is relayed as sent.";
+    // A measured success that relays summary whole, valid against the tool's own outputSchema.
+    async function measuredWith(body) {
+      const res = await cveSummaryWith(body);
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "measured", brief(res));
+      assert.deepEqual(sc.data.summary, OK.summary, "summary was not relayed as sent");
+      assert.equal(JSON.parse(textBlocks(res)[0]).summary.total, OK.summary.total);
+      const { tools } = await client.listTools();
+      assertValid("cve_summary", tools.find((t) => t.name === "cve_summary").outputSchema, sc);
+      return { res, sc, n: noteOf(res) };
+    }
+    it("production's poller block is relayed whole, with no left-out sentence", async () => {
+      const { sc, n } = await measuredWith(OK);
+      assert.deepEqual(sc.data.poller, OK.poller);
+      assert.doesNotMatch(n, LEFT_OUT, n);
+      assert.ok(!n.includes(RELAYED), n);
+    });
+    it("null fields, an empty or null block and keys this version does not know are kept as sent, with no left-out sentence", async () => {
+      for (const poller of [
+        { ...OK.poller, poll_errors: null, interval: null },
+        { ...OK.poller, poll_lag_ms: "12", next_poll_at: 5 },
+        {},
+        null,
+      ]) {
+        const { sc, n } = await measuredWith({ ...OK, poller });
+        assert.deepEqual(sc.data.poller, poller);
+        assert.doesNotMatch(n, LEFT_OUT, n);
+      }
+    });
+    for (const [what, field, value, sent, reads] of [
+      ["interval as a Go time.Duration (1200000000000)", "interval", 1_200_000_000_000, "a number", "a string"],
+      ["last_poll_at as unix seconds", "last_poll_at", 1_759_225_610, "a number", "a string"],
+      ["cves_ingested as a string", "cves_ingested", "7195", "a string", "a number"],
+      ["poll_errors as an object", "poll_errors", { total: 0 }, "an object", "a number"],
+      ["poll_count as a boolean", "poll_count", true, "a boolean", "a number"],
+    ]) {
+      it(`${what}: measured with summary.total, the field left out and named, every other field relayed`, async () => {
+        const { sc, n } = await measuredWith({ ...OK, poller: { ...OK.poller, [field]: value } });
+        const { [field]: _gone, ...rest } = OK.poller;
+        assert.deepEqual(sc.data.poller, rest);
+        assert.ok(
+          n.includes(` Left out of the data above because the answer sent it in a JSON type other than the one this tool reads: poller.${field} (${sent}, where this tool reads ${reads}). ${RELAYED}`),
+          n,
+        );
+        assert.ok(n.startsWith(`cve_summary OK: EchelonGraph answered HTTP 200 from ${stub.base}. The feed holds ${OK.summary.total} active CVEs`), n);
+        // The rest of the block is still labelled as the one instance's.
+        assert.ok(n.includes("poller is one API instance's NVD poller"), n);
+      });
+    }
+    it("two fields of another type: both left out and named, in one sentence", async () => {
+      const { sc, n } = await measuredWith({ ...OK, poller: { ...OK.poller, interval: 1_200_000_000_000, cves_ingested: "7195" } });
+      assert.equal(sc.data.poller.interval, undefined);
+      assert.equal(sc.data.poller.cves_ingested, undefined);
+      assert.equal(sc.data.poller.poll_count, OK.poller.poll_count);
+      assert.ok(
+        n.includes(
+          ` Left out of the data above because the answer sent them in a JSON type other than the one this tool reads: poller.cves_ingested (a string, where this tool reads a number) and poller.interval (a number, where this tool reads a string). ${RELAYED}`,
+        ),
+        n,
+      );
+    });
+    for (const [what, poller, sent] of [
+      ["an array", [OK.poller], "an array"],
+      ["a string", "20m0s", "a string"],
+      ["a number", 4, "a number"],
+    ]) {
+      it(`poller as ${what}: measured with summary.total, the block left out whole and named`, async () => {
+        const { sc, n } = await measuredWith({ ...OK, poller });
+        assert.equal(Object.hasOwn(sc.data, "poller"), false, JSON.stringify(sc.data.poller));
+        assert.ok(n.endsWith(` poller was left out of the data above because the answer sent it as ${sent}, where this tool reads an object. ${RELAYED}`), n);
+        assert.doesNotMatch(n, /poller is one API instance's NVD poller/, "a block left out is labelled as if relayed");
+      });
+    }
+    it("the description says a poller field of another JSON type is left out and named, and summary is relayed either way", async () => {
+      const { tools } = await client.listTools();
+      const d = tools.find((x) => x.name === "cve_summary").description;
+      // A poller of JSON null is kept as sent (above), so the sentence leaves null out of what is
+      // dropped whole.
+      const sentence =
+        "A poller field the answer sends in a JSON type other than the one described here is left out of data and named in the note, and a poller that is neither a JSON object nor null is left out whole: summary is relayed either way.";
+      assert.ok(d.includes(sentence), d);
+      // #2771's review: the envelope sentence, about 400 characters on, said data equals the API's
+      // JSON outright (the shared FEED_ENVELOPE), which the left-out path makes false.
+      const envelope = "with data equal to the API's JSON less each poller field (or the whole poller) the note names as left out;";
+      assert.ok(d.includes(envelope), d);
+      assert.ok(!d.includes("with data equal to the API's JSON;"), `cve_summary's description still says data is the API's JSON outright: ${d}`);
+      // #2610's six words stay out of what the poller sentences say (the site's control).
+      for (const s of [sentence, envelope]) assert.doesNotMatch(s, /\b(any|not|rating|scored|source|yet)\b/i, s);
+    });
+    it("the description's envelope matches what the left-out path relays: data is the API's JSON less what the note names", async () => {
+      const { sc, n } = await measuredWith({ ...OK, poller: { ...OK.poller, interval: 1_200_000_000_000 } });
+      const { interval: _gone, ...rest } = OK.poller;
+      assert.deepEqual(sc.data, { ...OK, poller: rest });
+      assert.ok(n.includes("poller.interval (a number, where this tool reads a string)"), n);
     });
   });
 

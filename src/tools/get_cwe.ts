@@ -31,7 +31,7 @@ import {
   succeeded,
   type ToolResult,
 } from "../index.js";
-import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
 
 const TOOL = "get_cwe";
 const CWE_ARG = /^(?:CWE-)?0*(\d{1,6})$/i;
@@ -48,7 +48,7 @@ export const GET_CWE_DESCRIPTION = `One CWE (weakness class) and the CVEs classi
 const GET_CWE_TEXT: TextCut = {
   rows: "cves",
   levels: [{ keep: ["cve_id", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "score_assessed", "score_unassessed_reason", "kev_listed", "published", "description"], clip: 120 }],
-  whole: "get_cve returns any one of these CVEs' records whole.",
+  whole: `${GET_CVE_WHOLE}.`,
 };
 
 function schemas() {

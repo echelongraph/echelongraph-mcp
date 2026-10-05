@@ -27,19 +27,23 @@
 // Structured results (#2311, #2313). Every result, success or failure, also carries
 // structuredContent: one envelope that says how the answer was measured — state (measured,
 // not_assessed, failed, invalid_input), measured_at, method, coverage, freshness and notes —
-// with, on a success, `data` equal to what content[0] carries, and on a failure an `error`.
-// Each tool advertises the envelope as its outputSchema.
+// with, on a success, `data`, the answer whole, and on a failure an `error`. content[0] carries
+// `data` as JSON up to 30,000 characters, and past them a cut of it that the note names (TEXT
+// CUT, #2783), so past them content[0] is not equal to `data` (#2802). Each tool advertises the
+// envelope as its outputSchema.
 //
 // The envelope in the text (#2440, #2467). Many clients pass only `content` to the model, so the
 // last text block of every result is structuredContent serialized as JSON, less what an earlier
-// text block already carries verbatim: `data` (content[0] on a success), the note's sentences
-// (the block just before, which structuredContent's notes end with), and method where that note
-// quotes it. The rest — state, measured_at, coverage, freshness, the envelope's own notes and,
-// on a failure, error — is copied key for key, so the text blocks together are the whole of
-// structuredContent and cannot disagree with it. The MCP spec (2025-06-18, Tools, Structured
-// Content) asks a tool that returns structured content to return it serialized in a text block
-// too; the JSON block stays first and the note second, as in 1.x, so a client that parses
-// content[0] is unaffected.
+// text block already carries: `data` (content[0] on a success, whole or cut as above), the note's
+// sentences (the block just before, which structuredContent's notes end with), and method where
+// that note quotes it. The rest — state, measured_at, coverage, freshness, the envelope's own notes
+// and, on a failure, error — is copied key for key, so the text blocks together are the whole of
+// structuredContent, but for what a TEXT CUT leaves out of `data`, and cannot disagree with it. The
+// MCP spec (2025-06-18, Tools, Structured Content) asks a tool that returns structured content to
+// return it serialized in a text block too; the JSON block stays first and the note second, as in
+// 1.x, so a client that parses content[0] still parses the answer's JSON, which past 30,000
+// characters is a cut of it (fields, entries and string ends left out, no value changed) and no
+// longer the whole answer: structuredContent.data is (#2802).
 //
 // Protocol eras (#2311). serveStdio answers both: a 2026-07-28 client's server/discover and
 // per-request `_meta` envelope, and a 2025-era client's `initialize` handshake. The first
@@ -54,11 +58,11 @@ import { registerCheckAffected } from "./tools/check_affected.js";
 import { registerCheckSbom } from "./tools/check_sbom.js";
 import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerGetCwe } from "./tools/get_cwe.js";
-import { isHttpEntrypoint, upstreamHeaders, upstreamUserAgent } from "./runtime.js";
+import { holdRequest, isHttpEntrypoint, requestSignal, upstreamHeaders, upstreamUserAgent } from "./runtime.js";
 import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
-import { dataText, TEXT_BUDGET_DESCRIPTION, type TextCut } from "./textBudget.js";
+import { dataText, GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type TextCut } from "./textBudget.js";
 
 // The package actually running, read from the package.json that ships beside dist/. The MCP
 // handshake (serverInfo) and the User-Agent both carry its name and version, so the API's
@@ -188,15 +192,30 @@ function retryAfterSeconds(v: string | null): number | undefined {
 // the URL); the User-Agent and Accept are this server's and are not overridden. init.timeoutMs
 // can only shorten the request's timeout below TIMEOUT_MS, never lengthen it: check_sbom passes
 // what is left of its call's budget, so a slow batch cannot carry the call past it (#2756).
-export async function api(path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number }): Promise<ApiResult> {
+// The request is cancelled when init.signal aborts (check_sbom's call was cancelled) or, on the
+// hosted endpoint, when the client it answers has gone (runtime.ts requestSignal, #2775): a
+// network failure saying so, which nobody reads, since the SDK sends nothing for a cancelled call.
+export async function api(
+  path: string,
+  init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal },
+): Promise<ApiResult> {
   const limitMs = init?.timeoutMs === undefined ? TIMEOUT_MS : Math.max(0, Math.min(TIMEOUT_MS, Math.floor(init.timeoutMs)));
+  const m = init?.method && init.method.toUpperCase() !== "GET" ? { method: init.method.toUpperCase() } : {};
+  const callers = [init?.signal, requestSignal()].filter((s): s is AbortSignal => s !== undefined);
+  const cancelledFailure = (): Failure => ({ ok: false, kind: "network", path, ...m, detail: "cancelled: the call was abandoned before the API answered" });
+  if (callers.some((s) => s.aborted)) return cancelledFailure();
   const ctrl = new AbortController();
   let timedOut = false;
+  let cancelled = false;
   const timer = setTimeout(() => {
     timedOut = true;
     ctrl.abort();
   }, limitMs);
-  const m = init?.method && init.method.toUpperCase() !== "GET" ? { method: init.method.toUpperCase() } : {};
+  const cancel = (): void => {
+    cancelled = true;
+    ctrl.abort();
+  };
+  for (const s of callers) s.addEventListener("abort", cancel, { once: true });
   const own = limitMs === TIMEOUT_MS ? {} : { timeoutMs: limitMs };
   const timeout = (): Failure => ({ ok: false, kind: "timeout", path, ...m, ...own, detail: `no response within ${limitMs} ms` });
   try {
@@ -212,13 +231,13 @@ export async function api(path: string, init?: { headers?: Record<string, string
         signal: ctrl.signal,
       });
     } catch (e) {
-      return timedOut ? timeout() : { ok: false, kind: "network", path, ...m, detail: describeError(e) };
+      return timedOut ? timeout() : cancelled ? cancelledFailure() : { ok: false, kind: "network", path, ...m, detail: describeError(e) };
     }
     let body: string;
     try {
       body = await res.text();
     } catch (e) {
-      return timedOut ? timeout() : { ok: false, kind: "network", path, ...m, detail: `reading the body failed: ${describeError(e)}` };
+      return timedOut ? timeout() : cancelled ? cancelledFailure() : { ok: false, kind: "network", path, ...m, detail: `reading the body failed: ${describeError(e)}` };
     }
     if (!res.ok) {
       const retryAfter = retryAfterSeconds(res.headers.get("retry-after"));
@@ -237,6 +256,7 @@ export async function api(path: string, init?: { headers?: Record<string, string
     return { ok: true, status: res.status, data };
   } finally {
     clearTimeout(timer);
+    for (const s of callers) s.removeEventListener("abort", cancel);
   }
 }
 
@@ -334,13 +354,15 @@ const REJECTED_INPUT =
 // earlier text block already carries verbatim (#2467). 2.1.0 sent the whole envelope without
 // `data`, so every note went out twice, once as prose and once as the notes array, and
 // cve_exposure's method a third time.
-//   data    left out: content[0] carries it verbatim.
+//   data    left out: content[0] carries it, verbatim up to DATA_TEXT_BUDGET and past it cut,
+//           with the note saying what the cut leaves out (TEXT CUT, #2783).
 //   notes   only the envelope's own sentences (`own`), which no text block says; the rest of
 //           structuredContent's notes are the sentences of `said`, the text block just before
 //           this one (the note, or a failure's message). Left out when there are none.
 //   method  left out when `said` quotes it verbatim (cve_exposure's note, "Method: …").
 // Every other key is copied as is, in structuredContent's order, so the text blocks together are
-// the whole of structuredContent and cannot disagree with it.
+// the whole of structuredContent, but for what a TEXT CUT leaves out of data, which the note names,
+// and cannot disagree with it (#2802).
 const envelopeText = (structured: Record<string, unknown>, said: string, own: readonly string[]): Text => {
   const envelope: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(structured)) {
@@ -636,13 +658,64 @@ function summaryPollerNote(d: object): string {
   return ` poller is one API instance's NVD poller, counted in that instance's memory since it last started and zeroed on every restart: report its counters${counters} as that instance's, never as the feed's size, intake or reliability, and poller.last_poll_at as that instance's last poll, never as the feed's freshness.`;
 }
 
+// ── poller's JSON types, never a reason to withhold summary (#2771) ──
+//
+// 2.6.2 typed poller's eight fields in the outputSchema (CVE_SUMMARY_OUTPUT), and every success
+// goes through checked(), so one counter core-backend sent in another JSON type failed the whole
+// call and withheld summary.total: cve/poller.go Stats returns a map[string]interface{}, so
+// emitting interval as a time.Duration (1200000000000) instead of interval.String() compiles.
+// The block is one instance's diagnostics, never the feed's, so it degrades on its own: a field of
+// another type is left out of data and named in the note, a poller that is neither a JSON object
+// nor null (an array, a string) is left out whole and named, and summary and the rest of the
+// answer are relayed as sent. What the schema allows is kept as sent: null for a field (opt), null
+// or an empty object for the block, and keys this version does not know. Installed 2.6.2 and
+// 2.6.3 copies still fail on such a change, so core-backend's cve/poller_stats_wire_test.go pins
+// Stats()'s eight keys to these JSON types.
+const SUMMARY_POLLER_KINDS = {
+  cves_ingested: "number",
+  cves_skipped: "number",
+  http_retries: "number",
+  interval: "string",
+  last_poll_at: "string",
+  last_poll_dur_ms: "number",
+  poll_count: "number",
+  poll_errors: "number",
+} as const;
+type PollerField = keyof typeof SUMMARY_POLLER_KINDS;
+const pollerField = (k: PollerField, description: string) => opt(SUMMARY_POLLER_KINDS[k] === "number" ? z.number() : z.string()).describe(description);
+const jsonKind = (v: unknown): string =>
+  v === null ? "null" : Array.isArray(v) ? "an array" : typeof v === "object" ? "an object" : typeof v === "number" ? "a number" : typeof v === "boolean" ? "a boolean" : typeof v === "string" ? "a string" : typeof v;
+function summaryPollerShaped(d: object): { data: object; note: string } {
+  const poller = field(d, "poller");
+  if (poller === undefined || poller === null) return { data: d, note: "" };
+  const relayed = " The rest of the answer, summary with it, is relayed as sent.";
+  if (!isPlainObject(poller)) {
+    const { poller: _dropped, ...rest } = d as Record<string, unknown>;
+    return { data: rest, note: ` poller was left out of the data above because the answer sent it as ${jsonKind(poller)}, where this tool reads an object.${relayed}` };
+  }
+  const unusable = (Object.keys(SUMMARY_POLLER_KINDS) as PollerField[]).filter((k) => {
+    const v = poller[k];
+    if (v === undefined || v === null) return false;
+    return SUMMARY_POLLER_KINDS[k] === "number" ? !isCount(v) : typeof v !== "string";
+  });
+  if (unusable.length === 0) return { data: d, note: "" };
+  const kept = Object.fromEntries(Object.entries(poller).filter(([k]) => !(unusable as string[]).includes(k)));
+  const named = unusable.map((k) => `poller.${k} (${jsonKind(poller[k])}, where this tool reads ${SUMMARY_POLLER_KINDS[k] === "number" ? "a number" : "a string"})`);
+  return {
+    data: { ...d, poller: kept },
+    note: ` Left out of the data above because the answer sent ${unusable.length === 1 ? "it" : "them"} in a JSON type other than the one this tool reads: ${listed(named)}.${relayed}`,
+  };
+}
+
 async function cveSummary(): Promise<ToolResult> {
   const tool = "cve_summary";
   try {
     const r = await api("/api/v1/public/cves/summary");
     if (!r.ok) return failed(tool, r);
     const head = okHead(tool, r.status);
-    const updated = strAt(r.data, "summary", "last_updated");
+    // #2771: a poller field of another JSON type is left out, never a failure of the call.
+    const { data, note: pollerShape } = summaryPollerShaped(r.data);
+    const updated = strAt(data, "summary", "last_updated");
     const env = {
       state: "measured" as const,
       measured_at: instantOrNull(updated),
@@ -656,17 +729,17 @@ async function cveSummary(): Promise<ToolResult> {
         NO_FEED_FRESHNESS,
       ],
     };
-    const total = numAt(r.data, "summary", "total");
-    // What summary.none (#2610), the NVD histogram and summary.rejected (#2641) count, and what
-    // the poller block is (#2647).
-    const labels = `${summaryNoneNote(r.data)}${summaryNVDNote(r.data)}${summaryRejectedNote(r.data)}${summaryPollerNote(r.data)}`;
-    if (total === undefined) return succeeded(r.data, `${head}${labels}`, env);
+    const total = numAt(data, "summary", "total");
+    // What summary.none (#2610), the NVD histogram and summary.rejected (#2641) count, what the
+    // poller block is (#2647), and what of it was left out (#2771).
+    const labels = `${summaryNoneNote(data)}${summaryNVDNote(data)}${summaryRejectedNote(data)}${summaryPollerNote(data)}${pollerShape}`;
+    if (total === undefined) return succeeded(data, `${head}${labels}`, env);
     if (total === 0) {
-      return succeeded(r.data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.${labels}`, env);
+      return succeeded(data, `${head} The feed reports 0 active CVEs — a measured empty result (we looked and found nothing), not a lookup failure.${labels}`, env);
     }
     // A stamp that is not a real instant stays in the JSON and is not repeated as prose.
     const stamp = realInstant(updated) ? ` (last updated ${updated})` : "";
-    return succeeded(r.data, `${head} The feed holds ${total} active CVEs${stamp}.${labels}`, env);
+    return succeeded(data, `${head} The feed holds ${total} active CVEs${stamp}.${labels}`, env);
   } catch (e) {
     return crashed(tool, e);
   }
@@ -683,7 +756,9 @@ type SearchArgs = { search?: string; severity?: "CRITICAL" | "HIGH" | "MEDIUM" |
 // 133,300 characters of text. Past DATA_TEXT_BUDGET each row in the first text block keeps the
 // fields the description promises and a few more a triage reads, the description cut to 200
 // characters; then, for a page of 50, the fields the description promises with the description cut
-// to 100. structuredContent.data keeps every field of every row; get_cve returns one record whole.
+// to 100. structuredContent.data keeps every field of every row; get_cve returns one record, whole in
+// its structuredContent.data and in its own first text block with every field (its lists cut past
+// the budget, #2802).
 const SEARCH_CVES_TEXT: TextCut = {
   rows: "cves",
   levels: [
@@ -693,7 +768,7 @@ const SEARCH_CVES_TEXT: TextCut = {
     },
     { keep: ["cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "published"], clip: 100 },
   ],
-  whole: "get_cve returns any one of these CVEs' records whole.",
+  whole: `${GET_CVE_WHOLE}.`,
   page: (shown, _rows, d) =>
     `To read the rows left out in the text, call search_cves again with the same arguments and offset ${(numAt(d, "offset") ?? 0) + shown}; a page of ${shown} rows or fewer like these fits the text without leaving rows out.`,
 };
@@ -2124,9 +2199,10 @@ const CVERecord = z.looseObject({
 
 // #2647: what cve_summary says the poller block is (summaryPollerNote). Like the #2641 strings
 // beside SUMMARY_NONE_DESCRIPTION, it uses none of #2610's six words ("any", "not", "rating",
-// "scored", "source", "yet"). Declared here, before the outputSchema that describes poller with it.
+// "scored", "source", "yet"), #2771's sentence on a field of another JSON type among them. Declared
+// here, before the outputSchema that describes poller with it.
 const SUMMARY_POLLER_DESCRIPTION =
-  "poller holds the in-memory counters of the NVD poller of the one API instance that answered (cves_ingested, cves_skipped, http_retries, poll_count, poll_errors, last_poll_at, last_poll_dur_ms, interval), counted since that instance last started and zeroed on every restart: they describe that instance, never the feed's size, intake, reliability or freshness. Whenever the answer carries poller the note says so.";
+  "poller holds the in-memory counters of the NVD poller of the one API instance that answered (cves_ingested, cves_skipped, http_retries, poll_count, poll_errors, last_poll_at, last_poll_dur_ms, interval), counted since that instance last started and zeroed on every restart: they describe that instance, never the feed's size, intake, reliability or freshness. Whenever the answer carries poller the note says so. A poller field the answer sends in a JSON type other than the one described here is left out of data and named in the note, and a poller that is neither a JSON object nor null is left out whole: summary is relayed either way.";
 
 // One of the NVD histogram's four labelled buckets (#2641).
 const nvdBand = (label: string) =>
@@ -2157,16 +2233,18 @@ const CVE_SUMMARY_OUTPUT = envelopeSchema({
       })
       .optional(),
     // #2647: one instance's counters, never the feed's (see summaryPollerNote).
+    // #2771: each field's JSON type is SUMMARY_POLLER_KINDS', which summaryPollerShaped enforces
+    // before this check, so a field of another type is left out, never a failed call.
     poller: z
       .looseObject({
-        cves_ingested: opt(z.number()).describe("CVE records this instance's NVD poller wrote since the instance last started: never the feed's size or intake."),
-        cves_skipped: opt(z.number()).describe("CVE records this instance's NVD poller skipped since the instance last started."),
-        http_retries: opt(z.number()).describe("HTTP retries this instance's NVD poller made since the instance last started."),
-        interval: opt(z.string()).describe("How often this instance's NVD poller polls."),
-        last_poll_at: opt(z.string()).describe("When this instance's NVD poller last polled: never the feed's freshness."),
-        last_poll_dur_ms: opt(z.number()).describe("How long that poll took, in milliseconds."),
-        poll_count: opt(z.number()).describe("Polls this instance's NVD poller made since the instance last started."),
-        poll_errors: opt(z.number()).describe("Polls of this instance's NVD poller that failed since the instance last started: never the feed's reliability."),
+        cves_ingested: pollerField("cves_ingested", "CVE records this instance's NVD poller wrote since the instance last started: never the feed's size or intake."),
+        cves_skipped: pollerField("cves_skipped", "CVE records this instance's NVD poller skipped since the instance last started."),
+        http_retries: pollerField("http_retries", "HTTP retries this instance's NVD poller made since the instance last started."),
+        interval: pollerField("interval", "How often this instance's NVD poller polls."),
+        last_poll_at: pollerField("last_poll_at", "When this instance's NVD poller last polled: never the feed's freshness."),
+        last_poll_dur_ms: pollerField("last_poll_dur_ms", "How long that poll took, in milliseconds."),
+        poll_count: pollerField("poll_count", "Polls this instance's NVD poller made since the instance last started."),
+        poll_errors: pollerField("poll_errors", "Polls of this instance's NVD poller that failed since the instance last started: never the feed's reliability."),
       })
       .nullable()
       .optional()
@@ -2353,6 +2431,11 @@ const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
 // What each description says about its structured result, naming only fields its schema holds.
 const FEED_ENVELOPE =
   "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the feed serves no poll-completion time) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
+// #2771: cve_summary's own, since its data is the API's JSON less each poller field (or the whole
+// poller) summaryPollerShaped leaves out. Like SUMMARY_POLLER_DESCRIPTION it uses none of #2610's
+// six words ("any", "not", "rating", "scored", "source", "yet").
+const CVE_SUMMARY_ENVELOPE =
+  "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the feed serves no poll-completion time) and notes, with data equal to the API's JSON less each poller field (or the whole poller) the note names as left out; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
 // #2610: what cve_summary says summary.none is (summaryNoneNote), one constant string for the same
 // reason as SCORE_ASSESSED_DESCRIPTION below.
 const SUMMARY_NONE_DESCRIPTION =
@@ -2384,7 +2467,7 @@ export function createServer(): McpServer {
     "cve_summary",
     {
       title: "CVE feed summary",
-      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} ${SUMMARY_POLLER_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION}`,
+      description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} ${SUMMARY_POLLER_DESCRIPTION} The feed is polled from its sources on a schedule, so this is the state as of that update. ${CVE_SUMMARY_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION}`,
       outputSchema: CVE_SUMMARY_OUTPUT,
       annotations: ANNOTATIONS,
     },
@@ -2415,7 +2498,7 @@ export function createServer(): McpServer {
     "get_cve",
     {
       title: "CVE detail",
-      description: `Full record for one CVE: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
+      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,
@@ -2451,8 +2534,10 @@ export function createServer(): McpServer {
   // #2716: its logic, schemas and description live in tools/check_affected.ts.
   registerCheckAffected(server, { api, succeeded, failed, badInput, crashed, checked, okHead, envelopeSchema, annotations: ANNOTATIONS });
 
-  // #2721: tools/check_sbom.ts, on this file's api(), envelope and failure contract.
-  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS });
+  // #2721: tools/check_sbom.ts, on this file's api(), envelope and failure contract. holdRequest
+  // (#2775): on the hosted endpoint, a call keeps its request's admission and large-body slot
+  // until it has stopped, not only until its answer, or its client, has gone.
+  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest });
 
   registerCveIntel(server);
   registerGetCwe(server);
@@ -2463,7 +2548,7 @@ export function createServer(): McpServer {
   // #2722: prompts and resources, in prompts.ts and resources.ts. Both lists are fixed per
   // connection, so listChanged is false above.
   registerPrompts(server, { cveId: CVE_ID });
-  registerResources(server, { api, cveId: CVE_ID, shownBase: SHOWN_BASE, getCve: async (id) => checked("get_cve", GET_CVE_OUTPUT, await getCVE(id)) });
+  registerResources(server, { api, cveId: CVE_ID, shownBase: SHOWN_BASE, sentences, getCve: async (id) => checked("get_cve", GET_CVE_OUTPUT, await getCVE(id)) });
 
   return server;
 }

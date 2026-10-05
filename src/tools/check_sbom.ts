@@ -29,13 +29,23 @@ type ApiOk = { ok: true; status: number; data: object };
 type FailureLike = { ok: false; kind: string; status?: number; retryAfter?: number };
 export type CheckSbomDeps<F extends FailureLike> = {
   // init.timeoutMs: what is left of the call's budget, the most this request may take (#2756).
-  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number }) => Promise<ApiOk | F>;
+  // init.signal: the call's own (below); api() answers a failure at once when it has aborted.
+  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal }) => Promise<ApiOk | F>;
   failed: (tool: string, f: F) => ToolResult;
   // index.ts's one sentence for a failure: quoted when a batch after the first fails.
   describeFailure: (f: F) => string;
-  // For a caller that must not wait in real time; production uses the clock and setTimeout.
-  sleep?: (ms: number) => Promise<void>;
+  // For a caller that must not wait in real time; production uses the clock and setTimeout. A
+  // wait ends early when `signal` aborts.
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
+  // #2775: the call's cancellation, the handler's ctx.mcpReq.signal: the SDK aborts it when the
+  // client sends notifications/cancelled, or when the hosted request's client has gone (its
+  // transport closes). Each batch request carries it, a Retry-After wait ends on it, and once it
+  // has aborted no further batch is sent: the SDK sends nothing for a cancelled call.
+  signal?: AbortSignal;
+  // #2775: on the hosted endpoint, runtime.ts holdRequest: the request's admission and large-body
+  // slot are held until the call has stopped. Absent, the call runs unheld.
+  hold?: <T>(p: Promise<T>) => Promise<T>;
   badInput: (tool: string, why: string) => ToolResult;
   crashed: (tool: string, e: unknown) => ToolResult;
   checked: (tool: string, schema: z.ZodType, r: ToolResult) => ToolResult;
@@ -92,6 +102,13 @@ const NOTE_AFFECTED_MAX = 25;
 const NOTE_CVES_MAX = 5;
 // CycloneDX nests components; this bounds the walk.
 const MAX_DEPTH = 32;
+// The order in which extract() reads and counts the distinct purls (#2799 review): purls as listed;
+// a CycloneDX document's components depth first, each one's nested components right after it
+// (fromCycloneDX); an SPDX document's packages as listed; each purl trimmed and kept at its first
+// place (dedupe). The note says it beside the position from which the purls not sent run, so a
+// second call can rebuild them from its own input whether or not the text cuts not_sent_purls.
+const READ_ORDER =
+  "counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place)";
 
 const METHOD =
   "EchelonGraph's registry advisory matcher (POST /api/v1/public/cves/match/batch): each component's purl is mapped to its OSV ecosystem, package name and version, and matched against the affected version ranges EchelonGraph holds from OSV.dev advisory records, the same matcher GET /api/v1/public/cves/match uses when given an ecosystem. No CPE matching, no score, no ranking.";
@@ -127,7 +144,8 @@ export const CHECK_SBOM_DESCRIPTION =
 // fit with that list whole, the text keeps its first 10 and the note says which they are: the
 // input's distinct purls from position `sent` + 1 on, in input order, which is how check_sbom read
 // them (x.purls.slice(answers.length * MAX_COMPONENTS)), so a second call can send them without
-// reading the list.
+// reading the list. noteFor gives that order (READ_ORDER) beside the position, so this sentence
+// points to it.
 export function sbomText(sent: number): TextCut {
   const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed"];
   const row = ["index", "purl", "ecosystem", "package", "version", "verdict", "assessed", "not_assessed_reason", "count", "not_affected_count", "undetermined_count", "cve_ids"];
@@ -143,11 +161,14 @@ export function sbomText(sent: number): TextCut {
         list: "not_sent_purls",
         cap: 10,
         said: (_inText, total) =>
-          `The ${total} purls not sent are the input's distinct purls from position ${sent + 1} on, in the order this tool read them (the order of purls, or of the document's components, nested ones after their parent, each purl at its first place), so a second call can send them without reading the list.`,
+          `The ${total} purls not sent are the input's distinct purls from position ${sent + 1} on, counted in the order the note gives for them, so a second call can send them without reading the list.`,
       },
     ],
     leaveOutFirst: { field: "verdict", values: ["not_affected", "not_assessed"], why: "data.summary counts every verdict" },
-    whole: "check_affected, given a row's ecosystem, package and version, returns that component's matches whole, and cve_intel a CVE's affected packages and fixed versions.",
+    // check_affected cuts its text too past the budget (#2802): only its structuredContent.data is
+    // a component's matches whole.
+    whole:
+      "check_affected, given a row's ecosystem, package and version, returns that component's matches, whole in its structuredContent.data, and cve_intel a CVE's affected packages and fixed versions.",
     page: (shown) => `To read every row in the text, check ${shown} or fewer purls per call.`,
   };
 }
@@ -314,10 +335,18 @@ function noteFor(head: string, x: Extracted, d: object, g: Sending): { note: str
       `The API's component budget (${API_COMPONENTS_PER_MINUTE} components a minute) ran out ${g.waits === 1 ? "once" : `${g.waits} times`}: the tool waited ${Math.round(g.waited_ms / 1000)} s in all, as its Retry-After asked, and sent the batch again.`,
     );
   }
+  // #2799: the position, not only the list. Past DATA_TEXT_BUDGET the first text block keeps the
+  // first 10 of data.not_sent_purls (sbomText), so a model that reads the text alone cannot send
+  // "that list"; the purls not sent are always the input's distinct purls from position sent + 1 on
+  // (x.purls.slice(answers.length * MAX_COMPONENTS)), which it can rebuild from its own input, given
+  // the order they are counted in (READ_ORDER), which this sentence says whenever it gives the
+  // position, not only when the text cuts the list.
   const notSent = g.not_sent_purls.length;
   if (notSent > 0) {
+    const one = notSent === 1;
+    const where = one ? `it is the input's distinct purl at position ${g.sent + 1}` : `they are the input's distinct purls from position ${g.sent + 1} on`;
     out.push(
-      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${notSent === 1 ? "it is" : "they are"} not checked and not clean; data.not_sent_purls lists ${notSent === 1 ? "it" : "them"}: call check_sbom again with purls set to that list${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
+      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${one ? "it is" : "they are"} not checked and not clean; ${where}, ${READ_ORDER}, and data.not_sent_purls lists ${one ? "it" : "them"}: call check_sbom again with purls set to ${one ? "it" : "them"}${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
     );
   }
   out.push(`Of the ${components} components checked: ${affected} affected, ${notAffected} not affected, ${undetermined} undetermined, ${notAssessed} not assessed.`);
@@ -410,7 +439,17 @@ export function mergeAnswers(answers: object[]): Record<string, unknown> {
   return out;
 }
 
-const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const realSleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((r) => {
+    if (signal?.aborted) return r();
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      r();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
 export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a: { purls?: unknown; sbom?: unknown }): Promise<ToolResult> {
   const tool = CHECK_SBOM;
@@ -461,12 +500,16 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ components: batches[answers.length].map((purl) => ({ purl })) }),
         timeoutMs: Math.max(0, left),
+        signal: deps.signal,
       });
       if (r.ok) {
         answers.push(r.data);
         status = r.status;
         continue;
       }
+      // Cancelled (#2775): this batch was cut off, or never sent after a wait the signal ended.
+      // Nothing more is sent, and the answer goes nowhere.
+      if (deps.signal?.aborted) return deps.failed(tool, r);
       if (r.kind === "http" && r.status === 429) {
         if (r.retryAfter === undefined) {
           stop = { reason: "rate_limited", detail: "the API answered 429 without a Retry-After to wait for" };
@@ -475,7 +518,7 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
         } else {
           const waitMs = Math.max(MIN_WAIT_MS, r.retryAfter * 1000);
           if (now() - started + waitMs <= TIME_BUDGET_MS) {
-            await sleep(waitMs);
+            await sleep(waitMs, deps.signal);
             waits++;
             waitedMs += waitMs;
             waitedFor = r;
@@ -653,11 +696,16 @@ export function registerCheckSbom<F extends FailureLike>(server: McpServer, deps
         sbom: z
           .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
-          .describe("a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read here and only they are sent"),
+          .describe(
+            "a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read by this MCP server and only they are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the document is the request body",
+          ),
       }),
       outputSchema: output as z.ZodObject,
       annotations: deps.annotations,
     },
-    async (a: { purls?: string[]; sbom?: unknown }) => deps.checked(CHECK_SBOM, output, await checkSbom(deps, a)) as never,
+    async (a: { purls?: string[]; sbom?: unknown }, ctx: { mcpReq: { signal: AbortSignal } }) => {
+      const run = checkSbom({ ...deps, signal: ctx.mcpReq.signal }, a);
+      return deps.checked(CHECK_SBOM, output, await (deps.hold ? deps.hold(run) : run)) as never;
+    },
   );
 }

@@ -34,9 +34,14 @@
 //   4. else every list keeps its first n entries, n halving, and then strings are cut too.
 // Whenever the text is not the JSON whole, the note ends with one sentence, starting TEXT CUT,
 // that says what the first text block leaves out, that structuredContent.data carries all of it,
-// and how to read the rest in the text: the tool that returns one row whole, and the page size or
-// offset at which a page fits. The cut is deterministic: the same answer is cut the same way.
+// and how to read the rest in the text: the tool that returns one row, and what of it, and the page
+// size or offset at which a page fits. The cut is deterministic: the same answer is cut the same way.
 export const DATA_TEXT_BUDGET = 30_000;
+// What a note may say of reading one CVE's record through get_cve (#2802): get_cve's own first text
+// block is cut too past the budget (each list to its first entries, every other field kept), so
+// only its structuredContent.data is the record whole. A row tool's `whole` sentence starts with it.
+export const GET_CVE_WHOLE =
+  "get_cve returns any one of these CVEs' records, whole in its structuredContent.data, and in its first text block with every field (past 30,000 characters, each list cut to its first entries)";
 // What every tool description says about it, one constant string (marketing-site
 // lib/mcpToolClaims.test.ts folds only constant strings); the suite holds its number to
 // DATA_TEXT_BUDGET's. It uses none of the words that check reviews as the page's own prose (how,
@@ -175,14 +180,24 @@ function cutSides(data: Record<string, unknown>, sides: readonly TextSide[]): { 
   return { fields, said };
 }
 
+// Where the cut JSON goes, as the sentence that opens what the note says of the cut names it: by
+// default a tool result's first text block, beside a structuredContent.data that holds the answer
+// whole. The cve:// resource has no first text block and no data beside its own, so it names its
+// own place (resources.ts, #2801).
+export type CutPlace = { opens: (chars: number) => string };
+export const FIRST_TEXT_BLOCK: CutPlace = {
+  opens: (chars) =>
+    `TEXT CUT: the API's answer is ${chars} characters of JSON, more than the ${DATA_TEXT_BUDGET} the first text block holds, so that block is cut, and structuredContent.data carries the answer whole.`,
+};
+
 /** The first text block for `data` within DATA_TEXT_BUDGET, and the TEXT CUT sentence when it is cut. */
-export function dataText(data: object, cut?: TextCut): { text: string; said: string } {
+export function dataText(data: object, cut?: TextCut, place: CutPlace = FIRST_TEXT_BLOCK): { text: string; said: string } {
   const pretty = JSON.stringify(data, null, 2);
   if (pretty.length <= DATA_TEXT_BUDGET) return { text: pretty, said: "" };
   const layout = (v: unknown): string => (isPlainObject(v) ? lined(v) : JSON.stringify(v));
   const all = layout(data);
   if (all.length <= DATA_TEXT_BUDGET) return { text: all, said: "" };
-  const head = `TEXT CUT: the API's answer is ${pretty.length} characters of JSON, more than the ${DATA_TEXT_BUDGET} the first text block holds, so that block is cut, and structuredContent.data carries the answer whole.`;
+  const head = place.opens(pretty.length);
   const say = (...xs: (string | undefined)[]) => [head, ...xs].filter((x): x is string => Boolean(x)).join(" ");
   let base: unknown = data;
   let rowsSaid = "";

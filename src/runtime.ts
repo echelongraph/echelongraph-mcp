@@ -25,10 +25,44 @@ export function isHttpEntrypoint(): boolean {
 // The client a tool call is being answered for. http.ts runs each request inside
 // withClient(), and the SDK dispatches the tool handler inside that same async context, so
 // api() can read it without the tool module passing it through every function.
-const clientStore = new AsyncLocalStorage<{ clientIp?: string; synthetic?: boolean }>();
+//   signal  aborted when the request's client has gone before its answer was written (#2775)
+//   work    what is still running for the request: http.ts keeps the request's admission and
+//           large-body slot until all of it has settled (holdRequest)
+type RequestScope = { clientIp?: string; synthetic?: boolean; signal?: AbortSignal; work?: Set<Promise<unknown>> };
+const clientStore = new AsyncLocalStorage<RequestScope>();
 
-export function withClient<T>(clientIp: string | undefined, fn: () => T, opts: { synthetic?: boolean } = {}): T {
-  return clientStore.run({ clientIp, synthetic: opts.synthetic === true }, fn);
+export function withClient<T>(
+  clientIp: string | undefined,
+  fn: () => T,
+  opts: { synthetic?: boolean; signal?: AbortSignal; work?: Set<Promise<unknown>> } = {},
+): T {
+  return clientStore.run({ clientIp, synthetic: opts.synthetic === true, signal: opts.signal, work: opts.work }, fn);
+}
+
+// #2775: a hosted client can go before its answer is ready (its own timeout, a closed tab, a
+// retry). Nobody will read that answer, so the request's API calls are cancelled (index.ts api()
+// reads this signal) and check_sbom sends no further batch: they would spend the client's API
+// budget and hold the instance's memory for nothing. On stdio there is none: the SDK's own
+// cancellation (notifications/cancelled) reaches check_sbom through its handler's signal.
+export function requestSignal(): AbortSignal | undefined {
+  return httpEntrypoint ? clientStore.getStore()?.signal : undefined;
+}
+
+/** Registers `p` as the hosted request's work, so its admission and large-body slot are held until p settles; on stdio, p untouched. */
+export function holdRequest<T>(p: Promise<T>): Promise<T> {
+  const work = httpEntrypoint ? clientStore.getStore()?.work : undefined;
+  if (!work) return p;
+  work.add(p);
+  const drop = (): void => {
+    work.delete(p);
+  };
+  p.then(drop, drop);
+  return p;
+}
+
+/** Resolves once everything held for a request (holdRequest) has settled, including what is held while it waits. */
+export async function requestSettled(work: Set<Promise<unknown>>): Promise<void> {
+  while (work.size > 0) await Promise.allSettled([...work]);
 }
 
 // #2737: the production MCP synthetic probes this endpoint too, and its calls must reach the API

@@ -10,6 +10,12 @@
 //     package or the hosted URL;
 //   * the hosted endpoint is described as in service, never as being rolled out (#2739), in
 //     agreement with /pulse/mcp's REMOTE_SERVING switch where the monorepo is present;
+//   * while server.json lists the hosted remote, check_sbom's description, its sbom argument, the
+//     Tools table's check_sbom row and the privacy section say the document reaches EchelonGraph's
+//     server as the request body, and no string of check_sbom's tools/list entry, nor that row, nor
+//     the privacy section denies it in any wording of document-denials.mjs, the list /pulse/mcp's
+//     check_sbom row is held to (#2796);
+//   * the Resources table names what echelongraph://sources relays for the NVD poller (#2770);
 //   * CHANGELOG.md has an entry for package.json's version, and its preamble says the issue
 //     numbers are an internal tracker's (#2740), in the words listings/README.md gives for
 //     Release bodies.
@@ -22,6 +28,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { StdioMcpClient, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, serverCommand, readPkgFile } from "./server-under-test.mjs";
+import { DENIAL_VARIANTS, documentDenials } from "./document-denials.mjs";
 
 const README = readPkgFile("README.md");
 const SERVER_JSON = JSON.parse(readPkgFile("server.json"));
@@ -108,7 +115,12 @@ describe("README configuration and hosted endpoint", () => {
       const servers = cfg.mcpServers ?? cfg.servers;
       assert.ok(servers?.echelongraph, `a config block without an echelongraph server: ${b}`);
       const s = servers.echelongraph;
-      if (s.command) assert.deepEqual([s.command, ...s.args], ["npx", "-y", PKG.name], b);
+      // #2813: the Claude Desktop troubleshooting block names npx by its absolute path (the
+      // `spawn npx ENOENT` fix), so a command is `npx` or an absolute path ending in /npx.
+      if (s.command) {
+        assert.match(s.command, /^(?:npx|\/(?:[^/\s]+\/)+npx)$/, b);
+        assert.deepEqual(s.args, ["-y", PKG.name], b);
+      }
       else assert.equal(s.url ?? s.serverUrl, REMOTE, b);
     }
   });
@@ -135,6 +147,247 @@ describe("README hosted-endpoint state (#2739)", () => {
     const m = fs.readFileSync(PAGE, "utf8").match(/^const REMOTE_SERVING = (true|false);$/m);
     assert.ok(m, "marketing-site/app/pulse/mcp/page.tsx lost its REMOTE_SERVING switch: re-aim this check");
     assert.equal(m[1], "true", "/pulse/mcp says the hosted endpoint is not serving, and the README says it is");
+  });
+});
+
+// #2796: since 2.6.2 (309b7343) two surfaces say that over the hosted endpoint the check_sbom
+// document is the request body: check_sbom's description, which the hosted tools/list serves to
+// every agent, and the README's privacy section, where /pulse/mcp sends readers and the fallback
+// privacy URL of the Anthropic directory submission (listings/README.md). Rewording both to "the
+// document itself is never sent and never leaves your machine" and "A check_sbom document never
+// reaches EchelonGraph" left the whole suite green. While server.json lists the hosted remote, both
+// must say where the document goes, and neither may deny it.
+describe("hosted-endpoint disclosure of the check_sbom document (#2796)", () => {
+  let client, tools;
+  before(async () => {
+    client = new StdioMcpClient({ ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    await client.open(MODERN);
+    ({ tools } = await client.listTools());
+  });
+  after(() => client?.close());
+  const hosted = () => (SERVER_JSON.remotes ?? []).some((r) => r.type === "streamable-http" && r.url === REMOTE);
+  const privacySection = () => README.split(/^## Privacy: what is sent where$/m)[1]?.split(/^## /m)[0] ?? "";
+  const privacy = () => privacySection().replace(/\s+/g, " ");
+  // A denial that the document is sent, leaves the machine or reaches EchelonGraph is one of
+  // document-denials.mjs's DENIALS, the list /pulse/mcp's check_sbom row is held to as well
+  // (marketing-site/lib/mcpToolClaims.test.ts imports it). #2796's review found this check's own
+  // list, kept here until then, passed most of the page's: "The server never sends the document.",
+  // "The document is processed locally.", "Only the purls are sent.", "The document, once parsed, is
+  // never sent." and others.
+  //
+  // One place in the section may deny it: the npm table's check_sbom cell, which says what the npm
+  // package sends ("only the purls in it are sent; the document is not"), true of the npm package,
+  // and qualifies that in its next sentence, NPM_QUALIFIER. Text before NPM_QUALIFIER in that one
+  // cell is not read; everything else in the section is, each table cell and each paragraph as its
+  // own text.
+  const NPM_QUALIFIER = "(Over the hosted endpoint the document goes to EchelonGraph's server instead: see below.)";
+  const units = (section) => {
+    const out = [];
+    for (const block of section.split(/\n\s*\n/)) {
+      const lines = block.split("\n");
+      const prose = lines.filter((l) => !l.trimStart().startsWith("|")).join(" ").replace(/\s+/g, " ").trim();
+      if (prose) out.push(prose);
+      for (const l of lines.filter((l) => l.trimStart().startsWith("|"))) {
+        for (const cell of l.split("|").map((c) => c.replace(/\s+/g, " ").trim())) if (cell && !/^-+$/.test(cell)) out.push(cell);
+      }
+    }
+    return out;
+  };
+  // The denials in a privacy section, and how many cells the NPM_QUALIFIER exception was taken in.
+  const privacyDenials = (section) => {
+    const u = units(section);
+    let excepted = 0;
+    const denials = u.flatMap((text, i) => {
+      const at = text.indexOf(NPM_QUALIFIER);
+      if (at < 0 || !u[i - 1]?.startsWith("`check_sbom`:")) return documentDenials(text);
+      excepted++;
+      return documentDenials(text.slice(at + NPM_QUALIFIER.length));
+    });
+    return { denials, excepted };
+  };
+  const entry = () => {
+    const e = tools.find((t) => t.name === "check_sbom");
+    assert.ok(e?.description, "tools/list has no check_sbom: re-aim this check");
+    return e;
+  };
+  const description = () => entry().description;
+  // #2796's third review: the sbom argument's description, served in the same tools/list entry,
+  // said "its purls are read here and only they are sent", which the list counts as a denial, and
+  // no check read it. Every string of the entry is read now: its description, title, and each
+  // description of inputSchema and outputSchema, at any depth. [path (its keys), string] pairs.
+  const strings = (v, at = [], out = []) => {
+    if (typeof v === "string") out.push([at, v]);
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) strings(x, [...at, k], out);
+    return out;
+  };
+  const entryDenials = (e) => strings(e).flatMap(([at, s]) => documentDenials(s).map((c) => `${at.join(".")}: ${c}`));
+  // The README Tools table's check_sbom row: the What it answers cell names the document too
+  // (#2796's third review found it said "…; the document is not." beside no guard).
+  const toolsRow = (readme) => {
+    const rows = (readme.split(/^## Tools$/m)[1]?.split(/^## /m)[0] ?? "").split("\n").filter((l) => l.startsWith("| `check_sbom` |"));
+    assert.equal(rows.length, 1, "the README Tools table has no single check_sbom row: re-aim this check");
+    return rows[0];
+  };
+  const rowDenials = (row) => row.split("|").flatMap((c) => documentDenials(c.replace(/\s+/g, " ").trim()));
+
+  it("server.json lists the hosted streamable-http remote this check is about", () => {
+    assert.ok(hosted(), `server.json lists no streamable-http remote at ${REMOTE}: re-aim this check`);
+  });
+  it("check_sbom's description says the hosted endpoint receives the document as the request body", () => {
+    const d = description();
+    assert.ok(d.includes("over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body"), d);
+    assert.deepEqual(documentDenials(d), [], d);
+  });
+  it("no string of check_sbom's tools/list entry denies it, and the sbom argument says where the document goes", () => {
+    const e = entry();
+    assert.ok(strings(e).length >= 50, `check_sbom's entry holds ${strings(e).length} strings: re-aim this check`);
+    assert.deepEqual(entryDenials(e), []);
+    const arg = e.inputSchema?.properties?.sbom?.description;
+    assert.ok(arg, "check_sbom's inputSchema has no sbom description: re-aim this check");
+    assert.ok(arg.includes("only they are sent to the API") && arg.includes("over the hosted endpoint (mcp.echelongraph.io) the document is the request body"), arg);
+  });
+  it("the README Tools table's check_sbom row says the hosted endpoint receives the document, and denies nothing", () => {
+    const row = toolsRow(README);
+    assert.ok(row.includes("over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the document is the request body"), row);
+    assert.deepEqual(rowDenials(row), []);
+  });
+  it("control: a denial in any string of the entry, or in the Tools row, is caught", () => {
+    const e = entry();
+    const arg = e.inputSchema.properties.sbom.description;
+    const OLD_ARG = "a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read here and only they are sent";
+    const withArg = (s) => ({ ...e, inputSchema: { ...e.inputSchema, properties: { ...e.inputSchema.properties, sbom: { ...e.inputSchema.properties.sbom, description: s } } } });
+    assert.notDeepEqual(entryDenials(withArg(OLD_ARG)), [], "the sbom argument's former words pass");
+    // A string deep in outputSchema: the first description found under it.
+    const deep = strings(e).find(([at]) => at[0] === "outputSchema" && at.length >= 4 && at.at(-1) === "description");
+    assert.ok(deep, "check_sbom's outputSchema has no description: re-aim this control");
+    const withDeep = (s) => {
+      const c = structuredClone(e);
+      let o = c;
+      for (const k of deep[0].slice(0, -1)) o = o[k];
+      o[deep[0].at(-1)] = `${deep[1]} ${s}`;
+      return c;
+    };
+    const row = toolsRow(README);
+    const ROW_ON = "; the document itself is not sent on.";
+    assert.ok(row.includes(ROW_ON), "the Tools row's sentence changed: re-aim this control");
+    assert.notDeepEqual(rowDenials(row.replace(ROW_ON, "; the document is not.")), [], "the Tools row's former words pass");
+    for (const bad of DENIAL_VARIANTS) {
+      assert.notDeepEqual(entryDenials(withArg(`${arg}; ${bad}`)), [], `the sbom argument passes: ${bad}`);
+      assert.notDeepEqual(entryDenials(withDeep(bad)), [], `${deep[0].join(".")} passes: ${bad}`);
+      assert.notDeepEqual(rowDenials(row.replace(ROW_ON, `; ${bad}`)), [], `the Tools row passes: ${bad}`);
+    }
+  });
+  it("the README's privacy section says the document reaches EchelonGraph's server, which neither logs nor keeps it", () => {
+    const p = privacy();
+    assert.ok(p.length > 1000, "the README lost its \"## Privacy: what is sent where\" section: re-aim this check");
+    assert.ok(p.includes("it is in the request body, so the whole document reaches EchelonGraph's server"), p);
+    assert.ok(p.includes("and neither logs nor keeps the document"), p);
+    const { denials, excepted } = privacyDenials(privacySection());
+    assert.equal(excepted, 1, `the npm table's check_sbom cell no longer ends its npm-only sentence with ${NPM_QUALIFIER}: re-aim this check`);
+    assert.deepEqual(denials, []);
+  });
+  it("control: every wording of the denial is caught, in the description and anywhere in the privacy section but the npm cell's qualified sentence", () => {
+    const d = description();
+    const section = privacySection();
+    const ON = "; the document itself is not sent on.";
+    const KEEP = "To keep the document on your machine, run the npm package, or pass `check_sbom` the purls.";
+    // KEEP as the README wraps it: any run of whitespace between its words.
+    const KEEP_AT = new RegExp(KEEP.split(" ").map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(String.raw`\s+`));
+    const npmCell = units(section).find((c) => c.includes(NPM_QUALIFIER));
+    assert.ok(d.includes(ON) && KEEP_AT.test(section) && npmCell, "the sentences this control replaces changed: re-aim this control");
+    for (const bad of DENIAL_VARIANTS) {
+      assert.notDeepEqual(documentDenials(bad), [], `the shared list passes: ${bad}`);
+      assert.notDeepEqual(documentDenials(d.replace(ON, `; ${bad}`)), [], `the description passes: ${bad}`);
+      assert.notDeepEqual(privacyDenials(section.replace(KEEP_AT, () => bad)).denials, [], `the hosted paragraph passes: ${bad}`);
+      assert.notDeepEqual(privacyDenials(section.replace(NPM_QUALIFIER, `${NPM_QUALIFIER} ${bad}`)).denials, [], `the npm cell, after its qualifier, passes: ${bad}`);
+    }
+    // The npm cell's own sentence is a denial everywhere but in that cell before its qualifier: in
+    // the hosted paragraph, or in another row's cell with the qualifier copied in.
+    const npmOnly = npmCell.slice(npmCell.indexOf("A CycloneDX"), npmCell.indexOf(NPM_QUALIFIER)).trim();
+    assert.ok(npmOnly.endsWith("the document is not."), `the npm cell's sentence changed: ${npmOnly}`);
+    assert.notDeepEqual(documentDenials(npmOnly), []);
+    assert.notDeepEqual(privacyDenials(section.replace(KEEP_AT, () => npmOnly)).denials, []);
+    assert.notDeepEqual(privacyDenials(section.replace("| No input. |", `| ${npmOnly} ${NPM_QUALIFIER} |`)).denials, []);
+  });
+  it("control: what both texts say truly passes, the npm package's own sentences among them", () => {
+    for (const fine of [
+      "To keep the document on your machine, run the npm package, or pass `check_sbom` the purls.",
+      "The purls are read from the document by this MCP server and only they are sent to the API, in POST bodies of at most 200 purls each, one after another, never in a URL; the document itself is not sent on.",
+      "the whole document reaches EchelonGraph's server, which reads the purls from it in memory, sends only those to the API, and neither logs nor keeps the document.",
+      "Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB.",
+      "Its structured result carries coverage (what the input held, what was sent in how many batches, and what was not sent and why).",
+      "not_sent_purls keeps its first 10, and the note says from which position of the input the purls not sent run.",
+      "The npm package sends the purls to the API.",
+      "Run from npm, the package sends purls, and only the purls are sent on to the API.",
+      "Only the purls travel to EchelonGraph's API, never in a URL.",
+      "The document itself is not sent on to the API.",
+      "The document itself is not sent onward.",
+      // The sbom argument's and the Tools row's words (#2796's third review)
+      "a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read by this MCP server and only they are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the document is the request body",
+      "the purls are read from it by the MCP server and only they are sent to the API, in POST bodies of at most 200 each, one after another; the document itself is not sent on.",
+      "Run from npm, the server is on your machine; over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the document is the request body.",
+      // The README's own copy beside the widened rules: the GAP, "stays/remains in", any noun after
+      // "leaves the", and more words before "purls"
+      "The SBOM's purls are what was not sent, and they are listed.",
+      "Pass the document to check_sbom (and, once more, the purls a rate limit or the time budget left unsent).",
+      "The npm package sends only the distinct purls to the API.",
+      // A leading \b: a word that ends in a noun of the document is not the document.
+      "Your user profile is never sent.",
+      "A tempfile is not uploaded.",
+      // #2831's widened rules: purls-only and "make it to" with the API as where the purls go, a
+      // POST that is the purls', and what the hosted server does with the document once read
+      "Only the purls make it to the API.",
+      "Nothing else is sent to the API.",
+      "The purls are all that is sent to EchelonGraph's API.",
+      "Only the purls are POSTed to the API, never in a URL.",
+      "EchelonGraph's server reads the purls from it in memory and does not store the document.",
+    ]) {
+      assert.deepEqual(documentDenials(fine), [], fine);
+    }
+    assert.deepEqual(privacyDenials(privacySection()).denials, []);
+  });
+});
+
+// #2771: cve_summary leaves out a poller field the answer sends in another JSON type, and a poller
+// that is neither a JSON object nor null, and relays the rest. Its review found three README
+// sentences still saying a success's data is the API's JSON with exposure_radar the one exception,
+// and that every outputSchema mismatch is unexpected_shape; and the cve_summary section calling a
+// null poller "not a JSON object", which is kept as sent.
+describe("README on cve_summary's left-out poller fields (#2771)", () => {
+  const flat = README.replace(/\s+/g, " ");
+  it("the cve_summary section says a poller of another type is left out whole, a null one aside", () => {
+    assert.ok(flat.includes("a `poller` that is neither a JSON object nor null is left out whole; `summary` is relayed either way"), "the cve_summary section's left-out sentence changed");
+    assert.ok(!flat.includes("a `poller` that is not a JSON object is left out whole"), "the cve_summary section calls a null poller not a JSON object");
+    assert.ok(flat.includes("The tool relays the API's JSON as it was sent, less a `poller` field left out as above."));
+  });
+  it("the success shape names cve_summary among the exceptions to verbatim", () => {
+    assert.ok(
+      flat.includes(
+        "The exceptions to verbatim are `cve_summary`, which leaves out a `poller` field the answer sends in a JSON type other than its outputSchema's (or a `poller` that is neither a JSON object nor null) and names it in the note, and `exposure_radar`:",
+      ),
+      "the success shape no longer names cve_summary as an exception to verbatim",
+    );
+    assert.ok(!flat.includes("The exception to verbatim is `exposure_radar`"), "the success shape names exposure_radar as the one exception");
+  });
+  it("the unexpected_shape sentence names cve_summary's poller as its exception", () => {
+    assert.ok(
+      flat.includes(
+        "is returned as a failure with `error.kind` `unexpected_shape`, never relayed, with one exception: a `cve_summary` `poller` field of another JSON type is left out of `data` and named in the note, and the rest of the answer is relayed, `summary` with it.",
+      ),
+      "the unexpected_shape sentence lost cve_summary's exception",
+    );
+  });
+});
+
+// #2770: the Resources table names what echelongraph://sources relays for the NVD poller, its two
+// counters as the one instance's, since it last started, never the feed's reliability.
+describe("README Resources table (#2770)", () => {
+  it("the echelongraph://sources row names interval, last_poll_at, poll_count and poll_errors, the counts as the one instance's", () => {
+    const row = README.split("\n").find((l) => l.startsWith("| `echelongraph://sources` |"));
+    assert.ok(row, "the README's Resources table has no echelongraph://sources row: re-aim this check");
+    for (const f of ["interval", "last_poll_at", "poll_count", "poll_errors"]) assert.ok(row.includes(`\`${f}\``), `the row does not name ${f}: ${row}`);
+    assert.match(row, /all of the one instance that answered/);
+    assert.match(row, /the two counts are that instance's since it last started, zeroed on every restart, never the feed's reliability/);
   });
 });
 

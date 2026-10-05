@@ -2,6 +2,7 @@
 // tested on its own: who the client is, which Origins are served, the per-client limit, and the
 // JSON-RPC error bodies the edge answers with.
 import { isIP } from "node:net";
+import { classifyInboundRequest } from "@modelcontextprotocol/server";
 
 // ── JSON-RPC errors from the edge ──
 //
@@ -11,7 +12,7 @@ import { isIP } from "node:net";
 export const ORIGIN_REFUSED_CODE = -32000; // the SDK's own code for an Origin refusal (originValidationResponse)
 export const RATE_LIMITED_CODE = -32029; // implementation-defined server error range (-32000..-32099); "429"
 export const BODY_TOO_LARGE_CODE = -32600; // Invalid Request
-export const BUSY_CODE = -32030; // implementation-defined server error range; "503", no large-body slot free (#2747)
+export const BUSY_CODE = -32030; // implementation-defined server error range; "503": no large-body slot free (#2747), or the instance full (#2773)
 
 export function rpcError(code: number, message: string, data?: Record<string, unknown>): string {
   return JSON.stringify({ jsonrpc: "2.0", id: null, error: { code, message, ...(data ? { data } : {}) } });
@@ -241,9 +242,11 @@ export class FixedWindowLimiter {
 // 2,000-purl ~2 MB body +62 MB; one 5.47 MB body +76 MB; two 5.47 MB bodies at once 209 MB in
 // all, also with V8's old space held to 64 MB: ~59 MB of 256 MiB left for everything else, so
 // not a third. So a body past 64 KiB must hold one of DEFAULT_LARGE_BODY_SLOTS (2) slots per
-// instance for as long as it is read and served; with none free it is answered 503 with
-// Retry-After, never queued. The per-client limit still counts each large request as one
-// request, before its body is read.
+// instance for as long as it is read, waits for a place (below) and is served; with none free it
+// is answered 503 with Retry-After, never queued. The per-client limit still counts each large
+// request as one request, before its body is read. That budget measured the two bodies alone, not
+// the requests served beside them, which were enough to kill the instance (#2773): "Requests in
+// flight per instance" below bounds those and records what each costs.
 export const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 export const DEFAULT_MAX_SBOM_BODY_BYTES = 6 * 1024 * 1024;
 export const DEFAULT_LARGE_BODY_SLOTS = 2;
@@ -283,6 +286,162 @@ export class Slots {
   get inUse(): number {
     return this.used;
   }
+}
+
+// ── Requests in flight per instance (#2773) ──
+//
+// The slots bound the large bodies, not the requests served beside them. Cloud Run sends one
+// instance up to 250 requests at once (deploy-all.sh SVC_CONCURRENCY) into 256 MiB. Measured
+// 2026-10-04 on dist/http.js, Node 22.22, in a 256 MiB memory cgroup, against a stub API
+// answering in 1.5 s, two 4,999,913-character check_sbom documents in flight plus N tools/call
+// cve_summary at once, 2025-era (answered over SSE, the costlier era): N=100 peaked at 226 MB,
+// N=125 at 259 MB (96%), N=200 and N=250 were OOM-killed; with no document, N=200 peaked at
+// 240 MB and N=250 was OOM-killed.
+//
+// Two bounds hold that load (test/http-memory.test.mjs drives the real server with it; what each
+// case does without each bound is below):
+//   - V8's heap. In that sandbox (a cgroup v1 on a 16 GB host) Node 22 sized V8's heap from the
+//     host's memory, not the cgroup's (heap_size_limit 8,195 MiB in 256 MiB), so V8 left the
+//     garbage of the requests served (~1 MB each) uncollected until the kernel killed the
+//     instance. So the image caps V8's old space at 128 MiB (Dockerfile.http), and V8 collects
+//     first. On Cloud Run this is not verified: an instance that shows Node only its 256 MiB gets
+//     a default heap near the cap already, and then the cap changes little. Its start-up line says
+//     which (heap_limit_mb; memory_limit_mb, null where Node is told no limit).
+//   - The live set. Under the cap, what must fit is what is live at once, and 250 requests at once
+//     do not: with every answer held until all 250 were inside the instance, V8 aborted
+//     ("JavaScript heap out of memory"). So an instance serves at most DEFAULT_MAX_IN_FLIGHT /mcp
+//     requests at once, large ones included (they hold a slot as well), whatever its heap.
+// A request's body is read before it waits for a place, so a client that uploads slowly holds its
+// socket (and a large body its slot), never a place. It then waits, first come first served, up
+// to DEFAULT_ADMISSION_WAIT_MS for one to finish, and is then answered 503 with Retry-After: it
+// waits rather than being refused at once because Cloud Run still routes up to 250 to the
+// instance and counts a waiting request toward scaling out. A waiting request costs its socket and
+// its body: at most 64 KiB, or a large body that holds a slot. At most DEFAULT_MAX_WAITING wait;
+// past that, 503 at once. A request counts until its answer is written AND its work has stopped: a
+// check_sbom call whose client has gone keeps its place until it stops (#2775). /health is never
+// held, and nor is a subscriptions/listen stream (isListenStream below).
+//
+// With both, in that cgroup, the two documents at the API, then 248 cve_summary sent at once:
+//   - the API answering in 1.5 s: all 250 answered 200, 64 served at once and the last waiting
+//     ~9 s (one core here serves about 28 a second, so on a slower one the last of such a burst
+//     wait past DEFAULT_ADMISSION_WAIT_MS and are answered 503), cgroup peak 221-225 MB of 268 MB
+//     (82-84%). Without the heap cap: OOM-killed in three runs of four, the fourth at 248 MB.
+//     Without the admission: V8 aborted, four of four.
+//   - every answer held until all 250 were inside the instance at once: 64 served and answered
+//     200, the other 186 answered 503 after waiting 10 s, peak 201-208 MB (75-77%), and 204-206 MB
+//     without the heap cap. Without the admission: V8 aborted, two of two.
+// What this does not bound is a request whose ANSWER is large: a check_sbom call of 2,000 purls
+// fits a 64 KiB body, and with production-shaped rows (~2.2 KB each) one peaks at +77 MB; beside
+// the two documents, 8 at once peaked at 84%, and 16 at once exhausted the 128 MiB heap. Bounding
+// that needs a weight per call (its purls), not a count of requests.
+export const DEFAULT_MAX_IN_FLIGHT = 64;
+export const DEFAULT_ADMISSION_WAIT_MS = 10_000;
+export const DEFAULT_MAX_WAITING = 250;
+
+/**
+ * A counting semaphore whose callers may wait, in arrival order, for a bounded time. acquire
+ * resolves true once admitted (the caller then calls release() exactly once), or false when the
+ * wait timed out, `signal` aborted, or maxWaiting callers were already waiting.
+ */
+export class Admission {
+  private used = 0;
+  private readonly queue: Array<() => void> = [];
+  constructor(
+    readonly max: number,
+    readonly maxWaiting: number,
+  ) {}
+
+  acquire(waitMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (this.used < this.max && this.queue.length === 0) {
+      this.used++;
+      return Promise.resolve(true);
+    }
+    if (signal?.aborted || waitMs <= 0 || this.queue.length >= this.maxWaiting) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      // admit is called by release(), which hands its unit straight over (used is unchanged).
+      const admit = (): void => {
+        done();
+        resolve(true);
+      };
+      const giveUp = (): void => {
+        const i = this.queue.indexOf(admit);
+        if (i >= 0) this.queue.splice(i, 1);
+        done();
+        resolve(false);
+      };
+      const timer = setTimeout(giveUp, waitMs);
+      const done = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", giveUp);
+      };
+      signal?.addEventListener("abort", giveUp, { once: true });
+      this.queue.push(admit);
+    });
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) next();
+    else if (this.used > 0) this.used--;
+  }
+
+  get inUse(): number {
+    return this.used;
+  }
+
+  get waiting(): number {
+    return this.queue.length;
+  }
+}
+
+// ── The request that is a stream: subscriptions/listen ──
+//
+// A 2026-07-28 client opens subscriptions/listen to hear of list changes, and the SDK answers it
+// with an SSE stream that stays open until the client leaves (or the server closes). This server
+// declares no listChanged (index.ts), so the stream carries the acknowledgement and then only
+// the SDK's keepalives: no work, no API call. Admitted like any other request, it held its place
+// for as long as it was open, so 64 idle listeners (under the per-client limit) left every
+// tools/call, initialize and server/discover on the instance waiting 10 s for a 503 (#2773). So it
+// is relayed without admission and without a work hold. What bounds the streams instead: the
+// per-client limit, which counts each one when it opens; the SDK's own cap of
+// DEFAULT_MAX_SUBSCRIPTIONS (1024 in @modelcontextprotocol/server 2.1.0) open per process, past
+// which it answers JSON-RPC -32603 "Subscription limit reached" at once; and on Cloud Run the
+// instance's 250 requests at once and its 60 s request timeout, which ends every stream
+// (deploy-all.sh SVC_CONCURRENCY, --timeout). Measured 2026-10-04 on dist/http.js, Node 22.22,
+// started as Dockerfile.http starts it, in a 256 MiB memory cgroup, with every place taken (two
+// maximum check_sbom documents and 62 cve_summary held at the API): beside 186 open listen
+// streams (Cloud Run's 250 at once) the cgroup peaked at 209-218 MB of 268 MB, and beside 1,024
+// (the SDK's cap) at 224-225 MB, never OOM-killed. Within Cloud Run's 250, a listen stream
+// takes the instance's concurrency that a waiting request would, and Cloud Run scales out.
+//
+// It is the only such request. GET and DELETE /mcp (the 2025 session stream and its end) are
+// answered 405 at once by the SDK's stateless legacy fallback, a 2025-era POST's SSE answer ends
+// with its result, and the server registers no task or resource subscription. Which request is a
+// listen stream is decided by the SDK's own routing step (classifyInboundRequest, what
+// createMcpHandler runs), so the two cannot disagree: a 2025-era body naming the method goes to
+// the legacy fallback, which answers it at once, and it waits for a place like any request.
+export const LISTEN_METHOD = "subscriptions/listen";
+
+/** The standard MCP headers of a request, as the SDK reads them. */
+export type StandardHeaders = { protocolVersion?: string; mcpMethod?: string; mcpName?: string };
+
+/** Whether a read POST body is one the SDK serves as a subscriptions/listen stream: see the section comment. */
+export function isListenStream(facts: BodyFacts, body: Buffer, headers: StandardHeaders): boolean {
+  if (facts.rpc_method !== LISTEN_METHOD) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return false;
+  }
+  const route = classifyInboundRequest({
+    httpMethod: "POST",
+    protocolVersionHeader: headers.protocolVersion,
+    mcpMethodHeader: headers.mcpMethod,
+    mcpNameHeader: headers.mcpName,
+    body: parsed,
+  });
+  return route.kind === "modern" && route.messageKind === "request" && route.message.method === LISTEN_METHOD;
 }
 
 // ── Bounded access-log fields ──

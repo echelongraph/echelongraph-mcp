@@ -26,6 +26,10 @@
 //
 // The values are fixed and public (well-known CVE ids, a public package). Nothing a visitor
 // typed is ever here, and the runner logs which candidate it used by index, not by value.
+//
+// THE HOSTED LEG'S OWN INPUTS (#2774). HTTP_PROBES replaces an entry for the hosted leg only, and
+// HTTP_EXPECT adds to what its answer must show; the stdio legs keep PROBES and EXPECT.
+import { createHash } from "node:crypto";
 
 // Log4Shell: CISA-KEV listed, EPSS-scored, with vendor advisories, CWE and exploits on record.
 const CVE = "CVE-2021-44228";
@@ -105,6 +109,64 @@ export const EXPECT = {
     const sent = sc?.coverage?.batches_sent;
     if (typeof sent === "number" && sent >= 2) return undefined;
     return `coverage.batches_sent ${JSON.stringify(sent ?? null)}, want at least 2 (not_sent_reason ${JSON.stringify(sc?.coverage?.not_sent_reason ?? null)})`;
+  },
+};
+
+// #2774: the hosted endpoint takes a request body over 64 KiB for check_sbom alone (#2747), and a
+// 2-purl list never tested that: a return of the 413 would have left every probe green. So the
+// hosted leg sends check_sbom the SAME 201 purls as a CycloneDX 1.5 document, pretty-printed as an
+// SBOM tool writes it, each component with its name, version, purl, licence and a SHA-512 (the
+// purl's own, so the document is fixed): 124,877 characters, a ~138,000-byte request body, twice
+// the 64 KiB cap. Same purls, so the same API budget as before (201 components, two batches per
+// era); the components' other fields never leave the endpoint.
+function cyclonedxOf(purls) {
+  const components = purls.map((purl) => {
+    const [, type, rest] = /^pkg:([^/]+)\/(.+)$/.exec(purl);
+    const at = rest.lastIndexOf("@");
+    const path = rest.slice(0, at).split("/");
+    const name = path.pop();
+    return {
+      type: "library",
+      "bom-ref": purl,
+      ...(path.length ? { group: path.join(".") } : {}),
+      name,
+      version: rest.slice(at + 1),
+      description: `${name}: a component of the EchelonGraph MCP synthetic's probe document (issue 2774).`,
+      licenses: [{ license: { id: type === "maven" ? "Apache-2.0" : "MIT" } }],
+      hashes: [{ alg: "SHA-512", content: createHash("sha512").update(purl).digest("hex") }],
+      purl,
+    };
+  });
+  return {
+    bomFormat: "CycloneDX",
+    specVersion: "1.5",
+    serialNumber: "urn:uuid:3b9f2c64-2774-4c5e-9a1d-0e6c2a7f2774",
+    version: 1,
+    metadata: {
+      timestamp: "2026-10-04T00:00:00Z",
+      tools: { components: [{ type: "application", name: "echelongraph-mcp-synthetic", version: "1.0" }] },
+      component: { type: "application", "bom-ref": "echelongraph-mcp-synthetic-probe", name: "echelongraph-mcp-synthetic-probe", version: "1.0" },
+    },
+    components,
+  };
+}
+export const SBOM_PROBE_DOCUMENT = JSON.stringify(cyclonedxOf(SBOM_PROBE_PURLS), null, 2);
+
+export const HTTP_PROBES = {
+  check_sbom: [{ sbom: SBOM_PROBE_DOCUMENT }],
+};
+
+// On the hosted leg check_sbom must have read the DOCUMENT (coverage.input cyclonedx, all 201
+// components) and measured something, beside EXPECT's two batches. A refused body never gets
+// here: the 413 is a JSON-RPC error, reason rpc_error with rpc_code -32600 (-32030 when the
+// instance's large-body slots were all busy).
+export const HTTP_EXPECT = {
+  check_sbom: (sc) => {
+    const c = sc?.coverage;
+    if (sc?.state !== "measured" || c?.input !== "cyclonedx" || c?.components_in_document !== SBOM_PROBE_PURLS.length) {
+      return `state ${JSON.stringify(sc?.state ?? null)}, coverage.input ${JSON.stringify(c?.input ?? null)}, components_in_document ${JSON.stringify(c?.components_in_document ?? null)}; want measured, cyclonedx, ${SBOM_PROBE_PURLS.length}`;
+    }
+    return EXPECT.check_sbom(sc);
   },
 };
 

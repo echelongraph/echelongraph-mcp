@@ -27,4 +27,12 @@ COPY --from=build /app/dist ./dist
 USER node
 # Cloud Run sets PORT; 8080 is the default in http.ts and SVC_PORT[mcp-remote].
 EXPOSE 8080
-CMD ["node", "dist/http.js"]
+# --max-old-space-size=128 (#2773): half of the instance's 256 MiB (deploy-all.sh SVC_MEMORY).
+# Node 22 sizes V8's heap from the memory the system reports, not from a cgroup's limit: in a
+# 256 MiB cgroup on a 16 GB host it allowed 8,195 MiB, so garbage piled up uncollected until the
+# kernel killed the instance with every request on it. Capped, V8 collects first; the rest of the
+# 256 MiB is the young generation, buffers and the runtime itself. What Cloud Run's instance
+# reports is not verified (one that reports 256 MiB gets a default near this cap already): the
+# start-up line's heap_limit_mb says what a revision runs with. httpPolicy.ts "Requests in flight
+# per instance" has the measurements, and test/http-memory.test.mjs runs http.js with these flags.
+CMD ["node", "--max-old-space-size=128", "dist/http.js"]

@@ -46,6 +46,22 @@ const RECORD = {
 };
 const POLLER = { poll_count: 12, cves_ingested: 40, cves_skipped: 0, poll_errors: 0, http_retries: 0, interval: "2h0m0s", last_poll_dur_ms: 900, last_poll_at: "2026-10-03T10:00:00Z" };
 const SUMMARY = { summary: { critical: 1, high: 2, medium: 3, low: 4, none: 0, total: 10, last_updated: "2026-09-27T01:00:00Z" }, poller: POLLER };
+// #2770: poller blocks carrying neither counter, or one of the two, served under their own modes.
+const POLLER_MODES = {
+  "poller-no-counters": { interval: "2h0m0s", last_poll_at: "2026-10-03T10:00:00Z" },
+  "poller-errors-only": { interval: "2h0m0s", poll_errors: 3 },
+  "poller-count-only": { last_poll_at: "2026-10-03T10:00:00Z", poll_count: 7 },
+  // #2770's review: a poller of another JSON type (cve_summary leaves it out and names it, #2771),
+  // and a JSON null one.
+  "poller-array": [POLLER],
+  "poller-string": "20m0s",
+  "poller-null": null,
+};
+// #2770: what echelongraph://sources says of poll_count and poll_errors whenever it relays either.
+// 2.6.3's resource relayed them with a note on interval and last_poll_at alone (production,
+// 2026-10-04T12:09:45Z: poll_count 5, poll_errors 0, and that one note).
+const POLLER_COUNTERS_NOTE =
+  "poll_count and poll_errors, where reported carries them, are that one instance's counters since it last started, zeroed on every restart: they count that instance's polls and failed polls, never the feed's reliability.";
 const KEV_METHOD = "EchelonGraph polls CISA's known_exploited_vulnerabilities.json every 5 minutes with a conditional GET.";
 const CATALOG = { source: "CISA KEV catalog", feed_url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", last_successful_fetch_at: "2026-10-03T11:55:01Z", catalog_version: "2026.10.02", date_released: "2026-10-02T17:00:41.1622Z", catalog_count: 1452 };
 const KEV = { kev: [], count: 0, total: 0, kev_listed_total: 1452, limit: 1, next_cursor: null, catalog: CATALOG, method: KEV_METHOD, generated_at: "2026-10-03T12:00:00Z" };
@@ -65,8 +81,8 @@ before(async () => {
     seen.push({ path: url.pathname, search: url.search, limit: req.headers["x-eg-limit"], since: req.headers["x-eg-since"], until: req.headers["x-eg-until"] });
     const day3400 = req.headers["x-eg-since"] === "2024-04-12" && req.headers["x-eg-until"] === "2024-04-12";
     const answers = {
-      "/api/v1/public/cves/summary": mode === "up" ? SUMMARY : mode === "no-poller" ? { summary: SUMMARY.summary } : null,
-      "/api/v1/public/kev/recent": mode === "up" || mode === "no-poller" ? (day3400 ? KEV_3400 : KEV) : null,
+      "/api/v1/public/cves/summary": mode === "up" ? SUMMARY : mode === "no-poller" ? { summary: SUMMARY.summary } : Object.hasOwn(POLLER_MODES, mode) ? { summary: SUMMARY.summary, poller: POLLER_MODES[mode] } : null,
+      "/api/v1/public/kev/recent": mode === "up" || mode === "no-poller" || Object.hasOwn(POLLER_MODES, mode) ? (day3400 ? KEV_3400 : KEV) : null,
       [`/api/v1/public/cves/${CVE}`]: RECORD,
     };
     const answer = answers[url.pathname];
@@ -165,12 +181,12 @@ for (const era of ERAS) {
     });
 
     const GETS = [
-      ["triage_cve", { cve_id: "cve-2024-3400" }, ["get_cve", "cve_intel", "vendor_advisories_for_cve", "epss_history", "cve_exposure", "kev_recent"]],
+      ["triage_cve", { cve_id: "cve-2024-3400" }, ["get_cve", "cve_intel", "vendor_advisories_for_cve", "epss_history", "cve_exposure"]],
       ["kev_weekly_brief", undefined, ["kev_recent"]],
       ["kev_weekly_brief_30", { days: "30" }, ["kev_recent"]],
       ["am_i_affected_product", { product: "openssl", version: "3.0.0" }, ["check_affected"]],
       ["am_i_affected_registry", { ecosystem: "npm", package: "lodash", version: "4.17.20" }, ["check_affected"]],
-      ["sbom_review", { sbom: SBOM }, ["check_sbom", "get_cve"]],
+      ["sbom_review", { sbom: SBOM }, ["check_sbom", "get_cve", "cve_intel"]],
     ];
     for (const [snap, args, named] of GETS) {
       it(`prompts/get ${snap}: names ${named.join(", ")} in order, carries the envelope rules, matches its snapshot`, async () => {
@@ -258,6 +274,13 @@ for (const era of ERAS) {
       for (const s of ["measured", "not_assessed", "failed", "invalid_input"]) assert.ok(t.includes(`| ${s} |`), s);
       for (const tool of tools) assert.match(t, new RegExp(`\\b${tool}\\b`), `methodology does not say how ${tool} measures`);
       noClaims("methodology", t);
+      // #2771's review: cve_summary's data is the API's JSON less a poller field of another JSON
+      // type, so the data row names it beside the tools that relay a selection.
+      const dataRow = t.split("\n").find((l) => l.startsWith("| data |"));
+      assert.equal(
+        dataRow,
+        "| data | On a success: the API's JSON (exposure_radar and cve_intel relay a labelled selection, and cve_summary leaves out a poller field of another JSON type, named in the note). |",
+      );
     });
 
     it("resources/read echelongraph://sources relays what the API reports, read at request time", async () => {
@@ -292,6 +315,59 @@ for (const era of ERAS) {
       assert.deepEqual(d.sources.map((x) => [x.state, x.error?.status]), [["failed", 404], ["failed", 404]]);
       mode = "up";
     });
+    it("#2770: whenever reported carries poll_count or poll_errors, notes says they are that one instance's counters since it last started, zeroed on every restart, never the feed's reliability", async () => {
+      const nvdIn = async (m) => {
+        mode = m;
+        try {
+          return JSON.parse((await client.readResource({ uri: "echelongraph://sources" })).contents[0].text).sources[0];
+        } finally {
+          mode = "up";
+        }
+      };
+      for (const [m, counters] of [
+        ["up", { poll_count: 12, poll_errors: 0 }],
+        ["poller-errors-only", { poll_errors: 3 }],
+        ["poller-count-only", { poll_count: 7 }],
+      ]) {
+        const nvd = await nvdIn(m);
+        assert.equal(nvd.state, "reported", m);
+        for (const [k, v] of Object.entries(counters)) assert.equal(nvd.reported[k], v, `${m}: ${k}`);
+        assert.ok(nvd.notes.includes(POLLER_COUNTERS_NOTE), `${m}: the counters are relayed without the sentence saying whose they are: ${nvd.notes.join(" | ")}`);
+      }
+      // The other polarity: a block carrying neither counter gets no sentence about them.
+      const bare = await nvdIn("poller-no-counters");
+      assert.deepEqual(bare.reported, POLLER_MODES["poller-no-counters"]);
+      assert.equal(bare.notes.length, 1, bare.notes.join(" | "));
+      assert.doesNotMatch(bare.notes.join(" "), /poll_count|poll_errors/);
+    });
+    it("#2770: a poller the answer sends as an array or a string is named as such, never as a missing block; a null one carries no block", async () => {
+      const nvdIn = async (m) => {
+        mode = m;
+        try {
+          return JSON.parse((await client.readResource({ uri: "echelongraph://sources" })).contents[0].text).sources[0];
+        } finally {
+          mode = "up";
+        }
+      };
+      for (const [m, kind] of [
+        ["poller-array", "an array"],
+        ["poller-string", "a string"],
+      ]) {
+        const nvd = await nvdIn(m);
+        assert.equal(nvd.state, "not_reported", m);
+        assert.equal(nvd.reported, null, m);
+        assert.deepEqual(nvd.notes, [`The answer carries poller as ${kind}, where a JSON object was expected, so it reports neither a poll interval nor a last poll time.`], m);
+      }
+      const none = await nvdIn("poller-null");
+      assert.equal(none.state, "not_reported");
+      assert.deepEqual(none.notes, ["The answer carries no poller block, so it reports neither a poll interval nor a last poll time."]);
+    });
+    it("#2770: the sources resource's description names what reported carries, its counters as the one instance's", async () => {
+      const { resources } = await client.listResources();
+      const d = resources.find((r) => r.uri === "echelongraph://sources").description;
+      for (const f of ["interval", "last poll", "poll_count", "poll_errors"]) assert.ok(d.includes(f), `the description does not name ${f}: ${d}`);
+      assert.match(d, /the one instance that answered \(the two counts since that instance last started, zeroed on every restart, never the feed's reliability\)/, d);
+    });
 
     it(`resources/read cve://${CVE}: get_cve's structured result, as JSON`, async () => {
       const r = await client.readResource({ uri: `cve://${CVE}` });
@@ -303,10 +379,13 @@ for (const era of ERAS) {
       assert.deepEqual(s.data, RECORD);
       const call = await client.callTool({ name: "get_cve", arguments: { cve_id: CVE } });
       assert.deepEqual(s, call.structuredContent);
+      // #2801: a record that fits is the structured result pretty-printed, character for character
+      // as through 2.6.3; past 30,000 characters data is cut (text-bound.test.mjs).
+      assert.equal(r.contents[0].text, JSON.stringify(call.structuredContent, null, 2));
     });
-    // #2736: triage_cve's step 6 feeds get_cve's kev_added_date to kev_recent. get_cve gives it as
-    // RFC 3339; the prompt says to pass its date part, and kev_recent reads either as the same date.
-    it("triage_cve step 6 composes: get_cve's kev_added_date, as given and as its date part, gets kev_recent's measured row and due date", async () => {
+    // #2736: get_cve's kev_added_date, fed to kev_recent, as triage_cve's step 6 did through 2.6.3.
+    // get_cve gives it as RFC 3339, and kev_recent reads it, or its date part, as the same date.
+    it("kev_recent reads get_cve's kev_added_date, as given and as its date part, and answers that day's row and due date", async () => {
       const added = (await client.callTool({ name: "get_cve", arguments: { cve_id: CVE } })).structuredContent.data.kev_added_date;
       assert.equal(added, "2024-04-12T00:00:00Z");
       for (const v of [added, added.slice(0, 10)]) {
@@ -318,6 +397,16 @@ for (const era of ERAS) {
         assert.deepEqual([req.since, req.until, req.search], ["2024-04-12", "2024-04-12", ""], v);
         assert.equal(r.structuredContent.data.kev.find((x) => x.cve_id === CVE)?.kev_due_date, "2024-04-19");
       }
+    });
+    // #2799 review: triage_cve reads the due date from get_cve's record, not from a kev_recent page
+    // of one day, which on a day of more than a page (2021-11-03: 287) need not hold the CVE's row.
+    it("triage_cve reads kev_due_date from get_cve, whose record carries it, and calls no kev_recent", async () => {
+      const t = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: CVE } }));
+      assert.match(t, /1\. get_cve: .*the CISA-KEV fields kev_listed, kev_added_date, kev_due_date and kev_ransomware\./);
+      assert.match(t, /- Deadline: get_cve's kev_due_date when the CVE is KEV-listed/);
+      assert.doesNotMatch(t, /kev_recent/);
+      const call = await client.callTool({ name: "get_cve", arguments: { cve_id: CVE } });
+      assert.equal(JSON.parse(call.content[0].text).kev_due_date, RECORD.kev_due_date);
     });
     it("cve:// upper-cases a lower-case CVE ID", async () => {
       const s = JSON.parse((await client.readResource({ uri: "cve://cve-2024-3400" })).contents[0].text);

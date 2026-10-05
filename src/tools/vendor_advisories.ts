@@ -279,7 +279,10 @@ const ROW_CUT_LEVELS: TextCut["levels"] = [
   { keep: ["vendor", "vendor_display_name", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "affected_products", "vendor_published_at", "withdrawn"], clip: 200, cap: 20 },
   { keep: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids", "vendor_published_at", "withdrawn"], clip: 100, cap: 10 },
 ];
-const WHOLE = "get_vendor_advisory returns any one of these advisories whole, by its vendor and vendor_advisory_id.";
+// get_vendor_advisory's own first text block is cut too past the budget (#2802): only its
+// structuredContent.data is one advisory whole.
+const WHOLE =
+  "get_vendor_advisory returns any one of these advisories by its vendor and vendor_advisory_id, whole in its structuredContent.data, and in its first text block with every field (past 30,000 characters, each list cut to its first entries).";
 const FOR_CVE_TEXT: TextCut = { rows: "advisories", levels: ROW_CUT_LEVELS, whole: WHOLE };
 const searchText = (a: { offset?: number }): TextCut => ({
   rows: "advisories",

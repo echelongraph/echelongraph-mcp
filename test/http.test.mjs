@@ -12,17 +12,21 @@
 //   5. the Origin policy: absent and https served, "null", non-https and malformed refused;
 //   6. over the per-client limit: OUR JSON-RPC error (429, -32029, application/json), per client;
 // plus the request-body cap, the access log (no body, no query, no typed value), the forward
-// headers the API keys remote users on (#2212), and that the npm stdio entry never sends them.
+// headers the API keys remote users on (#2212), that the npm stdio entry never sends them, the
+// requests an instance serves at once (#2773) and the listen streams that are not among them, and
+// what stops when a client goes (#2775). The memory those bounds keep the instance under is
+// test/http-memory.test.mjs.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
-import { legacy, modern, post } from "./mcp-http-client.mjs";
+import { ACCEPT, legacy, modern, modernHeaders, modernMeta, parseRpcBody, post } from "./mcp-http-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
 
@@ -492,6 +496,460 @@ describe("#2747: the large-body cap and slots", () => {
     const refused = await legacy(srv.url, "tools/list", { pad: "x".repeat(70 * 1024) }, { revision: "2025-06-18" });
     assert.equal(refused.status, 413);
     assert.equal((await post(srv.url, body, { "MCP-Protocol-Version": "2025-06-18" })).status, 200, "a refused large body kept its slot");
+  });
+});
+
+// ── #2773 and #2775: a stub API that answers slowly ──
+// Each answer takes state.ms (state.batchMs for the batch route). It counts what it is sent, how
+// many are open at once, and the requests the MCP server gave up on (cancelled: the connection
+// closed before the answer).
+async function slowStub() {
+  const state = { ms: 200, batchMs: 200, open: 0, maxOpen: 0, batches: 0, cancelled: 0 };
+  const server = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      const u = new URL(req.url, "http://stub");
+      const batch = u.pathname === BATCH_PATH;
+      if (batch) state.batches++;
+      state.open++;
+      state.maxOpen = Math.max(state.maxOpen, state.open);
+      const t = setTimeout(
+        () => {
+          state.open--;
+          if (u.pathname === "/api/v1/public/cves/summary") {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify(SUMMARY));
+          } else if (batch) {
+            const { components } = JSON.parse(b);
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify(batchAnswer(components.map((c, i) => ROWS.notAffected(i, c.purl, "x", "1")))));
+          } else {
+            res.writeHead(404, { "content-type": "text/plain" });
+            res.end("404 page not found\n");
+          }
+        },
+        batch ? state.batchMs : state.ms,
+      );
+      res.on("close", () => {
+        if (res.writableFinished) return;
+        clearTimeout(t);
+        state.open--;
+        state.cancelled++;
+      });
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    state,
+    base: `http://127.0.0.1:${server.address().port}`,
+    close: () => {
+      server.closeAllConnections();
+      return new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(cond, what, ms = 5000) {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
+    await sleep(10);
+  }
+}
+
+// One request on a raw socket, which the test can close without reading the answer: what a client
+// that times out, or whose user closes the tab, does. `bytes` sends only the first n bytes of the
+// body. Resolves the socket once the request is written.
+function rawRequest(url, era, params, { bytes } = {}) {
+  const u = new URL(url);
+  const modernEra = era === "modern";
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: modernEra ? { ...params, _meta: modernMeta() } : params });
+  const headers = modernEra ? modernHeaders("tools/call", params) : { "MCP-Protocol-Version": "2025-06-18" };
+  const head = [
+    `POST ${u.pathname} HTTP/1.1`,
+    `Host: ${u.host}`,
+    "Content-Type: application/json",
+    "Accept: application/json, text/event-stream",
+    `Content-Length: ${Buffer.byteLength(body)}`,
+    ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
+    "",
+    "",
+  ].join("\r\n");
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(Number(u.port), u.hostname, () => {
+      sock.write(head + (bytes === undefined ? body : body.slice(0, bytes)), () => resolve(sock));
+    });
+    sock.on("data", () => {});
+    sock.on("error", () => {});
+    sock.once("error", reject);
+  });
+}
+
+describe("#2773: at most MCP_MAX_IN_FLIGHT requests are served at once; the next waits, then 503", () => {
+  let stub, srv;
+  before(async () => {
+    stub = await slowStub();
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: "2", MCP_ADMISSION_WAIT_MS: "1500" });
+  });
+  after(async () => {
+    await srv?.stop();
+    await stub?.close();
+  });
+  const call = { name: "cve_summary", arguments: {} };
+  const summary = () => modern(srv.url, "tools/call", call);
+
+  it("six at once are all answered, never more than two at a time, four of them after waiting", async () => {
+    stub.state.ms = 300;
+    stub.state.maxOpen = 0;
+    const before = accessLines(srv).length;
+    const rs = await Promise.all(Array.from({ length: 6 }, summary));
+    for (const r of rs) assert.equal(r.status, 200, r.text);
+    assert.equal(stub.state.maxOpen, 2, "the API saw more than MCP_MAX_IN_FLIGHT at once");
+    await sleep(100);
+    const lines = accessLines(srv).slice(before);
+    assert.equal(lines.length, 6);
+    for (const l of lines) assert.ok(l.in_flight >= 1 && l.in_flight <= 2, JSON.stringify(l));
+    assert.ok(lines.filter((l) => l.queued_ms >= 200).length >= 4, JSON.stringify(lines.map((l) => l.queued_ms)));
+  });
+
+  it("one that waits MCP_ADMISSION_WAIT_MS is answered 503, JSON-RPC -32030, with Retry-After; /health is never held", async () => {
+    stub.state.ms = 4000;
+    const held = [summary(), summary()];
+    await waitFor(() => stub.state.open === 2, "two requests at the API");
+    const t0 = Date.now();
+    const r = await summary();
+    const waited = Date.now() - t0;
+    assert.equal(r.status, 503, r.text);
+    assert.match(r.contentType, /^application\/json/);
+    assert.equal(r.message.error.code, -32030);
+    assert.match(r.message.error.message, /already serving its 2 requests at once/);
+    assert.equal(r.headers.get("retry-after"), "5");
+    assert.ok(waited >= 1400 && waited < 3800, `answered after ${waited} ms`);
+    assert.equal((await fetch(`${srv.base}/health`)).status, 200, "/health was held behind the full instance");
+    for (const h of await Promise.all(held)) assert.equal(h.status, 200, h.text);
+    await sleep(100);
+    const refusal = accessLines(srv).find((l) => l.status === 503 && l.refused === "busy");
+    assert.ok(refusal && refusal.queued_ms >= 1400, JSON.stringify(refusal));
+    assert.ok(srv.lines.some((l) => JSON.parse(l).message === "mcp_busy"));
+  });
+
+  // The body is read before admission: a client that sends its body slowly, or never finishes
+  // it, holds no place, so more of them than there are places leave every other request served.
+  it("clients that upload slowly hold no place: with more stalled uploads than places, the next request is served at once", async () => {
+    stub.state.ms = 50;
+    const stalled = [];
+    for (let i = 0; i < 3; i++) stalled.push(await rawRequest(srv.url, "modern", call, { bytes: 20 }));
+    await sleep(200);
+    const before = accessLines(srv).length;
+    const t0 = Date.now();
+    const r = await summary();
+    const took = Date.now() - t0;
+    for (const sock of stalled) sock.destroy();
+    assert.equal(r.status, 200, r.text);
+    assert.ok(took < 1000, `answered after ${took} ms: the stalled uploads held the places`);
+    await sleep(100);
+    const line = accessLines(srv)
+      .slice(before)
+      .find((l) => l.status === 200);
+    assert.deepEqual([line.in_flight, line.queued_ms <= 50], [1, true], JSON.stringify(line));
+  });
+
+  it("a waiting request whose client goes leaves the queue (logged 499, client_closed) and takes no place", async () => {
+    stub.state.ms = 1500;
+    const held = [summary(), summary()];
+    await waitFor(() => stub.state.open === 2, "two requests at the API");
+    const before = accessLines(srv).length;
+    const sock = await rawRequest(srv.url, "modern", call);
+    await sleep(200);
+    sock.destroy();
+    for (const h of await Promise.all(held)) assert.equal(h.status, 200);
+    stub.state.ms = 50;
+    const next = await summary();
+    assert.equal(next.status, 200);
+    await sleep(100);
+    const lines = accessLines(srv).slice(before);
+    const gone = lines.find((l) => l.client_closed === true);
+    assert.ok(gone, JSON.stringify(lines));
+    assert.equal(gone.status, 499);
+    assert.equal(gone.refused, "client_closed");
+    const last = lines.at(-1);
+    assert.deepEqual([last.status, last.in_flight, last.queued_ms <= 50], [200, 1, true], JSON.stringify(last));
+  });
+});
+
+// A 2026-07-28 subscriptions/listen on a connection of its own: the SSE stream the SDK keeps open
+// until the client leaves. Resolves on the server's first event (the acknowledgement), or on a
+// whole answer that is not a stream; close() is the client leaving.
+function openListen(url) {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: modernMeta() } });
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      url,
+      {
+        method: "POST",
+        agent: false,
+        headers: { "Content-Type": "application/json", Accept: ACCEPT, "Content-Length": Buffer.byteLength(body), ...modernHeaders("subscriptions/listen") },
+      },
+      (res) => {
+        let text = "";
+        const contentType = res.headers["content-type"] ?? "";
+        const stream = /^text\/event-stream/.test(contentType);
+        const settle = (t) => resolve({ status: res.statusCode, contentType, stream, message: parseRpcBody(contentType, t), close: () => req.destroy() });
+        res.setEncoding("utf8");
+        res.on("data", (d) => {
+          text += d;
+          const end = text.indexOf("\n\n");
+          if (end >= 0 && stream) settle(text.slice(0, end));
+        });
+        res.on("end", () => settle(text));
+        res.on("error", () => {});
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+// #2773: a listen stream is open until its client leaves and carries only keepalives here (the
+// server declares no listChanged). It takes no place: held, MCP_MAX_IN_FLIGHT of them left every
+// other request waiting MCP_ADMISSION_WAIT_MS for a 503.
+describe("#2773: subscriptions/listen streams take no place; the gate still bounds every other request", () => {
+  const N = 2;
+  let stub, srv;
+  before(async () => {
+    stub = await slowStub();
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: String(N), MCP_ADMISSION_WAIT_MS: "1500" });
+  });
+  after(async () => {
+    await srv?.stop();
+    await stub?.close();
+  });
+  const call = { name: "cve_summary", arguments: {} };
+  const summary = (era) => (era === "modern" ? modern(srv.url, "tools/call", call) : legacy(srv.url, "tools/call", call, { revision: "2025-06-18" }));
+  const opening = (era) =>
+    era === "modern" ? modern(srv.url, "server/discover") : legacy(srv.url, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
+  // The access lines of 2026-era listens (a 2025-era body naming the method is not one).
+  const listenLines = () => accessLines(srv).filter((l) => l.rpc_method === "subscriptions/listen" && l.protocol_version === MODERN);
+  // Opens `count` listen streams into `streams`, one after another, each acknowledged.
+  async function openAll(streams, count) {
+    for (let i = 0; i < count; i++) {
+      const s = await openListen(srv.url);
+      streams.push(s);
+      assert.equal(s.status, 200, `listen ${i + 1} of ${count}: ${JSON.stringify(s.message)}`);
+      assert.ok(s.stream, s.contentType);
+      assert.equal(s.message?.method, "notifications/subscriptions/acknowledged", JSON.stringify(s.message));
+    }
+  }
+  // The client leaves every stream; resolves once each one's access line is written, so no line
+  // of one case lands in the next.
+  async function closeAll(streams) {
+    const logged = listenLines().length;
+    const open = streams.filter((s) => s.stream);
+    for (const s of streams) s.close();
+    await waitFor(() => listenLines().length >= logged + open.length, "the closed streams' access lines");
+  }
+
+  for (const count of [N, N + 5]) {
+    for (const era of ["modern", "legacy"]) {
+      it(`${count} listen streams open, MCP_MAX_IN_FLIGHT ${N}: a ${era} tools/call, and the era's opening request, are answered 200 at once`, async () => {
+        stub.state.ms = 50;
+        const streams = [];
+        try {
+          await openAll(streams, count);
+          const before = accessLines(srv).length;
+          const t0 = Date.now();
+          const r = await summary(era);
+          const took = Date.now() - t0;
+          assert.equal(r.status, 200, r.text);
+          assert.notEqual(r.message.result.isError, true, r.text);
+          assert.deepEqual(r.message.result.structuredContent.data, SUMMARY);
+          assert.ok(took < 1000, `answered after ${took} ms: the listen streams held the places`);
+          const o = await opening(era);
+          assert.equal(o.status, 200, o.text);
+          await sleep(100);
+          const line = accessLines(srv)
+            .slice(before)
+            .find((l) => l.rpc_method === "tools/call");
+          assert.deepEqual([line.status, line.in_flight, line.queued_ms <= 50], [200, 1, true], JSON.stringify(line));
+        } finally {
+          await closeAll(streams);
+        }
+      });
+    }
+  }
+
+  it("a listen stream is logged when its client ends it: 499 and client_closed, as #2775 logs a client that went, holding no place (in_flight 0)", async () => {
+    const before = listenLines().length;
+    const streams = [];
+    await openAll(streams, 1);
+    await sleep(200);
+    assert.equal(listenLines().length, before, "the line was written before the stream ended");
+    await closeAll(streams);
+    const line = listenLines()[before];
+    assert.deepEqual(
+      [line.method, line.path, line.status, line.client_closed, line.refused, line.in_flight, line.queued_ms, line.protocol_version],
+      ["POST", "/mcp", 499, true, "", 0, 0, MODERN],
+      JSON.stringify(line),
+    );
+    assert.ok(line.body_bytes > 0 && line.duration_ms >= 200, JSON.stringify(line));
+  });
+
+  it(`control: with ${N + 5} listen streams open the gate still bounds ordinary calls of both eras, and a 2025-era body naming subscriptions/listen waits like one`, async () => {
+    const streams = [];
+    try {
+      await openAll(streams, N + 5);
+      stub.state.ms = 3000;
+      stub.state.maxOpen = 0;
+      const held = [summary("modern"), summary("legacy")];
+      await waitFor(() => stub.state.open === N, `${N} calls at the API`);
+      // A listen opened now, with every place taken, is served at once.
+      const t0 = Date.now();
+      await openAll(streams, 1);
+      assert.ok(Date.now() - t0 < 1000, `a listen waited ${Date.now() - t0} ms for a place`);
+      // Every other request waits MCP_ADMISSION_WAIT_MS, then 503.
+      const t1 = Date.now();
+      const refused = await Promise.all([
+        summary("modern"),
+        summary("legacy"),
+        opening("modern"),
+        legacy(srv.url, "subscriptions/listen", { notifications: { toolsListChanged: true } }, { revision: "2025-06-18" }),
+      ]);
+      const waited = Date.now() - t1;
+      for (const r of refused) {
+        assert.equal(r.status, 503, r.text);
+        assert.equal(r.message.error.code, -32030, r.text);
+      }
+      assert.ok(waited >= 1400 && waited < 3800, `answered after ${waited} ms`);
+      for (const h of await Promise.all(held)) assert.equal(h.status, 200, h.text);
+      assert.equal(stub.state.maxOpen, N, "the API saw more than MCP_MAX_IN_FLIGHT at once");
+    } finally {
+      await closeAll(streams);
+    }
+  });
+});
+
+// #2775: a hosted check_sbom whose client has gone must stop: its batches stop (at most the one in
+// flight), its large-body slot is free again within about a second, and the access line says the
+// client closed. The call is 2,000 purls, an 84,991-byte body (past 64 KiB, so it holds the
+// instance's only slot), ten batches at 400 ms each; the client closes once the first is at the API.
+describe("#2775: a check_sbom call whose client goes stops, and frees its slot", () => {
+  let stub, srv;
+  before(async () => {
+    stub = await slowStub();
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_LARGE_BODY_SLOTS: "1", MCP_MAX_IN_FLIGHT: "3" });
+  });
+  after(async () => {
+    await srv?.stop();
+    await stub?.close();
+  });
+  const purls = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+  // Another body past 64 KiB that needs the slot and makes no API call: a document that is not JSON.
+  const probe = { name: "check_sbom", arguments: { sbom: "x".repeat(70 * 1024) } };
+
+  for (const era of ["modern", "legacy"]) {
+    it(`${era}: the batches stop, the slot is free within ~1 s, and the line says 499 client_closed`, async () => {
+      stub.state.batchMs = 400;
+      const batchesBefore = stub.state.batches;
+      const cancelledBefore = stub.state.cancelled;
+      const before = accessLines(srv).length;
+      const sock = await rawRequest(srv.url, era, purls);
+      await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API");
+      const sentBeforeClose = stub.state.batches;
+      const closedAt = Date.now();
+      sock.destroy();
+      await waitFor(() => stub.state.cancelled > cancelledBefore, "the batch at the API to be cut off", 1000);
+      // The next large body: 503 while the slot is held, 200 (an invalid_input result) once it is free.
+      let freedAfter;
+      while (Date.now() - closedAt < 6000) {
+        const r = era === "modern" ? await modern(srv.url, "tools/call", probe) : await legacy(srv.url, "tools/call", probe, { revision: "2025-06-18" });
+        if (r.status !== 503) {
+          assert.equal(r.status, 200, r.text.slice(0, 300));
+          assert.equal(r.message.result.structuredContent.state, "invalid_input");
+          freedAfter = Date.now() - closedAt;
+          break;
+        }
+        await sleep(100);
+      }
+      assert.ok(freedAfter !== undefined && freedAfter < 1500, `the slot was still held ${Date.now() - closedAt} ms after the client closed`);
+      // Long enough for four more batches, had the call kept going.
+      await sleep(1700);
+      assert.ok(stub.state.batches - sentBeforeClose <= 1, `${stub.state.batches - sentBeforeClose} batches were sent after the client closed`);
+      assert.ok(stub.state.batches - batchesBefore < 10, "the call ran to its end");
+      // The 2,000-purl call's line (~85 KB), not the probes' (~72 KB).
+      const line = accessLines(srv)
+        .slice(before)
+        .find((l) => l.tool === "check_sbom" && l.body_bytes > 80_000);
+      assert.ok(line, JSON.stringify(accessLines(srv).slice(before)));
+      assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
+    });
+  }
+
+  // Not only check_sbom: every API call of a request whose client has gone is cancelled (runtime.ts
+  // requestSignal, read by index.ts api()). cve_summary passes no signal of its own, so this is
+  // the only thing that stops its call.
+  for (const era of ["modern", "legacy"]) {
+    it(`${era}: a cve_summary whose client goes has its API call cancelled within ~1 s, and the line says 499 client_closed`, async () => {
+      stub.state.ms = 3000;
+      // Nothing left at the API: a call still there would be cut off by api()'s own timeout
+      // (ECHELONGRAPH_API_TIMEOUT_MS, 2 s here) and counted below as this one's cancellation.
+      await waitFor(() => stub.state.open === 0, "the API to be idle");
+      const openBefore = stub.state.open;
+      const cancelledBefore = stub.state.cancelled;
+      const before = accessLines(srv).length;
+      const sock = await rawRequest(srv.url, era, { name: "cve_summary", arguments: {} });
+      await waitFor(() => stub.state.open > openBefore, "the call at the API");
+      sock.destroy();
+      await waitFor(() => stub.state.cancelled > cancelledBefore, "the API call to be cancelled", 1000);
+      await sleep(100);
+      const line = accessLines(srv)
+        .slice(before)
+        .find((l) => l.tool === "cve_summary");
+      assert.ok(line, JSON.stringify(accessLines(srv).slice(before)));
+      assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
+    });
+  }
+
+  it("a client that goes mid-upload frees its slot, and held no place: the next request is admitted alone", async () => {
+    for (let i = 0; i < 4; i++) {
+      const sock = await rawRequest(srv.url, "legacy", purls, { bytes: 70_000 });
+      await sleep(100);
+      sock.destroy();
+    }
+    await sleep(200);
+    const before = accessLines(srv).length;
+    const r = await legacy(srv.url, "tools/call", probe, { revision: "2025-06-18" });
+    assert.equal(r.status, 200, r.text.slice(0, 300));
+    await sleep(100);
+    const line = accessLines(srv).slice(before).at(-1);
+    assert.deepEqual([line.in_flight, line.queued_ms <= 50], [1, true], JSON.stringify(line));
+    const aborted = accessLines(srv).filter((l) => l.status === 499 && l.refused === "client_closed" && l.body_bytes === 0);
+    assert.ok(aborted.length >= 4, JSON.stringify(accessLines(srv).slice(-8)));
+  });
+
+  it("stdio: a client's notifications/cancelled stops the call the same way", async () => {
+    stub.state.batchMs = 400;
+    const env = { ...process.env, ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "5000" };
+    const client = await connect({ era: "2025-06-18", ...serverCommand(), env, stderr: "ignore", requestTimeoutMs: 3000 });
+    try {
+      const batchesBefore = stub.state.batches;
+      const cancelledBefore = stub.state.cancelled;
+      const requestId = client.nextId;
+      const call = client.callTool(purls).then(
+        () => "answered",
+        (e) => (/no answer within/.test(e.message) ? "unanswered" : e.message),
+      );
+      await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API");
+      const sentBeforeCancel = stub.state.batches;
+      client.write({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId, reason: "test #2775" } });
+      await waitFor(() => stub.state.cancelled > cancelledBefore, "the batch at the API to be cut off", 1000);
+      await sleep(1700);
+      assert.ok(stub.state.batches - sentBeforeCancel <= 1, `${stub.state.batches - sentBeforeCancel} batches were sent after the cancellation`);
+      assert.equal(await call, "unanswered", "the SDK answers nothing for a cancelled request");
+    } finally {
+      await client.close();
+    }
   });
 });
 

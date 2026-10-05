@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PKG_DIR } from "./server-under-test.mjs";
+import { MODERN } from "./mcp-stdio-client.mjs";
+import { modernMeta } from "./mcp-http-client.mjs";
 
 const P = await import(pathToFileURL(path.join(PKG_DIR, "dist", "httpPolicy.js")).href);
 
@@ -140,5 +142,86 @@ describe("#2747: the request-body caps and the large-body slots", () => {
     s.release();
     s.release();
     assert.equal(s.inUse, 0, "a release past zero went negative");
+  });
+});
+
+describe("#2773: Admission, the requests served at once per instance", () => {
+  const settled = async (p) => Promise.race([p.then((v) => ({ v })), new Promise((r) => setTimeout(() => r("pending"), 20))]);
+  it("the defaults: 64 served at once, a 10 s wait, at most 250 waiting (Cloud Run's concurrency)", () => {
+    assert.equal(P.DEFAULT_MAX_IN_FLIGHT, 64);
+    assert.equal(P.DEFAULT_ADMISSION_WAIT_MS, 10_000);
+    assert.equal(P.DEFAULT_MAX_WAITING, 250);
+  });
+  it("admits up to max at once; the next waits and is admitted, in arrival order, as each is released", async () => {
+    const a = new P.Admission(2, 10);
+    assert.equal(await a.acquire(1000), true);
+    assert.equal(await a.acquire(1000), true);
+    const third = a.acquire(1000);
+    const fourth = a.acquire(1000);
+    assert.equal(await settled(third), "pending");
+    assert.deepEqual([a.inUse, a.waiting], [2, 2]);
+    a.release();
+    assert.deepEqual(await settled(third), { v: true });
+    assert.equal(await settled(fourth), "pending", "the second waiter went first");
+    assert.deepEqual([a.inUse, a.waiting], [2, 1], "a release hands its place over: in use stays at max");
+    a.release();
+    assert.deepEqual(await settled(fourth), { v: true });
+    a.release();
+    a.release();
+    assert.equal(a.inUse, 0);
+    a.release();
+    assert.equal(a.inUse, 0, "a release past zero went negative");
+  });
+  it("a wait ends false after waitMs, or at once when its signal aborts, and leaves no place behind", async () => {
+    const a = new P.Admission(1, 10);
+    assert.equal(await a.acquire(1000), true);
+    const t0 = Date.now();
+    assert.equal(await a.acquire(60), false);
+    assert.ok(Date.now() - t0 >= 50, "the wait was not waited");
+    const ac = new AbortController();
+    const gone = a.acquire(5000, ac.signal);
+    ac.abort();
+    assert.deepEqual(await settled(gone), { v: false });
+    assert.equal(a.waiting, 0, "a waiter that gave up is still queued");
+    a.release();
+    assert.equal(a.inUse, 0, "a release was handed to a waiter that had gone");
+    assert.equal(await a.acquire(0), true);
+  });
+  it("refuses at once when maxWaiting already wait, or the signal has already aborted", async () => {
+    const a = new P.Admission(1, 1);
+    assert.equal(await a.acquire(1000), true);
+    const waiting = a.acquire(1000);
+    assert.deepEqual(await settled(a.acquire(1000)), { v: false });
+    const ac = new AbortController();
+    ac.abort();
+    const b = new P.Admission(1, 5);
+    assert.equal(await b.acquire(1000), true);
+    assert.deepEqual(await settled(b.acquire(1000, ac.signal)), { v: false });
+    a.release();
+    assert.equal(await waiting, true);
+  });
+});
+
+// #2773: the one request that is a stream, decided by the SDK's own routing step.
+describe("#2773: isListenStream, the request that takes no place", () => {
+  const listen = { notifications: { toolsListChanged: true } };
+  const msg = (method, params) => Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }));
+  const modernHead = (method) => ({ protocolVersion: MODERN, mcpMethod: method });
+  const is = (body, headers) => P.isListenStream(P.bodyFacts(body), body, headers);
+  it("a 2026-era subscriptions/listen is one", () => {
+    assert.equal(is(msg("subscriptions/listen", { ...listen, _meta: modernMeta() }), modernHead("subscriptions/listen")), true);
+  });
+  it("a 2025-era body naming the method is not: the SDK's legacy fallback answers it at once", () => {
+    assert.equal(is(msg("subscriptions/listen", listen), { protocolVersion: "2025-06-18" }), false);
+    assert.equal(is(msg("subscriptions/listen", listen), {}), false);
+  });
+  it("nor is a listen the SDK refuses before its listen router (a method header that names another method)", () => {
+    assert.equal(is(msg("subscriptions/listen", { ...listen, _meta: modernMeta() }), modernHead("tools/list")), false);
+  });
+  it("nor any other 2026-era request, nor a batch or a body that is not JSON", () => {
+    assert.equal(is(msg("tools/call", { name: "cve_summary", arguments: {}, _meta: modernMeta() }), { ...modernHead("tools/call"), mcpName: "cve_summary" }), false);
+    assert.equal(is(msg("server/discover", { _meta: modernMeta() }), modernHead("server/discover")), false);
+    assert.equal(is(Buffer.from(JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "subscriptions/listen", params: listen }])), {}), false);
+    assert.equal(is(Buffer.from('{"method":"subscriptions/listen"'), modernHead("subscriptions/listen")), false);
   });
 });

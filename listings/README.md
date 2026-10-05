@@ -1,35 +1,64 @@
 # Directory listings for echelongraph-mcp
 
 Prepared for #2723. Nothing here has been submitted. Every submission below is a step for the
-founder (or someone the founder names), done by hand on the directory's own site or repo.
+founder (or someone the founder names), done by hand, signed in, on the directory's own site or
+repo. Steps that need no third-party account are marked **Parent**.
 
 One source of truth: `server.json` (its `title` and `description`) and `README.md`. Every paste
 block below uses their words. Rules from #2304: no "live", no "only", nothing comparative without
-a dated measurement. `test/listings.test.mjs` checks the paste blocks, `mcpb/manifest.json` and
-`docker/server.yaml` against `REMOVED_CLAIMS` in `test/tools.test.mjs`, and checks that they
-carry `server.json`'s description and `package.json`'s version.
+a dated measurement. `test/listings.test.mjs` checks the paste blocks, `mcpb/manifest.json`,
+`docker/server.yaml` and `docker/remote/server.yaml` against `REMOVED_CLAIMS` in
+`test/tools.test.mjs`, and checks that they carry `server.json`'s description and
+`package.json`'s version.
 
-Research for each directory was fetched 2026-10-03 to 2026-10-04 (UTC); sources are under each
-directory. Directory requirements change; re-read the source before you submit.
+Every directory's rules were re-read on 2026-10-04 (UTC); each section quotes the rules it relies
+on and names the source. Directory requirements change: re-read the source before you submit.
 
-| Directory | State on 2026-10-03 | What it takes | Blocked by |
-|---|---|---|---|
-| Official MCP Registry | listed: `io.echelongraph/echelongraph-mcp` 2.3.4, `isLatest: true` | nothing | none |
-| Smithery | not listed | upload an MCPB bundle (`mcpb/`); founder signs in | the next release (for the version to match) |
-| mcp.so | not listed | a GitHub issue on `chatmcp/mcpso` (free) or a $39 form | founder's choice of route |
-| PulseMCP | not listed; submissions paused | nothing to submit: it ingests the official registry | PulseMCP reopening |
-| Docker MCP Catalog | not listed | a PR to `docker/mcp-registry` (`docker/server.yaml`) | the next release (the Dockerfile must be in the public repo) |
-| Anthropic connector directory | not listed | a remote HTTPS server, submitted in the developer portal | founder's submission (the hosted endpoint, `https://mcp.echelongraph.io/mcp`, is in service) |
-| Glama | listed; shows release v1.0.3, not 2.3.4 | claim through `glama.json`, then edit the listing | the next release (the file must be in the public repo) |
+## Status on 2026-10-04
+
+Measured with `scripts/check-mcp-listings.mjs` (in the EchelonGraph repo; see "Listing check"
+below) at 10:57 UTC, npm `latest` 2.6.2:
+
+| Directory | Listed | Version shown | What it takes | Who |
+|---|---|---|---|---|
+| Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, 6 active versions | 2.6.2, `isLatest` | nothing: each release publishes it | release script |
+| Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 2.6.2 (`/health`) | nothing | deploy |
+| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.6.3 (Glama's latest release) | set our one-line description under Admin → Listing if Glama's differs | founder (GitHub sign-in) |
+| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; scan read 2.6.4: 14 tools, 4 prompts) | proxies the hosted endpoint | set display name and description; Settings → Verification | founder (Smithery sign-in) |
+| mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |
+| PulseMCP | no | shows none | nothing: submissions paused; it reads the official registry | nobody |
+| Docker MCP Catalog, local | no | n/a | a PR adding `servers/echelongraph/` | founder (GitHub sign-in) |
+| Docker MCP Catalog, remote | no | n/a | a PR adding `servers/echelongraph-remote/` | founder (GitHub sign-in) |
+| Anthropic connector directory | no | shows none | the developer portal's form | founder (paid Claude plan) |
+
+Smithery by URL, Docker's remote entry and Anthropic's directory all connect to the hosted
+endpoint, so the version they serve is the hosted endpoint's.
+
+## Who does what
+
+**Founder, signed in, in this order** (each section below has the exact text):
+
+1. Glama: claim the listing, paste the one-line description, resync (fixes the one finding today).
+2. Smithery: `smithery mcp publish https://mcp.echelongraph.io/mcp`, then paste the text.
+3. Docker: fork `docker/mcp-registry`, copy the two prepared entries, open the PR(s).
+4. Anthropic: the developer portal form at https://claude.ai/directory/manage .
+5. mcp.so: one GitHub issue on `chatmcp/mcpso`.
+
+**Parent, no third-party account:** keep these drafts at each release's version (the tests fail
+otherwise); run `node scripts/check-mcp-listings.mjs` after each founder step and again a week
+later (#2723's Done means); set that script's row to `listed` once a listing is up, so a later
+delisting is a finding; decide whether to wire the check (below).
 
 ## Files
 
 | File | Where it ends up | For |
 |---|---|---|
-| `../Dockerfile`, `../.dockerignore` | root of github.com/echelongraph/echelongraph-mcp | Docker MCP Catalog build |
-| `../glama.json` | root of the public repo | Glama ownership claim |
-| `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh` | public repo, `listings/mcpb/` | the `.mcpb` bundle for Smithery |
-| `docker/server.yaml` | copied into a `docker/mcp-registry` fork as `servers/echelongraph/server.yaml` | Docker MCP Catalog entry |
+| `../Dockerfile`, `../.dockerignore` | root of github.com/echelongraph/echelongraph-mcp (there since v2.4.0) | the Docker MCP Catalog's local build |
+| `../glama.json` | root of the public repo (there since v2.4.0) | Glama ownership claim |
+| `docker/server.yaml` | `servers/echelongraph/server.yaml` in a `docker/mcp-registry` fork | Docker MCP Catalog, local entry |
+| `docker/remote/server.yaml`, `tools.json`, `readme.md` | `servers/echelongraph-remote/` in the same fork | Docker MCP Catalog, remote entry |
+| `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh` | public repo, `listings/mcpb/` | an `.mcpb` bundle, if a stdio listing on Smithery is ever wanted |
+| `scripts/check-mcp-listings.mjs` (EchelonGraph repo, not mirrored) | nowhere | the listing check |
 
 None of these is in the npm package: `package.json` `files` is `dist`, `README.md`,
 `CHANGELOG.md` and `server.json`, and `test/listings.test.mjs` checks `npm pack --dry-run` for
@@ -81,9 +110,9 @@ Install configuration (for forms that ask for "connection information"):
 }
 ```
 
-Remote server URL (for forms that take a remote MCP server; Streamable HTTP, no auth). It
-serves once `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`; submit it only
-after that:
+Remote server URL (for forms that take a remote MCP server; Streamable HTTP, no auth). In
+service: `https://mcp.echelongraph.io/health` answered `{"status":"ok",…,"version":"2.6.2"}` on
+2026-10-04. Check it again before you submit:
 
 ```text
 https://mcp.echelongraph.io/mcp
@@ -96,7 +125,8 @@ Links:
 | Repository | https://github.com/echelongraph/echelongraph-mcp |
 | npm | https://www.npmjs.com/package/echelongraph-mcp |
 | Website / documentation | https://echelongraph.io/pulse/mcp |
-| Privacy policy | https://echelongraph.io/privacy |
+| Privacy policy | https://echelongraph.io/privacy (see "Anthropic connector directory" for a gap in it) |
+| What the server and the hosted endpoint send and log | https://github.com/echelongraph/echelongraph-mcp#privacy-what-is-sent-where |
 | Support / security contact | support@echelongraph.io |
 | Icon (512x512 PNG) | https://echelongraph.io/logo-mark.png (also `mcpb/icon.png`) |
 | License | MIT |
@@ -104,60 +134,117 @@ Links:
 
 ## Smithery
 
-**Status:** not listed. `https://registry.smithery.ai/servers?q=echelongraph` returned no
-EchelonGraph server on 2026-10-03.
+**Status (2026-10-05):** listed at https://smithery.ai/servers/echelongraph/echelongraph-mcp , published by the
+founder through the CLI after `smithery namespace create echelongraph` (the namespace did not exist; publishing
+to it first answered `404 {"error":"Namespace not found"}`). Smithery's scan reached the hosted endpoint and
+read `echelongraph-mcp` 2.6.4 with 14 tools and 4 prompts. Its display name is still `echelongraph-mcp`, with an
+empty description, until steps 3 and 4 below are done. The listing check's row is now `listed`.
 
-**What changed.** Smithery's publish docs no longer describe `smithery.yaml`. A stdio server is
-published as an MCPB bundle (`.mcpb`, a zip with `manifest.json`); a remote server is published by
-its HTTPS URL. So this directory has `mcpb/manifest.json` in place of a `smithery.yaml`.
+**Status (2026-10-04, before publishing):** not listed. `GET https://api.smithery.ai/servers/echelongraph/echelongraph-mcp`
+answers 404 `{"error":"Server not found"}`, and `?repoOwner=echelongraph&repoName=echelongraph-mcp`
+lists 0 servers.
+
+**No `smithery.yaml`.** Smithery's publish page and its documentation index no longer mention
+one. The publish page offers two routes:
+
+- **URL:** "**Bring your own hosting** — Smithery Gateway proxies to your upstream server."
+  Requirements: "Streamable HTTP transport" and "OAuth support (if auth required)". Scanning:
+  "**Public servers**: Scan completes automatically".
+- **Local (MCPB Bundle):** "**For local stdio servers** — Smithery distributes a pre-built MCPB
+  bundle that clients download and run locally."
+
+**Route: the hosted URL.** Our endpoint is Streamable HTTP and keyless, so it meets both
+requirements and Smithery needs no config schema. A URL listing cannot fall behind npm: Smithery
+proxies to whatever the hosted endpoint runs. A bundle would have to be rebuilt and uploaded at
+every release, because Smithery does not read npm; `mcpb/` stays prepared for that route but is
+not the recommendation. Checked 2026-10-04: an `initialize` sent with User-Agent
+`SmitheryBot/1.0 (+https://smithery.ai)` got a 200 from `https://mcp.echelongraph.io/mcp`. That
+request came from a cloud sandbox, not from the Cloudflare Workers that Smithery scans from; the
+endpoint is served by Google Frontend (Cloud Run), with no Cloudflare WAF in front of it to block
+those.
+
+**To know before publishing.** Because "Smithery Gateway proxies to your upstream server",
+requests from Smithery's users reach the endpoint from Smithery's addresses. The endpoint's
+per-client limit (120 requests a minute, keyed on the client's public address;
+`src/httpPolicy.ts`) then counts Smithery's egress addresses, not each user. Not measured. After
+listing, watch the hosted endpoint's rate-limited responses.
 
 **Steps**
 
-1. After the release that carries `listings/mcpb/` (so `manifest.json` is at the npm version):
-   `mcp-server/listings/mcpb/build.sh` builds `listings/mcpb/out/echelongraph-mcp-<version>.mcpb`
-   (it builds `dist/`, installs production dependencies from `package-lock.json`, validates the
-   manifest and packs with `@anthropic-ai/mcpb@2.1.2`).
-2. **Founder, signed in:** `npx -y @smithery/cli@4.11.1 auth login` (opens a browser sign-in).
-3. **Founder, signed in:** `npx -y @smithery/cli@4.11.1 namespace create echelongraph`. Namespace
-   names are global; if `echelongraph` is taken, stop and decide the name before publishing.
-4. **Founder, signed in:** `npx -y @smithery/cli@4.11.1 mcp publish ./listings/mcpb/out/echelongraph-mcp-<version>.mcpb -n echelongraph/echelongraph-mcp`
-5. **Founder, signed in:** on the server's page, paste the one-line and long descriptions above
-   where the page offers them, then open **Settings → Verification** and complete the checklist.
-6. Every release: rebuild the bundle and repeat step 4. Smithery does not read npm.
-7. Remote (once `https://mcp.echelongraph.io/health` answers): `smithery mcp publish https://mcp.echelongraph.io/mcp -n echelongraph/echelongraph-mcp`
-   or smithery.ai/new. Smithery scans with User-Agent `SmitheryBot/1.0 (+https://smithery.ai)` from
-   Cloudflare Workers; the edge in front of the remote must let that through.
+1. **Founder, signed in:** `npx -y @smithery/cli@4.11.1 auth login` (a browser sign-in).
+2. **Founder:** `npx -y @smithery/cli@4.11.1 mcp publish https://mcp.echelongraph.io/mcp -n echelongraph/echelongraph-mcp`
+   (or https://smithery.ai/new → enter the URL). On 2026-10-04 the namespace `echelongraph` held
+   no server (`api.smithery.ai/servers?namespace=echelongraph`: 0). Namespace names are global:
+   if `echelongraph` is taken, stop and choose the name before publishing, then change
+   `URLS.smithery` in `scripts/check-mcp-listings.mjs`.
+3. **Founder:** on the server's page, set the display name to the Name and the description to the
+   one-line description in "Paste text". Or, with a Smithery API key, send the JSON below as
+   `PATCH https://api.smithery.ai/servers/echelongraph/echelongraph-mcp` with
+   `Authorization: Bearer <key>` and `Content-Type: application/json`.
+4. **Founder:** open the server's **Settings → Verification**. The publish page: "Once your server
+   is published, open the server's Settings → Verification page to complete the automatic
+   official-vendor verification checklist."
+5. If the scan fails: the publish page's fallback is a static server card at
+   `/.well-known/mcp/server-card.json`. The endpoint answers 404 there today; it is not built,
+   because it is needed only if the scan fails.
+6. **Parent:** `node scripts/check-mcp-listings.mjs --only=smithery`; when it reads LISTED, set the
+   `smithery` row to `listed`.
 
-**Check after:** `https://smithery.ai/servers/echelongraph/echelongraph-mcp` shows the server,
-the text above, and the npm version.
+Smithery update body:
 
-Sources (fetched 2026-10-03): https://smithery.ai/docs/build/publish.md ,
-https://smithery.ai/docs/build/session-config.md , https://smithery.ai/docs/concepts/namespaces.md ,
-`smithery mcp publish --help` from `@smithery/cli@4.11.1`, MCPB spec
-https://github.com/modelcontextprotocol/mcpb/blob/main/MANIFEST.md (commit 70fe3b3, spec 0.3).
+```text
+{
+  "displayName": "EchelonGraph CVE & Exposure",
+  "description": "CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.",
+  "homepage": "https://echelongraph.io/pulse/mcp",
+  "repositoryUrl": "https://github.com/echelongraph/echelongraph-mcp",
+  "license": "MIT",
+  "iconUrl": "https://echelongraph.io/logo-mark.png"
+}
+```
+
+Sources (fetched 2026-10-04): https://smithery.ai/docs/build/publish.md ,
+https://smithery.ai/docs/llms.txt ,
+https://smithery.ai/docs/api-reference/servers/update-a-server.md ,
+https://smithery.ai/docs/api-reference/servers/list-all-servers.md , and
+`smithery mcp publish --help` from `@smithery/cli@4.11.1` (npm's latest that day): "Publish an MCP
+server URL or bundle to Smithery".
 
 ## mcp.so
 
-**Status:** not listed (`https://mcp.so/search?q=echelongraph`: "No servers match", 2026-10-03).
+**Status (2026-10-04):** not listed. https://mcp.so/search?q=echelongraph : "No servers match
+"echelongraph"".
 
-**Routes.** The form at https://mcp.so/submit takes a type, a repository URL and a name, and its
-button is a $39 paid submission ("Publish immediately without review", a "Verified badge",
-"Featured and priority placement"). The site's FAQ gives a free route: a new issue in its GitHub
-repository, `chatmcp/mcpso`. Paying a directory is a money decision for the founder (#2304); the
-free route is the default here. Recent issues there (for example #4506, 2026-09-29) were open with
-no maintainer reply when checked, so a listing can take a while.
+**Routes.**
+
+- Free: the site's FAQ, "How can I submit my MCP Server to mcp.so?": "You can submit your MCP
+  Server by creating a new issue in our GitHub repository. … Please provide details about your
+  server including its name, description, features, and connection information." The site links
+  github.com/chatmcp/mcp-directory, which GitHub serves as `chatmcp/mcpso`. Recent submissions
+  there are titled "Submit MCP server: <name>" or "Submit Remote MCP Server: <name>" (#4686 to
+  #4695, all opened 2026-10-04).
+- Paid: the form at https://mcp.so/submit has the types "MCP Server", "Remote Server", "MCP
+  Client" and "AI Agent", the fields "Repository URL*" and "Name", and "Paid submission $39
+  one-time publishing fee": "Publish immediately without review", "Verified badge", "Featured and
+  priority placement", "Dofollow project link"; its button is "Pay and submit automatically". The
+  page's description reads "Choose free review or publish immediately with Premium"; signed out,
+  only the paid button shows.
+
+Paying a directory is a money decision for the founder (#2304). The free route is the default.
 
 **Steps (free route)**
 
 1. **Founder, signed in to GitHub:** open https://github.com/chatmcp/mcpso/issues/new with the
    title and body below.
 2. **Founder, signed in to mcp.so** (once listed): claim or edit the page if mcp.so offers it, and
-   make its text match the one-line description above.
+   make its text match the one-line description.
+3. **Parent:** `node scripts/check-mcp-listings.mjs --only=mcpso`; when LISTED, set the row to
+   `listed`.
 
 Issue title:
 
 ```text
-Submit MCP Server: EchelonGraph CVE & Exposure (stdio, npm echelongraph-mcp)
+Submit MCP server: EchelonGraph CVE & Exposure (npm echelongraph-mcp, remote https://mcp.echelongraph.io/mcp)
 ```
 
 Issue body:
@@ -173,7 +260,7 @@ Description: CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Sh
 
 Tools (14, all read-only): cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, cve_intel, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
 
-Remote (Streamable HTTP, no install): https://mcp.echelongraph.io/mcp
+Remote (Streamable HTTP, no install, no key): https://mcp.echelongraph.io/mcp
 
 Install (stdio, Node.js 20 or later):
 {
@@ -188,64 +275,129 @@ Install (stdio, Node.js 20 or later):
 Contact: support@echelongraph.io
 ```
 
-**Check after:** the mcp.so page shows the server, the description above and no other wording.
+If the founder chooses the form instead: type "MCP Server", Repository URL
+`https://github.com/echelongraph/echelongraph-mcp`, Name `EchelonGraph CVE & Exposure`.
 
-Sources (fetched 2026-10-03): https://mcp.so/submit , https://mcp.so/ (FAQ: "How can I submit my
-MCP Server to mcp.so?"), https://github.com/chatmcp/mcpso/issues/4506 .
+Sources (fetched 2026-10-04): https://mcp.so/submit , https://mcp.so/ (FAQ),
+https://github.com/chatmcp/mcpso/issues .
 
 ## PulseMCP
 
-**Status:** not listed (search for "echelongraph": 0 servers, 2026-10-03). Submissions are
-paused. The submit page reads: "We are not accepting new MCP server or client submissions right
-now, and we are not making changes to existing listings", and asks servers to publish to the
-official MCP Registry, from which PulseMCP picks them up.
+**Status (2026-10-04):** not listed. https://www.pulsemcp.com/servers?q=echelongraph : "Showing
+0 - 0 of 0 servers for "echelongraph"", "No servers found."
 
-**Steps:** none to take. We are in the official registry. Re-check PulseMCP weekly; when a
-listing appears, compare its text with the one-line description above, and if it differs, ask
-PulseMCP through whatever channel the reopened site gives.
+**Nothing to submit.** https://www.pulsemcp.com/submit ("Last updated: September 3, 2026"): "We are
+not accepting new MCP server or client submissions right now, and we are not making changes to
+existing listings." It asks servers to "Publish it to the Official MCP Registry. That is the best
+first step even when we are not paused", and says "We will pick it up automatically once we are
+back." We are in the official registry (6 active versions, 2.6.2 latest).
 
-Sources (fetched 2026-10-03): https://www.pulsemcp.com/submit ,
-https://www.pulsemcp.com/servers?q=echelongraph .
+**Steps:** none. **Parent:** the listing check reads PulseMCP's search on every run. When a listing
+appears, compare its text with the one-line description; if it differs, ask PulseMCP through
+whatever channel the reopened site gives.
+
+How the check reads it: PulseMCP's API is not usable for this. `v0beta` answers 410
+`API_SUNSET` ("September 2026: Fully sunset (100%)"), and `v0.1` requires `X-API-Key` and
+`X-Tenant-ID`. So the check reads the public search page. On 2026-10-04 PulseMCP's edge answered
+curl from a cloud sandbox with a Cloudflare challenge, and Node's fetch from the same sandbox with
+the page. The check reports a challenge as "not measured", never as "not listed".
+
+Sources (fetched 2026-10-04): https://www.pulsemcp.com/submit ,
+https://www.pulsemcp.com/servers?q=echelongraph , https://www.pulsemcp.com/api/docs/v0.1 .
 
 ## Docker MCP Catalog
 
-**Status:** not listed (`hub.docker.com/v2/repositories/mcp/echelongraph/` → 404, 2026-10-03).
+**Status (2026-10-04):** not listed. Docker's published catalog,
+https://desktop.docker.com/mcp/catalog/v3/catalog.yaml , has no `echelongraph` entry.
 
-**How it works.** A PR to `docker/mcp-registry` adds `servers/<name>/server.yaml` pointing at a
-public GitHub repo and a pinned commit. Docker builds the image from that repo's `Dockerfile`
-and publishes it as `mcp/<name>` on Docker Hub "with cryptographic signatures, provenance
-tracking, SBOMs, and automatic security updates". So the image signature is Docker's: we do not
-run cosign for this listing. Docker review is required; after approval the server appears within
-24 hours.
+**How it works** (`CONTRIBUTING.md` at `docker/mcp-registry` commit 49b643c, which is still `main`
+on 2026-10-04). There are two kinds of entry:
 
-`docker/server.yaml` is the draft entry. It passes the registry's validator
-(`go run ./cmd/validate --name echelongraph`, registry commit 49b643c, 2026-09-16) on name, title,
-YAML formatting, pinned commit, secrets, config env and icon, when `source.commit` is a real
-SHA; the license check needs the GitHub API and was not run (the public repo's LICENSE is MIT).
-With the placeholder commit, the validator refuses it, as intended. `run.allowHosts` limits the
-container to `app.echelongraph.io:443`, so `ECHELONGRAPH_API_BASE` is not offered as a setting
-there.
+- Local: "Require a Dockerfile in the source repository". "If you don't provide a Docker image, we
+  will build the image for you and host it in Docker Hub's `mcp` namespace, the benefits are:
+  image will include cryptographic signatures, provenance tracking, SBOMs, and automatic security
+  updates."
+- Remote: "Don't require a Dockerfile (already deployed somewhere)". The directory holds
+  `server.yaml`, `tools.json` ("Always [] for remote servers") and `readme.md` ("Documentation
+  link (required)").
+
+Review: "Every pull request requires a review from the Docker team before merging." "Upon approval
+your entry will be processed and it will be available in 24 hours".
+
+**Signing is Docker's.** #2723 asked for an image "built reproducibly and signed (cosign)". Docker
+builds the local entry's image from our Dockerfile and signs it. Each Docker-built `mcp/*` image
+page names the check, for example `mcp/duckduckgo`'s: "COSIGN_REPOSITORY=mcp/signatures cosign
+verify mcp/duckduckgo --key https://raw.githubusercontent.com/docker/keyring/refs/heads/main/public/mcp/latest.pub".
+We sign nothing for this listing. `../Dockerfile` pins its base image by digest and installs
+exactly `package-lock.json`; it is byte-identical at the public tag `v2.6.2` (blob `dc99f10a`).
+
+**No PR per release.** The registry's daily "Update MCP Server Version Pins" workflow
+(`.github/workflows/update-pins.yaml`, `cmd/ci/update_pins.go`) moves every local server's
+`source.commit` to the head of its tracked branch (default `main`) and opens one PR per server,
+which `auto-merge-pins.yaml` merges when its checks pass. The public repo's `main` moves only at a
+release, so the image follows releases without a PR from us.
+
+**Two entries.** A local one (`echelongraph`, Docker builds and signs the image, stdio) and a
+remote one (`echelongraph-remote`, the hosted URL, no image). The registry has seven such
+`<name>` and `<name>-remote` pairs; five of them (`atlassian`, `notion`, `pulumi`, `stripe`,
+`webflow`) give both entries the same title, as ours do.
+
+**Validated 2026-10-04** with the registry's own `go run ./cmd/validate --name <name>` at 49b643c:
+
+- `echelongraph` (this directory's `docker/server.yaml`, pinned at `ccb1a7b8…`, the public commit of
+  `v2.6.2`): name, directory, title, YAML formatting, "✅ Commit is pinned", secrets, config env,
+  "✅ License is valid", "✅ Icon is valid", remote skipped, OAuth. Every check passed.
+- `echelongraph-remote` (`docker/remote/`): every check passed, with "✅ Dynamic tools are valid".
+  Run without `dynamic`, Docker's own client listed our tools from the URL: "✅ Remote tools are
+  valid. Found 14 tools."
+- Not run: `task build -- --tools echelongraph` (the sandbox has no Docker daemon and no Task). It
+  builds `../Dockerfile`, and `tools/list` needs no configuration and no network:
+  `test/listings.test.mjs` lists the tools exactly that way.
 
 **Steps**
 
-1. Release the next version, so the public repo's root holds `Dockerfile`. Note the public commit
-   of that release (`git ls-remote https://github.com/echelongraph/echelongraph-mcp refs/tags/v<version>^{}`).
-2. **Founder, signed in to GitHub:** fork https://github.com/docker/mcp-registry .
-3. In the fork: copy `docker/server.yaml` to `servers/echelongraph/server.yaml`, delete its
-   leading comment block, and set `source.commit` to the commit from step 1.
-4. In the fork: `task validate -- --name echelongraph` and `task build -- --tools echelongraph`
-   (needs Go 1.24+, Docker and Task). The build lists the tools by running the server; it needs
-   no configuration and no network for `tools/list`.
-5. **Founder, signed in to GitHub:** open the PR with the title and body below.
-6. Every release: a PR that moves `source.commit` to the new release's commit.
+1. **Founder, signed in to GitHub:** fork https://github.com/docker/mcp-registry and clone the fork.
+2. Copy `docker/server.yaml` to `servers/echelongraph/server.yaml`, and `docker/remote/server.yaml`,
+   `tools.json` and `readme.md` to `servers/echelongraph-remote/`. Both copy as they are. If npm's
+   latest is past 2.6.2, you may set `source.commit` to
+   `git ls-remote https://github.com/echelongraph/echelongraph-mcp 'refs/tags/v<latest>^{}'`'s
+   commit. The pin workflow moves it after the merge in any case.
+3. In the fork: `task validate -- --name echelongraph`, `task validate -- --name echelongraph-remote`
+   and `task build -- --tools echelongraph` (Go 1.24+, Docker and Task).
+4. **Founder:** open one PR per entry with the titles and bodies below, remote first (no build).
+   Docker's CI builds every server a PR changes, and each entry gets its own review.
+5. No test credentials: the server is keyless. Docker's form for sharing test credentials is for
+   servers that need them.
+6. **Parent:** `node scripts/check-mcp-listings.mjs --only=docker,docker-remote`; set each row to
+   `listed` when it reads LISTED.
 
-PR title:
+Remote PR title:
+
+```text
+Add EchelonGraph CVE & Exposure remote (echelongraph-remote)
+```
+
+Remote PR body:
+
+```text
+Adds echelongraph-remote: EchelonGraph CVE & Exposure, hosted.
+
+CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
+
+- Remote: https://mcp.echelongraph.io/mcp (streamable-http), no authentication, no secrets
+- tools.json is [] and dynamic tools are on; `go run ./cmd/validate` without dynamic lists 14 tools from the URL
+- 14 tools, all annotated readOnlyHint
+- Docs: https://github.com/echelongraph/echelongraph-mcp#readme (MIT)
+- Also in the official MCP Registry as io.echelongraph/echelongraph-mcp, with this remote
+```
+
+Local PR title:
 
 ```text
 Add EchelonGraph CVE & Exposure (echelongraph)
 ```
 
-PR body:
+Local PR body:
 
 ```text
 Adds echelongraph: EchelonGraph CVE & Exposure.
@@ -253,47 +405,62 @@ Adds echelongraph: EchelonGraph CVE & Exposure.
 CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
 
 - Source: https://github.com/echelongraph/echelongraph-mcp (MIT), pinned commit in server.yaml
-- Dockerfile at the repo root; the image runs the stdio server as uid 1000
+- Dockerfile at the repo root; base image pinned by digest, npm ci from the lockfile, runs the stdio server as uid 1000
 - No secrets or configuration; the server calls https://app.echelongraph.io (allowHosts)
 - 14 tools, all annotated readOnlyHint: cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, cve_intel, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories
 - Also in the official MCP Registry as io.echelongraph/echelongraph-mcp
 ```
 
-**Check after:** https://hub.docker.com/mcp and Docker Desktop's MCP Toolkit show the server
-with the description above; the image's `org.opencontainers.image.revision` label is the
-release commit.
-
-Sources (fetched 2026-10-03): https://github.com/docker/mcp-registry/blob/main/CONTRIBUTING.md
-(commit 49b643c), its `cmd/validate/main.go` and `pkg/servers/types.go`,
-https://docs.docker.com/ai/mcp-catalog-and-toolkit/catalog/ .
+Sources (fetched 2026-10-04): https://github.com/docker/mcp-registry/blob/main/CONTRIBUTING.md
+(49b643c), its `cmd/validate/main.go`, `cmd/ci/update_pins.go`, `.github/workflows/ci.yaml`,
+`update-pins.yaml` and `auto-merge-pins.yaml`, `servers/excalidraw-remote/` and
+`servers/cloudflare-docs/`; https://desktop.docker.com/mcp/catalog/v3/catalog.yaml ;
+https://hub.docker.com/v2/repositories/mcp/duckduckgo/ .
 
 ## Anthropic connector directory
 
-**Status:** not listed. The hosted endpoint, `https://mcp.echelongraph.io/mcp`, is in service
-(`https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`), so the listing waits only for
-the founder's submission below.
+**Status (2026-10-04):** not listed. https://claude.com/connectors/echelongraph redirects to
+https://claude.com/marketplace/connectors/echelongraph , which answers 404. A listed connector
+answers 200 at the same path (Semrush's, the same day).
 
-**Why remote.** The directory takes remote MCP servers over HTTPS, submitted in the developer
-portal. It "no longer accepts local servers packaged as MCP Bundles (MCPB)"; a local server can be
-listed only inside a plugin, and #2304 rejected a plugin. So the listing is of the hosted
-endpoint.
+**What it takes, and whether we qualify.** The directory takes remote servers, submitted in the
+developer portal. Checked against each requirement on the submission page:
 
-**Requirements that apply** (from the submission page): every tool has a `title` and a
-`readOnlyHint` or `destructiveHint` (every tool carries a title and `readOnlyHint: true`;
-checked in `tools/list` on 2026-10-04); no authentication is a supported mode for public data; a
-documentation URL, a privacy policy URL, a support contact and an icon; a paid Claude plan
-(Pro, Max, Team or Enterprise; on Team and Enterprise, an Owner submits); seven policy
-acknowledgments; and the Software Directory Terms and Policy.
+| Requirement (quoted) | Us |
+|---|---|
+| "Your server is remote and reachable over HTTPS" | yes: `https://mcp.echelongraph.io/mcp` |
+| "Authentication works for Claude's client: OAuth 2.0 if your tools act on a user's account, or no authentication for public data". The authentication page lists `none`, "No authentication (authless server)", as "Supported by default". | yes: no authentication, public data |
+| "Every tool has a `title` and a `readOnlyHint` or `destructiveHint` annotation" | yes: all 14 have a title and `readOnlyHint: true` (`test/listings.test.mjs`, both protocol eras) |
+| "You've tested it in Claude" | founder: add it as a custom connector and call each tool |
+| "documentation URL, privacy policy URL, support contact, an icon" | yes, in "Paste text", with the privacy gap below |
+| "You have a test account for reviewers: credentials for a fully populated account". The review checklist: "Test credentials: required". | **no account exists**: the server is keyless. Say so in Test & launch (block below). A reviewer may ask about it. |
+| "Your account can submit: any paid Claude plan". The publish page: "Plan: Pro, Max, Team, or Enterprise. Free accounts can't submit". On Team and Enterprise, "an Owner can submit". | founder's plan |
+| Review checklist, API ownership: "Your server must call your own first-party APIs, or APIs you legitimately proxy. The MCP server domain should match your service." | yes: `mcp.echelongraph.io` calls `app.echelongraph.io` |
+| "the directory no longer accepts local servers packaged as MCP Bundles (MCPB)" | the hosted URL is what we submit |
 
-**Steps** (check first that `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`)
+After submitting: "Anthropic scans your submission automatically for policy compliance and, by
+default, lists it as a Community connector". Escalations: `mcp-review@anthropic.com`.
+
+**Privacy gap, to fix or route around before submitting.** https://echelongraph.io/privacy
+(`marketing-site/app/privacy/PrivacyContent.tsx`) says nothing about the MCP server or the hosted
+endpoint. What the endpoint logs is in the server's README, "Privacy: what is sent where". Either
+add an MCP section to `/privacy` first (a marketing-site change, not made here), or give the
+README section as the privacy URL:
+https://github.com/echelongraph/echelongraph-mcp#privacy-what-is-sent-where . (`/privacy`
+answered 403 to the sandbox; the marketing edge challenges datacenter clients, #2304. So its
+served text was not re-read here; its source was.)
+
+**Steps** (first check that `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`)
 
 1. **Founder, signed in to claude.ai:** add the remote URL as a custom connector and call every
    tool from a conversation (the portal asks you to confirm this).
-2. **Founder, signed in:** https://claude.ai/directory/manage → **Submit new** → **MCP connector**.
-3. Connection: `https://mcp.echelongraph.io/mcp`. Tools sync from the server.
-4. Listing: name, one-line description and long description from "Paste text" above; categories
-   Security (and Open Data if offered); the links table above. The URL slug is permanent:
-   `echelongraph`.
+2. **Founder:** https://claude.ai/directory/manage → **Submit new** → **MCP connector**.
+3. Connection: `https://mcp.echelongraph.io/mcp`. Tools sync from the server, grouped as read-only.
+4. Listing: the Name, one-line description and long description from "Paste text"; categories
+   Security (and Open Data if offered); the links table. The URL slug is permanent: `echelongraph`.
+   The listing check reads `claude.com/marketplace/connectors/echelongraph`, on the assumption that
+   the public page follows the portal's slug (Semrush's page is at `…/connectors/semrush`); if the
+   published page is elsewhere, change `URLS.anthropic` in the script.
 5. Use cases: paste the block below. What users need before connecting: nothing. Reads data;
    writes nothing.
 6. Company: EchelonGraph, https://echelongraph.io , contact support@echelongraph.io (or the
@@ -303,6 +470,8 @@ acknowledgments; and the Software Directory Terms and Policy.
    no sponsored content.
 9. Test & launch: paste the block below.
 10. Compliance: read and tick the seven acknowledgments.
+11. **Parent:** `node scripts/check-mcp-listings.mjs --only=anthropic`; set the row to `listed`
+    when it reads LISTED.
 
 Use cases:
 
@@ -313,61 +482,52 @@ Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been s
 Test & launch:
 
 ```text
-No account is needed: the server is keyless and read-only. Connect the URL and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, and check_sbom with purls ["pkg:npm/lodash@4.17.15"].
+No test account exists, and none is needed: the server is keyless and read-only, so there are no credentials to give. Connect https://mcp.echelongraph.io/mcp with no authentication and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, and check_sbom with purls ["pkg:npm/lodash@4.17.15"]. Each client may send up to 120 requests a minute.
 ```
 
-**Check after:** the listing page at claude.ai/directory shows the text above.
-
-Sources (fetched 2026-10-03): https://claude.com/docs/connectors/building/submission.md ,
-https://claude.com/docs/directory/publish.md , https://claude.com/docs/connectors/building/mcpb.md .
+Sources (fetched 2026-10-04): https://claude.com/docs/connectors/building/submission.md ,
+https://claude.com/docs/directory/publish.md ,
+https://claude.com/docs/connectors/building/authentication.md ,
+https://claude.com/docs/connectors/building/review-criteria.md .
 
 ## Glama
 
-**Status:** listed at https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp , marked
-"Official", not claimed by us.
+**Status (2026-10-04):** listed at https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp ,
+marked "Official", not claimed. The page's latest release is **v1.0.3**, recorded by Glama on
+2026-09-27, while npm is at 2.6.2: the one finding of the listing check today.
 
-**#2706, re-checked 2026-10-03 23:50 UTC.** The listing's own text no longer carries a
-`REMOVED_CLAIMS` term. "live" appears on the page in two other places: Glama's own tool-grading
-notes (for example "whether external lookups are cached or live"), which ask a question and claim
-nothing about the product; and the summary of a different server, `purify-feeds-mcp` by
-`eason4kim-rocket`, in the page's "Related Servers" list ("MCP server for querying live CISA KEV,
-EPSS, and enriched vulnerability feeds with full provenance"). That is the sentence #2706 quoted;
-it now sits under another author's server. **Re-checked 2026-10-04:** the page's description
-of this server (Glama's own, generated from the repo) matches no `REMOVED_CLAIMS` term; the
-sentence is still `purify-feeds-mcp`'s: its card in "Related Servers" (which Glama rotates) runs
-name, tags, author, grades, then that description, and the page's embedded data pairs it with
-purify-feeds-mcp and the 2026-07-31 stamp #2706 cited. (A first re-check misread it as the next
-card's, `Agam-S/Vulnary-MCP`, whose own description is "MCP server for querying CVE and package
-vulnerability data from NVD and OSV.dev"; corrected by #2706's post-close review.) What
-Glama indexes from us carries none either: the public repo's README is byte-identical to
-`../README.md` (held to `REMOVED_CLAIMS` by `test/tools.test.mjs`), its description and topics
-are `github-repo-settings.json`'s (held by `test/listings.test.mjs`), and `glama.json` can carry
-only `maintainers`. So there is no source text left to fix; claiming the listing is what remains.
-What is still wrong: the page's latest release is
-v1.0.3 (observed 2026-09-27), not 2.3.4, and its generated summary says the server "distinguishes
-verified zeros from unassessed or failed lookups", which is Glama's wording, not ours.
+**Our card's text is clean.** The page's description of this server (Glama's own, generated from
+the repo: "Enables any MCP client to look up CVE intelligence …") matches no `REMOVED_CLAIMS` term.
+The "live CISA KEV" sentence #2706 quoted belongs to another server, `purify-feeds-mcp` by
+`eason4kim-rocket`, in the page's "Related Servers" list (corrected by #2706's post-close review;
+a first re-check had misread it as `Agam-S/Vulnary-MCP`'s). Glama's tool-grading notes also use
+"live" ("whether external lookups are cached or live"), as a question, not a claim about us. The
+listing check reads our card only (the head's title and description), so a word elsewhere on the
+page is never reported as ours, and its self-test holds that with the real page. Glama generates
+the description from the repo and could bring a barred word back with no change on our side; the
+check reads it on every run.
 
-**How claiming works.** `glama.json` at the repo root, with `$schema`
-`https://glama.ai/mcp/schemas/server.json`, lists the GitHub usernames allowed to maintain the
-listing (that schema defines `maintainers` and nothing else; re-read 2026-10-04, unchanged).
-For the hosted endpoint Glama also offers a domain claim: `https://glama.ai/mcp/schemas/connector.json`
-describes a `/.well-known/glama.json` served from a domain you control (`claim`, a token from
-Glama's claim panel, or `maintainers`). Not prepared here: it needs that token, and a file
-served on `mcp.echelongraph.io`. `../glama.json` names
-`AkshayDubey29`; change it before the release if someone else should hold the listing.
+**How claiming works.** The claim page says "Login with GitHub to claim"; "If you own the
+repository: Sign in as that GitHub account and this page becomes yours immediately"; "If owned by
+an organization: Add `glama.json` to the root of the repository with your GitHub username under
+`maintainers`, then sign in", and "Glama recognises you on the next sync". The public repo's root
+has held `glama.json` since v2.4.0, naming `AkshayDubey29` (its schema,
+https://glama.ai/mcp/schemas/server.json , defines `maintainers` and nothing else). Change
+`../glama.json` before a release if someone else should hold the listing.
 
 **Steps**
 
-1. Release the next version, so the public repo's root holds `glama.json`.
-2. **Founder, signed in to Glama with GitHub:** open
+1. **Founder, signed in to Glama with GitHub as `AkshayDubey29`:** open
    https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp/admin and claim the server.
-3. **Founder, signed in:** set the description to the one-line description above, and turn on
-   "Use Glama listing details as the source of truth" if the page offers it, so a registry update
-   does not overwrite the text. Ask for the release list to be refreshed if it still shows v1.0.3.
-4. Record the outcome on #2706.
+2. **Founder:** set the description to the one-line description in "Paste text", and turn on "Use
+   Glama listing details as the source of truth" if the page offers it, so a registry update does
+   not overwrite the text. Run the admin page's repository sync if it offers one; otherwise ask
+   Glama to refresh the release list, which still shows v1.0.3.
+3. **Parent:** `node scripts/check-mcp-listings.mjs --only=glama` must read 2.6.x (current), with
+   no barred claim. Record the outcome on #2723.
 
-Sources (fetched 2026-10-03): the listing page above, https://glama.ai/mcp/schemas/server.json ,
-https://glama.ai/mcp/faq .
+Sources (fetched 2026-10-04): the listing page and its `/admin` page above,
+https://glama.ai/mcp/schemas/server.json .
 
 ## Public repo settings
 
@@ -399,15 +559,50 @@ checklist: when a Release is created or edited, paste the sentence above its fir
 leave the numbers out. `test/readme.test.mjs` holds `CHANGELOG.md`'s preamble and this section
 to the same sentence.
 
-## Version lag
+## Listing check
 
-#2723's Done means asks for a check that reports any directory whose version lags npm `latest`.
-Not built here. Where each directory exposes a version:
+`scripts/check-mcp-listings.mjs` lives in the EchelonGraph repo, not in this directory, so it is
+not mirrored to the public repo. It reads each directory's public page or API for this server, one
+request at a time, and reports per row: listed or not; the version shown against npm's `latest`
+(or "not shown"); and any `REMOVED_CLAIMS` term in our own card's text.
 
-| Directory | Read |
-|---|---|
-| Official registry | `https://registry.modelcontextprotocol.io/v0/servers?search=io.echelongraph/echelongraph-mcp` (`server.version`, `isLatest`) |
-| Smithery | `https://registry.smithery.ai/servers/echelongraph/echelongraph-mcp` (after publishing) |
-| Docker | the `org.opencontainers.image.revision` label of `mcp/echelongraph`, against the release tag's commit |
-| Glama | the listing page's latest release |
-| mcp.so, PulseMCP | no version field seen; compare the description text |
+| Row | Reads | Our card | Version |
+|---|---|---|---|
+| Official MCP Registry | `registry.modelcontextprotocol.io/v0.1/servers?search=…&version=latest` | title, description | the active `isLatest` entry |
+| Hosted endpoint | `mcp.echelongraph.io/health` | none | `version` |
+| Glama | the listing page | `<title>`, meta description | `releaseVersion` in the page's data |
+| Smithery | `api.smithery.ai/servers/echelongraph/echelongraph-mcp` | displayName, description | none (a URL listing serves the hosted endpoint) |
+| mcp.so | `mcp.so/search?q=echelongraph` (its embedded results) | name, tagline | shows none |
+| PulseMCP | `pulsemcp.com/servers?q=echelongraph`, then our server page | `<title>`, meta description | shows none |
+| Docker, local and remote | `desktop.docker.com/mcp/catalog/v3/catalog.yaml` | title, description | local: the release tag whose commit Docker built (`source …/tree/<commit>` against the public repo's tags); remote: none |
+| Anthropic | `claude.com/marketplace/connectors/echelongraph` | `<title>`, meta description | shows none |
+
+Exit codes: 0 every row measured, no finding; 1 at least one finding (`missing` where the table
+says listed, `version-lags`, `barred-claim`); 2 no finding, but something could not be measured
+(a directory unreachable or challenged, a page whose shape changed, npm unreadable, a Docker build
+commit no release tag points at). A finding outranks could-not-measure, and both are printed.
+A row the script's table marks `pending` that does not list us is printed as PENDING and is not a
+finding. Once a listing is up, set its row to `listed`.
+
+`node scripts/check-mcp-listings.mjs --self-test` runs 12 cases offline against
+`scripts/fixtures/mcp-listings/`: responses saved 2026-10-04 (several trimmed, in served order),
+plus labelled synthetic ones where no directory can serve a listed page yet. It covers both
+polarities of each finding, the control that passes when every row is listed, current and clean,
+and the control of the real 2026-10-04 responses (exit 1: Glama's lag, and PulseMCP's challenge
+as curl got it). The real Glama page carries "live" in another server's card, and that must not be
+flagged. It passes with no network (run in a namespace with none), and every one of nine
+deliberate breaks of the checker made it fail.
+
+**How it would be wired (not wired; the parent decides):**
+
+- **Deploy-time warning**, in `infrastructure/cloudrun/deploy-all.sh` next to the official
+  registry guard (`--check-mcp-registry`). It would warn, not fail: a deploy cannot fix a third
+  party's page, and today's Glama lag would block every deploy.
+  ```bash
+  node scripts/check-mcp-listings.mjs --self-test >/dev/null || warn "listing check FAILED ITS SELF-TEST"
+  node scripts/check-mcp-listings.mjs || warn "listing check: exit $? (1 finding, 2 not measured)"
+  ```
+- **Weekly schedule** (#2723: "re-checked a week later"): a scheduled CI job or Routine that runs
+  `--self-test` and then the check, and fails or alerts on exit 1 or 2. It needs egress to the eight
+  hostnames in the table, plus `registry.npmjs.org` and `api.github.com`.
+- **CI:** `--self-test` on changes to the script or its fixtures (offline, under a second).

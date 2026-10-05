@@ -18,16 +18,36 @@
 // text-bound-live.mjs last recorded it, so a fixture cut at another level than production's page
 // fails here instead of bounding the wrong text.
 //
+// Since #2800 each case's size is held within MARGIN of its record in either direction, and the
+// fields each description says a cut row keeps "at least" are checked on every row of every case.
+// Since #2801 the cve:// resource, which relays get_cve's answer, is a case too, and since #2802 a
+// cut's sentences say where an answer is whole: structuredContent.data.
+//
 // Runs against dist/index.js, so build first; `npm test` does.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
-import { CEILING, MARGIN, SBOM_MAX_PURLS, SHAPED, SHAPED_DRIFT, argsOf, assertBoundUnderCeiling, productionText, readLiveRecord, shapedAnswers, shareOfCeiling, textSize } from "./text-bound.mjs";
+import {
+  CEILING,
+  MARGIN,
+  SBOM_MAX_PURLS,
+  SHAPED,
+  SHAPED_DRIFT,
+  argsOf,
+  assertBoundUnderCeiling,
+  assertCutOf,
+  cutPairs,
+  productionText,
+  readLiveRecord,
+  shapedAnswers,
+  shareOfCeiling,
+  startStub,
+  textSize,
+} from "./text-bound.mjs";
 
 // The cut itself, from the package under test (dist/textBudget.js loads nothing else and starts no server).
 const { DATA_TEXT_BUDGET, TEXT_BUDGET_DESCRIPTION, dataText } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "textBudget.js")).href);
@@ -35,81 +55,12 @@ const { DATA_TEXT_BUDGET, TEXT_BUDGET_DESCRIPTION, dataText } = await import(pat
 // The budget the server cuts the first text block to: half the ceiling, so the note and the
 // envelope after it, and a release's growth, have the other half.
 const BUDGET = DATA_TEXT_BUDGET;
-const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const blocksOf = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
 const LIMITED = "check_sbom, 2,000 purls, rate-limited after 6 batches (production's answer from a fresh budget)";
 const noteSentences = (t) => t.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).filter(Boolean);
-
-// The API's answer when a caller's component budget is spent (core-backend internal/waf/weighted.go).
-const RATE_LIMITED = { error: "component budget exceeded: this batch costs 200 components and this address has 0 left in the window. Nothing was looked up", code: "RATE_LIMIT_EXCEEDED", cost: 200, limit: 1200 };
-
-// A stub API answering each request with the case's answer for its path (whole URL first), and,
-// for a case with `limited`, every request after the first `after` with 429 and its Retry-After.
-async function startStub() {
-  const state = { answers: {}, limited: undefined, requests: 0 };
-  const server = http.createServer((req, res) => {
-    req.resume();
-    req.on("end", () => {
-      const { pathname } = new URL(req.url, "http://stub");
-      state.requests++;
-      if (state.limited && state.requests > state.limited.after) {
-        res.writeHead(429, { "content-type": "application/json", "retry-after": String(state.limited.retryAfter) });
-        res.end(JSON.stringify(RATE_LIMITED));
-        return;
-      }
-      const body = state.answers[req.url] ?? state.answers[pathname];
-      res.writeHead(body ? 200 : 404, { "content-type": body ? "application/json" : "text/plain" });
-      res.end(body ? JSON.stringify(body) : "404 page not found\n");
-    });
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return {
-    state,
-    base: `http://127.0.0.1:${server.address().port}`,
-    close: () => {
-      server.closeAllConnections();
-      return new Promise((r) => server.close(r));
-    },
-  };
-}
-
-// Whether `t`, read from the first text block, is a cut of `d`, structuredContent.data: every key
-// it has, `d` has; a string is equal or `d`'s first characters and "…"; a list is some of `d`'s
-// entries, in `d`'s order; anything else is equal. Throws, naming where, when it is not.
-function assertCutOf(t, d, at = "data") {
-  if (typeof t === "string" && typeof d === "string") {
-    if (t === d) return;
-    assert.ok(t.endsWith("…") && d.startsWith(t.slice(0, -1)) && t.length <= d.length, `${at}: ${JSON.stringify(t.slice(0, 80))} is neither the answer's string nor its start and "…"`);
-    return;
-  }
-  if (Array.isArray(t)) {
-    assert.ok(Array.isArray(d), `${at}: a list in the text where the answer has ${typeof d}`);
-    let j = 0;
-    for (const [i, x] of t.entries()) {
-      while (j < d.length && !isCut(x, d[j])) j++;
-      assert.ok(j < d.length, `${at}[${i}]: not one of the answer's entries, in the answer's order`);
-      j++;
-    }
-    return;
-  }
-  if (isObj(t)) {
-    assert.ok(isObj(d), `${at}: an object in the text where the answer has ${JSON.stringify(d)?.slice(0, 40)}`);
-    for (const k of Object.keys(t)) {
-      assert.ok(Object.hasOwn(d, k), `${at}.${k}: in the text, not in the answer`);
-      assertCutOf(t[k], d[k], `${at}.${k}`);
-    }
-    return;
-  }
-  assert.deepEqual(t, d, at);
-}
-function isCut(t, d) {
-  try {
-    assertCutOf(t, d);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// The tool cases, and the resource cases (#2801), of SHAPED.
+const TOOL_CASES = SHAPED.filter((c) => !c.resource);
+const RESOURCE_CASES = SHAPED.filter((c) => c.resource);
 
 // What every result of a case must be, besides its size: the cut's contract above.
 function assertTextIsACut(label, res) {
@@ -133,6 +84,36 @@ function assertTextIsACut(label, res) {
   assert.deepEqual({ ...e, notes: sc.notes, ...(Object.hasOwn(e, "method") ? {} : { method: sc.method }) }, rest, `${label}: the envelope block is not structuredContent without data`);
 }
 
+// What a cve:// read must be (#2801): get_cve's structured result with data cut as get_cve's first
+// text block is, laid out as that block lays it out, and notes that say nothing of a text block:
+// get_cve's TEXT CUT sentence is replaced by the resource's own (DATA CUT), and the sentences after
+// it, on what the cut leaves out, are the same.
+function assertResourceIsACut(label, res, tool) {
+  const [{ text, mimeType }] = res.contents;
+  assert.equal(mimeType, "application/json", label);
+  const s = JSON.parse(text);
+  const sc = tool.structuredContent;
+  assertCutOf(s.data, sc.data);
+  const block = blocksOf(tool)[0];
+  assert.ok(text.includes(`"data": ${block.replace(/\n/g, "\n  ")}\n}`), `${label}: data is not laid out as get_cve's first text block lays it out`);
+  const { data: _a, notes: _b, ...envelope } = s;
+  const { data: _c, notes: _d, ...toolEnvelope } = sc;
+  assert.deepEqual(envelope, toolEnvelope, `${label}: the envelope is not get_cve's`);
+  for (const n of s.notes) assert.doesNotMatch(n, /TEXT CUT|text block/, `${label}: a note about a text block the resource does not have: ${n}`);
+  const cut = JSON.stringify(s.data) !== JSON.stringify(sc.data);
+  const at = s.notes.findIndex((n) => n.startsWith("DATA CUT: "));
+  if (!cut) {
+    assert.equal(at, -1, `${label}: data is whole and a note says DATA CUT`);
+    assert.equal(text, JSON.stringify(sc, null, 2), `${label}: data is whole and the text is not the structured result pretty-printed`);
+    return;
+  }
+  assert.match(s.notes[at] ?? "", /^DATA CUT: the API's answer is \d+ characters of JSON, more than the 30000 this resource's data holds, so data here is cut, and get_cve's structuredContent\.data carries the answer whole\.$/, `${label}: data is cut and no note says so`);
+  const toolAt = sc.notes.findIndex((n) => n.startsWith("TEXT CUT: "));
+  assert.ok(toolAt >= 0, `${label}: get_cve's first text block is not cut, so this case does not test the resource's cut`);
+  assert.deepEqual(s.notes.slice(0, at), sc.notes.slice(0, toolAt), `${label}: the notes before the cut's are not get_cve's`);
+  assert.deepEqual(s.notes.slice(at + 1), sc.notes.slice(toolAt + 1), `${label}: the notes on what the cut leaves out are not get_cve's`);
+}
+
 describe("#2783: every tool's text on production-shaped answers, under the ceiling", () => {
   let stub;
   let client;
@@ -149,7 +130,8 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       stub.state.answers = shapedAnswers(c);
       assert.ok(stub.state.answers, `${c.label}: no answers kept`);
       served[c.label] = stub.state.answers;
-      measured[c.label] = await client.callTool({ name: c.tool, arguments: argsOf(c) });
+      measured[c.label] = c.resource ? await client.readResource({ uri: c.resource }) : await client.callTool({ name: c.tool, arguments: argsOf(c) });
+      if (c.resource) measured[`${c.label}: the tool`] = await client.callTool({ name: c.tool, arguments: argsOf(c) });
     }
   });
   after(async () => {
@@ -158,11 +140,17 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
   });
 
   // The ticket's own coverage rule: no tool is bounded only by a stub fixture.
-  it("every tool tools/list advertises has a production-shaped case at its default call, and every tool with a page size one at its largest page", () => {
+  it("every tool tools/list advertises has a production-shaped case at its default call, and every tool with a page size one at its largest page; every resource template that reads a tool's answer has one too", async () => {
     const names = tools.map((t) => t.name);
-    assert.deepEqual([...new Set(SHAPED.map((c) => c.tool))].sort(), [...names].sort(), "SHAPED does not cover exactly the tools tools/list advertises");
+    assert.deepEqual([...new Set(TOOL_CASES.map((c) => c.tool))].sort(), [...names].sort(), "SHAPED does not cover exactly the tools tools/list advertises");
+    // #2801: cve://{cve_id} relays get_cve's answer, so it is as long as get_cve's.
+    const { resourceTemplates } = await client.listResourceTemplates();
+    for (const rt of resourceTemplates) {
+      const scheme = rt.uriTemplate.slice(0, rt.uriTemplate.indexOf("{"));
+      assert.ok(RESOURCE_CASES.some((c) => c.resource.startsWith(scheme)), `${rt.uriTemplate}: no production-shaped case`);
+    }
     for (const t of tools) {
-      assert.ok(SHAPED.some((c) => c.tool === t.name && c.page === "default"), `${t.name}: no case at its default call`);
+      assert.ok(TOOL_CASES.some((c) => c.tool === t.name && c.page === "default"), `${t.name}: no case at its default call`);
       const max = t.inputSchema?.properties?.limit?.maximum;
       if (max !== undefined) {
         const c = SHAPED.find((x) => x.tool === t.name && x.page === "max");
@@ -175,25 +163,35 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     for (const c of sbom) assert.equal(new Set(argsOf(c).purls).size, SBOM_MAX_PURLS, `${c.label}: it does not send check_sbom's 2,000 distinct purls`);
   });
 
+  // #2800: the bound is two-sided. One-sided, it let an edit drop severity, cvss_v3_score,
+  // echelongraph_score, score_assessed, epss_score and kev_listed from both search_cves cut levels
+  // and stay green (13,483 characters to 11,030): a text that shrinks past MARGIN is a change to
+  // re-measure and review, as one that grows is.
   for (const c of SHAPED) {
-    const bound = c.size + MARGIN;
-    it(`${c.label}: at most ${bound} characters of text (${c.size} measured, plus ${MARGIN}), under the ceiling`, (t) => {
+    it(`${c.label}: ${c.size} characters of text, within ${MARGIN} either way, under the ceiling`, (t) => {
       const res = measured[c.label];
-      assert.notEqual(res.isError, true, `${c.label}: the production-shaped answer did not produce an answer: ${blocksOf(res)[0]?.slice(0, 300)}`);
-      assert.ok(["measured", "not_assessed"].includes(res.structuredContent.state), `${c.label}: state ${res.structuredContent.state}`);
+      if (c.resource) {
+        assert.equal(res.contents?.length, 1, `${c.label}: ${res.contents?.length} contents, expected 1`);
+      } else {
+        assert.notEqual(res.isError, true, `${c.label}: the production-shaped answer did not produce an answer: ${blocksOf(res)[0]?.slice(0, 300)}`);
+        assert.ok(["measured", "not_assessed"].includes(res.structuredContent.state), `${c.label}: state ${res.structuredContent.state}`);
+      }
       const { total, blocks } = textSize(res, stub.base);
       const prod = productionText(c);
       t.diagnostic(`${shareOfCeiling(c.label, total)}; blocks ${blocks.join(" + ")}${prod ? `; production's text for this call (${prod.version}, ${prod.at}): ${prod.total} (${prod.blocks.join(" + ")})` : ""}`);
-      assert.ok(total <= bound, `${c.label}: ${total} characters of text, over its bound of ${bound} (${c.size} measured, plus ${MARGIN})`);
+      // What the text says first, then how long it is: a wrong text fails on what is wrong.
+      if (c.resource) assertResourceIsACut(c.label, res, measured[`${c.label}: the tool`]);
+      else assertTextIsACut(c.label, res);
+      assert.ok(total <= c.size + MARGIN, `${c.label}: ${total} characters of text, over its bound of ${c.size + MARGIN} (${c.size} measured, plus ${MARGIN})`);
+      assert.ok(total >= c.size - MARGIN, `${c.label}: ${total} characters of text, under ${c.size - MARGIN} (${c.size} measured, less ${MARGIN}): the text lost more than a word; re-measure it and check what it lost`);
       assertBoundUnderCeiling(c.label, c.size);
-      assertTextIsACut(c.label, res);
     });
   }
 
   it("structuredContent.data is the API's answer whole, never the cut, wherever the tool relays the answer as sent", () => {
     // exposure_radar and cve_intel relay their own cut of the answer (#2307, #2722), and check_sbom
     // merges batches; every other tool's data is the one answer it read.
-    for (const c of SHAPED.filter((x) => !["exposure_radar", "cve_intel"].includes(x.tool) && x.page === "default" && x.tool !== "check_sbom")) {
+    for (const c of TOOL_CASES.filter((x) => !["exposure_radar", "cve_intel"].includes(x.tool) && x.page !== "max" && x.tool !== "check_sbom")) {
       const [body] = Object.values(served[c.label]);
       assert.deepEqual(measured[c.label].structuredContent.data, body, c.label);
     }
@@ -208,14 +206,16 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
   // #2783 review: flash_player 10.0.0 is 200 matches and an excluded sample of 50 whose detail
   // sentences are 13,861 characters; kept whole, they pushed 75 matches out of the text, two of
   // them CISA-KEV-listed, while the description says every match stays there. The lists beside
-  // the matches are cut first.
+  // the matches are cut first. #2799: each match now keeps ransomware and epss_score too, which the
+  // am_i_affected prompt asks for, so the samples keep their first 10 entries: 50 of them beside 200
+  // such matches were 120 characters past the budget for flash_player.
   it("check_affected keeps every match in the text, as its description says, the excluded and undetermined samples cut first", () => {
     for (const c of SHAPED.filter((x) => x.tool === "check_affected")) {
       const res = measured[c.label];
       const shown = JSON.parse(blocksOf(res)[0]);
       const data = res.structuredContent.data;
       assert.deepEqual(shown.matches.map((m) => m.cve_id), data.matches.map((m) => m.cve_id), `${c.label}: matches left out of the text`);
-      for (const k of ["cve_id", "kev_listed", "effective_score", "effective_severity", "score_assessed"]) {
+      for (const k of ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed"]) {
         assert.ok(shown.matches.every((m, i) => Object.hasOwn(m, k) || !Object.hasOwn(data.matches[i], k)), `${c.label}: a match in the text leaves out ${k}, which the description says it keeps`);
       }
       assert.doesNotMatch(blocksOf(res)[1], /Only \d+ of the \d+ rows of matches are in it/, c.label);
@@ -224,15 +224,14 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     const res = measured[c.label];
     const shown = JSON.parse(blocksOf(res)[0]);
     assert.equal(shown.matches.length, 200);
-    assert.equal(shown.excluded.length, 50, "the excluded sample keeps all 50 entries, each cut");
-    assert.deepEqual(shown.excluded.map((e) => Object.keys(e)), res.structuredContent.data.excluded.map(() => ["cve_id", "reason"]));
-    assert.match(blocksOf(res)[1], /Each entry of excluded in it leaves out criteria, detail and decisive\./);
+    assert.deepEqual(shown.excluded, res.structuredContent.data.excluded.slice(0, 10).map(({ cve_id, reason }) => ({ cve_id, reason })), "the excluded sample keeps its first 10 entries, each its cve_id and reason");
+    assert.match(blocksOf(res)[1], /In it, excluded keeps its first 10 of 50 entries; each entry of excluded in it leaves out criteria, detail and decisive\./);
   });
 
   // The registry path's largest answer: 200 matches (the cap), cve_ids naming each, and the
   // undetermined sample at its 50 (core-backend cve/pkgmatch.go maxUndeterminedReported), the
   // django rows repeated and the undetermined entries in the backend's UndeterminedMatch shape.
-  it("check_affected keeps every match at the registry path's largest answer: 200 matches, cve_ids and 50 undetermined", async () => {
+  it("check_affected keeps every match at the registry path's largest answer: 200 matches, cve_ids and 50 undetermined, each match with ransomware and epss_score", async () => {
     const c = SHAPED.find((x) => x.label.startsWith("check_affected, PyPI django"));
     const [[path, body]] = Object.entries(shapedAnswers(c));
     const matches = Array.from({ length: 200 }, (_, i) => ({ ...body.matches[i % body.matches.length], cve_id: `CVE-2026-${String(20000 + i)}` }));
@@ -251,8 +250,10 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     const shown = JSON.parse(first);
     assert.ok(first.length <= DATA_TEXT_BUDGET);
     assert.deepEqual(shown.matches.map((m) => m.cve_id), matches.map((m) => m.cve_id), "a match left the text");
-    assert.deepEqual(shown.undetermined, undetermined.map(({ cve_id, reason }) => ({ cve_id, reason })), "the undetermined sample lost an entry or its reason");
+    for (const k of ["ransomware", "epss_score"]) assert.ok(shown.matches.every((m) => Object.hasOwn(m, k)), `a match in the text leaves out ${k}`);
+    assert.deepEqual(shown.undetermined, undetermined.slice(0, 10).map(({ cve_id, reason }) => ({ cve_id, reason })), "the undetermined sample does not keep its first 10 entries, each its cve_id and reason");
     assert.match(note, /In it, cve_ids keeps its first 10 of 200 entries\. cve_ids lists each match's cve_id, in the order of matches\./);
+    assert.match(note, /In it, undetermined keeps its first 10 of 50 entries; each entry of undetermined in it leaves out package, ecosystem and detail\./);
   });
 
   // #2783 review: a 2,000-purl call from a fresh budget answers 1,200 rows and 800 purls not sent.
@@ -272,7 +273,10 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     if (keptAffected < affected) assert.equal(count(shown.results, "not_affected") + count(shown.results, "not_assessed"), 0, `${keptAffected} of ${affected} affected rows kept beside clean or not-assessed ones`);
     assert.ok(keptAffected >= Math.min(affected, 100), `only ${keptAffected} of ${affected} affected rows are in the text`);
     assert.deepEqual(shown.not_sent_purls, data.not_sent_purls.slice(0, shown.not_sent_purls.length), "the text's not_sent_purls are not the first of data's");
-    assert.match(note, /In it, not_sent_purls keeps its first 10 of 800 entries\. The 800 purls not sent are the input's distinct purls from position 1201 on, in the order this tool read them/);
+    assert.match(note, /In it, not_sent_purls keeps its first 10 of 800 entries\. The 800 purls not sent are the input's distinct purls from position 1201 on, counted in the order the note gives for them, so a second call can send them without reading the list\./);
+    // The order is in the note's own sentence on the purls not sent (#2799 review), which a list the
+    // text keeps whole is given by too.
+    assert.match(note, /they are the input's distinct purls from position 1201 on, counted in the order this tool read them \(the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place\), and data\.not_sent_purls lists them/);
     assert.match(note, /Only \d+ of the 1200 rows of results are in it; the other \d+ are in structuredContent\.data only: the \d+ whose verdict is not_affected or not_assessed/);
     assert.match(note, /To read every row in the text, check \d+ or fewer purls per call\./);
   });
@@ -332,9 +336,105 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.ok(compared > 0);
   });
 
+  // #2800: what each description says a row of the first text block keeps, held on every SHAPED
+  // case of the tool, at whatever level its cut stops. Through 2.6.3 only check_affected's list was
+  // asserted, so removing severity, cvss_v3_score, echelongraph_score, score_assessed, epss_score and
+  // kev_listed from both search_cves cut levels (src/index.ts SEARCH_CVES_TEXT) left the suite green.
+  // Each list is read from the description (`said`) and must equal `fields`, so neither can change
+  // alone; a row keeps a field wherever the answer's row has it. And some case of each tool must be
+  // cut (#2800 review): no production-shaped answer reached get_cwe's or vendor_advisories_for_cve's
+  // cut, so dropping every field but cve_id and description from get_cwe's level left the suite
+  // green; each now has a forced case (SHAPED, page "forced").
+  const AT_LEAST = /keeps (?:fewer fields, )?((?:[a-z_]+, )*[a-z_]+ and [a-z_]+) at least/;
+  const KEEPS = [
+    { tool: "search_cves", rows: "cves", said: /Returns cves, each with (.*?) where the record has them/, fields: ["cve_id", "severity", "cvss_v3_score", "echelongraph_score", "score_assessed", "epss_score", "kev_listed"] },
+    { tool: "get_cwe", rows: "cves", said: /and cves, one page of 50: each with (.*?)\. /, fields: ["cve_id", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "score_assessed", "kev_listed", "published", "description"] },
+    { tool: "kev_recent", rows: "kev", said: AT_LEAST, fields: ["cve_id", "kev_added_date", "kev_vendor", "kev_ransomware"] },
+    {
+      tool: "check_affected",
+      rows: "matches",
+      said: AT_LEAST,
+      fields: ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed"],
+      sides: { said: /the excluded and undetermined samples keep their first 10 entries, each its cve_id and reason/, lists: ["excluded", "undetermined"], fields: ["cve_id", "reason"] },
+    },
+    { tool: "check_sbom", rows: "results", said: AT_LEAST, fields: ["index", "purl", "verdict", "not_assessed_reason", "cve_ids"] },
+    // Production's by-CVE rows carry no cve_ids: each is an advisory naming the CVE asked for.
+    { tool: "vendor_advisories_for_cve", rows: "advisories", said: AT_LEAST, fields: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids"], absent: ["cve_ids"] },
+    { tool: "search_vendor_advisories", rows: "advisories", said: AT_LEAST, fields: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids"] },
+  ];
+  for (const k of KEEPS) {
+    it(`${k.tool}: every row of ${k.rows} in the first text block keeps ${k.fields.join(", ")}, as its description says, in every production-shaped case, one at least cut`, (t) => {
+      const description = tools.find((x) => x.name === k.tool).description;
+      const m = description.match(k.said);
+      assert.ok(m, `${k.tool}: its description no longer says what a row keeps (${k.said})`);
+      const cases = TOOL_CASES.filter((c) => c.tool === k.tool);
+      const cut = cases.filter((c) => blocksOf(measured[c.label])[1].includes("TEXT CUT: "));
+      assert.ok(cut.length > 0, `${k.tool}: no case cuts its text, so no row is held to a cut level and the fields it keeps are not checked`);
+      t.diagnostic(`cut in ${cut.map((c) => c.label).join("; ")}`);
+      // An "at least" list is a list of fields; a "named above" one is prose, read for the row's fields.
+      const keys = new Set(cases.flatMap((c) => (measured[c.label].structuredContent.data[k.rows] ?? []).flatMap((r) => Object.keys(r))));
+      const said = k.said === AT_LEAST ? m[1].split(/, | and /) : m[1].match(/[a-z][a-z0-9_]*/g).filter((w) => keys.has(w));
+      assert.deepEqual(said, k.fields, `${k.tool}: the fields its description says a row keeps are not the ones this test holds`);
+      if (k.sides) assert.match(description, k.sides.said, `${k.tool}: its description no longer says what the samples keep`);
+      for (const c of cases) {
+        const res = measured[c.label];
+        const data = res.structuredContent.data;
+        const pairs = cutPairs(JSON.parse(blocksOf(res)[0]), data);
+        const rowAt = new RegExp(`^data\\.${k.rows}\\[\\d+\\]$`);
+        const rows = pairs.filter((p) => rowAt.test(p.at));
+        assert.ok(rows.length > 0, `${c.label}: no row of ${k.rows} in the text`);
+        for (const f of k.fields) {
+          const lost = rows.filter((p) => Object.hasOwn(p.answer, f) && !Object.hasOwn(p.text, f));
+          assert.equal(lost.length, 0, `${c.label}: ${lost.length} of the ${rows.length} rows in the text leave out ${f}, which the description says each keeps (first at ${lost[0]?.at})`);
+        }
+        for (const list of k.sides?.lists ?? []) {
+          const at = new RegExp(`^data\\.${list}\\[\\d+\\]$`);
+          for (const p of pairs.filter((x) => at.test(x.at))) for (const f of k.sides.fields) assert.ok(Object.hasOwn(p.text, f) || !Object.hasOwn(p.answer, f), `${c.label}: ${p.at} leaves out ${f}`);
+        }
+        t.diagnostic(`${c.label}: ${rows.length} rows in the text, each with ${Object.keys(rows[0].text).length} fields`);
+      }
+      // Every field is one some case's answer has, so each is held somewhere, not vacuously.
+      for (const f of k.fields.filter((x) => !k.absent?.includes(x))) assert.ok(keys.has(f), `${k.tool}: no production-shaped row has ${f}`);
+      for (const f of k.absent ?? []) assert.ok(!keys.has(f), `${k.tool}: a production-shaped row has ${f}, so it is no longer absent`);
+    });
+  }
+  // #2802: through 2.6.3 the TEXT CUT sentences said "get_cve returns any one of these CVEs' records
+  // whole" (search_cves, kev_recent, get_cwe, check_affected) and that check_affected returns a
+  // component's matches whole (check_sbom), while get_cve's own text keeps 64 of 396 cpe_match and
+  // check_affected's cuts too. Whatever a cut's sentences call whole, they say it is whole in
+  // structuredContent.data.
+  it("every sentence of a TEXT CUT that calls something whole says it is whole in structuredContent.data", (t) => {
+    let checked = 0;
+    for (const c of TOOL_CASES) {
+      const note = blocksOf(measured[c.label])[1];
+      const cut = note.indexOf("TEXT CUT: ");
+      if (cut < 0) continue;
+      for (const s of noteSentences(note.slice(cut)).filter((x) => /\bwhole\b/.test(x))) {
+        assert.match(s, /\bwhole in its structuredContent\.data\b|structuredContent\.data carries the answer whole/, `${c.label}: ${s}`);
+        checked++;
+      }
+    }
+    t.diagnostic(`${checked} sentences`);
+    assert.ok(checked > 0);
+  });
+
+  // get_cve's description says its cut keeps the first entries of each list: every field stays.
+  it("get_cve: the first text block keeps every field of the record, as its description says, each list cut to its first entries", () => {
+    const description = tools.find((x) => x.name === "get_cve").description;
+    // #2802: its structured result's data is the full record; its first text block, past 30,000 characters, is not.
+    assert.match(description, /^One CVE's record: /);
+    assert.match(description, /Cut, each list in the record keeps its first entries, and the note names each list cut with its full length\./);
+    for (const c of TOOL_CASES.filter((x) => x.tool === "get_cve")) {
+      const res = measured[c.label];
+      const shown = JSON.parse(blocksOf(res)[0]);
+      assert.deepEqual(Object.keys(shown), Object.keys(res.structuredContent.data), `${c.label}: a field of the record left the text`);
+      for (const [k, v] of Object.entries(res.structuredContent.data)) if (v === null || typeof v !== "object") assert.equal(shown[k], v, `${c.label}: ${k} is not the record's`);
+    }
+  });
+
   it("every structured result still validates against the tool's advertised outputSchema", () => {
     const ajv = new AjvJsonSchemaValidator();
-    for (const c of SHAPED) {
+    for (const c of TOOL_CASES) {
       const schema = tools.find((t) => t.name === c.tool).outputSchema;
       const r = ajv.getValidator(schema)(measured[c.label].structuredContent);
       assert.ok(r.valid, `${c.label}: ${r.errorMessage}`);
@@ -524,6 +624,16 @@ describe("#2783: how a first text block longer than the budget is cut", () => {
     assert.equal(shown.cve_id, "CVE-2021-44228");
     assert.deepEqual(shown.cpe_match, d.cpe_match.slice(0, shown.cpe_match.length));
     assert.match(said, /Every list in it keeps at most its first (\d+) entries: cpe_match \(396\) and references \(103\), each named with its full length\./);
+  });
+
+  // #2801: the cve:// resource names its own place for the cut; a tool's first text block is the default.
+  it("the sentence that opens a cut names the place the caller cuts for, the first text block by default", () => {
+    const d = { cpe_match: rows(400, (i) => ({ criteria: `cpe:2.3:a:apache:log4j:${i}:*:*:*:*:*:*:*`, matchCriteriaId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` })) };
+    const first = dataText(d);
+    const there = dataText(d, undefined, { opens: (n) => `DATA CUT: ${n} characters, cut here.` });
+    assert.equal(there.text, first.text, "the same answer is cut the same way, wherever it goes");
+    assert.match(first.said, /^TEXT CUT: the API's answer is \d+ characters of JSON, more than the 30000 the first text block holds/);
+    assert.equal(there.said, first.said.replace(/^TEXT CUT: .*? carries the answer whole\./, `DATA CUT: ${JSON.stringify(d, null, 2).length} characters, cut here.`));
   });
 
   it("a string is never cut inside a surrogate pair", () => {

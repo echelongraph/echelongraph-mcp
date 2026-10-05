@@ -1,5 +1,5 @@
 // Directory listings (#2723): the files that list this server in Smithery (an MCPB bundle's
-// manifest), the Docker MCP Catalog (a docker/mcp-registry server.yaml draft and the Dockerfile),
+// manifest), the Docker MCP Catalog (docker/mcp-registry drafts, local and remote, and the Dockerfile),
 // Glama (glama.json), and the paste text in listings/README.md for the forms the founder fills in.
 //
 // What must hold:
@@ -7,7 +7,8 @@
 //     package.json's version, so a release cannot leave a listing describing another version;
 //   * our wording (#2304, #2706): no listing text makes a claim the package's own copy is barred
 //     from (REMOVED_CLAIMS, read from tools.test.mjs so the two cannot drift), calls a service
-//     count "hosts", or says "only" (read-only aside);
+//     count "hosts", or says "only" (read-only aside), and the public repository's GitHub topics
+//     claim nothing comparative either (#2780, as package.json's keywords);
 //   * the manifest names exactly the tools the server lists, with their titles, in both eras;
 //   * none of these files is published to npm.
 //
@@ -28,16 +29,29 @@ const HAVE = fs.existsSync(LISTINGS);
 const SKIP = HAVE ? false : "no listings/ here (npm does not pack it)";
 const read = (rel) => fs.readFileSync(path.join(REPO_PKG, rel), "utf8");
 
-// The barred-claims pattern, taken from tools.test.mjs's own source so this file cannot drift
-// from it.
-const REMOVED_CLAIMS = (() => {
-  const m = read("test/tools.test.mjs").match(/^const REMOVED_CLAIMS = \/(.+)\/([a-z]*);$/m);
-  assert.ok(m, "tools.test.mjs no longer declares REMOVED_CLAIMS as a regex literal: re-aim this check");
+// The wording patterns, taken from tools.test.mjs's own source so this file cannot drift from it:
+// the barred claims, and (#2780's review) "only" as an exclusivity claim, "read-only" and "read
+// only" aside since they say what the tools do, and the comparatives package.json's keywords are
+// held to.
+const toolsTestRegex = (name) => {
+  const m = read("test/tools.test.mjs").match(new RegExp(`^const ${name} = \\/(.+)\\/([a-z]*);$`, "m"));
+  assert.ok(m, `tools.test.mjs no longer declares ${name} as a regex literal: re-aim this check`);
   return new RegExp(m[1], m[2]);
-})();
+};
+const REMOVED_CLAIMS = toolsTestRegex("REMOVED_CLAIMS");
 const HOST_UNIT = /\bhosts\b|\bhost\(s\)/i;
-// "Only" as an exclusivity claim. "read-only" says what the tools do, not that nothing else does.
-const ONLY = /(?<!read-)\bonly\b/i;
+const ONLY = toolsTestRegex("ONLY");
+const COMPARATIVE = toolsTestRegex("COMPARATIVE");
+// GitHub topics are slugs, so each is read as written and with its hyphens as spaces, as
+// tools.test.mjs reads package.json's keywords: "no-other-source" is "no other source".
+const topicsText = (ts) => `${ts.join(" ")} / ${ts.join(" ").replace(/-/g, " ")}`;
+const topicProblems = (ts) => {
+  const text = topicsText(ts);
+  const out = wordingProblems("github-repo-settings.json topics", text);
+  const m = text.match(COMPARATIVE);
+  if (m) out.push(`github-repo-settings.json topics: a comparative or superlative claim: "${m[0]}" in: ${text}`);
+  return out;
+};
 
 const wordingProblems = (where, text) => {
   const out = [];
@@ -82,6 +96,26 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
     assert.equal(yamlScalar(dockerYaml, "description"), serverJson.description);
     assert.equal(yamlScalar(dockerYaml, "project"), serverJson.repository.url);
     assert.match(dockerYaml, /^\s*-\s*app\.echelongraph\.io:443$/m, "allowHosts names the default API host");
+    // docker/mcp-registry's validator refuses a local server whose source.commit is not a 40-hex SHA.
+    assert.match(yamlScalar(dockerYaml, "commit") ?? "", /^[0-9a-f]{40}$/, "source.commit must be a public commit's full SHA");
+    assert.doesNotMatch(dockerYaml, /^\s*#/m, "the draft is copied verbatim into docker/mcp-registry: no comments");
+  });
+
+  // The remote entry: servers/echelongraph-remote/{server.yaml,tools.json,readme.md} in the
+  // registry, as its keyless remote entries are (excalidraw-remote): dynamic tools, tools.json [].
+  it("the Docker remote draft carries server.json's title, description and remote URL", () => {
+    const remoteYaml = read("listings/docker/remote/server.yaml");
+    assert.equal(yamlScalar(remoteYaml, "name"), "echelongraph-remote");
+    assert.equal(yamlScalar(remoteYaml, "type"), "remote");
+    assert.equal(yamlScalar(remoteYaml, "title"), serverJson.title);
+    assert.equal(yamlScalar(remoteYaml, "description"), serverJson.description);
+    assert.equal(yamlScalar(remoteYaml, "transport_type"), serverJson.remotes[0].type);
+    assert.equal(yamlScalar(remoteYaml, "url"), serverJson.remotes[0].url);
+    assert.match(remoteYaml, /^dynamic:\n {2}tools: true$/m, "keyless remote: tools are discovered from the server");
+    assert.doesNotMatch(remoteYaml, /^(oauth|config|source):/m, "keyless: no OAuth, no secrets, no source");
+    assert.deepEqual(JSON.parse(read("listings/docker/remote/tools.json")), []);
+    assert.match(read("listings/docker/remote/readme.md"), /^Docs: https:\/\/\S+\n$/);
+    assert.deepEqual(wordingProblems("docker/remote/server.yaml description", yamlScalar(remoteYaml, "description")), []);
   });
 
   it("glama.json names at least one maintainer against Glama's schema", () => {
@@ -132,6 +166,16 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
     for (const t of gs.topics) assert.match(t, /^[a-z0-9][a-z0-9-]{0,49}$/, `not a GitHub topic: ${t}`);
     assert.equal(new Set(gs.topics).size, gs.topics.length, "a topic is listed twice");
     assert.deepEqual(Object.keys(gs).sort(), ["description", "homepage", "repository", "topics"]);
+    // #2780's review: topics are the repository's keywords, held to the same wording as npm's.
+    assert.deepEqual(topicProblems(gs.topics), []);
+  });
+
+  it("control: the topics check catches a barred, exclusive or comparative topic, and passes read-only", () => {
+    const gs = JSON.parse(read("listings/github-repo-settings.json"));
+    for (const bad of ["real-time", "realtime", "live-exploits", "the-only-free-cve-api", "best-cve-api", "fastest-cve-lookup", "exposed-hosts", "no-other-source", "unique-exposure-data"]) {
+      assert.notDeepEqual(topicProblems([...gs.topics, bad]), [], `the topic ${bad} passes`);
+    }
+    assert.deepEqual(topicProblems(["read-only", ...gs.topics]), []);
   });
 
   it("the long description fits the Anthropic directory's 2,000 characters and the one-liner its 200", () => {
@@ -166,4 +210,15 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
       });
     });
   }
+});
+
+// Smithery's "Link to Smithery" verification check scans this README (served from the public repo) for a
+// link to the server's page (#2723, 2026-10-05). Removing the line un-verifies the listing with no other
+// signal, so it is pinned here, with Glama beside it.
+describe("README links the directories that list us", () => {
+  it("links the Smithery server page and the Glama listing", () => {
+    const readme = read("README.md");
+    assert.ok(readme.includes("(https://smithery.ai/servers/echelongraph/echelongraph-mcp)"), "README lost the Smithery backlink that Smithery's verification looks for");
+    assert.ok(readme.includes("(https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)"), "README lost the Glama link");
+  });
 });

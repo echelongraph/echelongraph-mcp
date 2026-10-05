@@ -28,6 +28,8 @@ API call a tool needs to answer.
   Registry: `io.echelongraph/echelongraph-mcp` · Docs: <https://echelongraph.io/pulse/mcp>
 - Source: <https://github.com/echelongraph/echelongraph-mcp> · Changes:
   [CHANGELOG.md](CHANGELOG.md) · Security: [SECURITY.md](SECURITY.md)
+- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp) ·
+  [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)
 
 ## Quick start
 
@@ -38,20 +40,83 @@ have on record for it?"*
 
 ### Claude Desktop
 
-Settings → Developer → Edit Config opens `claude_desktop_config.json`
-(macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`; Windows:
-`%APPDATA%\Claude\claude_desktop_config.json`). Add:
+Two ways in. The first needs nothing installed; the second runs the server on your machine.
 
-```json
-{
-  "mcpServers": {
-    "echelongraph": {
-      "command": "npx",
-      "args": ["-y", "echelongraph-mcp"]
+**1. Custom connector (no install).** Claude Desktop uses your claude.ai account's connectors:
+Customize → Connectors → **+ Add** → **Add custom connector**. Name it `EchelonGraph`, paste
+`https://mcp.echelongraph.io/mcp`, choose **No sign in**, and add it. No Node.js, no PATH and no
+JSON to edit. A connector added on claude.ai shows up in Claude Desktop too, and the plan rules
+are claude.ai's (see "Remote (no install)" below).
+
+**2. Local server through `npx`.**
+
+1. **Check Node.js.** In Terminal (macOS) or PowerShell (Windows), run `node -v`. It must print
+   `v20` or later. If it prints an older version or `command not found`, install the LTS release
+   from <https://nodejs.org>, or on macOS with Homebrew run `brew install node`.
+2. **Open the config file in a plain-text editor.** Settings → Developer → Edit Config shows
+   `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`;
+   Windows: `%APPDATA%\Claude\claude_desktop_config.json`). Open it in a plain-text editor such as
+   VS Code, Notepad or `nano`. TextEdit on macOS turns `"` into curly quotes (`“ ”`) when Smart
+   Quotes is on, and the JSON then breaks without an error: turn it off under Edit → Substitutions
+   → Smart Quotes, or use another editor.
+3. **Merge, do not replace.** The file usually exists already and holds Claude Desktop's own
+   settings (for example a `"preferences"` object). Keep everything in it. Add an `"mcpServers"`
+   key at the top level, next to the keys already there; if `"mcpServers"` is already there, add
+   the `"echelongraph"` entry inside it. Mind the comma between entries. The result looks like
+   this, with your own settings where `preferences` is:
+
+   ```json
+   {
+     "preferences": {
+       "…": "the settings already in your file stay as they are"
+     },
+     "mcpServers": {
+       "echelongraph": {
+         "command": "npx",
+         "args": ["-y", "echelongraph-mcp"]
+       }
+     }
+   }
+   ```
+
+   To check that the file parses, run
+   `node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "<path to the file>"`:
+   no output means valid JSON.
+4. **Quit fully, then reopen.** Closing the window leaves the old config loaded. On macOS choose
+   Claude → Quit Claude (⌘Q); on Windows right-click the Claude icon in the system tray and choose
+   Quit. The first start can take longer while `npx` downloads the package.
+5. **Check that it worked.** Settings → Developer lists `echelongraph` as running, and the tools
+   menu in the chat box lists EchelonGraph's 14 tools. Then ask the question at the top of this
+   section.
+
+#### Troubleshooting Claude Desktop
+
+- **`spawn npx ENOENT`** (or the server shows as failed). On macOS, an app opened from the Dock
+  does not get your shell's PATH, so Claude Desktop cannot find `npx` where Homebrew (Apple
+  silicon: `/opt/homebrew/bin`; Intel: `/usr/local/bin`) or nvm put it. Run `which npx` in
+  Terminal, then give Claude Desktop that absolute path as `"command"`, and the folder it is in as
+  `PATH` under `"env"` (`npx` starts `node` from that same folder). With Homebrew on Apple silicon:
+
+  ```json
+  {
+    "mcpServers": {
+      "echelongraph": {
+        "command": "/opt/homebrew/bin/npx",
+        "args": ["-y", "echelongraph-mcp"],
+        "env": { "PATH": "/opt/homebrew/bin:/usr/bin:/bin" }
+      }
     }
   }
-}
-```
+  ```
+
+  With nvm, use the full path `which npx` prints (JSON does not expand `~`). Then quit fully and
+  reopen. On Windows, install Node.js with the installer from nodejs.org, which adds `npx` to the
+  system PATH, then quit Claude Desktop fully and reopen it.
+- **The server does not appear at all.** The file is not valid JSON (a missing comma, or curly
+  quotes), or the app was not fully quit: see steps 2 to 4.
+- **Logs.** macOS: `~/Library/Logs/Claude/mcp-server-echelongraph.log` (this server's output) and
+  `~/Library/Logs/Claude/mcp.log` (connections). Windows: `%APPDATA%\Claude\logs\`, with the same
+  file names.
 
 ### Claude Code
 
@@ -156,13 +221,13 @@ The example questions are ones a client can answer with that tool alone.
 |---|---|---|---|
 | `cve_summary` | CVE feed summary | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), the same CVEs counted by NVD's severity label, as provenance (`summary.nvd_critical` to `summary.nvd_none`), the rejected (withdrawn) records outside the total (`summary.rejected`), and when the feed was last updated. | *How many critical CVEs does the feed hold, and when was it last updated?* |
 | `search_cves` | Search CVEs | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; page with `limit` and `offset`; the note names each row not yet scored. | *Find critical CVEs that mention Tomcat with a CVSS of 9 or more.* |
-| `get_cve` | CVE detail | Full record for one CVE: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. | *What are CVE-2024-3094's CVSS, EPSS and CISA-KEV status?* |
+| `get_cve` | CVE detail | One CVE's record: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. | *What are CVE-2024-3094's CVSS, EPSS and CISA-KEV status?* |
 | `cve_exposure` | Internet exposure for one CVE | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. | *How many exposed services does EchelonGraph's radar have on record for CVE-2023-44487?* |
 | `exposure_radar` | Exposure radar totals | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. | *How many unauthenticated data stores has EchelonGraph's radar confirmed?* |
 | `kev_recent` | Recent CISA KEV additions | The CVEs CISA has added to its Known Exploited Vulnerabilities catalog, newest first (`kev_added_date`), from EchelonGraph's copy of the catalog, polled from CISA every 5 minutes: due date, vendor, product, known ransomware use, EchelonGraph's severity, CVSS, EPSS and `eg_kev_tier`, and `our_first_seen_kev`. Filter by date range, ransomware and vendor; page with `limit` and `next_cursor`. Dated by `last_successful_fetch_at`, our last successful fetch of CISA's feed; the filters travel as request headers, never in the URL. | *Which CVEs has CISA added to KEV since 1 September, and which have known ransomware use?* |
 | `epss_history` | EPSS change history for one CVE | How one CVE's EPSS score has changed, as EchelonGraph recorded it: one point per recorded change (`series_kind` `change_only`), never a daily series, with the value now and `series_starts_at`, when recording began; before it a missing point means not recorded, not unchanged. | *How has CVE-2023-44487's EPSS score changed, as EchelonGraph recorded it?* |
 | `check_affected` | Am I affected? (product or package at a version) | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed`, and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. | *Is openssl 3.0.0 affected by known CVEs? Is lodash 4.17.15 on npm?* |
-| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 2,000 distinct purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it by the MCP server (on your machine when it runs from npm) and only they are sent to the API, in POST bodies of at most 200 each, one after another; the document is not. When the API's per-component rate limit answers 429, the tool waits the `Retry-After` it names, within 50 seconds per call; past that it answers what it has, with the purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and the list in `data.not_sent_purls`, never dropped silently. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
+| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 2,000 distinct purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it by the MCP server and only they are sent to the API, in POST bodies of at most 200 each, one after another; the document itself is not sent on. Run from npm, the server is on your machine; over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the document is the request body. When the API's per-component rate limit answers 429, the tool waits the `Retry-After` it names, within 50 seconds per call; past that it answers what it has, with the purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and the list in `data.not_sent_purls`, never dropped silently. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
 | `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
 | `get_cwe` | CWE and its CVEs | One CWE (weakness class) and the CVEs classified under it: `name` and `description` from the MITRE CWE catalog EchelonGraph embeds, `total`, and one page of 50 `cves`, ordered as `order` states (CISA-KEV-listed first, then EchelonGraph score). A `total` of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. | *Which CVEs are classified under CWE-79, CISA-KEV-listed first?* |
 | `vendor_advisories_for_cve` | Vendor advisories for one CVE | The vendor-published advisories (Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks, GitHub GHSA and the other feeds EchelonGraph polls) that name one CVE, newest first, at most 20. | *Which vendor advisories name CVE-2024-3400?* |
@@ -195,8 +260,17 @@ it is neither a count of CVEs rated None nor the count of CVEs with no severity,
 `summary.total` and the other counts leave them out, and they are withdrawn records, never
 vulnerabilities.
 
-The tool relays the API's JSON as it was sent. When `summary.none`, `summary.nvd_none` or
-`summary.rejected` is above zero, the note says what it counts, with the number from the answer.
+`poller` holds the in-memory counters of the NVD poller of the one API instance that answered,
+counted since that instance last started and zeroed on every restart: they describe that instance,
+never the feed's size, intake, reliability or freshness, and the note says so whenever the answer
+carries `poller`. A `poller` field the answer sends in a JSON type other than the one the
+outputSchema describes is left out and named in the note, and a `poller` that is neither a JSON
+object nor null is left out whole; `summary` is relayed either way, so a change to that diagnostic
+block never withholds the counts.
+
+The tool relays the API's JSON as it was sent, less a `poller` field left out as above. When
+`summary.none`, `summary.nvd_none` or `summary.rejected` is above zero, the note says what it
+counts, with the number from the answer.
 The note says the five NVD counts add up to `summary.total` only when the answer's do, and says
 nothing about a field the answer does not carry.
 
@@ -470,18 +544,18 @@ never "not affected", and each figure cites its `measured_at`. A prompt makes no
 
 | Prompt | Arguments | What it asks the model to do |
 |---|---|---|
-| `triage_cve` | `cve_id` | `get_cve`, `cve_intel`, `vendor_advisories_for_cve`, `epss_history` and `cve_exposure` (and `kev_recent` for the due date when the CVE is KEV-listed), then a decision template: exploited, likelihood, reachable, patch, deadline, decision. |
-| `kev_weekly_brief` | `days` (1 to 365, default 7) | Work out the start date from `days`, page through `kev_recent` from it, and write a brief grouped by vendor with ransomware flags and due dates. |
+| `triage_cve` | `cve_id` | `get_cve` (with CISA's due date, `kev_due_date`, when the CVE is KEV-listed), `cve_intel`, `vendor_advisories_for_cve`, `epss_history` and `cve_exposure`, then a decision template: exploited, likelihood, reachable, patch, deadline, decision. The patch line gives `cve_intel`'s `fixed_version` as what it records for the package, one per package (the advisory's last range's), never as the fix for every affected branch, and points to `get_cve`'s references tagged Vendor Advisory or Patch for a branch's fix. |
+| `kev_weekly_brief` | `days` (1 to 365, default 7) | Work out the start date from `days`, page through `kev_recent` from it 50 rows a page, and write a brief grouped by vendor with ransomware flags and due dates. |
 | `am_i_affected` | `product`, or `ecosystem` and `package`; `version` | `check_affected`, read `assessed` before `count`, with the not-assessed wording. |
-| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom`, look up each affected CVE with `get_cve`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. |
+| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom` (and, once more, the purls a rate limit or the time budget left unsent: `data.not_sent_purls`, or, where the text cuts that list, the document's purls from the position and in the order its note gives), read each component's ecosystem, package and version from its purl, as `check_sbom` maps them (every purl type it maps, and `deb`, `apk`, `alpine` and `rpm` by a `distro` qualifier naming a Debian, Ubuntu or Alpine release; any other is unknown, and given no fixed version), look up each affected CVE with `get_cve` and `cve_intel`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. A fixed version is given where it is above the component's installed version: the advisory interval in `check_sbom`'s `match_reason` first, else `cve_intel`'s `fixed_version`, which is one per package (the advisory's last range's) and need not be the fix on the component's branch; otherwise the line says the results give no fixed version for that branch and points to the CVE's advisory. |
 
 ## Resources
 
 | Resource | What it holds |
 |---|---|
 | `echelongraph://methodology` | What each envelope field and `state` value means, and how each tool measures (Markdown). |
-| `echelongraph://sources` | What the API reports about its feeds when the resource is read: the NVD poller's interval and last poll (of the instance that answered, from `/api/v1/public/cves/summary`) and the CISA KEV catalog's last successful fetch and method (from `/api/v1/public/kev/recent`). It names the feeds no endpoint reports a schedule for, and states none for them (JSON). |
-| `cve://{cve_id}` | One CVE as `get_cve` returns it: the structured result, envelope and record, as JSON. An ID that is not a CVE ID is refused before any request; a CVE the API has no record of is not found. |
+| `echelongraph://sources` | What the API reports about its feeds when the resource is read: the NVD poller's `interval`, `last_poll_at`, `poll_count` and `poll_errors`, all of the one instance that answered (from `/api/v1/public/cves/summary`; the two counts are that instance's since it last started, zeroed on every restart, never the feed's reliability), and the CISA KEV catalog's last successful fetch and method (from `/api/v1/public/kev/recent`). It names the feeds no endpoint reports a schedule for, and states none for them (JSON). |
+| `cve://{cve_id}` | One CVE as `get_cve` returns it: the structured result, envelope and record, as JSON. Past 30,000 characters of JSON, `data` is cut as `get_cve`'s first text block is, and a note starting `DATA CUT` says what the cut leaves out; `get_cve`'s `structuredContent.data` holds the record whole. An ID that is not a CVE ID is refused before any request; a CVE the API has no record of is not found. |
 
 ## What a result means
 
@@ -494,8 +568,10 @@ outage for an all-clear:
   the structured result as JSON, less what the first two already say (below). When the
   feed genuinely holds nothing for the query the note says so in words ("we looked and
   found nothing … not a lookup failure"), because a measured zero is a measurement. The
-  exception to verbatim is `exposure_radar`: each radar is cut to the fields listed above, and
-  each `kev_exposure.newest_kev` row gains an `exposure_state`. Its `shadow_ai` counts are
+  exceptions to verbatim are `cve_summary`, which leaves out a `poller` field the answer sends
+  in a JSON type other than its outputSchema's (or a `poller` that is neither a JSON object nor
+  null) and names it in the note, and `exposure_radar`: each radar is cut to the fields listed
+  above, and each `kev_exposure.newest_kev` row gains an `exposure_state`. Its `shadow_ai` counts are
   regrouped as above, and its `poller` block carries only `running` and `last_run_at`, or is dropped when it
   carries no real completion time. The block's other fields describe the server instance that
   answered, not the radar. Its `last_run_at` is when the radar's leader last
@@ -538,17 +614,24 @@ most kept first (`search_cves` keeps `cve_id`, `severity`, `cvss_v3_score`, `ech
 `score_assessed`, `epss_score`, `kev_listed` and the first 200 characters of the description,
 among others), with every long string ending in "…". A list beside the rows is cut before any
 row field the first level keeps, and before any row leaves the text: `check_affected`'s
-`excluded` and `undetermined` samples keep each entry's `cve_id` and `reason`, and its `cve_ids`
-(each match's `cve_id`, in order) its first 10, so that every match stays in the text, and `check_sbom`'s `not_sent_purls` keeps its first 10, the note saying from
-which position of the input the purls not sent run, so that a second call can send them without
-reading the list. When even the leanest cut is too long, rows are left out of the text
+`excluded` and `undetermined` samples keep their first 10 entries, each its `cve_id` and
+`reason`, and its `cve_ids` (each match's `cve_id`, in order) its first 10, so that every match
+stays in the text, each with at least `cve_id`, `kev_listed`, `ransomware`, `epss_score`,
+`effective_score` and `score_assessed`, and `check_sbom`'s `not_sent_purls` keeps its first 10, the note saying from
+which position of the input the purls not sent run, and in what order the input's purls are
+counted, so that a second call can send them without reading the list. When even the leanest cut is too long, rows are left out of the text
 (`check_sbom` leaves out the `not_affected` rows first, then the `not_assessed` ones), and the
 note says how to read them: the `offset` to call next, or a smaller `limit`. Any other answer
 keeps the first entries of each of its lists (`get_cve`'s `cpe_match` and `references`). The note
 then ends with one sentence starting `TEXT CUT` that says what the first text block leaves out
-and which tool returns a row whole (`get_cve`, `get_vendor_advisory`, `check_affected`, and
-`cve_intel` a CVE's fixed versions). An answer that fits is sent as before, pretty-printed and
-whole. The same answer is always cut the same way.
+and which tool returns a row (`get_cve`, `get_vendor_advisory`, `check_affected`, and
+`cve_intel` a CVE's fixed versions): whole in that tool's `structuredContent.data`, since its own
+first text block is cut past 30,000 characters too. An answer that fits is sent as before,
+pretty-printed and whole. The same answer is always cut the same way. The `cve://{cve_id}`
+resource cuts its `data` as `get_cve`'s first text block is cut, and says so in a note starting
+`DATA CUT`. The prompts ask only for what the text keeps: `kev_weekly_brief` reads `kev_recent`
+50 rows a page, which the text holds whole; `triage_cve` reads CISA's due date from `get_cve`;
+and `sbom_review` reads fixed versions from `cve_intel`.
 
 ## Structured results
 
@@ -576,8 +659,8 @@ note's sentences, which are the text block just before it (on a failure, the mes
 with which `notes` ends: its `notes` holds only the sentences the envelope adds about itself,
 and is left out when there are none. It leaves out `method` too where that note quotes it verbatim, as
 `cve_exposure`'s does ("Method: …"). So the text blocks together carry the whole structured
-result, and cannot disagree with it. Before 2.2.0 this block repeated the whole note, so every
-note was sent twice.
+result, but for what a `TEXT CUT` leaves out of `data` (see "Long answers"), and cannot disagree
+with it. Before 2.2.0 this block repeated the whole note, so every note was sent twice.
 
 | `state` | What it means |
 |---|---|
@@ -622,7 +705,9 @@ The CVE feed tools' `freshness` is `null`: the feed's answers carry no time at w
 pollers last completed a poll for the feed as a whole.
 
 A success whose fields do not fit the tool's `outputSchema` (a field of a type the schema does
-not allow) is returned as a failure with `error.kind` `unexpected_shape`, never relayed. A
+not allow) is returned as a failure with `error.kind` `unexpected_shape`, never relayed, with one
+exception: a `cve_summary` `poller` field of another JSON type is left out of `data` and named in
+the note, and the rest of the answer is relayed, `summary` with it. A
 field the API adds later is still relayed by every tool that relays the API's JSON as data, and
 `exposure_radar` and `cve_intel`, which relay a selection, leave it out and name what they leave out.
 
@@ -718,7 +803,10 @@ JSON-RPC error (code `-32029`) that names the limit and the seconds to wait. A r
 64 KiB is refused (HTTP 413, code `-32600`), except a `tools/call` of `check_sbom` or a
 `prompts/get` of `sbom_review`, which may be up to 6 MiB: enough for a CycloneDX or SPDX document
 at the tool's 5,000,000-character cap. Each server instance reads at most two such large bodies at
-once; a third is answered HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`).
+once; a third is answered HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`). Each
+instance serves at most 64 requests at once; the next waits up to 10 seconds for one to finish,
+and is then answered the same way. A `subscriptions/listen` stream, which stays open until its
+client leaves, is not one of the 64.
 
 ## Configuration
 
@@ -731,8 +819,12 @@ The npm package (stdio):
 | `ECHELONGRAPH_MCP_UA` | unset | One product token (for example `my-monitor/1.0`) put ahead of this package's own User-Agent, so automated callers such as monitors are told apart from people using the server. A value that is not a single token is ignored. |
 
 The HTTP entrypoint, `dist/http.js` (`npm run start:http`), serves the same tools over
-Streamable HTTP on `POST /mcp`, with a liveness check on `GET /health`. It reads the three
-variables above and:
+Streamable HTTP on `POST /mcp`, with a liveness check on `GET /health`. In a container with
+little memory, start it with V8's heap capped below the container's limit, as EchelonGraph's
+hosted deployment does at half of 256 MiB (`node --max-old-space-size=128 dist/http.js`): Node
+otherwise sizes its heap from the memory the system reports, which in a container can be the
+host's, and the container is then killed before V8 collects.
+It reads the three variables above and:
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -741,6 +833,8 @@ variables above and:
 | `MCP_MAX_BODY_BYTES` | `65536` | The largest request body it reads, except for an SBOM (below). |
 | `MCP_MAX_SBOM_BODY_BYTES` | `6291456` | The largest body of a `tools/call` of `check_sbom` or a `prompts/get` of `sbom_review`. |
 | `MCP_LARGE_BODY_SLOTS` | `2` | How many bodies over `MCP_MAX_BODY_BYTES` it reads and serves at once; past that, 503 with `Retry-After`. |
+| `MCP_MAX_IN_FLIGHT` | `64` | How many requests it serves at once, not counting `subscriptions/listen` streams; the next, its body read, waits. |
+| `MCP_ADMISSION_WAIT_MS` | `10000` | How long a request waits to be served before it is answered 503 with `Retry-After`. |
 | `ECHELONGRAPH_FORWARD_TOKEN`, `ECHELONGRAPH_FORWARD_HOST`, `MCP_REQUIRE_FORWARD_TOKEN` | unset | EchelonGraph's hosted deployment only: the token with which it names each client to the API. Leave them unset when you run it yourself; the API then counts every request as coming from your server. |
 
 ## Develop

@@ -22,14 +22,19 @@
 // waf/mcpforward.go, #2212). MCP_REQUIRE_FORWARD_TOKEN=1 (set by deploy-all.sh) makes a missing
 // token fatal at start-up, because without it every remote user would share one API budget.
 import http from "node:http";
+import v8 from "node:v8";
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { forwardToken, markHttpEntrypoint, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
+import { forwardToken, markHttpEntrypoint, requestSettled, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
 import {
+  Admission,
   BODY_TOO_LARGE_CODE,
   BUSY_CODE,
+  DEFAULT_ADMISSION_WAIT_MS,
   DEFAULT_LARGE_BODY_SLOTS,
   DEFAULT_MAX_BODY_BYTES,
+  DEFAULT_MAX_IN_FLIGHT,
   DEFAULT_MAX_SBOM_BODY_BYTES,
+  DEFAULT_MAX_WAITING,
   DEFAULT_RATE_LIMIT_PER_MIN,
   LARGE_BODY_TARGETS_TEXT,
   Slots,
@@ -42,6 +47,7 @@ import {
   revisionLabel,
   rpcError,
   isLargeBodyTarget,
+  isListenStream,
   largeBodyAdmissible,
   uaFamily,
 } from "./httpPolicy.js";
@@ -63,7 +69,12 @@ const RATE_LIMIT_PER_MIN = positiveInt(process.env.MCP_RATE_LIMIT_PER_MIN, DEFAU
 const MAX_BODY_BYTES = positiveInt(process.env.MCP_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES);
 const MAX_SBOM_BODY_BYTES = Math.max(MAX_BODY_BYTES, positiveInt(process.env.MCP_MAX_SBOM_BODY_BYTES, DEFAULT_MAX_SBOM_BODY_BYTES));
 const LARGE_BODY_SLOTS = positiveInt(process.env.MCP_LARGE_BODY_SLOTS, DEFAULT_LARGE_BODY_SLOTS);
-// A large body's wait for a slot is not queued: the client is told to come back.
+// The requests served at once, and how long the next may wait (#2773): httpPolicy.ts "Requests
+// in flight per instance".
+const MAX_IN_FLIGHT = positiveInt(process.env.MCP_MAX_IN_FLIGHT, DEFAULT_MAX_IN_FLIGHT);
+const ADMISSION_WAIT_MS = positiveInt(process.env.MCP_ADMISSION_WAIT_MS, DEFAULT_ADMISSION_WAIT_MS);
+// A large body's wait for a slot is not queued: the client is told to come back. Nor is a
+// request that waited ADMISSION_WAIT_MS for admission.
 const BUSY_RETRY_AFTER_SEC = 5;
 const MCP_PATH = "/mcp";
 const HEALTH_PATH = "/health";
@@ -94,6 +105,7 @@ const handler = createMcpHandler(createServer, {
 
 const limiter = new FixedWindowLimiter(RATE_LIMIT_PER_MIN);
 const largeBodies = new Slots(LARGE_BODY_SLOTS);
+const admission = new Admission(MAX_IN_FLIGHT, DEFAULT_MAX_WAITING);
 
 // CORS for a browser client on an https Origin (the Origin policy has already admitted it).
 // A wildcard is safe here because nothing is credentialed: no cookies, no auth.
@@ -119,6 +131,12 @@ function send(res: http.ServerResponse, status: number, body: string, headers: R
 // forward headers. false on an /mcp request means its calls went WITHOUT them and core-backend
 // keyed them on this service: the one innocent reason core-backend's forward-token-mismatch alert
 // can fire (infrastructure/monitoring/create-mcp-remote-monitoring.sh).
+// clientClosed (#2775): the client went before its answer was written; logged as status 499 (the
+// "client closed request" of nginx and of the SDK), whatever status line had already been sent.
+// inFlight / queuedMs (#2773): the requests in flight when this one was admitted, itself
+// included, and how long it waited for that. A subscriptions/listen stream is never admitted
+// (httpPolicy.ts isListenStream), so its line says 0 and 0; its status is 499 with clientClosed
+// when its client ends it, which is how a listen stream normally ends.
 type Outcome = {
   status: number;
   body?: Buffer;
@@ -126,6 +144,9 @@ type Outcome = {
   throttled?: boolean;
   refused?: string;
   clientPublic?: boolean;
+  clientClosed?: boolean;
+  inFlight?: number;
+  queuedMs?: number;
 };
 
 // Reads the body. Up to MAX_BODY_BYTES it is read for any request. Past it, only a request that
@@ -238,45 +259,98 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
     return { status: 429, throttled: true };
   }
 
-  let body: Buffer | undefined;
-  let facts: ReturnType<typeof bodyFacts> | undefined;
+  // #2775: the client has gone when the response closes before it has finished. That aborts the
+  // request: its wait for admission, the SDK's handling of it (which cancels the tool's call), and
+  // its API calls (runtime.ts requestSignal).
+  const gone = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) gone.abort();
+  });
+
+  // The body is read BEFORE the request waits for admission (#2773), so a client that uploads
+  // slowly holds its socket, and a large body its large-body slot, as before admission existed,
+  // never one of the MAX_IN_FLIGHT places every other request needs. What a waiting request holds
+  // is its body: at most MAX_BODY_BYTES, or a large body that holds one of the slots.
   let slot = false;
-  if (method === "POST") {
-    const read = await readBody(req);
-    if (read === "too_large") return tooLarge(res, cors);
-    if (read === "busy") {
+  try {
+    let body: Buffer | undefined;
+    let facts: ReturnType<typeof bodyFacts> | undefined;
+    if (method === "POST") {
+      let read: BodyRead;
+      try {
+        read = await readBody(req);
+      } catch (e) {
+        // The request stream fails only when its connection does: the client went mid-upload.
+        if (req.destroyed) return { status: 499, refused: "client_closed", clientClosed: true };
+        throw e;
+      }
+      if (read === "too_large") return tooLarge(res, cors);
+      if (read === "busy") {
+        send(
+          res,
+          503,
+          rpcError(
+            BUSY_CODE,
+            `Server busy: this instance is already reading its ${LARGE_BODY_SLOTS} large request bodies at once. Retry after ${BUSY_RETRY_AFTER_SEC} s, or pass check_sbom the SBOM's purls.`,
+            { retry_after_seconds: BUSY_RETRY_AFTER_SEC },
+          ),
+          { ...cors, "Retry-After": String(BUSY_RETRY_AFTER_SEC), Connection: "close" },
+        );
+        log("WARNING", "mcp_large_body_busy", { slots: LARGE_BODY_SLOTS });
+        return { status: 503, refused: "large_body_busy" };
+      }
+      body = read.body;
+      slot = read.slot;
+      facts = bodyFacts(body);
+      // Past the general cap, the body itself must be what the headers (if any) said: one of
+      // LARGE_BODY_TARGETS. A 2025-era client sends no Mcp-Method, so this is where its large body
+      // is held to that.
+      if (body.length > MAX_BODY_BYTES && !isLargeBodyTarget(facts)) return { ...tooLarge(res, cors), body, facts };
+
+      // A 2026-era subscriptions/listen is a stream open until its client leaves, carrying only
+      // keepalives here: it takes no place and holds no work, or 64 idle ones would leave every
+      // other request waiting for a 503 (#2773; httpPolicy.ts isListenStream says what bounds it).
+      const standard = { protocolVersion: header(req, "mcp-protocol-version"), mcpMethod: header(req, "mcp-method"), mcpName: header(req, "mcp-name") };
+      if (isListenStream(facts, body, standard)) return { ...(await relay(req, res, pathname, method, cors, client, body, gone.signal)), facts };
+    }
+
+    // #2773: at most MAX_IN_FLIGHT requests are served at once; the next waits here.
+    const waitStart = Date.now();
+    if (!(await admission.acquire(ADMISSION_WAIT_MS, gone.signal))) {
+      const queuedMs = Date.now() - waitStart;
+      if (gone.signal.aborted) return { status: 499, refused: "client_closed", clientClosed: true, body, facts, queuedMs };
+      req.resume();
       send(
         res,
         503,
         rpcError(
           BUSY_CODE,
-          `Server busy: this instance is already reading its ${LARGE_BODY_SLOTS} large request bodies at once. Retry after ${BUSY_RETRY_AFTER_SEC} s, or pass check_sbom the SBOM's purls.`,
+          `Server busy: this instance is already serving its ${MAX_IN_FLIGHT} requests at once. Retry after ${BUSY_RETRY_AFTER_SEC} s.`,
           { retry_after_seconds: BUSY_RETRY_AFTER_SEC },
         ),
         { ...cors, "Retry-After": String(BUSY_RETRY_AFTER_SEC), Connection: "close" },
       );
-      log("WARNING", "mcp_large_body_busy", { slots: LARGE_BODY_SLOTS });
-      return { status: 503, refused: "large_body_busy" };
+      log("WARNING", "mcp_busy", { max_in_flight: MAX_IN_FLIGHT, waiting: admission.waiting });
+      return { status: 503, refused: "busy", body, facts, queuedMs };
     }
-    body = read.body;
-    slot = read.slot;
-    facts = bodyFacts(body);
-    // Past the general cap, the body itself must be what the headers (if any) said: one of
-    // LARGE_BODY_TARGETS. A 2025-era client sends no Mcp-Method, so this is where its large body
-    // is held to that.
-    if (body.length > MAX_BODY_BYTES && !isLargeBodyTarget(facts)) {
-      if (slot) largeBodies.release();
-      return { ...tooLarge(res, cors), body, facts };
+    const admitted = { inFlight: admission.inUse, queuedMs: Date.now() - waitStart };
+    // What is still running for this request (runtime.ts holdRequest): its admission and its
+    // large-body slot are held until all of it has settled, not only until the answer is written.
+    const work = new Set<Promise<unknown>>();
+    try {
+      return { ...(await relay(req, res, pathname, method, cors, client, body, gone.signal, work)), facts, ...admitted };
+    } finally {
+      // Every tool call stops on `gone` (#2775), so this wait is long only if one does not.
+      await requestSettled(work);
+      admission.release();
     }
-  }
-  try {
-    return { ...(await relay(req, res, pathname, method, cors, client, body)), facts };
   } finally {
     if (slot) largeBodies.release();
   }
 }
 
-// Hands one admitted request to the SDK's handler and streams its answer back.
+// Hands one admitted request (or a listen stream, which is not admitted and passes no `work`) to
+// the SDK's handler and streams its answer back.
 async function relay(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -285,26 +359,26 @@ async function relay(
   cors: Record<string, string>,
   client: ReturnType<typeof resolveClient>,
   body: Buffer | undefined,
+  gone: AbortSignal,
+  work?: Set<Promise<unknown>>,
 ): Promise<Outcome> {
   const headers = new Headers();
   for (const [k, v] of Object.entries(req.headers)) {
     if (v === undefined || HOP_BY_HOP.has(k)) continue;
     for (const one of Array.isArray(v) ? v : [v]) headers.append(k, one);
   }
-  const abort = new AbortController();
-  res.on("close", () => abort.abort());
   const request = new Request(`http://localhost${pathname}`, {
     method,
     headers,
     body: body && body.length > 0 ? new Uint8Array(body) : undefined,
-    signal: abort.signal,
+    signal: gone,
   });
 
   // #2737: the production synthetic names itself by its user-agent family; its API calls then
   // carry the synthetic's fixed token (runtime.ts upstreamUserAgent), so they are never counted
   // as hosted adoption.
   const synthetic = uaFamily(req.headers["user-agent"]) === SYNTHETIC_UA_FAMILY;
-  const response = await withClient(client.forwardAddress, () => handler.fetch(request), { synthetic });
+  const response = await withClient(client.forwardAddress, () => handler.fetch(request), { synthetic, signal: gone, work });
   const out: Record<string, string> = { ...cors };
   response.headers.forEach((v, k) => {
     out[k] = v;
@@ -314,7 +388,9 @@ async function relay(
     for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
   }
   res.end();
-  return { status: response.status, body, clientPublic: client.forwardAddress !== undefined };
+  const clientPublic = client.forwardAddress !== undefined;
+  if (gone.aborted) return { status: 499, body, clientPublic, clientClosed: true };
+  return { status: response.status, body, clientPublic };
 }
 
 const server = http.createServer((req, res) => {
@@ -343,6 +419,9 @@ const server = http.createServer((req, res) => {
       refused: o.refused ?? "",
       ua_family: uaFamily(req.headers["user-agent"]),
       client_public: o.clientPublic === true,
+      client_closed: o.clientClosed === true,
+      in_flight: o.inFlight ?? 0,
+      queued_ms: o.queuedMs ?? 0,
     });
   };
 
@@ -366,6 +445,23 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// #2773: the heap V8 may grow to, and the memory the container allows (0 when none is known). A
+// heap allowed past the container's memory is collected only when the kernel kills the instance:
+// Dockerfile.http caps it, and this says when a process was started without that cap. It can say
+// so only where Node can read the container's limit (process.constrainedMemory(), from cgroups):
+// where it cannot, memory_limit_mb is null, this never fires, and heap_limit_mb is what to read.
+const MiB = 1024 * 1024;
+const heapLimit = v8.getHeapStatistics().heap_size_limit;
+const memoryLimit = process.constrainedMemory?.() ?? 0;
+const memoryKnown = memoryLimit > 0 && memoryLimit < 2 ** 50;
+if (memoryKnown && heapLimit > memoryLimit * 0.75) {
+  log("WARNING", "mcp_remote_heap_unbounded", {
+    heap_limit_mb: Math.round(heapLimit / MiB),
+    memory_limit_mb: Math.round(memoryLimit / MiB),
+    reason: "V8 may grow its heap past the container's memory, and the kernel then kills the instance with every request on it (#2773): start http.js as Dockerfile.http does",
+  });
+}
+
 server.listen(PORT, () => {
   const addr = server.address();
   log("INFO", "mcp_remote_listening", {
@@ -379,6 +475,10 @@ server.listen(PORT, () => {
     max_body_bytes: MAX_BODY_BYTES,
     max_sbom_body_bytes: MAX_SBOM_BODY_BYTES,
     large_body_slots: LARGE_BODY_SLOTS,
+    max_in_flight: MAX_IN_FLIGHT,
+    admission_wait_ms: ADMISSION_WAIT_MS,
+    heap_limit_mb: Math.round(heapLimit / MiB),
+    memory_limit_mb: memoryKnown ? Math.round(memoryLimit / MiB) : null,
   });
 });
 

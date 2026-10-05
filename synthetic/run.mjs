@@ -34,7 +34,11 @@
 // endpoint's own tests use) on both eras: lists the tools, calls every one with the same probe
 // table, judged the same way against the outputSchema the ENDPOINT advertises, then one
 // prompts/get (triage_cve with a CVE) and one resources/read (echelongraph://methodology), tools
-// "prompt:triage_cve" and "resource:methodology" (probes.mjs). Every line carries `transport`,
+// "prompt:triage_cve" and "resource:methodology" (probes.mjs). check_sbom is sent its 201 purls as
+// a CycloneDX document, a request body twice the endpoint's 64 KiB general cap, and must answer
+// measured from the document (probes.mjs HTTP_PROBES and HTTP_EXPECT, #2774): the large-body path
+// #2747 opened is probed every run, and a return of its 413 fails the probe (rpc_error, rpc_code
+// -32600) instead of leaving every probe green. Every line carries `transport`,
 // "stdio" or "http", the metric's fourth label, so a hosted outage is its own series and its own
 // alert; package_version on an http line is the version the endpoint reports in its handshake.
 // The hosted leg runs even when the npm install failed: they are independent products.
@@ -80,7 +84,7 @@ import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
-import { AFTER, EXPECT, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
+import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
@@ -140,9 +144,9 @@ export function probeOrder(listed, forced = []) {
 }
 
 // The input a probe sends: the first candidate that validates against the tool's inputSchema.
-// Returns { args, index } or { reason } when there is none.
-export function chooseInput(name, tool, seen) {
-  const candidates = PROBES[name];
+// Returns { args, index } or { reason } when there is none. `table` is the leg's probe table.
+export function chooseInput(name, tool, seen, table = PROBES) {
+  const candidates = table[name];
   const schema = tool?.inputSchema;
   const fits = (args) => !schema || validates(schema, args).valid;
   if (!candidates) {
@@ -219,10 +223,11 @@ export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerI
 }
 
 // Probe one era of the hosted endpoint over Streamable HTTP (#2737): one line per tool, then the
-// prompt and the resource.
+// prompt and the resource. Its own inputs and expectations where probes.mjs has them (#2774:
+// check_sbom is sent a document past the endpoint's 64 KiB general body cap).
 export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {} }) {
   const open = () => connectHttp({ era, url, userAgent: UA_TOKEN, clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
-  return probeSession({ era, open, force, emit, onServerInfo, extras: true });
+  return probeSession({ era, open, force, emit, onServerInfo, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
 }
 
 // One prompt or resource probe: listed? then called and judged.
@@ -250,8 +255,8 @@ async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
 }
 
 // Probe one era of one session, however it is opened: one line per tool (and, with extras, one
-// for the prompt and one for the resource).
-export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, extras = false }) {
+// for the prompt and one for the resource), with the leg's probe table and expectations.
+export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, extras = false, probes = PROBES, expect = EXPECT }) {
   let client;
   try {
     client = await open();
@@ -277,7 +282,7 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
         emit({ tool: name, era, outcome: "not_published" });
         continue;
       }
-      const choice = tool ? chooseInput(name, tool, seen) : { args: {}, index: -1 };
+      const choice = tool ? chooseInput(name, tool, seen, probes) : { args: {}, index: -1 };
       if (!choice.args) {
         emit({ tool: name, era, outcome: "failure", reason: choice.reason });
         continue;
@@ -291,7 +296,7 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
         continue;
       }
       const latency = Math.round(performance.now() - t0);
-      const verdict = judge(res, tool, EXPECT[name]);
+      const verdict = judge(res, tool, expect[name]);
       if (verdict.outcome === "success") seen[name] = res.structuredContent;
       emit({ tool: name, era, latency_ms: latency, input: choice.index, ...verdict });
     }

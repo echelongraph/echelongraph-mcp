@@ -13,10 +13,11 @@
 //
 // The logic lives here, and index.ts passes in the shared envelope helpers, so the tool
 // registers with one call there (createServer) and its result contract is the same as every
-// other tool's: content[0] the API's JSON verbatim, content[1] the note, content[2] the envelope.
+// other tool's: content[0] the API's JSON (verbatim up to 30,000 characters, cut past them, #2783),
+// content[1] the note, content[2] the envelope.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
 
 type Text = { type: "text"; text: string };
 type ToolResult = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
@@ -201,7 +202,8 @@ function kevText(a: KevRecentArgs): TextCut {
       { keep: ["cve_id", "kev_added_date", "kev_vendor", "kev_product", "kev_ransomware"], clip: 40 },
       { keep: ["cve_id", "kev_added_date", "kev_vendor", "kev_ransomware"], clip: 40 },
     ],
-    whole: "get_cve returns any one of these CVEs' records whole.",
+    // A record carries the CISA fields a row leaves out (kev_due_date, kev_product, kev_vuln_name).
+    whole: `${GET_CVE_WHOLE}.`,
     page: (shown) =>
       `next_cursor continues after the last row of this page, not after the last row in this text: to read the rows left out in the text, call kev_recent again with the same filters${a.cursor?.trim() ? " and cursor" : ""} and a limit of ${shown}, whose rows are the ones in this text, then with that page's next_cursor and a limit of ${shown} or fewer.`,
   };

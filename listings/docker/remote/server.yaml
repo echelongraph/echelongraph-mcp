@@ -1,19 +1,18 @@
-name: echelongraph
-image: mcp/echelongraph
-type: server
+name: echelongraph-remote
+type: remote
+dynamic:
+  tools: true
 meta:
   category: security
   tags:
     - security
     - cve
     - vulnerability
+    - remote
 about:
   title: EchelonGraph CVE & Exposure
   description: CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
   icon: https://echelongraph.io/logo-mark.png
-source:
-  project: https://github.com/echelongraph/echelongraph-mcp
-  commit: ccb1a7b8dcf8d0a702249e62f8b8ddf924f43b55
-run:
-  allowHosts:
-    - app.echelongraph.io:443
+remote:
+  transport_type: streamable-http
+  url: https://mcp.echelongraph.io/mcp

@@ -19,12 +19,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MODERN } from "../test/mcp-stdio-client.mjs";
 import { modern } from "../test/mcp-http-client.mjs";
 import { chooseInput, COMPLETE_MESSAGE, HTTP, judge, judgePrompt, judgeResource, LEGACY, probeOrder, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
-import { AFTER, EXPECT, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
+import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBE, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS } from "./probes.mjs";
 import { BATCH_PATH, CALL_ANSWER } from "../test/fixtures/match-batch.mjs";
 
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
@@ -393,6 +393,42 @@ describe("#2757: what check_sbom's probe must show", () => {
   });
 });
 
+describe("#2774: what the hosted leg's check_sbom probe sends, and must show", () => {
+  const SBOM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "tools", "check_sbom.js");
+  const POLICY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "httpPolicy.js");
+  it("a CycloneDX document of exactly the 201 purls the stdio legs send, so the API budget is unchanged", async () => {
+    const { extract } = await import(pathToFileURL(SBOM).href);
+    assert.deepEqual(HTTP_PROBES.check_sbom, [{ sbom: SBOM_PROBE_DOCUMENT }]);
+    const x = extract({ sbom: SBOM_PROBE_DOCUMENT });
+    assert.deepEqual([x.input, x.components_in_document, x.without_purl, x.duplicates_removed], ["cyclonedx", 201, 0, 0]);
+    assert.deepEqual(x.purls, SBOM_PROBE_PURLS);
+    assert.deepEqual(PROBES.check_sbom, [{ purls: SBOM_PROBE_PURLS }], "the stdio legs' input changed");
+  });
+  it("as a request body, past the general 64 KiB cap on both eras and far inside the large one", async () => {
+    const P = await import(pathToFileURL(POLICY).href);
+    const { modernMeta } = await import("../test/mcp-http-client.mjs");
+    const params = { name: "check_sbom", arguments: HTTP_PROBES.check_sbom[0] };
+    for (const p of [params, { ...params, _meta: modernMeta() }]) {
+      const bytes = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: p }));
+      assert.ok(bytes > 2 * P.DEFAULT_MAX_BODY_BYTES && bytes < 200_000, `${bytes} bytes`);
+      assert.ok(bytes < P.DEFAULT_MAX_SBOM_BODY_BYTES);
+    }
+  });
+  it("HTTP_EXPECT holds measured, read from the document (cyclonedx, 201 components), and then EXPECT's two batches", () => {
+    const sc = (state, input, components_in_document, batches_sent) => ({ state, coverage: { input, components_in_document, batches_sent, not_sent_reason: null } });
+    assert.equal(HTTP_EXPECT.check_sbom(sc("measured", "cyclonedx", 201, 2)), undefined);
+    assert.equal(HTTP_EXPECT.check_sbom(sc("measured", "purls", null, 2)), 'state "measured", coverage.input "purls", components_in_document null; want measured, cyclonedx, 201');
+    assert.equal(HTTP_EXPECT.check_sbom(sc("not_assessed", "cyclonedx", 201, 2)), 'state "not_assessed", coverage.input "cyclonedx", components_in_document 201; want measured, cyclonedx, 201');
+    assert.equal(HTTP_EXPECT.check_sbom(sc("measured", "cyclonedx", 201, 1)), EXPECT.check_sbom(sc("measured", "cyclonedx", 201, 1)));
+    assert.notEqual(EXPECT.check_sbom(sc("measured", "cyclonedx", 201, 1)), undefined);
+  });
+  it("the hosted leg chooses it; the stdio legs keep the purl list", () => {
+    const tool = { inputSchema: { type: "object", properties: { purls: { type: "array", items: { type: "string" } }, sbom: { anyOf: [{ type: "string" }, { type: "object" }] } } } };
+    assert.deepEqual(chooseInput("check_sbom", tool, {}, { ...PROBES, ...HTTP_PROBES }), { args: { sbom: SBOM_PROBE_DOCUMENT }, index: 0 });
+    assert.deepEqual(chooseInput("check_sbom", tool, {}), { args: { purls: SBOM_PROBE_PURLS }, index: 0 });
+  });
+});
+
 describe("judging one result", () => {
   const schema = {
     type: "object",
@@ -503,7 +539,7 @@ describe("the forwarder", () => {
 // failure, never as silence or success.
 const HTTP_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "http.js");
 
-async function startHttpEntry(apiBase) {
+async function startHttpEntry(apiBase, extraEnv = {}) {
   const env = {
     ...process.env,
     PORT: "0",
@@ -512,6 +548,7 @@ async function startHttpEntry(apiBase) {
     ECHELONGRAPH_FORWARD_TOKEN: "forward-token-for-tests-2737",
     ECHELONGRAPH_FORWARD_HOST: "127.0.0.1",
     MCP_RATE_LIMIT_PER_MIN: "1000",
+    ...extraEnv,
   };
   const proc = spawn(process.execPath, [HTTP_ENTRY], { env, stdio: ["ignore", "pipe", "pipe"] });
   const lines = [];
@@ -625,6 +662,38 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         assert.equal(typeof a.client_public, "boolean");
       }
     });
+    it("#2774: the hosted check_sbom probe is a body past 64 KiB on each era, served 200 and read as the document", () => {
+      const sbom = srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.tool === "check_sbom");
+      assert.equal(sbom.length, 2, JSON.stringify(sbom));
+      for (const a of sbom) {
+        assert.ok(a.body_bytes > 64 * 1024, `a ${a.body_bytes}-byte body: under the general cap`);
+        assert.equal(a.status, 200);
+      }
+      for (const era of [MODERN, LEGACY]) {
+        const l = r.probes.find((p) => p.transport === HTTP && p.tool === "check_sbom" && p.era === era);
+        assert.deepEqual([l.outcome, l.state, l.input], ["success", "measured", 0], JSON.stringify(l));
+      }
+    });
+  });
+
+  it("#2774: on a canary copy whose large-body cap is 64 KiB (MCP_MAX_SBOM_BODY_BYTES=65536), the hosted check_sbom probe fails, rpc_error -32600, and nothing else does", async () => {
+    stub.state.mode = "ok";
+    const canary = await startHttpEntry(stub.base, { MCP_MAX_SBOM_BODY_BYTES: "65536" });
+    try {
+      const r = await run(stub, { stdio: false, remoteUrl: canary.url });
+      for (const era of [MODERN, LEGACY]) {
+        const l = r.of("check_sbom", era);
+        assert.equal(l.transport, HTTP);
+        assert.deepEqual([l.outcome, l.reason, l.rpc_code], ["failure", "rpc_error", -32600], JSON.stringify(l));
+        for (const tool of [...PUBLISHED.filter((t) => t !== "check_sbom"), ...EXTRAS]) assert.equal(r.of(tool, era).outcome, "success", tool);
+      }
+      assert.equal(r.exitCode, 2);
+      const refused = canary.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.status === 413);
+      assert.equal(refused.length, 2, "the endpoint logged each refusal");
+      for (const a of refused) assert.equal(a.refused, "body_size");
+    } finally {
+      await canary.stop();
+    }
   });
 
   it("the hosted leg alone: every API call the endpoint made for it leads with the synthetic's fixed token", async () => {

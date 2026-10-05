@@ -377,7 +377,15 @@ for (const era of [MODERN, "2025-06-18"]) {
           note.includes("440 purls were NOT sent (not_sent_reason time_budget: the API answered 429 asking for a wait of 600 s (Retry-After), which would pass the call's 50 s budget), so they are not checked and not clean;"),
           note,
         );
-        assert.match(note, /call check_sbom again with purls set to that list after a minute\./);
+        // #2799: the position the purls not sent run from, which a model reading the text alone
+        // can rebuild them from: the text keeps only the first 10 of data.not_sent_purls.
+        assert.ok(
+          note.includes(
+            "they are the input's distinct purls from position 401 on, counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place), and data.not_sent_purls lists them: call check_sbom again with purls set to them after a minute.",
+          ),
+          note,
+        );
+        assert.deepEqual(PURLS_840.slice(401 - 1), sc.data.not_sent_purls, "the position the note names is not where the purls not sent start");
         assert.ok(note.includes("Of the 400 components checked:"), note);
       });
 
