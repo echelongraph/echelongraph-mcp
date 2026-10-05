@@ -132,7 +132,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
     assert.match(tool.description, /The CPE path takes product/);
     assert.match(tool.description, /The registry path takes ecosystem/);
     assert.match(tool.description, /reported as undetermined \(undetermined_count, and up to 50 of them in undetermined\), never as safe/);
-    assert.match(tool.description, /a count of 0 there must never be reported as not affected/);
+    assert.match(tool.description, /a count of 0 there is not a finding of not affected/);
     assert.match(tool.description, /travel in request headers, never in the URL/);
   });
 

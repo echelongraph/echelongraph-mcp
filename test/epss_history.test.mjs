@@ -133,10 +133,10 @@ for (const era of ERAS) {
       assert.deepEqual(data.properties.series_kind.enum, ["change_only"]);
     });
 
-    it("the description says change-only, never interpolate, and what series_starts_at means", () => {
+    it("the description says change-only, never a daily series, and what series_starts_at means", () => {
       const d = tool.description;
       assert.match(d, /The series is change-only: a point is a recorded change, and a day without a point is not a recorded value\./);
-      assert.match(d, /Never interpolate it into a daily series\./);
+      assert.match(d, /A daily series interpolated from it holds values EchelonGraph never recorded, so the series is never a daily series\./);
       assert.match(d, /Before series_starts_at nothing was recorded, so a missing point there means not recorded, not unchanged/);
       assert.match(d, /latest_point_matches_current false means a change is missing from the series\./);
     });

@@ -6,6 +6,38 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.6.7 — 2026-10-05
+
+- Tool descriptions now state facts only: no reporting instructions to the model and no references
+  to other tools, for the Anthropic MCP Directory policy ("Tool descriptions contain no
+  instructions about model behavior, other tools, or external instruction sources, and no hidden
+  or encoded text"). Tool behavior, results and their notes are unchanged. Reworded:
+  - get_cve, search_cves: "The note labels each such CVE NOT YET SCORED: report it that way, never
+    as a score of 0." now reads "The note labels each such CVE NOT YET SCORED, which is not a score
+    of 0."
+  - cve_summary: summary.rejected's "report them as withdrawn records, never as vulnerabilities"
+    now reads "they are withdrawn records, none of them a vulnerability"; summary.none's "report
+    those CVEs as not yet scored, not as CVEs rated None" now reads "and names those CVEs not yet
+    scored, not CVEs rated None".
+  - get_vendor_advisory: "(the vendor and vendor_advisory_id fields of a row from
+    search_vendor_advisories or vendor_advisories_for_cve)" now reads "(the vendor and
+    vendor_advisory_id of a vendor advisory row)".
+  - exposure_radar: "and cve_exposure says per CVE whether the radar tracks it" now reads "and this
+    answer does not say whether the radar tracks that CVE: tracking is answered per CVE".
+  - epss_history: "Never interpolate it into a daily series." now reads "A daily series
+    interpolated from it holds values EchelonGraph never recorded, so the series is never a daily
+    series."
+  - check_affected: "Read assessed before count: … a count of 0 there must never be reported as
+    not affected" now reads "count depends on assessed: … a count of 0 there is not a finding of
+    not affected"; the outputSchema description of assessed, "Read first.", now reads "count
+    depends on it.".
+  - vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories: the outputSchema
+    description of withdrawn, "report it as withdrawn", now reads "so it is a withdrawn advisory,
+    not a current one".
+- test/description-policy.test.mjs lists the tools over stdio and fails if any title, description
+  or input/output schema description names another tool, matches a model-directed imperative
+  pattern, or carries zero-width, bidi or control characters or a base64-looking run.
+
 ## 2.6.6 — 2026-10-05
 
 - Correction to 2.6.5 (#2775). Its entry says: "On the hosted endpoint it is the client going away

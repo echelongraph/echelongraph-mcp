@@ -23,11 +23,11 @@ below) at 10:57 UTC, npm `latest` 2.6.2:
 |---|---|---|---|---|
 | Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, 6 active versions | 2.6.2, `isLatest` | nothing: each release publishes it | release script |
 | Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 2.6.2 (`/health`) | nothing | deploy |
-| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.6.3 (Glama's latest release) | set our one-line description under Admin → Listing if Glama's differs | founder (GitHub sign-in) |
-| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; scan read 2.6.4: 14 tools, 4 prompts) | proxies the hosted endpoint | set display name and description; Settings → Verification | founder (Smithery sign-in) |
+| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.6.5 at 2026-10-05 08:34Z, lagging npm 2.6.6 (Auto-Release or Admin → Sync Server) | set our one-line description under Admin → Listing if Glama's differs | founder (GitHub sign-in) |
+| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; scan read 2.6.6 at 08:32Z: 14 tools, release SUCCESS) | proxies the hosted endpoint | set display name and description; Settings → Verification | founder (Smithery sign-in) |
 | mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |
 | PulseMCP | no | shows none | nothing: submissions paused; it reads the official registry | nobody |
-| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.6.5 (`e95384fe`); validate and build pass (2026-10-05) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
+| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.6.6 (`cc231bfe`); validate and build pass (2026-10-05) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
 | Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passes; tools are dynamic, so no pin to move | serves the hosted endpoint | Docker's review | Docker |
 | Anthropic connector directory | no | shows none | the developer portal's form | founder (paid Claude plan) |
 

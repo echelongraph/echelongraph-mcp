@@ -249,7 +249,7 @@ const opt = <T extends z.ZodType>(t: T) => t.nullable().optional();
 const DATE_FIELDS = {
   vendor_published_at: opt(z.string()).describe("The date the vendor gives for the advisory."),
   our_first_seen_at: opt(z.string()).describe("When EchelonGraph first recorded the advisory; not the vendor's date."),
-  withdrawn: opt(z.boolean()).describe("true: the vendor withdrew (rescinded) this advisory; report it as withdrawn."),
+  withdrawn: opt(z.boolean()).describe("true: the vendor withdrew (rescinded) this advisory, so it is a withdrawn advisory, not a current one."),
 };
 const AdvisoryRow = z.looseObject({
   advisory_id: opt(z.string()),
@@ -606,7 +606,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "get_vendor_advisory",
     {
       title: "Vendor advisory detail",
-      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id fields of a row from search_vendor_advisories or vendor_advisories_for_cve): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. ${DATES_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
+      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id of a vendor advisory row): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. ${DATES_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
       inputSchema: z.object({
         vendor: z.string().describe("the vendor slug, e.g. microsoft, redhat, github"),
         advisory_id: z.string().describe("the vendor's advisory ID, e.g. RHSA-2024:1234 or GHSA-xxxx-xxxx-xxxx"),

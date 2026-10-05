@@ -3612,7 +3612,7 @@ describe(`against a stub API [${ERA}]`, () => {
       const d = t.description;
       assert.ok(d.includes("the count with no band (summary.none)"), d);
       assert.ok(d.includes("summary.none is not a severity rating of None: it counts the active CVEs with no severity band from any source, that is, CVEs not yet scored, and the answer may carry the same count again as summary.unscored."), d);
-      assert.ok(d.includes("Whenever summary.none is above zero the note says so: report those CVEs as not yet scored, not as CVEs rated None."), d);
+      assert.ok(d.includes("Whenever summary.none is above zero the note says so, and names those CVEs not yet scored, not CVEs rated None."), d);
       // 2.3.1 listed summary.none among the counts by severity.
       assert.doesNotMatch(d, /by severity[^.]*\(summary\.critical[^)]*summary\.none/, d);
       const s = branchOf(t.outputSchema, "measured").properties.data.properties.summary.properties;
@@ -3766,7 +3766,7 @@ describe(`against a stub API [${ERA}]`, () => {
         d,
       );
       assert.ok(
-        d.includes("summary.rejected counts the CVE records rejected (withdrawn) by their numbering authority, which summary.total and the other counts above leave out: report them as withdrawn records, never as vulnerabilities."),
+        d.includes("summary.rejected counts the CVE records rejected (withdrawn) by their numbering authority, which summary.total and the other counts above leave out: they are withdrawn records, none of them a vulnerability."),
         d,
       );
       const s = branchOf(t.outputSchema, "measured").properties.data.properties.summary.properties;
