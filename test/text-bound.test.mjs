@@ -522,6 +522,47 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
 });
 
 // The cut on its own (src/textBudget.ts dataText), on answers built to reach each step.
+// #2861: search_cves's first cut level keeps patch_evidence beside patch_available (src/index.ts
+// SEARCH_CVES_TEXT). No production-shaped answer carries patch_evidence yet (core-backend 2d8bb9ce
+// is not deployed as these fixtures were read), so a page past the budget whole and inside it at
+// the first level is served here: 50 rows with a 1,000-character description, every other row as
+// an API older than the field sends it (patch_available alone). The fixtures are not edited.
+describe("#2861: a search_cves page cut to its first level keeps patch_evidence", () => {
+  let stub;
+  let client;
+  before(async () => {
+    stub = await startStub();
+    client = await connect({ era: MODERN, ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "10000" }, stderr: "inherit" });
+  });
+  after(async () => {
+    await client?.close();
+    await stub?.close();
+  });
+
+  it("every row keeps patch_available, and patch_evidence where the answer's row has it; rows from an older API gain none", async () => {
+    const base = { severity: "CRITICAL", cvss_v3_score: 9.8, echelongraph_score: 9.1, score_assessed: true, kev_listed: false, description: "x".repeat(1000), cpe_match: ["cpe:2.3:a:apache:tomcat:*:*:*:*:*:*:*:*"] };
+    const rows = Array.from({ length: 50 }, (_, i) => ({
+      cve_id: `CVE-2099-${30000 + i}`,
+      ...base,
+      ...(i % 2 ? { patch_available: false } : { patch_available: true, patch_evidence: ["fixed_version", "nvd_patch_reference"] }),
+    }));
+    stub.state.answers = { "/api/v1/public/cves": { cves: rows, limit: 50, offset: 0, total: rows.length } };
+    const res = await client.callTool({ name: "search_cves", arguments: { search: "tomcat", limit: 50 } });
+    assert.notEqual(res.isError, true, JSON.stringify(res).slice(0, 300));
+    assertTextIsACut("search_cves, 50 rows, half with patch_evidence", res);
+    assert.deepEqual(res.structuredContent.data.cves, rows);
+    const shown = JSON.parse(blocksOf(res)[0]).cves;
+    assert.equal(shown.length, 50);
+    for (const [i, r] of shown.entries()) {
+      assert.ok(!Object.hasOwn(r, "cpe_match"), `row ${i} kept cpe_match: the text is not cut at a level`);
+      assert.equal(r.description, `${"x".repeat(200)}…`, `row ${i}: not the first level's clip`);
+      assert.equal(r.patch_available, rows[i].patch_available, `row ${i}`);
+      if (i % 2) assert.ok(!Object.hasOwn(r, "patch_evidence"), `row ${i}`);
+      else assert.deepEqual(r.patch_evidence, ["fixed_version", "nvd_patch_reference"], `row ${i}`);
+    }
+  });
+});
+
 describe("#2783: how a first text block longer than the budget is cut", () => {
   const big = (n, chars) => "x".repeat(chars) + String(n);
   // The one-row-a-line layout dataText uses, for data with `over` replacing some of its fields.

@@ -3513,6 +3513,103 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2861: core-backend 2d8bb9ce serves patch_available true exactly when EchelonGraph holds
+  // evidence of a fix, and patch_evidence (always a list) names its sources, strongest first. Both
+  // are relayed as sent, in structuredContent and in the first text block; an API older than the
+  // field sends no patch_evidence, and that answer is relayed as before. The bodies are synthetic,
+  // shaped as core-backend's CVE struct marshals them; CVE-2017-5651 is #2861's named case (two
+  // package rows with a fixed_version and an NVD reference tagged Patch, measured 2026-10-05).
+  describe("#2861: patch_available and patch_evidence are relayed as the API sends them", () => {
+    // A search_cves page cut to fit the text is held in text-bound.test.mjs (#2861 there): a cut
+    // text is not data whole, which this file's rebuild check (#2440) asks of every result.
+    const call = (name, args) => client.callTool({ name, arguments: args });
+    const GET = (id) => `/api/v1/public/cves/${id}`;
+    const NAMED = "CVE-2017-5651";
+    const WITH_EVIDENCE = { cve_id: NAMED, severity: "CRITICAL", cvss_v3_score: 9.8, echelongraph_score: 9.1, score_confidence: "HIGH", score_assessed: true, kev_listed: false, patch_available: true, patch_evidence: ["fixed_version", "nvd_patch_reference"] };
+    // What an API before 2d8bb9ce sends: patch_available alone, false for this CVE then.
+    const OLDER_API = { cve_id: NAMED, severity: "CRITICAL", cvss_v3_score: 9.8, echelongraph_score: 9.1, score_confidence: "HIGH", score_assessed: true, kev_listed: false, patch_available: false };
+    async function served(p, body, name, args) {
+      stub.state.mode = "ok";
+      stub.state.overrides[p] = body;
+      try {
+        return await call(name, args);
+      } finally {
+        delete stub.state.overrides[p];
+      }
+    }
+    const getCve = (body) => served(GET(body.cve_id), body, "get_cve", { cve_id: body.cve_id });
+    const headOf = (id) => `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${id}.`;
+
+    it("get_cve with patch_evidence: relayed whole in structuredContent.data and in the first text block, the note unchanged", async () => {
+      const res = await getCve(WITH_EVIDENCE);
+      assert.notEqual(res.isError, true, brief(res));
+      assert.deepEqual(res.structuredContent.data, WITH_EVIDENCE);
+      assert.equal(res.structuredContent.data.patch_available, true);
+      assert.deepEqual(res.structuredContent.data.patch_evidence, ["fixed_version", "nvd_patch_reference"]);
+      const text = JSON.parse(textBlocks(res)[0]);
+      assert.equal(text.patch_available, true);
+      assert.deepEqual(text.patch_evidence, ["fixed_version", "nvd_patch_reference"]);
+      assert.equal(noteOf(res), headOf(NAMED));
+    });
+
+    it("get_cve from an API older than patch_evidence: answered as before, with no patch_evidence invented", async () => {
+      const res = await getCve(OLDER_API);
+      assert.notEqual(res.isError, true, brief(res));
+      assert.equal(res.structuredContent.state, "measured");
+      assert.deepEqual(res.structuredContent.data, OLDER_API);
+      assert.ok(!Object.hasOwn(res.structuredContent.data, "patch_evidence"));
+      const text = JSON.parse(textBlocks(res)[0]);
+      assert.equal(text.patch_available, false);
+      assert.ok(!Object.hasOwn(text, "patch_evidence"));
+      assert.equal(noteOf(res), headOf(NAMED));
+      assert.doesNotMatch(textOf(res), /patch_evidence/);
+    });
+
+    it("get_cve: patch_available true beside an empty patch_evidence (the flag is never set back to false) is relayed as sent", async () => {
+      const body = { ...WITH_EVIDENCE, patch_evidence: [] };
+      const res = await getCve(body);
+      assert.notEqual(res.isError, true, brief(res));
+      assert.deepEqual(res.structuredContent.data.patch_evidence, []);
+      assert.deepEqual(JSON.parse(textBlocks(res)[0]).patch_evidence, []);
+    });
+
+    it("get_cve: a label the API adds later is relayed, never a failed call", async () => {
+      const body = { ...WITH_EVIDENCE, patch_evidence: ["vendor_patch", "a_later_source"] };
+      const res = await getCve(body);
+      assert.notEqual(res.isError, true, brief(res));
+      assert.deepEqual(res.structuredContent.data.patch_evidence, ["vendor_patch", "a_later_source"]);
+    });
+
+    it("get_cve: a patch_evidence that is not a list, or a patch_available that is not a boolean, does not fit the outputSchema and is not relayed", async () => {
+      for (const [body, field] of [
+        [{ ...WITH_EVIDENCE, patch_evidence: "fixed_version" }, /patch_evidence/],
+        [{ ...WITH_EVIDENCE, patch_available: "true" }, /patch_available/],
+      ]) {
+        const res = await getCve(body);
+        assertErrorResult("get_cve", res);
+        assertNames("get_cve", res, stub.base, /did not match this tool's output schema/, field);
+      }
+    });
+
+    it("both descriptions and outputSchemas say what patch_available and patch_evidence are: false is no fix evidence on record, not a finding that no fix exists", async () => {
+      const { tools } = await client.listTools();
+      for (const name of ["search_cves", "get_cve"]) {
+        const t = tools.find((x) => x.name === name);
+        const d = t.description;
+        assert.ok(d.includes("patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names the sources of that evidence, strongest first: vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range) and nvd_patch_reference (an NVD reference tagged Patch)."), `${name}: ${d}`);
+        assert.ok(d.includes("patch_available false means no fix evidence is on record, which is not a finding that no fix exists."), `${name}: ${d}`);
+        assert.ok(d.includes("An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either."), `${name}: ${d}`);
+        const data = branchOf(t.outputSchema, "measured").properties.data;
+        const rec = name === "get_cve" ? data : data.properties.cves.items;
+        assert.match(rec.properties.patch_available.description, /^true: EchelonGraph holds evidence of a fix for the CVE, its sources named in patch_evidence\. false: no fix evidence is on record, which is not a finding that no fix exists\./, name);
+        assert.match(rec.properties.patch_evidence.description, /^The sources of the fix evidence EchelonGraph holds for the CVE, strongest first: vendor_patch .* Absent \(an API older than the field\): the answer does not name the evidence\.$/, name);
+        assert.deepEqual(rec.properties.patch_available.type, ["boolean", "null"], name);
+        const labels = JSON.stringify(rec.properties.patch_evidence);
+        for (const l of ["vendor_patch", "fixed_version", "nvd_patch_reference"]) assert.ok(labels.includes(`"${l}"`), `${name}: ${l} is not a value of patch_evidence`);
+      }
+    });
+  });
+
   // cve_summary against a body served for this call only (#2610, #2641).
   async function cveSummaryWith(body) {
     stub.state.mode = "ok";

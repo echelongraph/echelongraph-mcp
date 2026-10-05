@@ -6,6 +6,27 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.6.8 — 2026-10-05
+
+- get_cve and search_cves now say what `patch_available` means, and describe `patch_evidence`
+  (#2861). Through 2.6.7 neither tool described `patch_available`, and core-backend set it only
+  from Ubuntu and Red Hat patch records, so a `false` read as "no patch": measured in production on
+  2026-10-05, 101,725 CVEs read `false` while EchelonGraph held evidence of a fix for them, 48,145
+  with a package `fixed_version` and 71,705 with an NVD reference tagged "Patch" (CVE-2017-5651,
+  Apache Tomcat, among them, with two package rows carrying a `fixed_version`). core-backend now
+  sets `patch_available` true whenever it holds evidence of a fix, and serves `patch_evidence`, the
+  list of its sources, strongest first: `vendor_patch` (a vendor patch on record, from Ubuntu or
+  Red Hat), `fixed_version` (a package fix version, or the fixed bound of an affected version
+  range) and `nvd_patch_reference` (an NVD reference tagged Patch). Both descriptions, and the
+  outputSchema descriptions of both fields, now state: `patch_available` is true when EchelonGraph
+  holds evidence of a fix; `false` means no fix evidence is on record, which is not a finding that
+  no fix exists; once true it is never set back to false, so it can be true beside an empty
+  `patch_evidence`; and an answer with no `patch_evidence` (an API older than that field) does not
+  name the evidence. Both fields are relayed as the API sends them; a `patch_evidence` label the API
+  adds later is relayed, not a failed call.
+- search_cves: a page cut to fit the text keeps `patch_evidence` beside `patch_available` in each
+  row at the first cut level.
+
 ## 2.6.7 — 2026-10-05
 
 - Tool descriptions now state facts only: no reporting instructions to the model and no references

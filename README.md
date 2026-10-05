@@ -317,6 +317,18 @@ Both tools relay the API's JSON as it was sent, and the note says what the score
 | `score_assessed: false` | **NOT YET SCORED**, tagged "(score_assessed: false)": report the CVE as not yet scored, never as a zero or low score. Each of `echelongraph_score`, `echelongraph_severity` and `echelongraph_risk` it carries is named as a placeholder. A rejected record is **NOT SCORED** instead. |
 | no `score_assessed` field | The answer does not say whether the CVE was scored (an API older than the field), and a zero `echelongraph_score` in it is not a rating. |
 
+### What `patch_available` says
+
+`patch_available` is `true` when EchelonGraph holds evidence of a fix for the CVE, and
+`patch_evidence` lists the sources of that evidence, strongest first: `vendor_patch` (a vendor
+patch on record, from Ubuntu or Red Hat), `fixed_version` (a fixed version recorded for an
+affected package, or the fixed bound of an affected version range) and `nvd_patch_reference` (an
+NVD reference tagged Patch). `false` means no fix evidence is on record, which is **not** a
+finding that no fix exists. Once `true`, `patch_available` is not set back to `false`, so it can be
+`true` beside an empty `patch_evidence`. An answer with no `patch_evidence` (an API older than that
+field) does not name the evidence, and a `false` there is not a finding that no fix exists either.
+Both tools relay the two fields as the API sends them.
+
 ### How `cve_exposure` counts
 
 Every 12 hours, when Shodan query credits allow, the KEV-exposure radar runs one Shodan query

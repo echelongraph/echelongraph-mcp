@@ -763,7 +763,7 @@ const SEARCH_CVES_TEXT: TextCut = {
   rows: "cves",
   levels: [
     {
-      keep: ["cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "echelongraph_risk", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "kev_ransomware", "published", "vuln_status", "patch_available", "exploit_poc_available"],
+      keep: ["cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "echelongraph_risk", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "kev_ransomware", "published", "vuln_status", "patch_available", "patch_evidence", "exploit_poc_available"],
       clip: 200,
     },
     { keep: ["cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "published"], clip: 100 },
@@ -2184,6 +2184,27 @@ const CPE_MATCH_DESCRIPTION =
   "The record's CPE match criteria as one flat list, every configuration's cpeMatch entries together: the AND/OR operator and negate of each configuration and node, versionStartExcluding and matchCriteriaId are not in it, so a CPE that is only a platform a product runs on reads as one more entry.";
 const CPE_CONFIGURATIONS_DESCRIPTION =
   "NVD's configurations array as NVD sent it: each configuration and node with its operator (AND, OR) and negate, and each cpeMatch with criteria, vulnerable, versionStartIncluding, versionStartExcluding, versionEndIncluding, versionEndExcluding and matchCriteriaId. A cpeMatch with vulnerable false inside an AND configuration is the platform the vulnerable product runs on, not an affected product. Absent: EchelonGraph holds no stored NVD configuration for the CVE, which is not a finding that no product is affected.";
+// #2861: what patch_available and patch_evidence are, as core-backend serves them since 2d8bb9ce
+// (core-backend/internal/cve/patch_evidence.go states the rule). Through that commit
+// patch_available was EXISTS(a cve_patches row), fed only by Ubuntu and Red Hat, so 101,725 CVEs
+// read false while EchelonGraph held a package fixed_version or an NVD Patch-tagged reference for
+// them (CVE-2017-5651 among them). patch_available is now true exactly when the evidence set is
+// non-empty, and only ever set true. So false is "no fix evidence on record", never "no fix
+// exists", and an answer without patch_evidence (an API older than it) says nothing about why.
+// One constant string each (the site's tool-claims check folds only constant strings).
+const PATCH_EVIDENCE_LABELS = ["vendor_patch", "fixed_version", "nvd_patch_reference"] as const;
+const PATCH_EVIDENCE_SOURCES =
+  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range) and nvd_patch_reference (an NVD reference tagged Patch)";
+const PATCH_AVAILABLE_DESCRIPTION =
+  "patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names the sources of that evidence, strongest first: " +
+  PATCH_EVIDENCE_SOURCES +
+  ". patch_available false means no fix evidence is on record, which is not a finding that no fix exists. patch_evidence lists the evidence found when EchelonGraph last computed it, and is empty where none was found; patch_available, once true, is never set back to false, so it can be true beside an empty patch_evidence. An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either.";
+const PATCH_AVAILABLE_FIELD =
+  "true: EchelonGraph holds evidence of a fix for the CVE, its sources named in patch_evidence. false: no fix evidence is on record, which is not a finding that no fix exists. Once true it is never set back to false.";
+const PATCH_EVIDENCE_FIELD =
+  "The sources of the fix evidence EchelonGraph holds for the CVE, strongest first: " +
+  PATCH_EVIDENCE_SOURCES +
+  ". Empty where none was found when EchelonGraph last computed it. Absent (an API older than the field): the answer does not name the evidence.";
 const CVERecord = z.looseObject({
   cve_id: opt(z.string()),
   description: opt(z.string()),
@@ -2208,6 +2229,9 @@ const CVERecord = z.looseObject({
   kev_ransomware: opt(z.boolean()),
   kev_added_date: opt(z.string()),
   ghsa_id: opt(z.string()),
+  // #2861: fix evidence. A label the API adds later is admitted, never a failed call.
+  patch_available: opt(z.boolean()).describe(PATCH_AVAILABLE_FIELD),
+  patch_evidence: opt(z.array(z.union([z.enum(PATCH_EVIDENCE_LABELS), z.string()]))).describe(PATCH_EVIDENCE_FIELD),
   references: z.unknown().optional(),
   // #2720: NVD's configurations, losslessly, beside the flat list (see cpeConfigurationsNote).
   cpe_match: z.unknown().optional().describe(CPE_MATCH_DESCRIPTION),
@@ -2499,7 +2523,7 @@ export function createServer(): McpServer {
     "search_cves",
     {
       title: "Search CVEs",
-      description: `Search/list CVEs from EchelonGraph's CVE feed (NVD + MITRE-CNA pre-NVD + CISA-KEV + EPSS + GitHub GHSA, each polled on a schedule). Filter by severity, minimum CVSS, free text, and sort; page with limit and offset. Returns cves, each with cve_id, severity, cvss_v3_score, echelongraph_score and score_assessed (whether EchelonGraph has scored it), epss_score and kev_listed where the record has them, and the list's total, total_counted (false: the matches were not counted, so total is not a count), total_is_lower_bound (true: at least total), search_relaxed (true: a phrase was relaxed to all of its words), limit and offset. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} coverage repeats total, total_counted, total_is_lower_bound, search_relaxed, limit and offset, and gives returned, the rows in this page. ${TEXT_BUDGET_DESCRIPTION} Cut, each row keeps at least the fields named above and the first 200 characters of its description (100 on a page too long for that), or rows are left out and the note gives the offset to call next.`,
+      description: `Search/list CVEs from EchelonGraph's CVE feed (NVD + MITRE-CNA pre-NVD + CISA-KEV + EPSS + GitHub GHSA, each polled on a schedule). Filter by severity, minimum CVSS, free text, and sort; page with limit and offset. Returns cves, each with cve_id, severity, cvss_v3_score, echelongraph_score and score_assessed (whether EchelonGraph has scored it), epss_score and kev_listed where the record has them, and the list's total, total_counted (false: the matches were not counted, so total is not a count), total_is_lower_bound (true: at least total), search_relaxed (true: a phrase was relaxed to all of its words), limit and offset. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} coverage repeats total, total_counted, total_is_lower_bound, search_relaxed, limit and offset, and gives returned, the rows in this page. ${TEXT_BUDGET_DESCRIPTION} Cut, each row keeps at least the fields named above and the first 200 characters of its description (100 on a page too long for that), or rows are left out and the note gives the offset to call next. ${PATCH_AVAILABLE_DESCRIPTION}`,
       inputSchema: z.object({
         search: z.string().optional().describe("free-text search (product, vendor, or keyword, e.g. 'tomcat')"),
         severity: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]).optional().describe("filter to one severity"),
@@ -2519,7 +2543,7 @@ export function createServer(): McpServer {
     "get_cve",
     {
       title: "CVE detail",
-      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
+      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity (when the record has a CVSS v4 score), echelongraph_score and echelongraph_severity with score_confidence (EchelonGraph's multi-source score) and score_assessed (whether EchelonGraph has scored it), epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, and kev_ransomware for known ransomware-campaign use), ghsa_id (GitHub GHSA), patch_available and patch_evidence (whether EchelonGraph holds evidence of a fix, and its sources), references, cpe_match (the CPE criteria as one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator, negate, versionStartExcluding and matchCriteriaId; absent where EchelonGraph has stored none, which is not a finding that no product is affected), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${PATCH_AVAILABLE_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
       inputSchema: z.object({ cve_id: CVE_ID_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,
