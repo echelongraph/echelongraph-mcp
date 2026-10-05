@@ -4,16 +4,38 @@ name: Release
 # publishing (OIDC): no npm token exists anywhere in this repository or its secrets.
 # https://docs.npmjs.com/trusted-publishers
 #
-# Three jobs, so the one that can mint a publish credential runs no dependency code:
+# Six jobs, so the ones that can mint a credential run no dependency code:
 #   build    builds, tests, packs, and tests the PACKED TARBALL; uploads that tarball.
-#   publish  holds id-token: write. Downloads the tested tarball, checks it is byte for byte
-#            the one build tested, and publishes it with a provenance attestation.
+#   bundle   (#2815) builds the Claude Desktop extension, echelongraph-mcp.mcpb, from this tag with
+#            listings/mcpb/build.sh, whose pinned MCPB CLI validates manifest.json before it packs,
+#            and uploads it unchecked with its sha256. Read-only token.
+#   check-bundle  (#2815) on a fresh runner that never ran the MCPB CLI, from a fresh checkout,
+#            checks the bundle (listings/mcpb/check-bundle.mjs): it holds only what build.sh
+#            stages; its package.json, LICENSE, README.md and dist/ are the tested tarball's; its
+#            node_modules/ adds or changes nothing a production install from the lockfile has; and
+#            its own server lists manifest.json's tools. Read-only token.
+#   publish  holds id-token: write. Runs only once build AND check-bundle pass. Downloads the tested
+#            tarball, checks it is byte for byte the one build tested, and publishes it with a
+#            provenance attestation.
 #   verify   reads the registry until it serves the version, and checks it serves the tested
 #            tarball with a provenance attestation that `npm audit signatures` verifies, and that
 #            names this workflow at this tag and this commit (.github/scripts/check-provenance.sh).
+#   release-bundle  holds id-token, attestations and contents: write; checks out nothing and runs
+#            no dependency code. After verify (or for a version npm already has), it signs the
+#            checked bundle with a SLSA v1 build-provenance attestation (Sigstore, keyless: no key
+#            or certificate exists anywhere), attaches it and its Sigstore bundle to the GitHub
+#            release vX.Y.Z, creating the release if there is none, and checks with
+#            `gh attestation verify` that the file the release serves is attested by this workflow
+#            at this tag. README "Install in Claude Desktop" links releases/latest/download/ to it.
 #
-# npm versions are immutable and cannot be taken back, only superseded. Every check that can
-# refuse a release runs before the publish.
+# npm versions are immutable and cannot be taken back, only superseded. Every check of what is
+# released, the tarball (build) and the bundle (bundle, check-bundle), runs before the publish:
+# a manifest or bundle defect stops the release with nothing published. What runs after the
+# publish only reads what the registry and the GitHub release serve, and signs and attaches the
+# bundle already checked.
+#
+# Critical path: build 20 + bundle 20 + check-bundle 15 + publish 15 + verify 30 + release-bundle
+# 15 = 115 min of job timeouts, plus queueing (scripts/npm-publish-mcp.sh RUN_FINISH_POLLS).
 #
 # A tag whose version npm already has publishes nothing, and its run passes only if that version
 # carries provenance from this workflow at this tag (see "Is the version on npm yet").
@@ -189,7 +211,9 @@ jobs:
 
   publish:
     name: Publish the tested tarball with provenance
-    needs: build
+    # check-bundle (#2815): a bundle that fails its checks stops the release before npm has the
+    # immutable version, whose README links the bundle.
+    needs: [build, check-bundle]
     if: needs.build.outputs.already != 'true'
     runs-on: ubuntu-latest # trusted publishing supports GitHub-hosted runners only
     timeout-minutes: 15
@@ -340,3 +364,225 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: bash .github/scripts/check-provenance.sh "$VERSION" "$GITHUB_SHA"
+
+  # The Claude Desktop extension (#2815): a one-click install that needs no Node.js on the user's
+  # machine, since Claude Desktop runs it with the Node.js it ships. Built from this tag, then
+  # checked by check-bundle against the tarball the build job tested. This job runs dependency code
+  # (npm ci, tsc, the MCPB CLI) and holds a read-only token; nothing it produces is trusted until
+  # check-bundle, on another runner, has checked it.
+  bundle:
+    name: Build the Claude Desktop bundle (.mcpb)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      sha256: ${{ steps.stage.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - run: npm ci --ignore-scripts
+
+      # build.sh refuses a manifest.json not at package.json's version (and the build job checked
+      # package.json against the tag), then runs `mcpb validate` on the manifest before `mcpb pack`:
+      # an invalid manifest fails the release here, before anything is published, signed or attached.
+      - name: Build the bundle; the pinned MCPB CLI validates the manifest, then packs
+        run: bash listings/mcpb/build.sh "$RUNNER_TEMP/mcpb"
+
+      - name: Stage the bundle and the release notes
+        id: stage
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          cp "$RUNNER_TEMP/mcpb/echelongraph-mcp-$VERSION.mcpb" "$RUNNER_TEMP/release/echelongraph-mcp.mcpb"
+          # Used only if the release does not exist yet: the version's CHANGELOG section.
+          # shellcheck disable=SC2016 # ${...} below is a JavaScript template literal
+          node -e '
+            const fs = require("fs");
+            const [file, v, out] = process.argv.slice(1);
+            const lines = fs.readFileSync(file, "utf8").split("\n");
+            const a = lines.findIndex((l) => l.startsWith(`## ${v} `));
+            if (a < 0) { console.log(`::error::CHANGELOG.md has no "## ${v} " section`); process.exit(1); }
+            let b = lines.findIndex((l, i) => i > a && l.startsWith("## "));
+            if (b < 0) b = lines.length;
+            const note = "Issue numbers (#NNNN) refer to EchelonGraph\u0027s internal issue tracker, which is not public: they are not issues of the public repository, and cannot be followed from it.";
+            fs.writeFileSync(out, `${note}\n\n${lines.slice(a + 1, b).join("\n").trim()}\n`);
+          ' CHANGELOG.md "$VERSION" "$RUNNER_TEMP/release/notes.md"
+          SHA256="$(sha256sum "$RUNNER_TEMP/release/echelongraph-mcp.mcpb" | cut -d' ' -f1)"
+          echo "echelongraph-mcp.mcpb  $(stat -c%s "$RUNNER_TEMP/release/echelongraph-mcp.mcpb") bytes  sha256=$SHA256"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mcpb
+          path: |
+            ${{ runner.temp }}/release/echelongraph-mcp.mcpb
+            ${{ runner.temp }}/release/notes.md
+          if-no-files-found: error
+          retention-days: 30
+
+  # Checks the bundle on its own runner (#2815): the bundle job ran the MCPB CLI, from npm with
+  # unpinned transitive dependencies, and that runner's files cannot be trusted to check its own
+  # output. This job runs no npm package's code but check-bundle.mjs from a fresh checkout, the
+  # bundle's own server (step 4 of check-bundle.mjs, after its files were compared), and an
+  # `npm ci --ignore-scripts` of the lockfile's production packages as the reference. Read-only token.
+  check-bundle:
+    name: Check the bundle against the tested tarball
+    needs: [build, bundle]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tarball
+          path: ${{ runner.temp }}/tarball
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mcpb
+          path: ${{ runner.temp }}/mcpb
+
+      - name: The tarball is the one the build job tested, and the bundle the one the bundle job built
+        env:
+          NAME: ${{ needs.build.outputs.tarball }}
+          WANT_SHA1: ${{ needs.build.outputs.sha1 }}
+          WANT_SHA256: ${{ needs.bundle.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          TARBALL="$RUNNER_TEMP/tarball/$NAME"
+          GOT="$(sha1sum "$TARBALL" | cut -d' ' -f1)"
+          [ "$GOT" = "$WANT_SHA1" ] || { echo "::error::downloaded tarball sha1 $GOT, tested $WANT_SHA1"; exit 1; }
+          GOT="$(sha256sum "$RUNNER_TEMP/mcpb/echelongraph-mcp.mcpb" | cut -d' ' -f1)"
+          [ "$GOT" = "$WANT_SHA256" ] || { echo "::error::downloaded echelongraph-mcp.mcpb sha256 $GOT, built $WANT_SHA256"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/tested" "$RUNNER_TEMP/unpacked"
+          tar -xzf "$TARBALL" -C "$RUNNER_TEMP/tested"
+          unzip -q "$RUNNER_TEMP/mcpb/echelongraph-mcp.mcpb" -d "$RUNNER_TEMP/unpacked"
+
+      - name: The bundle is the tested package and serves manifest.json's tools
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nmref"
+          cp package.json package-lock.json "$RUNNER_TEMP/nmref/"
+          (cd "$RUNNER_TEMP/nmref" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
+          env -u NODE_PATH node listings/mcpb/check-bundle.mjs "$RUNNER_TEMP/unpacked" \
+            --version "$VERSION" --package "$RUNNER_TEMP/tested/package" \
+            --node-modules-ref "$RUNNER_TEMP/nmref/node_modules"
+
+  # Signs and attaches only once npm serves the version with provenance (verify), or for a version
+  # npm already had (the build job then proved the registry serves what this commit packs, with
+  # provenance from this workflow at this tag). A release that already carries the bundle keeps
+  # it: a re-run never replaces a file users may have installed; it re-checks its attestation.
+  # Each of the two assets is attached on its own, so a run that uploaded the bundle and failed
+  # before its Sigstore bundle gets the Sigstore bundle on a re-run.
+  # If this job fails after npm published, do NOT re-tag: re-run this run's failed jobs.
+  release-bundle:
+    name: Attest the bundle and attach it to the GitHub release
+    needs: [build, verify, bundle, check-bundle]
+    if: >-
+      always() && needs.build.result == 'success' && needs.bundle.result == 'success' &&
+      needs.check-bundle.result == 'success' &&
+      (needs.verify.result == 'success' || (needs.build.outputs.already == 'true' && needs.verify.result == 'skipped'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release and upload its assets
+      id-token: write # the OIDC token Sigstore exchanges for a short-lived signing certificate
+      attestations: write # store the attestation with GitHub
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+      ASSET: echelongraph-mcp.mcpb
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mcpb
+          path: ${{ runner.temp }}/release
+
+      - name: The bundle is the one check-bundle checked
+        env:
+          WANT_SHA256: ${{ needs.bundle.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          GOT="$(sha256sum "$RUNNER_TEMP/release/$ASSET" | cut -d' ' -f1)"
+          [ "$GOT" = "$WANT_SHA256" ] || { echo "::error::downloaded $ASSET sha256 $GOT, checked $WANT_SHA256"; exit 1; }
+          echo "$ASSET sha256=$GOT, the bundle check-bundle checked"
+
+      - name: Sign the bundle with SLSA build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/echelongraph-mcp.mcpb
+
+      - name: Attach the bundle to release vX.Y.Z
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            # A maintainer may create it by hand at the same moment: then this uploads to theirs.
+            gh release create "$TAG" --verify-tag --title "echelongraph-mcp $VERSION" --notes-file "$RUNNER_TEMP/release/notes.md" \
+              || gh release view "$TAG" --json tagName >/dev/null
+          fi
+          HAVE="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          if grep -qxF "$ASSET" <<<"$HAVE"; then
+            echo "::notice::release $TAG already carries $ASSET: kept, not replaced; the next step checks its attestation"
+          else
+            gh release upload "$TAG" "$RUNNER_TEMP/release/$ASSET"
+          fi
+
+      # What a user can run on the file they downloaded:
+      #   gh attestation verify echelongraph-mcp.mcpb --repo echelongraph/echelongraph-mcp \
+      #     --signer-workflow echelongraph/echelongraph-mcp/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z
+      - name: The bundle the release serves is attested by this workflow at this tag
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/served"
+          gh release download "$TAG" --pattern "$ASSET" --dir "$RUNNER_TEMP/served"
+          gh attestation verify "$RUNNER_TEMP/served/$ASSET" --repo "$GH_REPO" \
+            --signer-workflow "$GH_REPO/.github/workflows/release.yml" --source-ref "refs/tags/$TAG" \
+            --deny-self-hosted-runners --format json > "$RUNNER_TEMP/verified.json"
+          echo "OK: release $TAG serves $ASSET (sha256 $(sha256sum "$RUNNER_TEMP/served/$ASSET" | cut -d' ' -f1)), attested by this workflow at refs/tags/$TAG"
+
+      # Its own upload, apart from the bundle's: a re-run of a run that attached the bundle and
+      # failed before this file attaches it now. When the served bundle is the one this run signed,
+      # this run's Sigstore bundle is its signature; when it is an earlier run's file, the Sigstore
+      # bundle is the attestation the step above verified for that file.
+      - name: Attach the bundle's Sigstore bundle to release vX.Y.Z
+        env:
+          SIGSTORE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          SIG="$ASSET.sigstore.json"
+          HAVE="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          if grep -qxF "$SIG" <<<"$HAVE"; then
+            echo "::notice::release $TAG already carries $SIG: kept, not replaced"
+            exit 0
+          fi
+          OURS="$(sha256sum "$RUNNER_TEMP/release/$ASSET" | cut -d' ' -f1)"
+          SERVED="$(sha256sum "$RUNNER_TEMP/served/$ASSET" | cut -d' ' -f1)"
+          if [ "$SERVED" = "$OURS" ]; then
+            cp "$SIGSTORE" "$RUNNER_TEMP/release/$SIG"
+          else
+            jq -e '.[0].attestation.bundle' "$RUNNER_TEMP/verified.json" > "$RUNNER_TEMP/release/$SIG" || {
+              echo "::error::release $TAG serves an earlier run's $ASSET (sha256 $SERVED) and gh attestation verify returned no Sigstore bundle for it"; exit 1; }
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP/release/$SIG"
