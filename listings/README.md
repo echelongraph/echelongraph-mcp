@@ -27,8 +27,8 @@ below) at 10:57 UTC, npm `latest` 2.6.2:
 | Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; scan read 2.6.4: 14 tools, 4 prompts) | proxies the hosted endpoint | set display name and description; Settings → Verification | founder (Smithery sign-in) |
 | mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |
 | PulseMCP | no | shows none | nothing: submissions paused; it reads the official registry | nobody |
-| Docker MCP Catalog, local | no | n/a | a PR adding `servers/echelongraph/` | founder (GitHub sign-in) |
-| Docker MCP Catalog, remote | no | n/a | a PR adding `servers/echelongraph-remote/` | founder (GitHub sign-in) |
+| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.6.5 (`e95384fe`); validate and build pass (2026-10-05) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
+| Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passes; tools are dynamic, so no pin to move | serves the hosted endpoint | Docker's review | Docker |
 | Anthropic connector directory | no | shows none | the developer portal's form | founder (paid Claude plan) |
 
 Smithery by URL, Docker's remote entry and Anthropic's directory all connect to the hosted
@@ -57,7 +57,7 @@ delisting is a finding; decide whether to wire the check (below).
 | `../glama.json` | root of the public repo (there since v2.4.0) | Glama ownership claim |
 | `docker/server.yaml` | `servers/echelongraph/server.yaml` in a `docker/mcp-registry` fork | Docker MCP Catalog, local entry |
 | `docker/remote/server.yaml`, `tools.json`, `readme.md` | `servers/echelongraph-remote/` in the same fork | Docker MCP Catalog, remote entry |
-| `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh` | public repo, `listings/mcpb/` | an `.mcpb` bundle, if a stdio listing on Smithery is ever wanted |
+| `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh`, `mcpb/check-bundle.mjs` | public repo, `listings/mcpb/`; the built `echelongraph-mcp.mcpb` is attached, signed, to every new GitHub release (releases up to 2.6.5 have none) by the public repo's `release.yml` (#2815) | the one-click Claude Desktop install the README links as "Install in Claude Desktop"; also the bundle a stdio listing on Smithery would take |
 | `scripts/check-mcp-listings.mjs` (EchelonGraph repo, not mirrored) | nowhere | the listing check |
 
 None of these is in the npm package: `package.json` `files` is `dist`, `README.md`,
@@ -125,7 +125,7 @@ Links:
 | Repository | https://github.com/echelongraph/echelongraph-mcp |
 | npm | https://www.npmjs.com/package/echelongraph-mcp |
 | Website / documentation | https://echelongraph.io/pulse/mcp |
-| Privacy policy | https://echelongraph.io/privacy (see "Anthropic connector directory" for a gap in it) |
+| Privacy policy | https://echelongraph.io/privacy (Section 11, https://echelongraph.io/privacy#hosted-mcp-endpoint , covers the MCP server and the hosted endpoint) |
 | What the server and the hosted endpoint send and log | https://github.com/echelongraph/echelongraph-mcp#privacy-what-is-sent-where |
 | Support / security contact | support@echelongraph.io |
 | Icon (512x512 PNG) | https://echelongraph.io/logo-mark.png (also `mcpb/icon.png`) |
@@ -155,9 +155,10 @@ one. The publish page offers two routes:
 
 **Route: the hosted URL.** Our endpoint is Streamable HTTP and keyless, so it meets both
 requirements and Smithery needs no config schema. A URL listing cannot fall behind npm: Smithery
-proxies to whatever the hosted endpoint runs. A bundle would have to be rebuilt and uploaded at
-every release, because Smithery does not read npm; `mcpb/` stays prepared for that route but is
-not the recommendation. Checked 2026-10-04: an `initialize` sent with User-Agent
+proxies to whatever the hosted endpoint runs. A bundle would have to be uploaded at every release,
+because Smithery does not read npm. Since #2815 the release workflow builds and signs one for
+every new release (the GitHub release's `echelongraph-mcp.mcpb`), so that route would need only the
+upload, but it is not the recommendation. Checked 2026-10-04: an `initialize` sent with User-Agent
 `SmitheryBot/1.0 (+https://smithery.ai)` got a 200 from `https://mcp.echelongraph.io/mcp`. That
 request came from a cloud sandbox, not from the Cloudflare Workers that Smithery scans from; the
 endpoint is served by Google Frontend (Cloud Run), with no Cloudflare WAF in front of it to block
@@ -432,7 +433,7 @@ developer portal. Checked against each requirement on the submission page:
 | "Authentication works for Claude's client: OAuth 2.0 if your tools act on a user's account, or no authentication for public data". The authentication page lists `none`, "No authentication (authless server)", as "Supported by default". | yes: no authentication, public data |
 | "Every tool has a `title` and a `readOnlyHint` or `destructiveHint` annotation" | yes: all 14 have a title and `readOnlyHint: true` (`test/listings.test.mjs`, both protocol eras) |
 | "You've tested it in Claude" | founder: add it as a custom connector and call each tool |
-| "documentation URL, privacy policy URL, support contact, an icon" | yes, in "Paste text", with the privacy gap below |
+| "documentation URL, privacy policy URL, support contact, an icon" | yes, in "Paste text"; the privacy policy URL is `/privacy`, whose Section 11 covers the hosted endpoint (below) |
 | "You have a test account for reviewers: credentials for a fully populated account". The review checklist: "Test credentials: required". | **no account exists**: the server is keyless. Say so in Test & launch (block below). A reviewer may ask about it. |
 | "Your account can submit: any paid Claude plan". The publish page: "Plan: Pro, Max, Team, or Enterprise. Free accounts can't submit". On Team and Enterprise, "an Owner can submit". | founder's plan |
 | Review checklist, API ownership: "Your server must call your own first-party APIs, or APIs you legitimately proxy. The MCP server domain should match your service." | yes: `mcp.echelongraph.io` calls `app.echelongraph.io` |
@@ -441,14 +442,19 @@ developer portal. Checked against each requirement on the submission page:
 After submitting: "Anthropic scans your submission automatically for policy compliance and, by
 default, lists it as a Community connector". Escalations: `mcp-review@anthropic.com`.
 
-**Privacy gap, to fix or route around before submitting.** https://echelongraph.io/privacy
-(`marketing-site/app/privacy/PrivacyContent.tsx`) says nothing about the MCP server or the hosted
-endpoint. What the endpoint logs is in the server's README, "Privacy: what is sent where". Either
-add an MCP section to `/privacy` first (a marketing-site change, not made here), or give the
-README section as the privacy URL:
-https://github.com/echelongraph/echelongraph-mcp#privacy-what-is-sent-where . (`/privacy`
-answered 403 to the sandbox; the marketing edge challenges datacenter clients, #2304. So its
-served text was not re-read here; its source was.)
+**Privacy policy.** Give https://echelongraph.io/privacy as the privacy policy URL. Its Section 11,
+"MCP Server and Hosted MCP Endpoint" (anchor `#hosted-mcp-endpoint`,
+`marketing-site/app/privacy/PrivacyContent.tsx`, #2797), says what the hosted endpoint receives
+(tool arguments, and whole files, documents and labels among them: SBOM documents up to 6 MiB, and,
+as tools that take them are added, manifests and lockfiles, package-database text and workload
+labels), that it processes them in memory and neither logs nor stores them, what its access line
+records, what the API logs of the calls it makes for the user (each under the user's address, with
+its URL path), and that the npm package runs on the user's machine. `marketing-site/lib/privacyMcpEndpoint.test.ts`
+holds that section to `src/http.ts`'s log lines and `src/httpPolicy.ts`'s caps: a field added to a
+log line fails it until the section names it. The server's README section, "Privacy: what is sent
+where" (https://github.com/echelongraph/echelongraph-mcp#privacy-what-is-sent-where), stays the
+per-tool detail. (`/privacy` answers 403 to the sandbox, as the marketing edge challenges datacenter
+clients, #2304: read the served Section 11 from a browser before submitting.)
 
 **Steps** (first check that `https://mcp.echelongraph.io/health` answers `{"status":"ok",…}`)
 
@@ -558,6 +564,27 @@ that cites issue numbers carries this sentence, word for word, as `CHANGELOG.md`
 checklist: when a Release is created or edited, paste the sentence above its first `#NNNN`, or
 leave the numbers out. `test/readme.test.mjs` holds `CHANGELOG.md`'s preamble and this section
 to the same sentence.
+
+## Release steps
+
+A release is done when all of these hold, in this order (2026-10-05). Each step names what proves it.
+
+1. `scripts/npm-publish-mcp.sh --publish "<summary>"`: npm serves the version with SLSA provenance,
+   and public main plus tag `vX.Y.Z` carry exactly `mcp-server/`.
+2. `scripts/npm-publish-mcp.sh --publish-mcp-registry`: the official registry lists it as latest.
+3. `DEPLOY_ENV=production bash infrastructure/cloudrun/deploy-all.sh mcp-remote`: the hosted
+   endpoint's `/health` reports the version.
+4. **GitHub Release** for `vX.Y.Z`, titled `echelongraph-mcp X.Y.Z`, marked Latest. Its body is the
+   CHANGELOG section, preceded by the sentence in "Release notes" above. The script does not
+   create it. Glama's Auto-Release builds from it, and it is what "Watch → Releases" emails.
+5. `scripts/publish-smithery.sh`: Smithery re-scans the hosted endpoint, so its listing shows this
+   release's tools and descriptions. It refuses until step 3 holds. It reads the founder's API key
+   from Secret Manager (`smithery-api-key`, echelongraph-prod) and checks that Smithery's API lists
+   the release's tool count. Self-test: `scripts/publish-smithery-selftest.sh`.
+6. docker/mcp-registry#5429, while it is open: move `servers/echelongraph/server.yaml`'s
+   `source.commit` to the tag's commit, then re-run `go run ./cmd/validate --name echelongraph` and
+   `go run ./cmd/build --tools echelongraph`. Mirror the commit in `docker/server.yaml` here.
+7. `node scripts/check-mcp-listings.mjs`: no finding. Glama can lag a few minutes behind step 4.
 
 ## Listing check
 

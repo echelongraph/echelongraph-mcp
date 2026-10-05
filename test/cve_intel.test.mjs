@@ -96,6 +96,22 @@ const OLDER_EMPTY = { ...OLDER, cwes: [], exploits: [] };
 // Sections the API could not read (#2720): served empty, and named.
 const PARTIAL = { ...LOG4SHELL_ENRICHMENT, cwes: [], exploits: [], exploits_total: null, exploits_capped: false, exploits_by_kind: {}, exploits_by_status: {}, failed_sections: ["cwes", "exploits", "exploits_total"] };
 const ALL_FAILED = { ...EMPTY_ENRICHMENT, failed_sections: ["affected_packages", "cwes", "exploits", "exploits_total", "fixed_versions", "timeline", "timeline_stats"] };
+// #2817: the affected_packages rows core-backend serves since #2817 for CVE-2021-44228: one row per
+// package, fixed_version one range's fix (log4j-core's 2.12.2, production's on 2026-10-04), and
+// fixed_branches every range of the OSV record (GHSA-jfh8-c2jp-5v3q), in the record's order, each
+// naming that record; a last_affected bound kept out of fixed; null for a row never structurally
+// loaded; [] beside a fixed_version where no version range is on record (only commit ranges).
+const RANGE = (introduced, fixed, last_affected = null) => ({ introduced, fixed, last_affected, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" });
+const LOG4J_CORE_BRANCHES = [RANGE("2.13.0", "2.15.0"), RANGE("2.0-beta9", "2.3.1"), RANGE("2.4", "2.12.2")];
+const BRANCHES = {
+  ...LOG4SHELL_ENRICHMENT,
+  affected_packages: [
+    { ecosystem: "Maven", package_name: "org.apache.logging.log4j:log4j-core", version_range: "2.10.0 ... 2.9.1 (18 versions)", fixed_version: "2.12.2", fixed_branches: LOG4J_CORE_BRANCHES, dependents_count: 0, source: "osv" },
+    { ecosystem: "Maven", package_name: "com.guicedee.services:log4j-core", version_range: "1.0.10.0 ... 1.2.1.2-jre17 (362 versions)", fixed_branches: [RANGE("0", null, "1.2.1.2-jre17")], dependents_count: 0, source: "osv" },
+    { ecosystem: "Debian:12", package_name: "apache-log4j2", fixed_version: "2.15.0-1", fixed_branches: null, dependents_count: 0, source: "osv_bulk" },
+    { ecosystem: "Go", package_name: "example.test/commit-ranges-only", fixed_version: "8a5e1f0d3c2b", fixed_branches: [], dependents_count: 0, source: "osv_bulk" },
+  ],
+};
 
 const CWE79_ROWS = [
   { cve_id: "CVE-2024-27204", severity: "MEDIUM", cvss_v3_score: 6.1, echelongraph_score: 7.2, echelongraph_severity: "HIGH", score_assessed: true, published: "2024-03-01T00:00:00Z", description: "XSS", kev_listed: true },
@@ -145,6 +161,7 @@ const ANSWERS = {
   [ENRICH("CVE-2099-27303")]: PARTIAL,
   [ENRICH("CVE-2099-27304")]: ALL_FAILED,
   [ENRICH("CVE-2099-27305")]: { status: 500, body: { error: "boom" } },
+  [ENRICH("CVE-2099-28170")]: BRANCHES,
   "/api/v1/public/cwes/CWE-79": CWE79,
   "/api/v1/public/cwes/CWE-79?page=3": { ...CWE79, page: 3 },
   "/api/v1/public/cwes/CWE-79?page=200": { ...CWE79, page: 200, cves: [] },
@@ -298,6 +315,46 @@ for (const era of ERAS) {
       assert.ok(n.includes("affected_packages is empty"), n);
       assert.doesNotMatch(n, /older than that field/);
       assertTextIsStructure("cve_intel empty", res);
+    });
+
+    it("#2817 cve_intel: fixed_branches relayed as sent, every range of log4j-core; the note and description say fixed_version is one range's", async () => {
+      const res = await call("cve_intel", { cve_id: "CVE-2099-28170" });
+      assert.ok(!res.isError, noteOf(res));
+      const rows = res.structuredContent.data.affected_packages;
+      assert.deepEqual(rows, BRANCHES.affected_packages, "affected_packages relayed as sent");
+      const core = rows.find((r) => r.package_name === "org.apache.logging.log4j:log4j-core");
+      assert.deepEqual(core.fixed_branches, LOG4J_CORE_BRANCHES);
+      // The range holding 2.14.1 is fixed in 2.15.0; fixed_version alone says 2.12.2.
+      assert.equal(core.fixed_branches.find((b) => b.introduced === "2.13.0").fixed, "2.15.0");
+      assert.equal(core.fixed_version, "2.12.2");
+      // The first text block (what a client without structuredContent shows) carries them whole.
+      assert.deepEqual(JSON.parse(textBlocks(res)[0]).affected_packages[0].fixed_branches, LOG4J_CORE_BRANCHES);
+      const n = noteOf(res);
+      assert.ok(n.includes("1 affected_packages row lists more than one affected range in fixed_branches (org.apache.logging.log4j:log4j-core (Maven)): there, fixed_version is one range's fix, and an installed version's fix is the fixed of the range that holds it."), n);
+      assert.ok(n.includes("1 affected_packages row carries fixed_branches null (apache-log4j2 (Debian:12)): its ranges are not on record, so fixed_version, one range's fix, is all the answer holds"), n);
+      // [] is "no version range on record", not "no fix": the row's fixed_version is named as such.
+      assert.ok(n.includes("1 affected_packages row carries fixed_branches [] and a fixed_version (example.test/commit-ranges-only (Go)): no version range is on record there, which is not a finding that no fix exists"), n);
+      // Each range names the OSV record that published it, relayed as sent.
+      assert.equal(core.fixed_branches[0].advisory_id, "GHSA-jfh8-c2jp-5v3q");
+      assert.equal(core.fixed_branches[0].source, "osv_bulk");
+      assertTextIsStructure("cve_intel fixed_branches", res);
+
+      // The description says how to pick the range for an installed version, and what fixed_version is.
+      const d = tools.find((t) => t.name === "cve_intel").description;
+      assert.match(d, /affected_packages \(ecosystem, package_name, version_range, fixed_version, fixed_branches\)/);
+      assert.match(d, /To pick the range for an installed version, compare in the ecosystem's version order/);
+      assert.match(d, /at or above introduced \("0" is the first version\) and below fixed, or at or below last_affected; that range's fixed is the fix for it/);
+      assert.match(d, /fixed_version is one range's fix, kept for compatibility/);
+      assert.match(d, /with advisory_id \(the OSV record that published the range\) and source/);
+      assert.match(d, /Ranges with an advisory_id are in the order their record lists them/);
+      assert.match(d, /\[\] where no version range is on record \(the advisory gives none, only commit ranges, or more than are stored\), which is not a finding that no fix exists/);
+      assert.match(d, /not the fix for every affected range/);
+      // #2817 trip-wire: nothing calls fixed_version the version to upgrade to.
+      assert.doesNotMatch(d, /fixed_version[^.]*(the version to upgrade to|upgrade to)/i);
+
+      // An answer older than #2817 (no fixed_branches on any row) is worded as such.
+      const older = await call("cve_intel", { cve_id: LOG4SHELL });
+      assert.ok(noteOf(older).includes("No affected_packages row carries fixed_branches (an API older than that field): each row's fixed_version is one range's fix, which need not be the fix for a given installed version."), noteOf(older));
     });
 
     it("cve_intel: a section the API could not read is left out of data and named, not relayed as empty", async () => {

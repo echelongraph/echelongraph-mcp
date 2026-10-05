@@ -24,6 +24,15 @@
 // EXPLOIT_NUCLEI_ENABLED, EXPLOIT_POCGITHUB_ENABLED; core-backend cmd/server/main.go). The answer
 // does not say which ran, so no text here says a source is polled: it names the sources the data
 // model holds, and says coverage depends on which pollers run.
+//
+// Fixed versions (#2817). /enrichment keeps one affected_packages row per (CVE, ecosystem,
+// package), and its fixed_version is one range's fix: the last range's as the advisory was read
+// (core-backend cve/backfill_osv_packages.go summariseAffected). For CVE-2021-44228 production
+// served log4j-core 2.12.2 alone (2026-10-04), the fix for 2.4-2.12.1, below an affected 2.14.1.
+// Since #2817 each row also carries fixed_branches, the fix for every range (core-backend
+// cve/fixed_branches.go, from the version_intervals the matcher evaluates): this tool relays it as
+// sent, its description says how to pick the range for an installed version, and the note counts
+// the rows where fixed_version is not the whole answer.
 import * as z from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
@@ -89,7 +98,10 @@ const CVE_INTEL_METHOD =
 const VERIFIED_STATUS_DESCRIPTION =
   "verified_status is the label stored with each reference: verified for a Metasploit module, for an Exploit-DB entry Exploit-DB marks verified, and for curated seed rows marked so; reported for a public artefact nothing has confirmed works (nuclei templates, GitHub proofs of concept, unverified Exploit-DB entries); unconfirmed where a curated row says so. It is a label from the source, not a guarantee that the exploit works against a given system.";
 
-export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with its name and source), exploits (each with kind, source_name, source_url, first_seen_at and verified_status; at most 10, verified first) with exploits_total (every reference on record), exploits_capped (true when exploits lists fewer than exploits_total), exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version), fixed_versions (ecosystem, package_name, vulnerable_range, fixed_version) and timeline (the newest enrichment-history rows, with timeline_total). ${VERIFIED_STATUS_DESCRIPTION} An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which of them are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Vendor advisories, patches, generated summaries, trending signals and historical incidents are not relayed. Pass a CVE ID like CVE-2021-44228. Its structured result carries state (measured), measured_at (null: each row carries its own time), method, coverage (the sections relayed, failed and left out, and per-list counts), freshness (null) and notes, with data, which the first text block holds whole up to 30,000 characters; the result's last text block repeats it without data and without the note's sentences (the text block before it), with which notes ends. ${TEXT_BUDGET_DESCRIPTION}`;
+const FIXED_BRANCHES_DESCRIPTION =
+  'fixed_branches lists each affected range of the package on record: introduced, and fixed (the range\'s fix) or last_affected (its last affected version, where no fix is on record), each null when absent, with advisory_id (the OSV record that published the range) and source (the loader\'s label for that record), both null on a row loaded before they were stored. Ranges with an advisory_id are in the order their record lists them (records in id order); ranges without one are oldest first. To pick the range for an installed version, compare in the ecosystem\'s version order (release numbers part by part, as numbers: 2.4 is below 2.13.0): the version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; that range\'s fixed is the fix for it, and a version in no range is outside every range on record. fixed_branches is null where the package\'s ranges were never loaded, and [] where no version range is on record (the advisory gives none, only commit ranges, or more than are stored), which is not a finding that no fix exists: fixed_version can still name one. fixed_version is one range\'s fix, kept for compatibility (one per package: the range the loader kept, the advisory\'s last as a rule), not the fix for every affected range: for CVE-2021-44228, its advisory gives log4j-core three ranges, and fixed_version 2.12.2 is the fix for the one from 2.4, while the range holding 2.14.1 (from 2.13.0) is fixed in 2.15.0.';
+
+export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with its name and source), exploits (each with kind, source_name, source_url, first_seen_at and verified_status; at most 10, verified first) with exploits_total (every reference on record), exploits_capped (true when exploits lists fewer than exploits_total), exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (ecosystem, package_name, vulnerable_range, fixed_version: one row per fixed version, with the vulnerable_range it fixes where the source gives one) and timeline (the newest enrichment-history rows, with timeline_total). ${FIXED_BRANCHES_DESCRIPTION} ${VERIFIED_STATUS_DESCRIPTION} An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which of them are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Vendor advisories, patches, generated summaries, trending signals and historical incidents are not relayed. Pass a CVE ID like CVE-2021-44228. Its structured result carries state (measured), measured_at (null: each row carries its own time), method, coverage (the sections relayed, failed and left out, and per-list counts), freshness (null) and notes, with data, which the first text block holds whole up to 30,000 characters; the result's last text block repeats it without data and without the note's sentences (the text block before it), with which notes ends. ${TEXT_BUDGET_DESCRIPTION}`;
 
 // ── outputSchema ──
 const Rows = (shape: Record<string, z.ZodType>) => z.array(z.looseObject(shape));
@@ -119,7 +131,20 @@ function schemas() {
       ecosystem: opt(z.string()),
       package_name: opt(z.string()),
       version_range: opt(z.string()),
-      fixed_version: opt(z.string()),
+      fixed_version: opt(z.string()).describe("One range's fix, kept for compatibility; not the fix for every affected range: read fixed_branches."),
+      fixed_branches: z
+        .array(
+          z.looseObject({
+            introduced: opt(z.string()).describe('The range\'s lower bound, inclusive; "0" is the first version.'),
+            fixed: opt(z.string()).describe("The range's fix: the first version past it. null where no fix is on record."),
+            last_affected: opt(z.string()).describe("The range's last affected version, inclusive, where no fix is on record; never a fix."),
+            advisory_id: opt(z.string()).describe("The OSV record that published the range (GHSA-…, PYSEC-…, CVE-…); null on a row loaded before it was stored."),
+            source: opt(z.string()).describe("The loader's label for that record (osv_bulk, osv); null on a row loaded before it was stored."),
+          }),
+        )
+        .nullable()
+        .optional()
+        .describe(FIXED_BRANCHES_DESCRIPTION),
       dependents_count: opt(z.number()),
       source: opt(z.string()),
     }).optional(),
@@ -205,6 +230,53 @@ function listSentence(name: "affected_packages" | "fixed_versions", rows: unknow
   return `${name} lists ${rows.length} row${rows.length === 1 ? "" : "s"}${cut}.`;
 }
 
+// #2817: where fixed_version is not the whole answer. A row with more than one range in
+// fixed_branches has a fix per range; a row with fixed_branches null has only fixed_version on
+// record, and so does a row with fixed_branches [] and a fixed_version (no version range on
+// record: none in the advisory, only commit ranges, or more than core-backend stores); an answer
+// whose rows carry no fixed_branches is an API older than #2817.
+function branchSentences(rows: unknown[]): string[] {
+  if (rows.length === 0) return [];
+  const named = (r: unknown, i: number) => {
+    const eco = strAt(r, "ecosystem");
+    const pkg = strAt(r, "package_name") ?? `affected_packages[${i}]`;
+    return eco ? `${pkg} (${eco})` : pkg;
+  };
+  const withField = rows.filter((r) => field(r, "fixed_branches") !== undefined);
+  if (withField.length === 0) {
+    return [
+      "No affected_packages row carries fixed_branches (an API older than that field): each row's fixed_version is one range's fix, which need not be the fix for a given installed version.",
+    ];
+  }
+  const out: string[] = [];
+  const multi: string[] = [];
+  const unknown: string[] = [];
+  const noRange: string[] = [];
+  rows.forEach((r, i) => {
+    const fb = field(r, "fixed_branches");
+    if (Array.isArray(fb) && fb.length > 1) multi.push(named(r, i));
+    if (fb === null) unknown.push(named(r, i));
+    if (Array.isArray(fb) && fb.length === 0 && strAt(r, "fixed_version")) noRange.push(named(r, i));
+  });
+  const few = (xs: string[]) => (xs.length <= 3 ? listed(xs) : `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more`);
+  if (multi.length) {
+    out.push(
+      `${multi.length} affected_packages row${multi.length === 1 ? " lists" : "s list"} more than one affected range in fixed_branches (${few(multi)}): there, fixed_version is one range's fix, and an installed version's fix is the fixed of the range that holds it.`,
+    );
+  }
+  if (unknown.length) {
+    out.push(
+      `${unknown.length} affected_packages row${unknown.length === 1 ? " carries" : "s carry"} fixed_branches null (${few(unknown)}): ${unknown.length === 1 ? "its" : "their"} ranges are not on record, so fixed_version, one range's fix, is all the answer holds, and it need not be the fix for a given installed version.`,
+    );
+  }
+  if (noRange.length) {
+    out.push(
+      `${noRange.length} affected_packages row${noRange.length === 1 ? " carries" : "s carry"} fixed_branches [] and a fixed_version (${few(noRange)}): no version range is on record there, which is not a finding that no fix exists, so fixed_version, one range's fix, is all the answer holds, and it need not be the fix for a given installed version.`,
+    );
+  }
+  return out;
+}
+
 // ── The tool ──
 export async function cveIntel(cve_id: string): Promise<ToolResult> {
   const id = cve_id.trim();
@@ -248,6 +320,7 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
     for (const k of ["affected_packages", "fixed_versions"] as const) {
       const xs = rows(k);
       if (xs) said.push(listSentence(k, xs));
+      if (xs && k === "affected_packages") said.push(...branchSentences(xs));
     }
     const timeline = rows("timeline");
     const apiTimeline = field(d, "timeline");

@@ -152,8 +152,9 @@ describe("README hosted-endpoint state (#2739)", () => {
 
 // #2796: since 2.6.2 (309b7343) two surfaces say that over the hosted endpoint the check_sbom
 // document is the request body: check_sbom's description, which the hosted tools/list serves to
-// every agent, and the README's privacy section, where /pulse/mcp sends readers and the fallback
-// privacy URL of the Anthropic directory submission (listings/README.md). Rewording both to "the
+// every agent, and the README's privacy section, where /pulse/mcp sends readers and which the
+// Anthropic directory submission links beside /privacy Section 11 (listings/README.md, #2797;
+// marketing-site/lib/privacyMcpEndpoint.test.ts holds that section). Rewording both to "the
 // document itself is never sent and never leaves your machine" and "A check_sbom document never
 // reaches EchelonGraph" left the whole suite green. While server.json lists the hosted remote, both
 // must say where the document goes, and neither may deny it.

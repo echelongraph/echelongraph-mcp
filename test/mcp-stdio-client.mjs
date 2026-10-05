@@ -27,7 +27,7 @@ export class RpcError extends Error {
 }
 
 export class StdioMcpClient {
-  constructor({ command, args = [], env, stderr = "inherit", clientInfo = { name: "echelongraph-mcp-test", version: "0.0.0" }, requestTimeoutMs = 30_000 }) {
+  constructor({ command, args = [], env, cwd, stderr = "inherit", clientInfo = { name: "echelongraph-mcp-test", version: "0.0.0" }, requestTimeoutMs = 30_000 }) {
     this.clientInfo = clientInfo;
     this.requestTimeoutMs = requestTimeoutMs;
     this.era = undefined;
@@ -36,7 +36,7 @@ export class StdioMcpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = "";
-    this.proc = spawn(command, args, { env, stdio: ["pipe", "pipe", stderr] });
+    this.proc = spawn(command, args, { env, cwd, stdio: ["pipe", "pipe", stderr] });
     this.exited = new Promise((resolve) => this.proc.once("exit", (code, signal) => resolve({ code, signal })));
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (chunk) => this.onData(chunk));

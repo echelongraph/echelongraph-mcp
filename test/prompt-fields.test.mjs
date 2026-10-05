@@ -24,10 +24,10 @@
 //
 // #2799 review: sbom_review asked for "fixed versions where a result gives them", words the check
 // above did not read, and check_sbom's text keeps match_reason, the advisory interval that names
-// the fixed version, only at its first level (Juice Shop's 50 components are cut past it); it now
-// reads fixed_version from cve_intel. triage_cve read kev_due_date from a kev_recent page of one
-// day, unpaged, which on 2021-11-03 (287 additions) did not hold most of that day's rows; it now
-// reads it from get_cve.
+// the fixed version (or, closed "[A, B]", the last affected one: #2830), only at its first level
+// (Juice Shop's 50 components are cut past it); it now reads fixed_version from cve_intel.
+// triage_cve read kev_due_date from a kev_recent page of one day, unpaged, which on 2021-11-03
+// (287 additions) did not hold most of that day's rows; it now reads it from get_cve.
 //
 // #2799 second review (#2817): cve_intel keeps one fixed_version per (CVE, ecosystem, package), the
 // advisory's last range's, and production's for log4j-core under CVE-2021-44228 is 2.12.2, older
@@ -120,7 +120,10 @@ const DERIVED = {
 
 // Production's check_sbom answer for log4j-core 2.14.1, read through the hosted endpoint
 // (prod-shaped/check_sbom-log4j-core.json): one row, whole in the text.
-const LOG4J = { label: "check_sbom, log4j-core 2.14.1 (one purl)", args: { purls: ["pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"] }, fixture: "check_sbom-log4j-core", answers: ["batch"] };
+// #2817: cve_intel on production's rows with the fixed_branches core-backend serves since #2817
+// (text-bound.mjs SHAPED), which the prompts now read.
+const INTEL_2817 = "cve_intel, CVE-2021-44228, with fixed_branches (#2817)";
+const LOG4J = { label:"check_sbom, log4j-core 2.14.1 (one purl)", args: { purls: ["pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"] }, fixture: "check_sbom-log4j-core", answers: ["batch"] };
 
 // a < b, a = b or a > b (-1, 0, 1) for release versions of dot-separated numbers; undefined for
 // any other (a pre-release, a qualifier, a revision), which the prompt says not to give.
@@ -133,16 +136,36 @@ function releaseOrder(a, b) {
 }
 
 // sbom_review's fix rule, as its text states it, on what the model is shown for one CVE on one
-// component: the advisory interval's end in the CVE's match_reason, else cve_intel's fixed_version
-// for the component's ecosystem and package (or the recorded fix a match_reason names); offered,
-// the ones strictly greater than the installed version.
+// component: the fixed end B of a "[A, B)" advisory interval in the CVE's match_reason, else the
+// fixed of the cve_intel fixed_branches range that holds the installed version (#2817), else, for a
+// package without fixed_branches, cve_intel's fixed_version for the component's ecosystem and
+// package (or the recorded fix a match_reason names); offered, the ones strictly greater than the
+// installed version and than the B of any "[A, B]" interval (#2830: a last_affected bound, still
+// affected, never a fix).
+const HALF_OPEN_END = /falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\)/;
+const LAST_AFFECTED = /falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\]/;
 function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
   const candidates = [];
+  const lastAffected = [];
   for (const m of (row.matches ?? []).filter((x) => x.cve_id === cve)) {
-    const end = m.match_reason?.match(/falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\)/)?.[1];
+    const end = m.match_reason?.match(HALF_OPEN_END)?.[1];
     if (end && end !== "∞") candidates.push({ from: "match_reason", version: end });
+    const last = m.match_reason?.match(LAST_AFFECTED)?.[1];
+    if (last) lastAffected.push(last);
   }
+  // #2817: then the fixed of the cve_intel range (fixed_branches) that holds the installed version;
+  // a range closed by last_affected has no fix on record.
   if (candidates.length === 0) {
+    for (const r of intel.affected_packages ?? []) {
+      if (r.ecosystem !== ecosystem || r.package_name !== pkg || !Array.isArray(r.fixed_branches)) continue;
+      for (const b of r.fixed_branches) {
+        const from = b.introduced === "0" ? -1 : releaseOrder(b.introduced, installed);
+        const below = b.fixed ? releaseOrder(installed, b.fixed) === -1 : b.last_affected ? releaseOrder(installed, b.last_affected) !== 1 : true;
+        if (from !== undefined && from <= 0 && below && b.fixed) candidates.push({ from: "fixed_branches", version: b.fixed });
+      }
+    }
+  }
+  if (candidates.length === 0 && !(intel.affected_packages ?? []).some((r) => r.ecosystem === ecosystem && r.package_name === pkg && Array.isArray(r.fixed_branches))) {
     for (const m of (row.matches ?? []).filter((x) => x.cve_id === cve)) {
       const fix = m.match_reason?.match(/is below the recorded fix (\S+?)(?: |$)/)?.[1];
       if (fix) candidates.push({ from: "match_reason", version: fix });
@@ -151,7 +174,8 @@ function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
       if (r.ecosystem === ecosystem && r.package_name === pkg && r.fixed_version) candidates.push({ from: "cve_intel", version: r.fixed_version });
     }
   }
-  return { candidates, offered: candidates.filter((c) => releaseOrder(c.version, installed) === 1) };
+  const above = (v, floor) => releaseOrder(v, floor) === 1;
+  return { candidates, offered: candidates.filter((c) => above(c.version, installed) && lastAffected.every((l) => above(c.version, l))) };
 }
 
 /** The fields prompt `name` names: its snake_case words and PLAIN words, less ENVELOPE_RULES' line and the embedded SBOM. */
@@ -343,7 +367,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     // log4j-core 2.14.1 (LOG4J).
     const small = await call("check_sbom", LOG4J.args, shapedAnswers(LOG4J));
     for (const f of heldTo(LOG4J.label, small, named, derived)) carried.add(f);
-    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228"]) {
+    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817]) {
       const c = caseOf(label);
       for (const f of heldTo(label, await call(c.tool, argsOf(c), shapedAnswers(c)), named, derived)) carried.add(f);
     }
@@ -351,12 +375,13 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
   });
 
   // #2817: production's cve_intel for CVE-2021-44228 (prod-shaped/cve_intel.json, read again on the
-  // hosted endpoint at 2026-10-04T14:20:45Z) keeps one fixed_version for log4j-core, 2.12.2, the
-  // advisory's last range's; production's check_sbom for log4j-core 2.14.1 (LOG4J) says each match
-  // is "listed verbatim in the advisory's affected versions", which names no fix. Read as the
-  // prompt's rule says, what the model is shown offers no fixed version for 2.14.1, and the prompt
-  // says to write so: never 2.12.2. Through bab4e868 the prompt asked for "each fixed_version
-  // cve_intel gives for the component's package".
+  // hosted endpoint at 2026-10-05T07:38:23Z, after #2817's deploy) keeps one fixed_version for
+  // log4j-core, 2.12.2, the advisory's last range's, beside fixed_branches; production's check_sbom
+  // for log4j-core 2.14.1 (LOG4J) says each match is "listed verbatim in the advisory's affected
+  // versions", which names no fix. Read as the prompt's rule says, what the model is shown offers
+  // 2.15.0, the fix of the range holding 2.14.1, and on the same rows without fixed_branches (the
+  // API's of 2026-10-04) no fixed version, which the prompt says to write so: never 2.12.2. Through
+  // bab4e868 the prompt asked for "each fixed_version cve_intel gives for the component's package".
   it("sbom_review on production's answers for log4j-core 2.14.1 and CVE-2021-44228: its fix rule gives no fixed version older than the installed one, 2.12.2 among them", async (t) => {
     const [purl] = LOG4J.args.purls;
     const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
@@ -366,7 +391,11 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     // order, not as text; the advisory interval first; cve_intel's one value per package named as
     // such; and otherwise no fixed version for the branch, pointing to the advisory.
     assert.ok(own.includes("Never give a fixed version that is not strictly greater than the component's installed version (the version in its purl), compared in the ecosystem's version order: release numbers part by part, as numbers, not as text (2.9.1 is below 2.12.2, and 2.12.2 is below 2.14.1); where you are not sure of the order (pre-releases, qualifiers and distro revisions have their own rules), say so and do not give it."), own);
-    assert.match(own, /Prefer the match's match_reason where the text keeps it: "falls inside the advisory interval \[A, B\)" says the advisory's range that holds the installed version ends at B/);
+    assert.ok(own.includes("Prefer the match's match_reason where the text keeps it: \"falls inside the advisory interval [A, B)\", closed by a parenthesis, says B is the advisory's fixed version for the range that holds the installed version, so give B as the fixed version, quoting it"), own);
+    assert.ok(own.includes("\"falls inside the advisory interval [A, B]\", closed by a square bracket, says B is the range's last affected version, still affected, and the range records no fix (core-backend adds \"(B is the last affected version, not a fix)\", which a cut text can clip, so the bracket alone decides): never give B, or any version at or below it, as a fixed version."), own);
+    // #2830: through 2.6.5 the text hedged B, which core-backend rendered alike for a fixed and a
+    // last_affected bound; core-backend now tells them apart, and so does the prompt.
+    assert.doesNotMatch(own, /does not say is a fixed version rather than|give B as the end of that interval/, "sbom_review still hedges the [A, B) bound");
     assert.match(own, /cve_intel keeps one fixed_version per package, its advisory's last range's, which need not be the fix on the component's branch/);
     assert.match(own, /Where no version meets the rule \("listed verbatim in the advisory's affected versions" names none\), write that the results give no fixed version for the component's branch, which is not a finding that no fix exists, and point to the CVE's advisory for it: get_cve's references tagged Vendor Advisory or Patch/);
     assert.doesNotMatch(own, /each fixed_version cve_intel gives/, "the prompt still asks for every fixed_version cve_intel gives, whatever the installed version");
@@ -413,11 +442,21 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const cve = "CVE-2021-44228";
     assert.ok(row.cve_ids.includes(cve));
 
-    const { candidates, offered } = fixRule(row, cve, intel, { ecosystem, pkg, installed });
-    t.diagnostic(`${cve} on ${purl}: candidates ${JSON.stringify(candidates)}, offered ${JSON.stringify(offered)}`);
-    // The hazard is in what the model is shown: cve_intel's 2.12.2 for this package.
-    assert.ok(candidates.some((c) => c.from === "cve_intel" && c.version === "2.12.2"), "cve_intel no longer gives log4j-core 2.12.2 for CVE-2021-44228, so this case does not test the rule");
     assert.ok(row.matches.filter((m) => m.cve_id === cve).every((m) => /listed verbatim in the advisory's affected versions/.test(m.match_reason)));
+    // Production's rows since #2817's deploy (prod-shaped/cve_intel.json, read 2026-10-05) carry
+    // fixed_branches: the rule gives the fixed of the range holding 2.14.1, 2.15.0, never 2.12.2.
+    const core = intel.affected_packages.find((r) => r.ecosystem === ecosystem && r.package_name === pkg);
+    assert.equal(core.fixed_version, "2.12.2", "cve_intel no longer gives log4j-core 2.12.2 for CVE-2021-44228, so this case does not test the rule");
+    const now = fixRule(row, cve, intel, { ecosystem, pkg, installed });
+    t.diagnostic(`${cve} on ${purl}: candidates ${JSON.stringify(now.candidates)}, offered ${JSON.stringify(now.offered)}`);
+    assert.deepEqual(now.offered, [{ from: "fixed_branches", version: "2.15.0" }]);
+    assert.ok(!now.candidates.some((c) => c.version === "2.12.2"), "the rule reads fixed_version where fixed_branches is there");
+    // The same rows from an API older than #2817 (production's of 2026-10-04): no fixed_branches,
+    // and the hazard is in what the model is shown, cve_intel's 2.12.2 for this package.
+    const older = { ...intel, affected_packages: intel.affected_packages.map(({ fixed_branches, ...r }) => r) };
+    const { candidates, offered } = fixRule(row, cve, older, { ecosystem, pkg, installed });
+    t.diagnostic(`${cve} on ${purl}, rows without fixed_branches: candidates ${JSON.stringify(candidates)}, offered ${JSON.stringify(offered)}`);
+    assert.ok(candidates.some((c) => c.from === "cve_intel" && c.version === "2.12.2"), "without fixed_branches the rule no longer meets cve_intel's 2.12.2, so this case does not test the rule");
     assert.deepEqual(offered, [], "the rule offers a fixed version that is not above the installed 2.14.1");
 
     // The other polarity, on production's Juice Shop answer: lodash 4.17.19 falls inside
@@ -427,6 +466,146 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     assert.deepEqual(fixRule(lodash, "CVE-2021-23337", { affected_packages: [], fixed_versions: [] }, { ecosystem: l.ecosystem, pkg: l.package, installed: l.version }).offered, [{ from: "match_reason", version: "4.17.21" }]);
   });
 
+  // #2830: core-backend's match_reason rendered an OSV last_affected bound L as "[A, L)", the same
+  // as a fixed bound, so a reader took L, a version still affected, as the fix. It now renders it
+  // "[A, L] (L is the last affected version, not a fix)" (core-backend cve/pkgmatch.go
+  // renderInterval; LAST_AFFECTED_REASON below is the string its
+  // TestEvaluateRegistryRow_IntervalBoundRendering pins), and sbom_review gives a "[A, B)" B as the
+  // fix without a hedge and never gives a "[A, B]" B, or any version at or below it. Here the
+  // production Juice Shop row for lodash 4.17.19 is shown to the model with CVE-2021-23337's
+  // interval as each kind of bound, through check_sbom's text.
+  const LAST_AFFECTED_REASON = "registry package (confidence 0.95): npm/lodash — version 4.17.19 falls inside the advisory interval [0, 4.17.20] (4.17.20 is the last affected version, not a fix)";
+  it("sbom_review's fix rule on check_sbom's text (#2830): a [A, B) interval's B is the fix; a [A, B] interval's B is still affected and never given, nor a cve_intel version at or below it", async () => {
+    const batch = readShaped("check_sbom").answers.batch;
+    const lodash = batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
+    const cve = "CVE-2021-23337";
+    const shown = async (row) => {
+      const res = await call("check_sbom", { purls: [row.purl] }, { [batch.path]: { ...batch.body, results: [{ ...row, index: 0 }] } });
+      assert.notEqual(res.isError, true, blocksOf(res)[0]);
+      const [r] = JSON.parse(blocksOf(res)[0]).results;
+      assert.equal(r.purl, row.purl);
+      return r;
+    };
+    const target = { ecosystem: "npm", pkg: "lodash", installed: "4.17.19" };
+    const noIntel = { affected_packages: [], fixed_versions: [] };
+    const intelAt = (v) => ({ affected_packages: [{ ecosystem: "npm", package_name: "lodash", fixed_version: v }], fixed_versions: [] });
+
+    // A fixed bound: "[0, 4.17.21)", as production renders it, gives 4.17.21.
+    const fixedRow = await shown(lodash);
+    assert.ok(fixedRow.matches.some((m) => m.cve_id === cve && m.match_reason.endsWith("falls inside the advisory interval [0, 4.17.21)")));
+    assert.deepEqual(fixRule(fixedRow, cve, noIntel, target).offered, [{ from: "match_reason", version: "4.17.21" }]);
+
+    // A last_affected bound: the text keeps the closed bracket and its words, and nothing is given
+    // from it: cve_intel's value is offered only above both the installed version and 4.17.20.
+    const lastRow = await shown({ ...lodash, matches: lodash.matches.map((m) => (m.cve_id === cve ? { ...m, match_reason: LAST_AFFECTED_REASON } : m)) });
+    const reasons = lastRow.matches.filter((m) => m.cve_id === cve).map((m) => m.match_reason);
+    assert.deepEqual(reasons, [LAST_AFFECTED_REASON], "check_sbom's text does not keep the last_affected interval as core-backend renders it");
+    assert.deepEqual(fixRule(lastRow, cve, noIntel, target), { candidates: [], offered: [] }, "the rule takes a last_affected bound as a fix");
+    assert.deepEqual(fixRule(lastRow, cve, intelAt("4.17.20"), target).offered, [], "the rule offers cve_intel's version at the last affected one");
+    assert.deepEqual(fixRule(lastRow, cve, intelAt("4.17.21"), target).offered, [{ from: "cve_intel", version: "4.17.21" }]);
+
+    // And the prompt states both readings, unhedged.
+    const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "lodash", version: "4.17.19", purl: lodash.purl }] });
+    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
+    assert.match(own, /"falls inside the advisory interval \[A, B\)", closed by a parenthesis, says B is the advisory's fixed version[^.]*, so give B as the fixed version/);
+    assert.match(own, /"falls inside the advisory interval \[A, B\]", closed by a square bracket, says B is the range's last affected version, still affected, and the range records no fix \(core-backend adds "\(B is the last affected version, not a fix\)", which a cut text can clip, so the bracket alone decides\): never give B, or any version at or below it, as a fixed version\./);
+  });
+
+  // #2830 review: check_sbom's first cut level clips every string to 200 characters, and a
+  // last_affected match_reason for a long Maven name runs past it, so the words core-backend adds
+  // after the bracket are cut. The closing "]" stays, and the rule reads the bracket alone.
+  it("sbom_review's fix rule on a cut check_sbom text (#2830): a long last_affected match_reason clipped at 200 characters keeps its closing bracket, and nothing is given from it", async () => {
+    const batch = readShaped("check_sbom").answers.batch;
+    const lodash = batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
+    const cve = "CVE-2021-23337";
+    const purl = "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.10";
+    const reason = "registry package (confidence 0.95): Maven/com.fasterxml.jackson.core:jackson-databind — version 2.9.10 falls inside the advisory interval [2.0.0, 2.9.10.7] (2.9.10.7 is the last affected version, not a fix)";
+    assert.ok(reason.length > 200, `the reason is ${reason.length} characters, so the cut does not clip it`);
+    const row = {
+      ...lodash,
+      index: 0,
+      purl,
+      matches: lodash.matches.filter((m) => m.cve_id === cve).map((m) => ({ ...m, match_reason: reason, description: "x".repeat(40_000) })),
+      cve_ids: [cve],
+    };
+    const res = await call("check_sbom", { purls: [purl] }, { [batch.path]: { ...batch.body, results: [row] } });
+    assert.notEqual(res.isError, true, blocksOf(res)[0]);
+    assert.match(blocksOf(res)[1], /TEXT CUT/, "the answer is not cut, so the test does not reach the clip");
+    const [r] = JSON.parse(blocksOf(res)[0]).results;
+    const [shownReason] = r.matches.filter((m) => m.cve_id === cve).map((m) => m.match_reason);
+    assert.equal(shownReason, `${reason.slice(0, 200)}…`, "check_sbom's first cut level no longer clips match_reason at 200 characters");
+    assert.ok(shownReason.includes("[2.0.0, 2.9.10.7]") && !shownReason.includes("not a fix)"), shownReason);
+    const target = { ecosystem: "Maven", pkg: "com.fasterxml.jackson.core:jackson-databind", installed: "2.9.10" };
+    const intelAt = (v) => ({ affected_packages: [{ ecosystem: "Maven", package_name: target.pkg, fixed_version: v }], fixed_versions: [] });
+    assert.deepEqual(fixRule(r, cve, { affected_packages: [], fixed_versions: [] }, target), { candidates: [], offered: [] }, "the rule takes a clipped last_affected bound as a fix");
+    assert.deepEqual(fixRule(r, cve, intelAt("2.9.10.7"), target).offered, [], "the rule offers cve_intel's version at the clipped last affected one");
+    assert.deepEqual(fixRule(r, cve, intelAt("2.9.10.8"), target).offered, [{ from: "cve_intel", version: "2.9.10.8" }]);
+  });
+
+  // #2830 third review: a match_reason long enough is clipped at 200 characters before the
+  // interval's closing bracket, "[A, B…", which says neither ")" nor "]". The prompt gives no fixed
+  // version from it, and the rule falls back to cve_intel's value.
+  it("sbom_review's fix rule on a cut check_sbom text (#2830): a match_reason clipped before the interval's closing bracket gives no fixed version", async () => {
+    const batch = readShaped("check_sbom").answers.batch;
+    const lodash = batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
+    const cve = "CVE-2021-23337";
+    const group = "org.apache.logging.log4j.extended.components";
+    const artifact = "log4j-core-extended-artifact";
+    const installed = "2.14.1";
+    const purl = `pkg:maven/${group}/${artifact}@${installed}`;
+    const reason = `registry package (confidence 0.95): Maven/${group}:${artifact} — version ${installed} falls inside the advisory interval [2.0.0.20180101.release, 2.15.0.20211212.release] (2.15.0.20211212.release is the last affected version, not a fix)`;
+    const open = reason.indexOf("advisory interval [") + "advisory interval [".length;
+    assert.ok(open < 200 && reason.indexOf("]", open) >= 200, `the interval opens at ${open} and closes at ${reason.indexOf("]", open)}, so the clip does not fall inside it`);
+    const row = {
+      ...lodash,
+      index: 0,
+      purl,
+      matches: lodash.matches.filter((m) => m.cve_id === cve).map((m) => ({ ...m, match_reason: reason, description: "x".repeat(40_000) })),
+      cve_ids: [cve],
+    };
+    const res = await call("check_sbom", { purls: [purl] }, { [batch.path]: { ...batch.body, results: [row] } });
+    assert.notEqual(res.isError, true, blocksOf(res)[0]);
+    assert.match(blocksOf(res)[1], /TEXT CUT/, "the answer is not cut, so the test does not reach the clip");
+    const [r] = JSON.parse(blocksOf(res)[0]).results;
+    const [shownReason] = r.matches.filter((m) => m.cve_id === cve).map((m) => m.match_reason);
+    assert.equal(shownReason, `${reason.slice(0, 200)}…`, "check_sbom's first cut level no longer clips match_reason at 200 characters");
+    const tail = shownReason.slice(shownReason.indexOf("advisory interval ["));
+    assert.ok(!tail.includes(")") && !tail.includes("]"), shownReason);
+    const target = { ecosystem: "Maven", pkg: `${group}:${artifact}`, installed };
+    const intelAt = (v) => ({ affected_packages: [{ ecosystem: "Maven", package_name: target.pkg, fixed_version: v }], fixed_versions: [] });
+    assert.deepEqual(fixRule(r, cve, { affected_packages: [], fixed_versions: [] }, target), { candidates: [], offered: [] }, "the rule takes an interval clipped before its bracket as a fix");
+    assert.deepEqual(fixRule(r, cve, intelAt("2.16.0"), target).offered, [{ from: "cve_intel", version: "2.16.0" }]);
+
+    // And the prompt says so.
+    const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: artifact, version: installed, purl }] });
+    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
+    assert.ok(own.includes("Where the text is cut before the interval's closing bracket (\"[A, B…\", neither \")\" nor \"]\"), it does not say which bound B is: give no fixed version from that match_reason."), own);
+  });
+
+  // #2817, the fix itself: with fixed_branches (core-backend since #2817), what the model is shown
+  // for log4j-core 2.14.1 and CVE-2021-44228 gives, by the prompt's rule, the fix of the range that
+  // holds 2.14.1, [2.13.0, 2.15.0): 2.15.0, and never fixed_version's 2.12.2.
+  it("sbom_review with fixed_branches: log4j-core 2.14.1 is given 2.15.0, the fix of its range, not 2.12.2", async (t) => {
+    const [purl] = LOG4J.args.purls;
+    const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
+    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
+    assert.match(own, /cve_intel, to read fixed_branches and fixed_version from its affected_packages rows, and fixed_version from its fixed_versions rows/);
+    assert.match(own, /Otherwise, where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches, give the fixed of the range that holds the installed version: at or above its introduced \("0" is the first version\) and below its fixed, or at or below its last_affected, in the same version order; a range with last_affected and no fixed has no fix on record, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used\./);
+    const [row] = JSON.parse(blocksOf(await call("check_sbom", { sbom }, shapedAnswers(LOG4J)))[0]).results;
+    const { ecosystem, package: pkg, version: installed } = fromPurl(row.purl);
+    const c = caseOf(INTEL_2817);
+    const intel = JSON.parse(blocksOf(await call("cve_intel", argsOf(c), shapedAnswers(c)))[0]);
+    const core = intel.affected_packages.find((r) => r.ecosystem === ecosystem && r.package_name === pkg);
+    assert.equal(core.fixed_version, "2.12.2", "the case no longer carries the one-range fixed_version, so it does not test the rule");
+    const { candidates, offered } = fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed });
+    t.diagnostic(`candidates ${JSON.stringify(candidates)}, offered ${JSON.stringify(offered)}`);
+    assert.deepEqual(offered, [{ from: "fixed_branches", version: "2.15.0" }]);
+    assert.ok(!candidates.some((x) => x.version === "2.12.2"), "the rule still reads fixed_version where fixed_branches is there");
+    // Another branch, by the same rule: 2.10.0 is fixed in 2.12.2; and a version past every range.
+    assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed: "2.10.0" }).offered, [{ from: "fixed_branches", version: "2.12.2" }]);
+    assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed: "2.15.0" }).offered, [], "2.15.0 is in no range, and is given no fixed version");
+  });
+
   it("triage_cve: each tool it calls keeps, in its text, every field the prompt reads from it", async (t) => {
     const prompt = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: "CVE-2021-44228" } }));
     const named = namedFields("triage_cve", prompt);
@@ -434,7 +613,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     for (const f of ["kev_listed", "kev_added_date", "kev_due_date", "kev_ransomware"]) assert.ok(named.includes(f), `triage_cve no longer names ${f}`);
     const carried = new Set();
     const called = [];
-    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", "vendor_advisories_for_cve, CVE-2021-44228", "get_vendor_advisory, aws 2026-098-AWS", "epss_history, CVE-2021-44228", "cve_exposure, CVE-2023-44487"]) {
+    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817, "vendor_advisories_for_cve, CVE-2021-44228", "get_vendor_advisory, aws 2026-098-AWS", "epss_history, CVE-2021-44228", "cve_exposure, CVE-2023-44487"]) {
       const c = caseOf(label);
       const held = heldTo(label, await call(c.tool, argsOf(c), shapedAnswers(c)), named);
       for (const f of held) carried.add(f);
@@ -455,8 +634,11 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const prompt = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: "CVE-2021-44228" } }));
     const patch = prompt.split("\n").find((l) => l.startsWith("- Patch:"));
     assert.ok(patch, prompt);
-    assert.match(patch, /cve_intel keeps one fixed_version per ecosystem and package, its advisory's last range's, which need not be the fix for every affected version of the package/);
-    assert.match(patch, /never as the fix for every affected branch or the version every install should move to/);
+    assert.match(patch, /cve_intel keeps one fixed_version per ecosystem and package, its advisory's last range's as a rule, which need not be the fix for every affected version of the package/);
+    assert.match(patch, /never one range's fix as the fix for every affected branch or the version every install should move to/);
+    // #2817: every range with its fix, from fixed_branches; fixed_version only where a row has none.
+    assert.match(patch, /For each affected package whose cve_intel row carries fixed_branches, give every range with its fix: from introduced \("0" is the first version\) up to its fixed, or up to and including last_affected, where no fix is on record for that range/);
+    assert.match(patch, /where a row has no fixed_branches \(null or absent\), give fixed_version as the fixed version cve_intel records for that package, never as the fix for every affected branch/);
     assert.match(patch, /for the fix on a given branch point to get_cve's references tagged Vendor Advisory or Patch, where it has them, and to the vendor advisories\./);
     assert.match(patch, /where the results hold none, write "none on record", which is not a finding that no fix exists/);
     // A fixed version is spoken of in step 2 (cve_intel's fields) and the Patch line, nowhere else.

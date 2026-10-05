@@ -34,6 +34,7 @@ import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 import {
   CEILING,
   MARGIN,
+  RECORD_SOURCE,
   SBOM_MAX_PURLS,
   SHAPED,
   SHAPED_DRIFT,
@@ -41,8 +42,10 @@ import {
   assertBoundUnderCeiling,
   assertCutOf,
   cutPairs,
+  keptSizesOffRecord,
   productionText,
   readLiveRecord,
+  setKeptSize,
   shapedAnswers,
   shareOfCeiling,
   startStub,
@@ -281,8 +284,9 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.match(note, /To read every row in the text, check \d+ or fewer purls per call\./);
   });
 
-  // #2783 review: match_reason carries a registry match's advisory interval, which names the fixed
-  // version, and get_cve, the tool the note points to, does not carry it.
+  // #2783 review: match_reason carries a registry match's advisory interval ("[A, B)" names the
+  // fixed version B, "[A, B]" the last affected one, #2830), and get_cve, the tool the note points
+  // to, does not carry it.
   it("a cut that fits at its first level keeps each match's match_reason, and the note names cve_intel for fixed versions", () => {
     const c = SHAPED.find((x) => x.label.startsWith("check_affected, PyPI django"));
     const res = measured[c.label];
@@ -467,7 +471,37 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       assert.ok(SHAPED.some((c) => c.label === label), `${label} is recorded but is not a SHAPED case`);
       assert.equal(r.blocks.reduce((n, b) => n + b, 0), r.total, `${label}: its blocks do not add up to its total`);
       assert.ok(r.total <= CEILING, `${label}: production's text, ${r.total} characters (${r.measured_at}), is past #2467's ceiling of ${CEILING}`);
+      // #2822: the record is written by text-bound-live.mjs --record, so its source is one it writes.
+      assert.match(r.source, RECORD_SOURCE, `${label}: source ${JSON.stringify(r.source)} is not one text-bound-live.mjs writes: re-record, do not edit`);
       t.diagnostic(`${shareOfCeiling(`${label}, production ${r.measured_at}`, r.total)}; ${r.source}`);
+    }
+  });
+
+  // #2822: a re-record of the kept answers moves the record's total; the SHAPED size the suite
+  // holds the same answers to must move with it, or the release's own test run fails on them.
+  it("each case measured on kept production answers has its size within MARGIN of the record's total for its tool", () => {
+    const record = readLiveRecord();
+    for (const c of SHAPED.filter((x) => x.kept)) assert.ok(record.tools?.[c.kept], `${c.label}: the record has no tools.${c.kept}`);
+    assert.deepEqual(keptSizesOffRecord(record).map(setKeptSize), []);
+  });
+
+  it("control: a kept case's size moved past MARGIN from its record is named, with the size to set", () => {
+    const record = readLiveRecord();
+    // From SHAPED's size, not the record's total, so the control holds whatever the record says.
+    const total = SHAPED.find((c) => c.kept === "exposure_radar").size;
+    const off = keptSizesOffRecord({ ...record, tools: { ...record.tools, exposure_radar: { ...record.tools.exposure_radar, total: total + MARGIN + 1 } } });
+    assert.equal(off.length, 1);
+    assert.match(setKeptSize(off[0]), new RegExp(`^exposure_radar: SHAPED's size is \\d+, but the record \\(.+\\) measured ${total + MARGIN + 1}, more than MARGIN ${MARGIN} away: set its size to ${total + MARGIN + 1} in test/text-bound\\.mjs`));
+    assert.deepEqual(keptSizesOffRecord({ ...record, tools: { ...record.tools, exposure_radar: { ...record.tools.exposure_radar, total: total + MARGIN } } }).filter((o) => o.label === "exposure_radar"), []);
+  });
+
+  // #2822: measured_at is when the record was measured; answers_read_at is when the answers it
+  // measured were read from production, which a re-measure of the kept answers does not move.
+  it("each tool measured on kept answers says when those answers were read from production, no later than it measured them", () => {
+    for (const [tool, r] of Object.entries(readLiveRecord().tools ?? {})) {
+      if (!r.answers_kept) continue;
+      assert.ok(typeof r.answers_read_at === "string" && !Number.isNaN(Date.parse(r.answers_read_at)), `${tool}: answers_read_at ${JSON.stringify(r.answers_read_at)} is not a time: re-record`);
+      assert.ok(Date.parse(r.answers_read_at) <= Date.parse(r.measured_at), `${tool}: its answers were read (${r.answers_read_at}) after they were measured (${r.measured_at})`);
     }
   });
 

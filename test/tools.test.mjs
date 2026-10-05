@@ -283,6 +283,7 @@ const MCP_STATS = {
   transport: { streamable_http: 251, legacy_sse: 3, unknown: 1402, not_measured: 8561 },
   window: { from: "2026-09-12T00:04:01Z", to: "2026-09-28T22:51:09Z" },
   own_controls_excluded: 3,
+  withheld_opted_out: 2,
   enabled: true,
   last_run_at: "2026-09-28T23:05:44Z",
   counted_at: "2026-09-28T23:06:00Z",
@@ -305,6 +306,7 @@ const MCP_EMPTY = {
   transport: zeroed(MCP_STATS.transport),
   window: { from: null, to: null },
   own_controls_excluded: 0,
+  withheld_opted_out: 0,
   enabled: false,
   last_run_at: null,
   counted_at: "2026-09-28T23:06:00Z",
@@ -555,8 +557,8 @@ const BODIES = {
   "/api/v1/public/vendor-advisories/coverage": {
     ok: {
       vendors: [
-        { vendor: "microsoft", vendor_display_name: "Microsoft", advisories: 1311, earliest_vendor_published_at: "2016-01-12T08:00:00Z", latest_vendor_published_at: "2026-09-30T07:00:00Z", history_backfill: "complete", history_units_done: 193, history_completed_at: "2026-10-04T08:00:00Z" },
-        { vendor: "redhat", vendor_display_name: "Red Hat", advisories: 18420, earliest_vendor_published_at: "2001-03-29T00:00:00Z", latest_vendor_published_at: "2026-10-04T04:00:00Z", history_backfill: "not_supported", history_units_done: 0, history_completed_at: "" },
+        { vendor: "microsoft", vendor_display_name: "Microsoft", advisories: 1311, earliest_vendor_published_at: "2016-01-12T08:00:00Z", latest_vendor_published_at: "2026-09-30T07:00:00Z", held_since: "2016-01-12T08:00:00Z", history_backfill: "complete", history_units_done: 193, history_completed_at: "2026-10-04T08:00:00Z" },
+        { vendor: "redhat", vendor_display_name: "Red Hat", advisories: 18420, earliest_vendor_published_at: "2001-03-29T00:00:00Z", latest_vendor_published_at: "2026-10-04T04:00:00Z", held_since: "2026-05-19T11:00:00Z", history_backfill: "not_supported", history_units_done: 0, history_completed_at: "" },
       ],
     },
     empty: { vendors: [] },
@@ -895,6 +897,7 @@ const RADAR_LABELLED = {
       "pending_readjudication",
       "not_assessed",
       "own_controls_excluded",
+      "withheld_opted_out",
       ...["not_assessed_by_reason", "prm_via", "era", "transport"].flatMap((p) => Object.keys(MCP_STATS[p]).map((b) => `${p}.${b}`)),
     ].map((k) => [`mcp_servers.${k}`, `mcp_servers.${k}`]),
   ),
@@ -2667,6 +2670,7 @@ describe(`against a stub API [${ERA}]`, () => {
         /and mcp_servers\.era\.not_measured \(8561\), a verdict recorded before EchelonGraph's probe began recording the era and not re-checked since\./,
         /mcp_servers\.transport divides them by the transport that identified the server: mcp_servers\.transport\.streamable_http \(251\), a POST to \/mcp; mcp_servers\.transport\.legacy_sse \(3\)/,
         /mcp_servers\.own_controls_excluded \(3\) counts EchelonGraph's own control servers, which are left out of every other mcp_servers number\./,
+        /mcp_servers\.withheld_opted_out \(2\) counts hostnames whose owner opted out of EchelonGraph's scanning: they are not checked again while the opt-out stands, so their last verdict cannot be re-checked, and they are left out of every other mcp_servers number\./,
         /mcp_servers\.window says when the verdicts counted were last checked: the oldest at 2026-09-12T00:04:01Z \(mcp_servers\.window\.from\) and the newest at 2026-09-28T22:51:09Z \(mcp_servers\.window\.to\), so the counts are each hostname's latest verdict, not one sweep at one time\./,
         /mcp_servers last completed check: 2026-09-28T23:05:44Z \(mcp_servers\.last_run_at, a timestamp, not a count\)\./,
         /mcp_servers\.enabled is true: the API reports the AI-exposure radar running, a check having completed within 45 minutes of its answer\./,
@@ -2798,6 +2802,33 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.match(n, /Left out of mcp_servers because this version of the tool cannot label them: host, hostnames, server_name, version\./, n);
       assert.match(n, /Also left out of mcp_servers: 2 fields whose name is not shaped like a field name, not repeated here, since a name could itself identify a server\./, n);
       assert.deepEqual(unlabelledIn(JSON.parse(r.content[0].text)), []);
+    });
+    // #2822: the API withholds a hostname whose owner opted out from every count, as its
+    // unparameterised answer does, and says how many in withheld_opted_out.
+    it("#2822: withheld_opted_out is relayed and labelled; an API that predates it is said to have counted those hostnames, never read as 0", async () => {
+      const zero = await relaying({ ...MCP_STATS, withheld_opted_out: 0 });
+      assert.equal(zero.relayed.withheld_opted_out, 0);
+      assert.match(zero.n, /mcp_servers\.withheld_opted_out \(0\) counts hostnames whose owner opted out of EchelonGraph's scanning/, zero.n);
+      assert.doesNotMatch(zero.n, /does not say how many hostnames whose owner opted out/, zero.n);
+
+      const { withheld_opted_out: _w, ...older } = MCP_STATS;
+      const old = await relaying(older);
+      assert.ok(!("withheld_opted_out" in old.relayed), JSON.stringify(old.relayed));
+      const { withheld_opted_out: _r, ...olderRelayed } = MCP_RELAYED;
+      assert.deepEqual(old.relayed, olderRelayed, "the rest of an older answer is relayed as before");
+      assert.match(
+        old.n,
+        /The answer does not say how many hostnames whose owner opted out of scanning it withheld \(mcp_servers\.withheld_opted_out\), so its counts may include such a hostname's last verdict, which is not re-checked while the opt-out stands\./,
+        old.n,
+      );
+      assert.doesNotMatch(old.n, /Left out of mcp_servers|mcp_servers\.withheld_opted_out \(/, old.n);
+
+      for (const bad of ["2", -1, 1.5, null, { n: 2 }]) {
+        const b = await relaying({ ...MCP_STATS, withheld_opted_out: bad });
+        assert.ok(!("withheld_opted_out" in b.relayed), JSON.stringify(bad));
+        assert.match(b.n, /Left out of mcp_servers because they were not in the expected shape: withheld_opted_out\./, JSON.stringify(bad));
+        assert.doesNotMatch(b.n, /mcp_servers\.withheld_opted_out \(|does not say how many hostnames/, JSON.stringify(bad));
+      }
     });
     it("a timestamp that is not a time is not relayed, and not repeated; a window without a real span is left out and named", async () => {
       const { relayed, n, r } = await relaying({
@@ -4008,7 +4039,7 @@ describe(`against a stub API [${ERA}]`, () => {
     // would quote (371 characters); data and the envelope block (563) are unchanged. The other
     // bounds are unchanged.
     const CASES = [
-      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_079], // #2438: the state note names the windows
+      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_364], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_709],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],

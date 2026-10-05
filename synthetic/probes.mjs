@@ -104,11 +104,35 @@ export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
 //                       this: the first batch of 200 is refused (400 TOO_MANY_COMPONENTS), nothing
 //                       is answered, and the probe fails as state_invalid_input (a 400 is the API
 //                       refusing the input, index.ts failed()).
+//   cve_intel (#2817)   for CVE-2021-44228, the org.apache.logging.log4j:log4j-core row of
+//                       data.affected_packages carries fixed_branches with at least 3 ranges, one
+//                       of them fixed in 2.15.0 (GHSA-jfh8-c2jp-5v3q lists [2.13.0, 2.15.0),
+//                       [2.0-beta9, 2.3.1), [2.4, 2.12.2)). Before #2817 production served one
+//                       fixed_version, 2.12.2, older than an affected 2.14.1. Unmet means the
+//                       per-range fixes are not served: core-backend without #2817, the row's
+//                       version_intervals not loaded (null), the row gone, or fewer ranges
+//                       (detail says which). advisory_id is deliberately NOT held here: it is
+//                       null on every range until the founder-timed OSV backfill rerun
+//                       (docs/RUNBOOK_MIGRATION_099_VERSION_INTERVALS.md 4c), and this image is
+//                       rebuilt by any later infrastructure/mcp-synthetic/deploy.sh, so holding it
+//                       would page every 15 minutes until that write ran. 4c checks it instead.
+export const LOG4J_CORE = "org.apache.logging.log4j:log4j-core";
 export const EXPECT = {
   check_sbom: (sc) => {
     const sent = sc?.coverage?.batches_sent;
     if (typeof sent === "number" && sent >= 2) return undefined;
     return `coverage.batches_sent ${JSON.stringify(sent ?? null)}, want at least 2 (not_sent_reason ${JSON.stringify(sc?.coverage?.not_sent_reason ?? null)})`;
+  },
+  cve_intel: (sc) => {
+    const rows = sc?.data?.affected_packages;
+    if (!Array.isArray(rows)) return `data.affected_packages ${rows === undefined ? "absent" : "not a list"}; want the ${LOG4J_CORE} row with fixed_branches`;
+    const row = rows.find((r) => r?.ecosystem === "Maven" && r?.package_name === LOG4J_CORE);
+    if (!row) return `no Maven ${LOG4J_CORE} row among ${rows.length} affected_packages rows`;
+    const fb = row.fixed_branches;
+    if (!Array.isArray(fb)) return `${LOG4J_CORE} fixed_branches ${fb === undefined ? "absent" : JSON.stringify(fb)} (fixed_version ${JSON.stringify(row.fixed_version ?? null)}); want at least 3 ranges, one fixed in 2.15.0`;
+    const fixes = fb.map((b) => b?.fixed ?? null);
+    if (fb.length < 3 || !fixes.includes("2.15.0")) return `${LOG4J_CORE} fixed_branches has ${fb.length} ranges, fixes ${JSON.stringify(fixes)}; want at least 3, one fixed in 2.15.0`;
+    return undefined;
   },
 };
 

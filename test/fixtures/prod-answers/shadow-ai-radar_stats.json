@@ -3,174 +3,170 @@
   "poller": {
     "running": false,
     "interval_seconds": 60,
-    "last_run_at": "2026-10-04T09:43:02.070279Z",
+    "last_run_at": "2026-10-05T07:05:32.931411Z",
     "shodan_enabled": true
   },
   "stats": {
-    "total": 35742,
+    "total": 34919,
     "by_category": {
       "AI-AGENT": 12,
-      "AI-WORKFLOW": 10384,
-      "ANNOTATION": 1301,
+      "AI-WORKFLOW": 10144,
+      "ANNOTATION": 1263,
       "EXPERIMENT": 3,
-      "INFERENCE-SRV": 540,
-      "LLM-PROXY": 8175,
-      "MCP-SERVER": 1445,
+      "INFERENCE-SRV": 523,
+      "LLM-PROXY": 8000,
+      "MCP-SERVER": 1417,
       "ML-PIPELINE": 189,
-      "MODEL-REG": 396,
-      "MODEL-STORE": 8868,
-      "NOTEBOOK": 3610,
-      "VECTOR-DB": 819
+      "MODEL-REG": 394,
+      "MODEL-STORE": 8662,
+      "NOTEBOOK": 3508,
+      "VECTOR-DB": 804
     },
     "visible_by_category": {
       "AI-WORKFLOW": 93,
       "INFERENCE-SRV": 89,
-      "LLM-PROXY": 1767,
+      "LLM-PROXY": 1818,
       "MODEL-REG": 151,
-      "NOTEBOOK": 127,
-      "VECTOR-DB": 164
+      "NOTEBOOK": 124,
+      "VECTOR-DB": 162
     },
-    "last_observation": "2026-10-04T09:24:42.241146Z",
-    "last_24h_count": 1444,
-    "last_24h_visible_count": 203,
+    "last_observation": "2026-10-05T00:38:04.147026Z",
+    "last_24h_count": 1460,
+    "last_24h_visible_count": 227,
     "confirmed_window": {
-      "from": "2026-09-30T04:28:15.649832Z",
-      "to": "2026-10-04T10:05:14.021229Z",
+      "from": "2026-10-01T01:47:28.818058Z",
+      "to": "2026-10-05T07:20:47.734006Z",
       "undated": 0
     },
-    "auth_confirmed": 8467,
-    "auth_undetermined": 9693,
+    "auth_confirmed": 9361,
+    "auth_undetermined": 8475,
     "top_products": [
       {
         "product": "MinIO Server",
-        "count": 6660
+        "count": 6494
       },
       {
         "product": "LiteLLM",
-        "count": 6414
+        "count": 6294
       },
       {
         "product": "Streamlit",
-        "count": 2322
+        "count": 2252
       },
       {
         "product": "Jupyter Hub",
-        "count": 1740
+        "count": 1699
       },
       {
         "product": "LocalAI",
-        "count": 1558
+        "count": 1502
       },
       {
         "product": "Jupyter Server",
-        "count": 1407
+        "count": 1354
       },
       {
         "product": "nginx",
-        "count": 1303
+        "count": 1273
       },
       {
         "product": "Label Studio",
-        "count": 1140
+        "count": 1105
       },
       {
         "product": "ComfyUI",
-        "count": 408
+        "count": 397
       },
       {
         "product": "Weaviate",
-        "count": 320
+        "count": 315
       }
     ],
     "top_countries": [
       {
         "country": "United States",
-        "count": 7198
+        "count": 7032
       },
       {
         "country": "China",
-        "count": 6056
+        "count": 5892
       },
       {
         "country": "Germany",
-        "count": 2702
+        "count": 2636
       },
       {
         "country": "Singapore",
-        "count": 1295
+        "count": 1253
       },
       {
         "country": "Japan",
-        "count": 1213
+        "count": 1189
       },
       {
         "country": "India",
-        "count": 1183
+        "count": 1144
       },
       {
         "country": "Canada",
-        "count": 1131
+        "count": 1109
       },
       {
         "country": "Australia",
-        "count": 1100
+        "count": 1077
       },
       {
         "country": "Switzerland",
-        "count": 1050
+        "count": 1028
       },
       {
         "country": "France",
-        "count": 1001
+        "count": 976
       }
     ],
     "top_issuers": [
       {
         "issuer": "Aliyun Computing Co., LTD (China)",
-        "count": 1243
+        "count": 1194
       },
       {
         "issuer": "Amazon Technologies Inc. (United States)",
-        "count": 1180
+        "count": 1162
       },
       {
         "issuer": "Linode (United States)",
-        "count": 897
+        "count": 878
       },
       {
         "issuer": "Let's Encrypt",
-        "count": 866
-      },
-      {
-        "issuer": "Amazon.com, Inc. (United States)",
-        "count": 824
+        "count": 868
       },
       {
         "issuer": "Tencent cloud computing (Beijing) Co., Ltd. (China)",
-        "count": 804
+        "count": 794
+      },
+      {
+        "issuer": "Amazon.com, Inc. (United States)",
+        "count": 794
       },
       {
         "issuer": "Amazon Data Services Canada (Canada)",
-        "count": 762
+        "count": 737
       },
       {
         "issuer": "Hetzner Online GmbH (Germany)",
-        "count": 634
+        "count": 624
       },
       {
         "issuer": "Tencent Cloud Computing (Beijing) Co., Ltd (China)",
-        "count": 590
+        "count": 584
       },
       {
         "issuer": "Amazon Data Services India (India)",
-        "count": 583
+        "count": 569
       }
     ],
     "trend_30d": [
-      {
-        "date": "2026-09-05",
-        "count": 597
-      },
       {
         "date": "2026-09-06",
         "count": 1559
@@ -285,9 +281,13 @@
       },
       {
         "date": "2026-10-04",
-        "count": 717
+        "count": 1190
+      },
+      {
+        "date": "2026-10-05",
+        "count": 270
       }
     ],
-    "generated_at": "2026-10-04T10:18:01.591525203Z"
+    "generated_at": "2026-10-05T07:36:35.350899089Z"
   }
 }

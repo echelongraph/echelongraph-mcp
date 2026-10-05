@@ -217,7 +217,8 @@ function matchesNote(matches: unknown[]): string {
 // description and match_reason, so openssl 3.0.0 (71 matches) was 156,058 characters of text and
 // linux_kernel 5.10.0 (200, the API's cap) 364,408. Past DATA_TEXT_BUDGET each match in the first
 // text block keeps its scores, flags, vendor attribution and match_reason (for a registry match,
-// the advisory interval its version falls inside, which names the fixed version) with the
+// the advisory interval its version falls inside: "[A, B)" names the fixed version B, "[A, B]" the
+// last affected one, #2830) with the
 // description cut to 200 characters; then the same without the description; then only the fields
 // the description promises; then, for a list at the cap, without cpe_vendor and vendor_unknown;
 // and last without effective_severity, the band of effective_score. kev_listed, ransomware,

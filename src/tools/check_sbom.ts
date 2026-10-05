@@ -133,7 +133,8 @@ export const CHECK_SBOM_DESCRIPTION =
 // a CVE with its description, so the 50-component Juice Shop document was 112,820 characters of
 // text, and 2,000 purls about 1,200,000. Past DATA_TEXT_BUDGET each row in the first text block
 // keeps its verdict, counts and cve_ids, and each match its scores, flags and match_reason (the
-// advisory interval the version falls inside, which names the fixed version) without the
+// advisory interval the version falls inside: "[A, B)" names the fixed version B, "[A, B]" the last
+// affected one, #2830) without the
 // description; then the same without match_reason; then only index, purl, verdict,
 // not_assessed_reason and cve_ids. When rows must still go, the clean ones (not_affected) leave
 // first, then the not_assessed ones, both counted in data.summary and the note, so the affected

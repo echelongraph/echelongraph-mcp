@@ -19,6 +19,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import http2 from "node:http2";
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
@@ -504,7 +505,9 @@ describe("#2747: the large-body cap and slots", () => {
 // many are open at once, and the requests the MCP server gave up on (cancelled: the connection
 // closed before the answer).
 async function slowStub() {
-  const state = { ms: 200, batchMs: 200, open: 0, maxOpen: 0, batches: 0, cancelled: 0 };
+  // retryAfter (#2775): when set, the batch route answers 429 with that Retry-After at once, as
+  // production's API did to the canary's calls (1,200 components a minute per caller).
+  const state = { ms: 200, batchMs: 200, open: 0, maxOpen: 0, batches: 0, cancelled: 0, retryAfter: undefined };
   const server = http.createServer((req, res) => {
     let b = "";
     req.on("data", (c) => (b += c));
@@ -512,6 +515,11 @@ async function slowStub() {
       const u = new URL(req.url, "http://stub");
       const batch = u.pathname === BATCH_PATH;
       if (batch) state.batches++;
+      if (batch && state.retryAfter !== undefined) {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": String(state.retryAfter) });
+        res.end(JSON.stringify({ error: "rate limit exceeded" }));
+        return;
+      }
       state.open++;
       state.maxOpen = Math.max(state.maxOpen, state.open);
       const t = setTimeout(
@@ -950,6 +958,286 @@ describe("#2775: a check_sbom call whose client goes stops, and frees its slot",
     } finally {
       await client.close();
     }
+  });
+});
+
+// #2775 over h2c. Cloud Run does not tell an HTTP/1.1 container that its client went (measured in
+// production on 2026-10-05: every abandoned call was logged 200 and kept its slot to the end), so
+// production serves h2c (MCP_H2C=1 with `--use-http2`), where a client that goes resets its
+// stream. These tests are that path: one h2 connection carrying several streams, as Cloud Run's
+// front end multiplexes clients onto one connection, and a stream reset (RST_STREAM CANCEL) while
+// the connection stays open. Whether Cloud Run sends that reset is for the canary to show
+// (infrastructure/cloudrun/deploy-all.sh mcp-remote); what this server does with it is held here.
+function h2Call(session, era, params, { bytes, path: p = "/mcp", headers: extra = {} } = {}) {
+  const modernEra = era === "modern";
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: modernEra ? { ...params, _meta: modernMeta() } : params });
+  const std = modernEra ? modernHeaders("tools/call", params) : { "MCP-Protocol-Version": "2025-06-18" };
+  const headers = {
+    ":method": "POST",
+    ":path": p,
+    "content-type": "application/json",
+    accept: ACCEPT,
+    "content-length": String(Buffer.byteLength(body)),
+    ...Object.fromEntries(Object.entries({ ...std, ...extra }).map(([k, v]) => [k.toLowerCase(), v])),
+  };
+  const stream = session.request(headers);
+  stream.on("error", () => {});
+  if (bytes === undefined) stream.end(body);
+  else stream.write(body.slice(0, bytes));
+  const answer = new Promise((resolve) => {
+    let status;
+    let responseHeaders = {};
+    let text = "";
+    stream.on("response", (h) => {
+      status = h[":status"];
+      responseHeaders = h;
+    });
+    stream.setEncoding("utf8");
+    stream.on("data", (d) => (text += d));
+    stream.on("close", () => {
+      let message;
+      try {
+        message = parseRpcBody(responseHeaders["content-type"], text);
+      } catch {
+        message = undefined;
+      }
+      resolve({ status, headers: responseHeaders, text, message, rstCode: stream.rstCode });
+    });
+  });
+  return { stream, answer };
+}
+
+function h2Get(session, p) {
+  return new Promise((resolve, reject) => {
+    const stream = session.request({ ":method": "GET", ":path": p });
+    let status;
+    let text = "";
+    stream.on("response", (h) => (status = h[":status"]));
+    stream.setEncoding("utf8");
+    stream.on("data", (d) => (text += d));
+    stream.on("end", () => resolve({ status, text }));
+    stream.on("error", reject);
+  });
+}
+
+describe("#2775: over h2c (MCP_H2C=1), a stream reset is a client that went", () => {
+  let stub, srv, session;
+  before(async () => {
+    stub = await slowStub();
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_LARGE_BODY_SLOTS: "1", MCP_MAX_IN_FLIGHT: "3", MCP_H2C: "1" });
+    session = http2.connect(srv.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await srv?.stop();
+    await stub?.close();
+  });
+  const purls = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+  const probe = { name: "check_sbom", arguments: { sbom: "x".repeat(70 * 1024) } };
+
+  it("it serves h2c, and its start-up line says so: /health and tools/call in both eras are answered", async () => {
+    const listening = srv.lines.map((l) => JSON.parse(l)).find((j) => j.message === "mcp_remote_listening");
+    assert.equal(listening.protocol, "h2c");
+    const health = await h2Get(session, "/health");
+    assert.equal(health.status, 200);
+    assert.equal(JSON.parse(health.text).status, "ok");
+    stub.state.ms = 10;
+    const before = accessLines(srv).length;
+    for (const era of ["modern", "legacy"]) {
+      const r = await h2Call(session, era, { name: "cve_summary", arguments: {} }).answer;
+      assert.equal(r.status, 200, r.text.slice(0, 300));
+      assert.deepEqual(r.message.result.structuredContent.data, SUMMARY, `${era}: ${r.text.slice(0, 300)}`);
+    }
+    await sleep(50);
+    const lines = accessLines(srv).slice(before);
+    assert.deepEqual(
+      lines.map((l) => [l.tool, l.status, l.client_closed]),
+      [
+        ["cve_summary", 200, false],
+        ["cve_summary", 200, false],
+      ],
+    );
+  });
+
+  it("a refusal that would close an HTTP/1.1 connection is answered on its stream, with no connection header", async () => {
+    const big = { name: "check_sbom", arguments: { sbom: "x".repeat(7 * 1024 * 1024) } };
+    const r = await h2Call(session, "modern", big).answer;
+    assert.equal(r.status, 413, r.text.slice(0, 300));
+    assert.equal(r.message.error.code, -32600, r.text.slice(0, 300));
+    assert.equal(r.headers.connection, undefined);
+    assert.doesNotMatch(srv.stderr(), /connection header|UnsupportedWarning/i);
+  });
+
+  for (const era of ["modern", "legacy"]) {
+    it(`${era}: a check_sbom whose stream is reset stops; the slot is free within ~1 s on the same connection; the line says 499 client_closed`, async () => {
+      stub.state.batchMs = 400;
+      await waitFor(() => stub.state.open === 0, "the API to be idle");
+      const batchesBefore = stub.state.batches;
+      const cancelledBefore = stub.state.cancelled;
+      const before = accessLines(srv).length;
+      const { stream } = h2Call(session, era, purls);
+      await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API");
+      const sentBeforeClose = stub.state.batches;
+      const closedAt = Date.now();
+      stream.close(http2.constants.NGHTTP2_CANCEL);
+      await waitFor(() => stub.state.cancelled > cancelledBefore, "the batch at the API to be cut off", 1000);
+      let freedAfter;
+      while (Date.now() - closedAt < 6000) {
+        const r = await h2Call(session, era, probe).answer;
+        if (r.status !== 503) {
+          assert.equal(r.status, 200, r.text.slice(0, 300));
+          assert.equal(r.message.result.structuredContent.state, "invalid_input");
+          freedAfter = Date.now() - closedAt;
+          break;
+        }
+        await sleep(100);
+      }
+      assert.ok(freedAfter !== undefined && freedAfter < 1500, `the slot was still held ${Date.now() - closedAt} ms after the stream was reset`);
+      assert.ok(!session.closed && !session.destroyed, "the connection stayed open, as Cloud Run's does");
+      await sleep(1700);
+      assert.ok(stub.state.batches - sentBeforeClose <= 1, `${stub.state.batches - sentBeforeClose} batches were sent after the reset`);
+      const line = accessLines(srv)
+        .slice(before)
+        .find((l) => l.tool === "check_sbom" && l.body_bytes > 80_000);
+      assert.ok(line, JSON.stringify(accessLines(srv).slice(before)));
+      assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
+    });
+  }
+
+  it("a stream reset mid-upload frees its slot, and held no place: the next request is admitted alone", async () => {
+    const before = accessLines(srv).length;
+    for (let i = 0; i < 4; i++) {
+      const { stream } = h2Call(session, "legacy", purls, { bytes: 70_000 });
+      await sleep(100);
+      stream.close(http2.constants.NGHTTP2_CANCEL);
+    }
+    await sleep(200);
+    const aborted = accessLines(srv)
+      .slice(before)
+      .filter((l) => l.status === 499 && l.refused === "client_closed" && l.body_bytes === 0);
+    assert.equal(aborted.length, 4, JSON.stringify(accessLines(srv).slice(before)));
+    const mark = accessLines(srv).length;
+    const r = await h2Call(session, "legacy", probe).answer;
+    assert.equal(r.status, 200, r.text.slice(0, 300));
+    await sleep(100);
+    const line = accessLines(srv).slice(mark).at(-1);
+    assert.deepEqual([line.in_flight, line.queued_ms <= 50], [1, true], JSON.stringify(line));
+  });
+
+  it("control: an HTTP/1.1 request to an h2c-only server gets no answer, which is why MCP_H2C=1 and --use-http2 go together", async () => {
+    await assert.rejects(fetch(`${srv.base}/health`));
+  });
+});
+
+// #2775, as the canary of 2026-10-05 met it: the API answers check_sbom's batch 429 with a
+// Retry-After the call waits out (production's 1,200 components a minute per caller), and the
+// client goes during that wait. The wait must end when the client goes, not when it runs out: the
+// slot is free within ~1 s, no batch is sent again, the access line says 499 with duration_ms
+// about the time the client held on (the call stopped then), and mcp_client_gone says when the
+// server learned it and that no answer had started. Over HTTP/1.1 (a closed socket) and over h2c
+// (a reset stream on a connection that stays open).
+describe("#2775: a check_sbom call waiting out a 429's Retry-After stops when its client goes", () => {
+  let stub, h1, h2, session;
+  before(async () => {
+    stub = await slowStub();
+    const env = { ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_LARGE_BODY_SLOTS: "1", MCP_MAX_IN_FLIGHT: "3" };
+    h1 = await startHttp(env);
+    h2 = await startHttp({ ...env, MCP_H2C: "1" });
+    session = http2.connect(h2.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await h1?.stop();
+    await h2?.stop();
+    await stub?.close();
+  });
+  const purls = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+  const probe = { name: "check_sbom", arguments: { sbom: "x".repeat(70 * 1024) } };
+  const goneLines = (srv) => srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_client_gone");
+
+  for (const proto of ["http/1.1", "h2c"]) {
+    it(`${proto}: the client goes 700 ms into a 20 s Retry-After wait; the call stops then, and frees its slot`, async () => {
+      const srv = proto === "h2c" ? h2 : h1;
+      stub.state.retryAfter = 20;
+      const batchesBefore = stub.state.batches;
+      const before = accessLines(srv).length;
+      const goneBefore = goneLines(srv).length;
+      const sentAt = Date.now();
+      let close;
+      if (proto === "h2c") {
+        const { stream } = h2Call(session, "modern", purls);
+        close = () => stream.close(http2.constants.NGHTTP2_CANCEL);
+      } else {
+        const sock = await rawRequest(srv.url, "modern", purls);
+        close = () => sock.destroy();
+      }
+      await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API (answered 429)");
+      await sleep(700);
+      const heldMs = Date.now() - sentAt;
+      const closedAt = Date.now();
+      close();
+      stub.state.retryAfter = undefined;
+      let freedAfter;
+      while (Date.now() - closedAt < 6000) {
+        const r = proto === "h2c" ? await h2Call(session, "modern", probe).answer : await modern(srv.url, "tools/call", probe);
+        if (r.status !== 503) {
+          assert.equal(r.status, 200, r.text.slice(0, 300));
+          freedAfter = Date.now() - closedAt;
+          break;
+        }
+        await sleep(100);
+      }
+      assert.ok(freedAfter !== undefined && freedAfter < 1500, `the slot was still held ${Date.now() - closedAt} ms after the client went`);
+      await sleep(300);
+      assert.equal(stub.state.batches - batchesBefore, 1, "the 429'd batch was sent again after the client went");
+      const line = accessLines(srv)
+        .slice(before)
+        .find((l) => l.tool === "check_sbom" && l.body_bytes > 80_000);
+      assert.ok(line, JSON.stringify(accessLines(srv).slice(before)));
+      assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
+      assert.ok(line.duration_ms < heldMs + 1000, `the call ran ${line.duration_ms} ms; its client held on ${heldMs} ms`);
+      const gone = goneLines(srv).slice(goneBefore);
+      assert.equal(gone.length, 1, JSON.stringify(gone));
+      assert.equal(gone[0].answer_started, false, JSON.stringify(gone[0]));
+      assert.ok(Math.abs(gone[0].after_ms - heldMs) < 500, `learned ${gone[0].after_ms} ms in; the client went ${heldMs} ms in`);
+      assert.deepEqual(Object.keys(gone[0]).sort(), ["after_ms", "answer_started", "message", "rst_code", "severity"]);
+      if (proto === "h2c") assert.equal(gone[0].rst_code, http2.constants.NGHTTP2_CANCEL);
+      else assert.equal(gone[0].rst_code, null);
+    });
+  }
+
+  it("h2c: a reset with NO_ERROR is a client that went too", async () => {
+    stub.state.retryAfter = 20;
+    const batchesBefore = stub.state.batches;
+    const before = accessLines(h2).length;
+    const { stream } = h2Call(session, "modern", purls);
+    await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API (answered 429)");
+    await sleep(300);
+    stream.close(http2.constants.NGHTTP2_NO_ERROR);
+    stub.state.retryAfter = undefined;
+    await waitFor(
+      () => accessLines(h2).slice(before).some((l) => l.tool === "check_sbom" && l.body_bytes > 80_000),
+      "the call's access line",
+      1500,
+    );
+    const line = accessLines(h2)
+      .slice(before)
+      .find((l) => l.tool === "check_sbom" && l.body_bytes > 80_000);
+    assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
+  });
+
+  it("an answer that is written is no client gone: no mcp_client_gone line, over either protocol", async () => {
+    stub.state.retryAfter = undefined;
+    stub.state.ms = 10;
+    const g1 = goneLines(h1).length;
+    const g2 = goneLines(h2).length;
+    assert.equal((await modern(h1.url, "tools/call", { name: "cve_summary", arguments: {} })).status, 200);
+    assert.equal((await h2Call(session, "modern", { name: "cve_summary", arguments: {} }).answer).status, 200);
+    await sleep(200);
+    assert.equal(goneLines(h1).length, g1, JSON.stringify(goneLines(h1).slice(g1)));
+    assert.equal(goneLines(h2).length, g2, JSON.stringify(goneLines(h2).slice(g2)));
   });
 });
 

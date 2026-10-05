@@ -1,20 +1,22 @@
 {
-  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record. tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh). cases: every case of text-bound.mjs SHAPED, each tool at its default call and largest page, held to the ceiling, and text-bound.test.mjs holds each SHAPED case within SHAPED_DRIFT of its record here; source says where the answers came from (probe-prod, or the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text).",
+  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record. tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh). tools.*.measured_at is when this checkout's server last measured the kept answers and answers_read_at when they were read from production (#2822); a re-measure of the kept answers (--answers test/fixtures/prod-answers) moves measured_at, never answers_read_at. cases: every case of text-bound.mjs SHAPED, each tool at its default call and largest page, held to the ceiling, and text-bound.test.mjs holds each SHAPED case within SHAPED_DRIFT of its record here; source says where the answers came from (probe-prod, or the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text).",
   "tools": {
     "exposure_radar": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 40997,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "answers_read_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 41315,
       "blocks": [
-        21272,
-        17075,
+        21334,
+        17331,
         2650
       ],
       "answers_kept": true
     },
     "cve_summary": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "answers_read_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
       "total": 2698,
       "blocks": [
         584,
@@ -26,8 +28,8 @@
   },
   "cases": {
     "cve_summary": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
       "total": 2698,
       "blocks": [
         584,
@@ -37,30 +39,30 @@
       "source": "probe-prod"
     },
     "search_cves, default page (search openssl)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 13513,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 13651,
       "blocks": [
         11682,
-        1089,
+        1227,
         742
       ],
       "source": "probe-prod"
     },
     "search_cves, largest page (search openssl, limit 50)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 30601,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 30739,
       "blocks": [
         28770,
-        1089,
+        1227,
         742
       ],
       "source": "probe-prod"
     },
     "get_cve, CVE-2021-44228": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
       "total": 22960,
       "blocks": [
         21782,
@@ -70,8 +72,8 @@
       "source": "probe-prod"
     },
     "cve_exposure, CVE-2023-44487": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
       "total": 4365,
       "blocks": [
         2003,
@@ -81,41 +83,41 @@
       "source": "probe-prod"
     },
     "exposure_radar": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 40997,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 41315,
       "blocks": [
-        21272,
-        17075,
+        21334,
+        17331,
         2650
       ],
       "source": "probe-prod"
     },
     "kev_recent, default page (limit 50)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 28738,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 28812,
       "blocks": [
-        27506,
+        27578,
         444,
-        788
-      ],
-      "source": "probe-prod"
-    },
-    "kev_recent, largest page (limit 200)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 31583,
-      "blocks": [
-        29867,
-        926,
         790
       ],
       "source": "probe-prod"
     },
+    "kev_recent, largest page (limit 200)": {
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 31717,
+      "blocks": [
+        29861,
+        1064,
+        792
+      ],
+      "source": "probe-prod"
+    },
     "epss_history, CVE-2021-44228": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
       "total": 2379,
       "blocks": [
         697,
@@ -125,52 +127,52 @@
       "source": "probe-prod"
     },
     "check_affected, openssl 3.0.0": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 26011,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 26149,
       "blocks": [
         24299,
-        814,
+        952,
         898
       ],
       "source": "probe-prod"
     },
     "check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 27777,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 29794,
       "blocks": [
-        25632,
-        1248,
+        27515,
+        1382,
         897
       ],
       "source": "probe-prod"
     },
     "check_sbom, Juice Shop 11.1.2 (50 components)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 28793,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 28824,
       "blocks": [
         24696,
-        2436,
+        2467,
         1661
       ],
       "source": "probe-prod"
     },
     "cve_intel, CVE-2021-44228": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 14280,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 17355,
       "blocks": [
-        11515,
-        942,
+        14300,
+        1232,
         1823
       ],
       "source": "probe-prod"
     },
     "get_cwe, CWE-79": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
       "total": 28457,
       "blocks": [
         26907,
@@ -180,67 +182,67 @@
       "source": "probe-prod"
     },
     "vendor_advisories_for_cve, CVE-2021-44228": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 14850,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 15561,
       "blocks": [
         9753,
-        1042,
-        4055
+        1277,
+        4531
       ],
       "source": "probe-prod"
     },
     "get_vendor_advisory, aws 2026-098-AWS": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 3038,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 3082,
       "blocks": [
         1838,
         128,
-        1072
+        1116
       ],
       "source": "probe-prod"
     },
     "search_vendor_advisories, default page (query log4j)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 32658,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 33118,
       "blocks": [
         28303,
         172,
-        4183
+        4643
       ],
       "source": "probe-prod"
     },
     "search_vendor_advisories, largest page (query log4j, limit 50)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 23028,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 23629,
       "blocks": [
-        18094,
-        751,
-        4183
+        18098,
+        888,
+        4643
       ],
       "source": "probe-prod"
     },
     "check_affected, flash_player 10.0.0 (200 matches and an excluded sample of 50)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 30064,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 30152,
       "blocks": [
-        27894,
-        1271,
+        27798,
+        1455,
         899
       ],
       "source": "probe-prod"
     },
     "check_affected, PyPI django 1.11.0 (the registry path)": {
-      "measured_at": "2026-10-04T10:18:25.179Z",
-      "package_version": "2.6.2",
-      "total": 23751,
+      "measured_at": "2026-10-05T07:37:21.576Z",
+      "package_version": "2.6.5",
+      "total": 23889,
       "blocks": [
         22101,
-        709,
+        847,
         941
       ],
       "source": "probe-prod"

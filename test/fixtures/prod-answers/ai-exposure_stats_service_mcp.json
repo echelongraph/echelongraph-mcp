@@ -1,47 +1,48 @@
 {
   "service": "mcp",
-  "total": 13859,
-  "protected": 871,
+  "total": 14056,
+  "protected": 887,
   "pending_readjudication": 0,
-  "not_assessed": 12988,
+  "not_assessed": 13169,
   "not_assessed_by_reason": {
-    "identified_no_challenge": 436,
-    "resource_mismatch": 344,
+    "identified_no_challenge": 442,
+    "resource_mismatch": 349,
     "cross_origin_pointer": 81,
-    "bare_challenge_no_prm": 413,
+    "bare_challenge_no_prm": 475,
     "pointer_unreachable": 11,
     "pointer_invalid": 7,
     "no_authorization_servers": 3,
     "wellknown_unreachable": 1,
     "metadata_invalid": 1,
-    "challenge_unadjudicated": 919,
-    "no_http_answer": 8741,
-    "not_identified_as_mcp": 2031
+    "challenge_unadjudicated": 865,
+    "no_http_answer": 8880,
+    "not_identified_as_mcp": 2054
   },
   "prm_via": {
-    "header": 822,
-    "wellknown_path": 19,
-    "wellknown_root": 30
+    "header": 833,
+    "wellknown_path": 21,
+    "wellknown_root": 33
   },
   "era": {
-    "legacy": 125,
+    "legacy": 146,
     "dual": 2,
-    "modern": 12,
-    "unknown": 4970,
-    "not_measured": 8750
+    "modern": 14,
+    "unknown": 5615,
+    "not_measured": 8279
   },
   "transport": {
-    "streamable_http": 124,
-    "legacy_sse": 15,
-    "unknown": 4970,
-    "not_measured": 8750
+    "streamable_http": 146,
+    "legacy_sse": 16,
+    "unknown": 5615,
+    "not_measured": 8279
   },
   "window": {
-    "from": "2026-09-14T16:57:06Z",
-    "to": "2026-10-04T10:18:15Z"
+    "from": "2026-09-15T09:32:11Z",
+    "to": "2026-10-05T07:28:26Z"
   },
   "own_controls_excluded": 3,
+  "withheld_opted_out": 0,
   "enabled": true,
-  "last_run_at": "2026-10-04T10:18:17Z",
-  "counted_at": "2026-10-04T10:18:34Z"
+  "last_run_at": "2026-10-05T07:28:28Z",
+  "counted_at": "2026-10-05T07:37:25Z"
 }

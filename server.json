@@ -17,7 +17,7 @@
       ]
     }
   ],
-  "version": "2.6.5",
+  "version": "2.6.6",
   "remotes": [
     {
       "type": "streamable-http",
@@ -28,7 +28,7 @@
     {
       "registryType": "npm",
       "identifier": "echelongraph-mcp",
-      "version": "2.6.5",
+      "version": "2.6.6",
       "transport": {
         "type": "stdio"
       },

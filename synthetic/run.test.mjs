@@ -24,7 +24,7 @@ import { MODERN } from "../test/mcp-stdio-client.mjs";
 import { modern } from "../test/mcp-http-client.mjs";
 import { chooseInput, COMPLETE_MESSAGE, HTTP, judge, judgePrompt, judgeResource, LEGACY, probeOrder, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
-import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBE, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS } from "./probes.mjs";
+import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, LOG4J_CORE, PROBES, PROMPT_PROBE, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS } from "./probes.mjs";
 import { BATCH_PATH, CALL_ANSWER } from "../test/fixtures/match-batch.mjs";
 
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
@@ -79,7 +79,18 @@ BODIES["/api/v1/public/cves/match"] = {
 };
 BODIES[BATCH_PATH] = CALL_ANSWER;
 BODIES[`/api/v1/public/cves/${CVE}/enrichment`] = {
-  vendor_advisories: [], patches: [], fixed_versions: [], affected_packages: [],
+  vendor_advisories: [], patches: [], fixed_versions: [],
+  // #2817: what core-backend serves for log4j-core since #2817, which EXPECT.cve_intel holds.
+  affected_packages: [
+    {
+      ecosystem: "Maven", package_name: "org.apache.logging.log4j:log4j-core", fixed_version: "2.12.2", dependents_count: 0, source: "osv",
+      fixed_branches: [
+        { introduced: "2.13.0", fixed: "2.15.0", last_affected: null, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" },
+        { introduced: "2.0-beta9", fixed: "2.3.1", last_affected: null, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" },
+        { introduced: "2.4", fixed: "2.12.2", last_affected: null, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" },
+      ],
+    },
+  ],
   cwes: [{ cwe_id: "CWE-502", name: "Deserialization of Untrusted Data", source: "nvd" }],
   timeline: [], timeline_count_7d: 0, timeline_count_30d: 0, timeline_total: 0,
   ai: { plain_summary: null, risk_narrative: null, remediation_playbook: null },
@@ -111,7 +122,7 @@ BODIES["/api/v1/public/ai-exposure/stats?service=mcp"] = {
   prm_via: { header: 0, wellknown_path: 0, wellknown_root: 0 },
   era: { legacy: 0, dual: 0, modern: 0, unknown: 0, not_measured: 0 },
   transport: { streamable_http: 0, legacy_sse: 0, unknown: 0, not_measured: 0 },
-  window: { from: null, to: null }, own_controls_excluded: 0, enabled: false,
+  window: { from: null, to: null }, own_controls_excluded: 0, withheld_opted_out: 0, enabled: false,
 };
 
 // mode: ok (BODIES, else the router's 404), 500 (every request a 500).
@@ -390,6 +401,36 @@ describe("#2757: what check_sbom's probe must show", () => {
     assert.deepEqual(judge({ structuredContent: { state: "measured", ok: true } }, tool, expect), { outcome: "success", state: "measured" });
     assert.deepEqual(judge({ structuredContent: { state: "measured" } }, tool, expect), { outcome: "failure", reason: "expectation_unmet", state: "measured", detail: "saw not ok" });
     assert.equal(judge({ isError: true, structuredContent: { state: "failed" } }, tool, expect).reason, "state_failed");
+  });
+});
+
+describe("#2817: what cve_intel's probe must show", () => {
+  const row = (fixed_branches, extra = {}) => ({ state: "measured", data: { affected_packages: [{ ecosystem: "Maven", package_name: LOG4J_CORE, fixed_version: "2.12.2", ...(fixed_branches === undefined ? {} : { fixed_branches }), ...extra }] } });
+  const GHSA = "GHSA-jfh8-c2jp-5v3q";
+  const R = (introduced, fixed, advisory_id = GHSA) => ({ introduced, fixed, last_affected: null, source: advisory_id ? "osv_bulk" : null, advisory_id });
+  it("the probe asks for CVE-2021-44228", () => assert.deepEqual(PROBES.cve_intel, [{ cve_id: "CVE-2021-44228" }]));
+  it("holds log4j-core's three ranges, one fixed in 2.15.0", () => {
+    assert.equal(EXPECT.cve_intel(row([R("2.13.0", "2.15.0"), R("2.0-beta9", "2.3.1"), R("2.4", "2.12.2")])), undefined);
+  });
+  it("ranges loaded before the OSV backfill rerun (advisory_id null or absent) are met: the rerun is founder-timed, 4c checks it", () => {
+    assert.equal(EXPECT.cve_intel(row([R("2.0-beta9", "2.3.1", null), R("2.4", "2.12.2", null), R("2.13.0", "2.15.0", null)])), undefined);
+    assert.equal(EXPECT.cve_intel(row([{ introduced: "2.0-beta9", fixed: "2.3.1" }, { introduced: "2.4", fixed: "2.12.2" }, { introduced: "2.13.0", fixed: "2.15.0" }])), undefined);
+  });
+  it("two ranges, one of them fixed in 2.15.0, are too few", () => {
+    assert.equal(
+      EXPECT.cve_intel(row([R("2.13.0", "2.15.0"), R("2.4", "2.12.2")])),
+      `${LOG4J_CORE} fixed_branches has 2 ranges, fixes ["2.15.0","2.12.2"]; want at least 3, one fixed in 2.15.0`,
+    );
+  });
+  it("three ranges with none fixed in 2.15.0 are unmet", () => {
+    assert.match(EXPECT.cve_intel(row([R("2.0-beta9", "2.3.1"), R("2.4", "2.12.2"), R("2.13.0", "2.16.0")])), /has 3 ranges, fixes \["2.3.1","2.12.2","2.16.0"\]/);
+  });
+  it("says what it saw otherwise: production before #2817, a row never loaded, too few ranges, the row gone", () => {
+    assert.equal(EXPECT.cve_intel(row(undefined)), `${LOG4J_CORE} fixed_branches absent (fixed_version "2.12.2"); want at least 3 ranges, one fixed in 2.15.0`);
+    assert.equal(EXPECT.cve_intel(row(null)), `${LOG4J_CORE} fixed_branches null (fixed_version "2.12.2"); want at least 3 ranges, one fixed in 2.15.0`);
+    assert.equal(EXPECT.cve_intel(row([R("2.4", "2.12.2")])), `${LOG4J_CORE} fixed_branches has 1 ranges, fixes ["2.12.2"]; want at least 3, one fixed in 2.15.0`);
+    assert.equal(EXPECT.cve_intel({ data: { affected_packages: [] } }), `no Maven ${LOG4J_CORE} row among 0 affected_packages rows`);
+    assert.equal(EXPECT.cve_intel({ data: {} }), `data.affected_packages absent; want the ${LOG4J_CORE} row with fixed_branches`);
   });
 });
 

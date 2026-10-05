@@ -13,6 +13,17 @@
 //   GET /health   liveness. Not /healthz: Cloud Run's front end reserves paths ending in "z"
 //                 and answers them itself, so a /healthz would never reach this process.
 //
+// HTTP/1.1 by default; HTTP/2 cleartext (h2c, prior knowledge) ONLY when MCP_H2C=1 (#2775). Cloud
+// Run tells a container that its client went away only over HTTP/2 or a WebSocket ("When you use
+// HTTP/1.1 on Cloud Run, client disconnect events are not propagated to the Cloud Run container",
+// https://docs.cloud.google.com/run/docs/troubleshooting): over HTTP/1.1 its front end reads the
+// whole answer itself, so an abandoned call ran to its end, holding its large-body slot. With
+// `--use-http2` Cloud Run sends the container h2c and nothing else, and a client that goes resets
+// its stream, which this server acts on at once (serveMcp). But on a canary of 2026-10-05 that reset
+// came only when the answer was written, 15 and 34 s in, not when the client went:
+// mcp_client_gone (after_ms, answer_started) is how production shows which. The flag and
+// MCP_H2C=1 go together (deploy-all.sh mcp-remote): either one alone answers no request at all.
+//
 // No auth: the endpoint serves only public data (MCP makes authorization optional), and the
 // server's instructions say what it is. The edge rules — Origin policy, per-client limit, body
 // cap, what is logged — are in httpPolicy.ts, each with its reasoning.
@@ -22,6 +33,8 @@
 // waf/mcpforward.go, #2212). MCP_REQUIRE_FORWARD_TOKEN=1 (set by deploy-all.sh) makes a missing
 // token fatal at start-up, because without it every remote user would share one API budget.
 import http from "node:http";
+import http2 from "node:http2";
+import type net from "node:net";
 import v8 from "node:v8";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { forwardToken, markHttpEntrypoint, requestSettled, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
@@ -76,6 +89,9 @@ const ADMISSION_WAIT_MS = positiveInt(process.env.MCP_ADMISSION_WAIT_MS, DEFAULT
 // A large body's wait for a slot is not queued: the client is told to come back. Nor is a
 // request that waited ADMISSION_WAIT_MS for admission.
 const BUSY_RETRY_AFTER_SEC = 5;
+// #2775: serve h2c instead of HTTP/1.1 (see the top of this file). Exactly "1": anything else is
+// HTTP/1.1, the default for a local run and for every test that does not ask.
+const H2C = process.env.MCP_H2C === "1";
 const MCP_PATH = "/mcp";
 const HEALTH_PATH = "/health";
 
@@ -122,8 +138,17 @@ const PREFLIGHT_HEADERS: Record<string, string> = {
 
 const HOP_BY_HOP = new Set(["host", "connection", "content-length", "transfer-encoding", "keep-alive", "upgrade", "expect"]);
 
+// HTTP/2 has no connection-specific headers (RFC 9113 8.2.2): Node drops them from an h2 answer
+// with a warning, so they are never set on one. A refusal's "Connection: close" (the rest of the
+// body is discarded unread) is the stream's own end there.
+const CONNECTION_SPECIFIC = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"]);
+function forProtocol(res: http.ServerResponse, headers: Record<string, string>): Record<string, string> {
+  if (!((res as unknown) instanceof http2.Http2ServerResponse)) return headers;
+  return Object.fromEntries(Object.entries(headers).filter(([k]) => !CONNECTION_SPECIFIC.has(k.toLowerCase())));
+}
+
 function send(res: http.ServerResponse, status: number, body: string, headers: Record<string, string> = {}): void {
-  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
+  res.writeHead(status, forProtocol(res, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }));
   res.end(body);
 }
 
@@ -154,8 +179,10 @@ type Outcome = {
 // when sent, say so) reads on, up to MAX_SBOM_BODY_BYTES, and only while it holds one of this
 // instance's large-body slots: none free is "busy". Over the cap that applies: "too_large".
 // Either way the rest is discarded unread (the response closes the connection). A body that
-// crossed MAX_BODY_BYTES returns holding its slot; the caller releases it.
-type BodyRead = { body: Buffer; slot: boolean } | "too_large" | "busy";
+// crossed MAX_BODY_BYTES returns holding its slot; the caller releases it. "gone": the request
+// closed before its body ended, so the client went mid-upload (a reset h2 stream ends the request
+// with 'close' and no 'error', #2775); its slot is released here.
+type BodyRead = { body: Buffer; slot: boolean } | "too_large" | "busy" | "gone";
 function readBody(req: http.IncomingMessage): Promise<BodyRead> {
   const mayBeLarge = largeBodyAdmissible(header(req, "mcp-method"), header(req, "mcp-name"));
   const cap = mayBeLarge ? MAX_SBOM_BODY_BYTES : MAX_BODY_BYTES;
@@ -176,7 +203,7 @@ function readBody(req: http.IncomingMessage): Promise<BodyRead> {
     const chunks: Buffer[] = [];
     let size = 0;
     let done = false;
-    const stop = (r: "too_large" | "busy"): void => {
+    const stop = (r: "too_large" | "busy" | "gone"): void => {
       done = true;
       chunks.length = 0;
       if (slot) largeBodies.release();
@@ -194,7 +221,12 @@ function readBody(req: http.IncomingMessage): Promise<BodyRead> {
       chunks.push(chunk);
     });
     req.on("end", () => {
-      if (!done) resolve({ body: Buffer.concat(chunks), slot });
+      if (done) return;
+      done = true;
+      resolve({ body: Buffer.concat(chunks), slot });
+    });
+    req.on("close", () => {
+      if (!done) stop("gone");
     });
     req.on("error", (e) => {
       if (done) return;
@@ -262,10 +294,32 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
   // #2775: the client has gone when the response closes before it has finished. That aborts the
   // request: its wait for admission, the SDK's handling of it (which cancels the tool's call), and
   // its API calls (runtime.ts requestSignal).
+  // Over h2c the response of a reset stream closes marked finished (node:http2's compatibility
+  // API ends it), so there the stream itself is watched, from the moment the reset arrives:
+  // 'aborted' (a reset before the answer was written, any error code) and a 'close' before this
+  // server ended its answer (a reset with NO_ERROR emits no 'aborted').
+  // mcp_client_gone says WHEN this server learned it: after_ms from the request's start, and
+  // whether its answer had started (answer_started). On 2026-10-05 a canary behind Cloud Run's
+  // --use-http2 logged its aborted calls 499 only when their answers were written, 15 and 34 s
+  // in: this line tells a reset that arrived then from one that arrived early and was not acted on
+  // (the access line's duration_ms is when the call actually stopped).
   const gone = new AbortController();
+  const t0 = Date.now();
+  const h2stream = (res as unknown as Partial<http2.Http2ServerResponse>).stream;
+  const clientWent = (): void => {
+    if (gone.signal.aborted) return;
+    gone.abort();
+    log("INFO", "mcp_client_gone", { after_ms: Date.now() - t0, answer_started: res.headersSent, rst_code: h2stream?.rstCode ?? null });
+  };
   res.on("close", () => {
-    if (!res.writableFinished) gone.abort();
+    if (!res.writableFinished || h2stream?.aborted) clientWent();
   });
+  if (h2stream) {
+    h2stream.once("aborted", clientWent);
+    h2stream.once("close", () => {
+      if (!res.writableEnded) clientWent();
+    });
+  }
 
   // The body is read BEFORE the request waits for admission (#2773), so a client that uploads
   // slowly holds its socket, and a large body its large-body slot, as before admission existed,
@@ -284,6 +338,7 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
         if (req.destroyed) return { status: 499, refused: "client_closed", clientClosed: true };
         throw e;
       }
+      if (read === "gone") return { status: 499, refused: "client_closed", clientClosed: true };
       if (read === "too_large") return tooLarge(res, cors);
       if (read === "busy") {
         send(
@@ -364,7 +419,8 @@ async function relay(
 ): Promise<Outcome> {
   const headers = new Headers();
   for (const [k, v] of Object.entries(req.headers)) {
-    if (v === undefined || HOP_BY_HOP.has(k)) continue;
+    // ":method", ":path", ":authority", ":scheme": an h2 request's pseudo-headers, which a Request cannot carry.
+    if (v === undefined || HOP_BY_HOP.has(k) || k.startsWith(":")) continue;
     for (const one of Array.isArray(v) ? v : [v]) headers.append(k, one);
   }
   const request = new Request(`http://localhost${pathname}`, {
@@ -383,7 +439,7 @@ async function relay(
   response.headers.forEach((v, k) => {
     out[k] = v;
   });
-  res.writeHead(response.status, out);
+  res.writeHead(response.status, forProtocol(res, out));
   if (response.body) {
     for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
   }
@@ -393,7 +449,7 @@ async function relay(
   return { status: response.status, body, clientPublic };
 }
 
-const server = http.createServer((req, res) => {
+function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   const start = process.hrtime.bigint();
   // The path only: a query string is never read, kept or logged.
   let pathname = "/";
@@ -443,7 +499,16 @@ const server = http.createServer((req, res) => {
     else res.end();
     finish({ status: 500 });
   });
-});
+}
+
+// #2775: with MCP_H2C=1, node:http2's compatibility API, whose request and response carry the
+// IncomingMessage / ServerResponse members used above. Where they differ the code says so:
+// pseudo-headers (relay), connection-specific headers (forProtocol), a stream reset mid-upload
+// (readBody "gone"). A stream reset after that closes the response unfinished, which aborts
+// `gone` in serveMcp exactly as a closed HTTP/1.1 socket does.
+const server: net.Server = H2C
+  ? http2.createServer((req, res) => onRequest(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse))
+  : http.createServer(onRequest);
 
 // #2773: the heap V8 may grow to, and the memory the container allows (0 when none is known). A
 // heap allowed past the container's memory is collected only when the kernel kills the instance:
@@ -466,6 +531,7 @@ server.listen(PORT, () => {
   const addr = server.address();
   log("INFO", "mcp_remote_listening", {
     port: typeof addr === "object" && addr ? addr.port : PORT,
+    protocol: H2C ? "h2c" : "http/1.1",
     name: NAME,
     version: VERSION,
     api_base: SHOWN_BASE,

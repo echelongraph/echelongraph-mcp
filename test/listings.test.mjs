@@ -222,3 +222,22 @@ describe("README links the directories that list us", () => {
     assert.ok(readme.includes("(https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)"), "README lost the Glama link");
   });
 });
+
+// The Anthropic directory steps (#2797 review): a privacy paragraph was once spliced into the middle of
+// "automatically", deleting the escalation address and leaving a fragment of the old paragraph behind,
+// and every other check here passed. This pins the sentence and the paragraph, and catches the shape
+// of a splice anywhere in the file: a word running straight into bold text, or a closing ".)" with a
+// word glued to it.
+describe("listings/README.md is not spliced", { skip: SKIP }, () => {
+  it("keeps the After submitting sentence, its escalation address and the privacy paragraph", () => {
+    const text = read("listings/README.md");
+    const flat = text.replace(/\s+/g, " ");
+    assert.ok(flat.includes('After submitting: "Anthropic scans your submission automatically for policy compliance and, by default, lists it as a Community connector". Escalations: `mcp-review@anthropic.com`.'), "the After submitting sentence or its escalation address is gone");
+    assert.match(text, /^\*\*Privacy policy\.\*\* Give https:\/\/echelongraph\.io\/privacy as the privacy policy URL\./m, "the Privacy policy paragraph no longer starts its own line");
+  });
+  it("has no word fused into bold text and nothing glued after a closing parenthesis", () => {
+    const lines = read("listings/README.md").split("\n");
+    const bad = lines.map((l, i) => [i + 1, l]).filter(([, l]) => /[a-z]\*\*[A-Z]/.test(l) || /\.\)[A-Za-z]/.test(l));
+    assert.deepEqual(bad, [], `spliced lines in listings/README.md: ${bad.map(([n, l]) => `${n}: ${l}`).join(" | ")}`);
+  });
+});

@@ -34,7 +34,12 @@
 //                                                    and (not with --hosted) exposure_radar's and
 //                                                    cve_summary's answers, kept in
 //                                                    fixtures/prod-answers/ so the suite measures
-//                                                    them on every run; commit both
+//                                                    them on every run; commit both. It exits 1
+//                                                    when exposure_radar's or cve_summary's
+//                                                    SHAPED size in text-bound.mjs is then more
+//                                                    than MARGIN from its record, naming the size
+//                                                    to set (#2822): set it, run npm test, and
+//                                                    commit text-bound.mjs with the record
 //
 // Only exposure_radar and cve_summary, production-wide answers to no input, are held to MARGIN
 // from their record (#2616). Every other case's rows change as the feeds do (a search page, the
@@ -57,7 +62,7 @@ import { fileURLToPath } from "node:url";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { connectHttp } from "./mcp-http-client.mjs";
 import { PKG, serverCommand } from "./server-under-test.mjs";
-import { CEILING, LIVE_RECORD, LIVE_TOOLS, MARGIN, PROD_ANSWERS, SHAPED, answerFile, argsOf, readLiveRecord, shareOfCeiling, textSize } from "./text-bound.mjs";
+import { CEILING, KEPT_SOURCE, LIVE_RECORD, LIVE_TOOLS, MARGIN, PROD_ANSWERS, SHAPED, answerFile, argsOf, keptSizesOffRecord, readLiveRecord, setKeptSize, shareOfCeiling, textSize } from "./text-bound.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROBE = path.resolve(HERE, "..", "..", "scripts", "probe-prod.sh");
@@ -70,7 +75,10 @@ const record = argv.includes("--record");
 const answersDir = argv.includes("--answers") ? argv[argv.indexOf("--answers") + 1] : undefined;
 const hostedAt = argv.indexOf("--hosted");
 const hosted = hostedAt < 0 ? undefined : argv[hostedAt + 1]?.startsWith("http") ? argv[hostedAt + 1] : HOSTED;
-const source = answersDir ? `answers in ${answersDir}` : hosted ? `hosted ${hosted}, its data replayed to this checkout's server` : "probe-prod";
+// #2822: the answers kept in fixtures/prod-answers are named as such, so a record re-measured from
+// them says where they came from without a hand edit (KEPT_SOURCE, which text-bound.test.mjs knows).
+const keptDir = answersDir !== undefined && path.resolve(answersDir) === path.resolve(PROD_ANSWERS);
+const source = keptDir ? KEPT_SOURCE : answersDir ? `answers in ${answersDir}` : hosted ? `hosted ${hosted}, its data replayed to this checkout's server` : "probe-prod";
 const run = promisify(execFile);
 
 // One production request through probe-prod.sh: its status and body.
@@ -199,10 +207,21 @@ if (record) {
     const m = measured[c.label];
     if (!m || m.isError) continue;
     cs[c.label] = { measured_at: readAt, package_version: PKG.version, total: m.total, blocks: m.blocks, source: m.source };
-    if (c.kept && keptAll) tools[c.kept] = { measured_at: readAt, package_version: PKG.version, total: m.total, blocks: m.blocks, answers_kept: true };
+    // #2822: when the answers were read from production. Read here (probe-prod) it is now; the
+    // answers already kept keep the time they were read; answers from another directory carry no
+    // time, so it is null rather than now.
+    const answersReadAt = !answersDir ? readAt : keptDir ? (prior.tools?.[c.kept]?.answers_read_at ?? null) : null;
+    if (c.kept && keptAll) tools[c.kept] = { measured_at: readAt, answers_read_at: answersReadAt, package_version: PKG.version, total: m.total, blocks: m.blocks, answers_kept: true };
   }
-  fs.writeFileSync(LIVE_RECORD, `${JSON.stringify({ ...prior, tools: { ...prior.tools, ...tools }, cases: { ...(prior.cases ?? {}), ...cs } }, null, 2)}\n`);
+  const written = { ...prior, tools: { ...prior.tools, ...tools }, cases: { ...(prior.cases ?? {}), ...cs } };
+  fs.writeFileSync(LIVE_RECORD, `${JSON.stringify(written, null, 2)}\n`);
   console.log(`recorded ${Object.keys(cs).length} cases${Object.keys(tools).length ? ` and ${Object.keys(tools).join(", ")}, answers in ${PROD_ANSWERS}` : ""} in ${LIVE_RECORD}`);
+  // #2822: the suite measures the kept answers on every run and holds them within MARGIN of
+  // SHAPED's size for the case, so a record that moved past it leaves `npm test`, and the release
+  // that runs it, red until that size is set. Say which, and fail, so the re-record is not committed alone.
+  const off = keptSizesOffRecord(written);
+  for (const o of off) console.log(`SHAPED SIZE STALE: ${setKeptSize(o)}`);
+  if (off.length) red = true;
 }
 console.log(JSON.stringify({ check: "text-bound-live", read_at: readAt, package_version: PKG.version, source, ceiling: CEILING, margin: MARGIN, measured, red }));
 process.exit(red ? 1 : 0);

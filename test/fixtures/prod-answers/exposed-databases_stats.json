@@ -1,40 +1,40 @@
 {
-  "distinct_hosts": 6975,
+  "distinct_hosts": 6744,
   "engines": 11,
   "pii_likely": 0,
   "pci_likely": 0,
   "top_engines": [
     {
       "engine": "redis",
-      "hosts": 2346
+      "hosts": 2289
     },
     {
       "engine": "prometheus",
-      "hosts": 2003
+      "hosts": 1976
     },
     {
       "engine": "memcached",
-      "hosts": 1821
-    },
-    {
-      "engine": "influxdb",
-      "hosts": 277
+      "hosts": 1757
     },
     {
       "engine": "kibana",
-      "hosts": 218
+      "hosts": 234
+    },
+    {
+      "engine": "influxdb",
+      "hosts": 184
     },
     {
       "engine": "jaeger",
-      "hosts": 157
+      "hosts": 149
     },
     {
       "engine": "cassandra",
-      "hosts": 78
+      "hosts": 75
     },
     {
       "engine": "grafana",
-      "hosts": 62
+      "hosts": 68
     },
     {
       "engine": "mongodb",
@@ -42,7 +42,7 @@
     },
     {
       "engine": "couchdb",
-      "hosts": 5
+      "hosts": 4
     },
     {
       "engine": "neo4j",
@@ -52,51 +52,51 @@
   "top_countries": [
     {
       "country": "United States",
-      "hosts": 1570
+      "hosts": 1532
     },
     {
       "country": "Germany",
-      "hosts": 879
+      "hosts": 830
     },
     {
       "country": "China",
-      "hosts": 778
+      "hosts": 767
     },
     {
       "country": "France",
-      "hosts": 387
+      "hosts": 390
     },
     {
       "country": "United Kingdom",
-      "hosts": 335
+      "hosts": 302
     },
     {
       "country": "Singapore",
-      "hosts": 242
-    },
-    {
-      "country": "Indonesia",
-      "hosts": 219
+      "hosts": 232
     },
     {
       "country": "India",
       "hosts": 211
     },
     {
+      "country": "Indonesia",
+      "hosts": 203
+    },
+    {
       "country": "Netherlands",
-      "hosts": 180
+      "hosts": 178
     },
     {
       "country": "Brazil",
-      "hosts": 165
+      "hosts": 162
     }
   ],
   "observed_window": {
     "from": "2026-07-18T00:40:07.29043Z",
-    "to": "2026-10-04T02:16:37.623258Z",
+    "to": "2026-10-05T02:16:11.471615Z",
     "undated": 0
   },
-  "generated_at": "2026-10-04T10:18:08.645553316Z",
-  "last_run_at": "2026-10-04T02:17:52Z",
+  "generated_at": "2026-10-05T07:34:49.372478691Z",
+  "last_run_at": "2026-10-05T02:17:27Z",
   "attribution": "The services counted here come from Shodan data, or from LeakIX data when Shodan query credits run low. Shodan data is owned by Shodan, which holds its copyright (© Shodan). EchelonGraph claims no ownership of it or copyright in it."
 }

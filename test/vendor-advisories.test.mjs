@@ -15,6 +15,9 @@
 //     the note names the vendors whose window starts after the CVE's year began, or whose history
 //     is still being read, so no advisory from them is never read as "the vendor published none";
 //     windows that cannot be read leave the answer measured, with the windows null and said so;
+//   - #2803: a window starts at held_since, never at the earliest held advisory: a vendor with no
+//     history read (Cisco, Red Hat) holds old advisories it revised lately, years before the date
+//     it is held from without a gap, and is still listed in vendors_not_fully_held;
 //   - #2728: a 1- or 2-character search is whole words (search_match word), said in the note and
 //     the description, and a capped total is written 1,000+, never as an exact 1000.
 // Every structuredContent received is validated against the tool's outputSchema with ajv.
@@ -61,18 +64,21 @@ const DETAIL_WITHDRAWN = { ...DETAIL, vendor_advisory_id: "RHSA-2024:0001", with
 // #2729: GET /api/v1/public/vendor-advisories/coverage as core-backend's CoverageHandler writes it
 // (vendors by slug; "" for a date that does not exist), in production's shape on 2026-10-04 before
 // the backfill finished: Palo Alto held only from 2026-09-09, Microsoft's history being read, Cisco
-// holding nothing.
+// holding nothing. #2803: held_since as coverage.go heldSince derives it: GitHub's and Red Hat's
+// first polls read their last 7 days (first seen less 7 days), Microsoft's first poll, Palo Alto's
+// whole feed (its earliest held). GitHub's 2017 and Red Hat's 2001 advisories are ones the vendor
+// revised after those first polls, not the start of a window.
 const COVERAGE_PATH = "/api/v1/public/vendor-advisories/coverage";
-const win = (vendor, vendor_display_name, advisories, earliest, latest, history_backfill, history_units_done = 0) => ({
-  vendor, vendor_display_name, advisories, earliest_vendor_published_at: earliest, latest_vendor_published_at: latest, history_backfill, history_units_done, history_completed_at: "",
+const win = (vendor, vendor_display_name, advisories, earliest, latest, history_backfill, history_units_done = 0, held_since = earliest) => ({
+  vendor, vendor_display_name, advisories, earliest_vendor_published_at: earliest, latest_vendor_published_at: latest, held_since, history_backfill, history_units_done, history_completed_at: "",
 });
 const COVERAGE = {
   vendors: [
     win("cisco", "Cisco", 0, "", "", "not_supported"),
-    win("github", "GitHub Security Advisories", 21877, "2017-10-24T00:00:00Z", "2026-10-04T05:00:00Z", "not_supported"),
-    win("microsoft", "Microsoft", 1311, "2016-01-12T08:00:00Z", "2026-09-30T07:00:00Z", "in_progress", 112),
+    win("github", "GitHub Security Advisories", 21877, "2017-10-24T00:00:00Z", "2026-10-04T05:00:00Z", "not_supported", 0, "2026-05-14T09:00:00Z"),
+    win("microsoft", "Microsoft", 1311, "2016-01-12T08:00:00Z", "2026-09-30T07:00:00Z", "in_progress", 112, "2026-05-20T10:00:00Z"),
     win("paloalto", "Palo Alto Networks", 71, "2026-09-09T16:00:00Z", "2026-10-02T21:00:00Z", "not_started"),
-    win("redhat", "Red Hat", 18420, "2001-03-29T00:00:00Z", "2026-10-04T04:00:00Z", "not_supported"),
+    win("redhat", "Red Hat", 18420, "2001-03-29T00:00:00Z", "2026-10-04T04:00:00Z", "not_supported", 0, "2026-05-19T11:00:00Z"),
   ],
 };
 // What the tools relay for a window: the API's row less the backfill bookkeeping, "" as null.
@@ -82,8 +88,16 @@ const relayed = (w) => ({
   advisories: w.advisories,
   earliest_vendor_published_at: w.earliest_vendor_published_at || null,
   latest_vendor_published_at: w.latest_vendor_published_at || null,
+  held_since: w.held_since || null,
   history_backfill: w.history_backfill,
 });
+// #2803: production's Cisco and Red Hat on 2026-10-04, as the API served them before held_since:
+// Cisco's continuous run starts 2026-02-25, its three earlier advisories revised later (the
+// earliest cisco-sa-asaftdvirtual-dos-MuenGnYR, 2024-10-23); Red Hat's earliest held 2009-02-04.
+const CVE_20188 = "CVE-2025-20188"; // Cisco published cisco-sa-wlc-file-uplpd-rHZG9UfC on 2025-05-07
+const CVE_HEARTBLEED = "CVE-2014-0160";
+const CISCO_REVISED = win("cisco", "Cisco PSIRT openVuln", 312, "2024-10-23T16:00:00Z", "2026-10-01T16:00:00Z", "not_supported", 0, "2026-02-25T09:00:00Z");
+const REDHAT_REVISED = win("redhat", "Red Hat Product Security", 9120, "2009-02-04T00:00:00Z", "2026-10-04T04:00:00Z", "not_supported", 0, "2026-05-19T11:00:00Z");
 const CVE_3400 = "CVE-2024-3400"; // KEV; Palo Alto's own advisory is dated 2024-04-12
 const CVE_OLD = "CVE-2010-0249"; // older than Microsoft's earliest held advisory
 
@@ -100,7 +114,7 @@ async function startStub() {
     };
     if (pathname === COVERAGE_PATH) return state.coverage.status ? send(state.coverage.status, state.coverage.body) : send(200, state.coverage);
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE}`) return send(200, { cve_id: CVE, advisories: [row(), WITHDRAWN], total: 2 });
-    for (const empty of [CVE_3400, CVE_OLD]) if (pathname === `/api/v1/public/vendor-advisories/by-cve/${empty}`) return send(200, { cve_id: empty, advisories: [], total: 0 });
+    for (const empty of [CVE_3400, CVE_OLD, CVE_20188, CVE_HEARTBLEED]) if (pathname === `/api/v1/public/vendor-advisories/by-cve/${empty}`) return send(200, { cve_id: empty, advisories: [], total: 0 });
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_FULL}`) return send(200, { cve_id: CVE_FULL, advisories: Array.from({ length: 20 }, () => row()), total: 20 });
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_NONE}`) return send(200, { cve_id: CVE_NONE, advisories: [], total: 0 });
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2024%3A1234") return send(200, DETAIL);
@@ -124,7 +138,7 @@ const mainRequests = (seen) => seen.filter((s) => s.url !== COVERAGE_PATH);
 const coverageRequests = (seen) => seen.filter((s) => s.url === COVERAGE_PATH);
 // The sentence the list and the search add for the fixture's two vendors still being read.
 const BACKFILLING_NOTE =
-  "The older advisories of 2 vendors are still being read (history_backfill in_progress or not_started): microsoft (held from 2016-01-12 to 2026-09-30; history_backfill in_progress); paloalto (held from 2026-09-09 to 2026-10-02; history_backfill not_started). EchelonGraph does not yet hold all of their older advisories, so none found from them is not a finding that they published none.";
+  "The older advisories of 2 vendors are still being read (history_backfill in_progress or not_started): microsoft (held from 2026-05-20 to 2026-09-30, and before that only in part, the earliest held dated 2016-01-12; history_backfill in_progress); paloalto (held from 2026-09-09 to 2026-10-02; history_backfill not_started). EchelonGraph does not yet hold all of their older advisories, so none found from them is not a finding that they published none.";
 const validator = new AjvJsonSchemaValidator();
 
 for (const era of [MODERN, "2025-06-18"]) {
@@ -172,7 +186,7 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.ok(!JSON.stringify(res).includes(piece), `the term was echoed into the result: ${piece}`);
       }
       // With a vendor filter, the windows are that vendor's: Microsoft's history is being read.
-      const msft = "The older advisories of 1 vendor are still being read (history_backfill in_progress or not_started): microsoft (held from 2016-01-12 to 2026-09-30; history_backfill in_progress). EchelonGraph does not yet hold all of its older advisories, so none found from it is not a finding that it published none.";
+      const msft = "The older advisories of 1 vendor are still being read (history_backfill in_progress or not_started): microsoft (held from 2026-05-20 to 2026-09-30, and before that only in part, the earliest held dated 2016-01-12; history_backfill in_progress). EchelonGraph does not yet hold all of its older advisories, so none found from it is not a finding that it published none.";
       assert.equal(noteOf(res), `search_vendor_advisories OK: EchelonGraph answered HTTP 200 from ${stub.base}. The search matched 7 vendor advisories; 1 returned in this page (offset 10). ${msft}`);
       const sc = res.structuredContent;
       assert.equal(sc.state, "measured");
@@ -237,14 +251,15 @@ for (const era of [MODERN, "2025-06-18"]) {
       const note = noteOf(res);
       assert.match(note, new RegExp(`2 vendor advisories name ${CVE}\\.`));
       assert.match(note, /WITHDRAWN: 1 of these 2 advisories was withdrawn \(rescinded\) by its vendor \(withdrawn true\): github\/GHSA-aaaa-bbbb-cccc\. Report it as withdrawn, not as a current advisory\./);
-      // #2729: Microsoft and GitHub answered; Cisco holds nothing and Palo Alto only from 2026-09-09.
+      // #2729: Microsoft and GitHub answered; Cisco holds nothing and Palo Alto only from 2026-09-09;
+      // #2803: Red Hat is held without a gap only from 2026-05-19.
       assert.deepEqual(res.structuredContent.coverage, {
         returned: 2,
         cap: 20,
         at_cap: false,
         cve_year: 2024,
         vendor_windows: COVERAGE.vendors.map(relayed),
-        vendors_not_fully_held: ["cisco", "paloalto"],
+        vendors_not_fully_held: ["cisco", "paloalto", "redhat"],
       });
       assert.ok(res.structuredContent.notes.some((n) => /our_first_seen_at is when EchelonGraph first recorded it/.test(n)));
     });
@@ -309,13 +324,13 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.equal(sc.state, "measured");
       assert.deepEqual(sc.coverage.vendor_windows, COVERAGE.vendors.map(relayed));
       // Cisco holds nothing, Microsoft's history is being read, Palo Alto starts after 2024 began;
-      // GitHub (2017) and Red Hat (2001) start before it.
-      assert.deepEqual(sc.coverage.vendors_not_fully_held, ["cisco", "microsoft", "paloalto"]);
+      // #2803: GitHub and Red Hat are held without a gap only from 2026, whatever their earliest.
+      assert.deepEqual(sc.coverage.vendors_not_fully_held, ["cisco", "github", "microsoft", "paloalto", "redhat"]);
       const note = noteOf(res);
       assert.match(note, /found nothing/, "still the measured empty result");
       assert.ok(
         note.endsWith(
-          ` ${CVE_3400} is a 2024 CVE ID, and EchelonGraph may not hold every advisory 3 vendors published for it (vendors_not_fully_held): cisco (none held); microsoft (held from 2016-01-12 to 2026-09-30; history_backfill in_progress); paloalto (held only from 2026-09-09 to 2026-10-02; history_backfill not_started). An advisory a vendor published before the earliest one EchelonGraph holds is not held, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from those vendors is not a finding that they published none.`,
+          ` ${CVE_3400} is a 2024 CVE ID, and EchelonGraph may not hold every advisory 5 vendors published for it (vendors_not_fully_held): cisco (none held); github (held only from 2026-05-14 to 2026-10-04, and before that only in part, the earliest held dated 2017-10-24); microsoft (held only from 2026-05-20 to 2026-09-30, and before that only in part, the earliest held dated 2016-01-12; history_backfill in_progress); paloalto (held only from 2026-09-09 to 2026-10-02; history_backfill not_started); redhat (held only from 2026-05-19 to 2026-10-04, and before that only in part, the earliest held dated 2001-03-29). An advisory a vendor published before the date EchelonGraph holds that vendor from (held_since) may not be held, even when an older one is, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from those vendors is not a finding that they published none.`,
         ),
         note,
       );
@@ -324,18 +339,45 @@ for (const era of [MODERN, "2025-06-18"]) {
     it("#2729: once Palo Alto's history is read back to 2012, CVE-2024-3400 no longer names it, and a 2010 CVE names every vendor that starts after 2010 began", async () => {
       stub.state.coverage = {
         vendors: COVERAGE.vendors.map((w) =>
-          w.vendor === "paloalto" ? { ...w, advisories: 573, earliest_vendor_published_at: "2012-04-27T00:00:00Z", history_backfill: "complete" } : w.vendor === "microsoft" ? { ...w, history_backfill: "complete" } : w,
+          w.vendor === "paloalto"
+            ? { ...w, advisories: 573, earliest_vendor_published_at: "2012-04-27T00:00:00Z", held_since: "2012-04-27T00:00:00Z", history_backfill: "complete" }
+            : w.vendor === "microsoft"
+              ? { ...w, held_since: w.earliest_vendor_published_at, history_backfill: "complete" }
+              : w,
         ),
       };
       try {
         const now = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
-        assert.deepEqual(now.structuredContent.coverage.vendors_not_fully_held, ["cisco"]);
+        assert.deepEqual(now.structuredContent.coverage.vendors_not_fully_held, ["cisco", "github", "redhat"]);
         assert.doesNotMatch(noteOf(now), /paloalto|microsoft/);
         const old = await call("vendor_advisories_for_cve", { cve_id: CVE_OLD });
-        assert.deepEqual(old.structuredContent.coverage.vendors_not_fully_held, ["cisco", "github", "microsoft", "paloalto"]);
+        assert.deepEqual(old.structuredContent.coverage.vendors_not_fully_held, ["cisco", "github", "microsoft", "paloalto", "redhat"]);
         assert.equal(old.structuredContent.coverage.cve_year, 2010);
-        assert.ok(noteOf(old).includes("; paloalto (held only from 2012-04-27 to 2026-10-02)."), noteOf(old));
-        assert.doesNotMatch(noteOf(old), /redhat/, "Red Hat's held advisories start in 2001");
+        assert.ok(noteOf(old).includes("; paloalto (held only from 2012-04-27 to 2026-10-02); "), noteOf(old));
+        assert.ok(noteOf(old).includes("; microsoft (held only from 2016-01-12 to 2026-09-30); "), noteOf(old));
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    // #2803 review: the year rule alone must not be what lists a vendor whose history is being read.
+    // Palo Alto is a whole-feed poller in backfillVendors, so while its read is in_progress its
+    // held_since is its earliest held advisory, which can already be before the CVE's year; it is
+    // still listed. And held_since exactly at 1 January 00:00Z of the year is held from that year.
+    it("#2803: a vendor whose history is being read is listed though its held_since is before the CVE's year; one held from 1 January 00:00Z exactly is not", async () => {
+      const yearStart = "2024-01-01T00:00:00Z";
+      stub.state.coverage = {
+        vendors: [
+          win("aws", "AWS", 40, yearStart, "2026-10-01T00:00:00Z", "not_supported"),
+          win("paloalto", "Palo Alto Networks", 300, "2012-04-27T00:00:00Z", "2026-10-02T21:00:00Z", "in_progress", 40, "2012-04-27T00:00:00Z"),
+        ],
+      };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["paloalto"]);
+        assert.ok(noteOf(res).includes("(vendors_not_fully_held): paloalto (held from 2012-04-27 to 2026-10-02; history_backfill in_progress)."), noteOf(res));
+        assert.doesNotMatch(noteOf(res), /aws \(/, "held from 1 January 00:00Z of the CVE's year is held for that year");
       } finally {
         stub.state.coverage = COVERAGE;
       }
@@ -379,7 +421,7 @@ for (const era of [MODERN, "2025-06-18"]) {
         const b = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2024:1234" });
         assert.ok(
           noteOf(b).endsWith(
-            " The older advisories of 1 vendor are still being read (history_backfill in_progress or not_started): redhat (held from 2001-03-29 to 2026-10-04; history_backfill in_progress). EchelonGraph does not yet hold all of its older advisories, so none found from it is not a finding that it published none.",
+            " The older advisories of 1 vendor are still being read (history_backfill in_progress or not_started): redhat (held from 2026-05-19 to 2026-10-04, and before that only in part, the earliest held dated 2001-03-29; history_backfill in_progress). EchelonGraph does not yet hold all of its older advisories, so none found from it is not a finding that it published none.",
           ),
           noteOf(b),
         );
@@ -450,11 +492,13 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.ok(d("search_vendor_advisories").includes("A query of 1 or 2 characters matches whole words only (search_match word)"), d("search_vendor_advisories"));
       assert.ok(d("search_vendor_advisories").includes("past that, total is 1000 and total_capped is true, which means 1,000 or more (the note writes 1,000+), never exactly 1,000"));
       for (const n of ["vendor_advisories_for_cve", "search_vendor_advisories", "get_vendor_advisory"]) {
-        for (const f of ["earliest_vendor_published_at", "latest_vendor_published_at", "history_backfill", "in_progress", "not_started"]) assert.ok(d(n).includes(f), `${n}: ${f}`);
+        for (const f of ["earliest_vendor_published_at", "latest_vendor_published_at", "held_since", "history_backfill", "in_progress", "not_started"]) assert.ok(d(n).includes(f), `${n}: ${f}`);
       }
       assert.ok(d("vendor_advisories_for_cve").includes("vendors_not_fully_held"));
       for (const n of ["vendor_advisories_for_cve", "search_vendor_advisories"]) {
-        assert.ok(d(n).includes("An advisory a vendor published before its earliest_vendor_published_at is not held, so no advisory from a vendor is not a finding that it published none."), n);
+        assert.ok(d(n).includes("An advisory a vendor published before its held_since may not be held, even when its earliest_vendor_published_at is older, so no advisory from a vendor is not a finding that it published none."), n);
+        // #2803: no description says the window begins at the earliest held advisory.
+        assert.doesNotMatch(d(n), /before its earliest_vendor_published_at is not held|earliest held advisory is dated after/, n);
       }
     });
 
@@ -469,8 +513,61 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.ok(s.includes("the advisories EchelonGraph holds") && s.includes("not that no vendor published one"), `an empty answer is read as the vendors publishing none: "${s}"`);
       }
       // Every reason a vendor is listed in vendors_not_fully_held, as notFullyHeld() lists it.
-      for (const why of ["of which EchelonGraph holds none", "whose earliest held advisory is dated after 1 January of cve_year", "whose history is still being read"]) {
+      for (const why of ["of which EchelonGraph holds none", "whose held_since is after 1 January of cve_year or not known", "whose history is still being read"]) {
         assert.ok(d.includes(why), `vendors_not_fully_held: ${why}`);
+      }
+    });
+
+    // ── #2803: a vendor with no history read is held from held_since, not from its earliest ──
+    it("#2803: CVE-2025-20188 lists cisco, though Cisco's earliest held advisory is dated 2024-10-23", async () => {
+      stub.state.coverage = { vendors: [CISCO_REVISED, REDHAT_REVISED] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_20188 });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.equal(res.structuredContent.coverage.cve_year, 2025);
+        assert.deepEqual(res.structuredContent.coverage.vendor_windows, [CISCO_REVISED, REDHAT_REVISED].map(relayed));
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["cisco", "redhat"]);
+        assert.ok(
+          noteOf(res).includes(
+            "(vendors_not_fully_held): cisco (held only from 2026-02-25 to 2026-10-01, and before that only in part, the earliest held dated 2024-10-23); redhat (",
+          ),
+          noteOf(res),
+        );
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#2803: CVE-2014-0160 lists redhat, though Red Hat's earliest held advisory is dated 2009-02-04", async () => {
+      stub.state.coverage = { vendors: [CISCO_REVISED, REDHAT_REVISED] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_HEARTBLEED });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["cisco", "redhat"]);
+        assert.ok(noteOf(res).includes("; redhat (held only from 2026-05-19 to 2026-10-04, and before that only in part, the earliest held dated 2009-02-04)."), noteOf(res));
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#2803: from an API without held_since, a vendor whose history is not read is listed for any year; one whose history read is complete is held from its earliest", async () => {
+      const old = (w) => {
+        const { held_since, ...rest } = w;
+        return rest;
+      };
+      const msftDone = { ...win("microsoft", "Microsoft", 1311, "2016-01-12T08:00:00Z", "2026-09-30T07:00:00Z", "complete", 193), history_completed_at: "2026-10-04T08:00:00Z" };
+      stub.state.coverage = { vendors: [old(CISCO_REVISED), old(msftDone), old(REDHAT_REVISED)] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_20188 });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.deepEqual(
+          res.structuredContent.coverage.vendor_windows.map((w) => [w.vendor, w.held_since]),
+          [["cisco", null], ["microsoft", null], ["redhat", null]],
+        );
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["cisco", "redhat"]);
+        assert.ok(noteOf(res).includes("cisco (held from 2024-10-23 to 2026-10-01, not known to be without a gap); redhat (held from 2009-02-04 to 2026-10-04, not known to be without a gap)."), noteOf(res));
+      } finally {
+        stub.state.coverage = COVERAGE;
       }
     });
 

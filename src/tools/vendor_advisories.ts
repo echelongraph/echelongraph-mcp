@@ -36,11 +36,21 @@
 // CVE-2024-21412, which both vendors did publish advisories for. core-backend now reads those
 // histories back (vendoradv backfill.go) and serves each vendor's window at
 // /api/v1/public/vendor-advisories/coverage (coverage.go): advisories held, the earliest and latest
-// vendor_published_at among them, and history_backfill. All three tools read it beside their own
-// request and relay it in coverage, and the note says when a CVE's ID year begins before a
-// vendor's earliest held advisory, or a vendor's history is still being read, so an empty answer
-// is never read as "the vendor published none". The window is context, not the answer: when it
-// cannot be read (an API older than the route, a failure), the answer is relayed as before, with
+// vendor_published_at among them, held_since and history_backfill. All three tools read it beside
+// their own request and relay it in coverage, and the note says when a CVE's ID year begins before
+// the date a vendor is held from, or a vendor's history is still being read, so an empty answer
+// is never read as "the vendor published none".
+//
+// held_since, not the earliest held advisory, is where a vendor's window begins (#2803). A vendor
+// with no history read (history_backfill not_supported) is held from its poller's first poll on,
+// and Cisco's and Red Hat's first polls read only what the vendor had CHANGED lately: an old
+// advisory the vendor revised since is held, so the earliest held advisory reached back to 2024
+// for Cisco and 2009 for Red Hat while the advisories published beside it are not held, and
+// CVE-2025-20188 read Cisco as fully held for 2025. coverage.go serves held_since as the start of
+// the window EchelonGraph has read the vendor's advisories from; an API older than that field gives none, and a vendor is
+// then taken as held from its earliest advisory only when its history read is complete.
+//
+// The window is context, not the answer: when it cannot be read (an API older than the route, a failure), the answer is relayed as before, with
 // the windows null and a note saying they are unknown, never failed. The coverage request carries
 // nothing typed: a fixed path, no query, no search header.
 //
@@ -140,6 +150,7 @@ type VendorWindow = {
   advisories: number | null;
   earliest_vendor_published_at: string | null;
   latest_vendor_published_at: string | null;
+  held_since: string | null;
   history_backfill: string | null;
 };
 // The windows, or why there are none.
@@ -165,6 +176,7 @@ function windowsOf(d: unknown): VendorWindow[] | undefined {
         advisories: num(r, "advisories") ?? null,
         earliest_vendor_published_at: instantOrNull(r, "earliest_vendor_published_at"),
         latest_vendor_published_at: instantOrNull(r, "latest_vendor_published_at"),
+        held_since: instantOrNull(r, "held_since"),
         history_backfill: str(r, "history_backfill") ?? null,
       },
     ];
@@ -173,12 +185,28 @@ function windowsOf(d: unknown): VendorWindow[] | undefined {
 
 const day = (instant: string) => instant.slice(0, 10);
 const backfilling = (w: VendorWindow) => w.history_backfill !== null && BACKFILLING.has(w.history_backfill);
+// #2803: the start of the window a vendor's advisories have been read from: held_since as the API
+// gives it; from an API without it, the earliest held advisory when the vendor's history read is
+// complete (that is the archive's start), else unknown (null).
+const heldFrom = (w: VendorWindow): string | null =>
+  w.held_since ?? (w.history_backfill === "complete" ? w.earliest_vendor_published_at : null);
+// Whether a vendor's window starts on or before 1 January of a CVE ID's year.
+const heldFromYear = (w: VendorWindow, yearStart: number) => {
+  const from = heldFrom(w);
+  return from !== null && Date.parse(from) <= yearStart;
+};
 // What a note says of one window: what is held, and the history read when it is not done.
 const windowItem = (w: VendorWindow, heldOnly: boolean) => {
+  const from = heldFrom(w);
+  const to = w.latest_vendor_published_at ? ` to ${day(w.latest_vendor_published_at)}` : "";
   const held =
     w.earliest_vendor_published_at === null
       ? "none held"
-      : `held ${heldOnly ? "only " : ""}from ${day(w.earliest_vendor_published_at)}${w.latest_vendor_published_at ? ` to ${day(w.latest_vendor_published_at)}` : ""}`;
+      : from === null
+        ? `held from ${day(w.earliest_vendor_published_at)}${to}, not known to be without a gap`
+        : `held ${heldOnly ? "only " : ""}from ${day(from)}${to}${
+            day(w.earliest_vendor_published_at) < day(from) ? `, and before that only in part, the earliest held dated ${day(w.earliest_vendor_published_at)}` : ""
+          }`;
   return `${w.vendor} (${held}${backfilling(w) ? `; history_backfill ${w.history_backfill}` : ""})`;
 };
 
@@ -187,22 +215,25 @@ const windowsUnknown = (why: string) =>
   ` The vendors' coverage windows could not be read (${why}), so this answer cannot say from what date each vendor's advisories are held: no advisory here from a vendor is not a finding that it published none.`;
 
 // vendor_advisories_for_cve: the vendors with no advisory in the answer that may have published
-// one EchelonGraph does not hold: none held at all, the earliest held dated after 1 January of the
-// year in the CVE ID, or a history still being read.
+// one EchelonGraph does not hold: none held at all, held (held_since) only from after 1 January of
+// the year in the CVE ID or from a date not known, or a history still being read. Never the
+// earliest held advisory: for a vendor with no history read it can be years before held_since
+// (#2803).
 function notFullyHeld(windows: VendorWindow[], rows: unknown[], year: number): VendorWindow[] {
   const answered = new Set(rows.map((r) => str(r, "vendor")).filter((v): v is string => v !== undefined));
   const yearStart = Date.UTC(year, 0, 1);
-  return windows.filter(
-    (w) => !answered.has(w.vendor) && (w.earliest_vendor_published_at === null || Date.parse(w.earliest_vendor_published_at) > yearStart || backfilling(w)),
-  );
+  return windows.filter((w) => !answered.has(w.vendor) && (w.earliest_vendor_published_at === null || !heldFromYear(w, yearStart) || backfilling(w)));
 }
 
 function notFullyHeldNote(cve: string, year: number, missing: VendorWindow[]): string {
   if (!missing.length) return "";
   const k = missing.length;
   const yearStart = Date.UTC(year, 0, 1);
-  const items = missing.map((w) => windowItem(w, w.earliest_vendor_published_at !== null && Date.parse(w.earliest_vendor_published_at) > yearStart));
-  return ` ${cve} is a ${year} CVE ID, and EchelonGraph may not hold every advisory ${plural(k, "1 vendor", `${k} vendors`)} published for it (vendors_not_fully_held): ${items.join("; ")}. An advisory a vendor published before the earliest one EchelonGraph holds is not held, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from ${plural(k, "that vendor", "those vendors")} is not a finding that ${plural(k, "it", "they")} published none.`;
+  const items = missing.map((w) => {
+    const from = heldFrom(w);
+    return windowItem(w, from !== null && Date.parse(from) > yearStart);
+  });
+  return ` ${cve} is a ${year} CVE ID, and EchelonGraph may not hold every advisory ${plural(k, "1 vendor", `${k} vendors`)} published for it (vendors_not_fully_held): ${items.join("; ")}. An advisory a vendor published before the date EchelonGraph holds that vendor from (held_since) may not be held, even when an older one is, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from ${plural(k, "that vendor", "those vendors")} is not a finding that ${plural(k, "it", "they")} published none.`;
 }
 
 // search_vendor_advisories and get_vendor_advisory: the vendors whose history is still being read.
@@ -243,9 +274,12 @@ const ENVELOPE_DESCRIPTION =
 // #2729: what a vendor's window is.
 const HISTORY_BACKFILL_DESCRIPTION =
   "history_backfill: complete (the vendor's published history has been read back as far as its source goes), in_progress or not_started (it is still being read, so the vendor's older advisories are not all held yet), or not_supported (EchelonGraph has no history read for that vendor, so what it holds is what the vendor's feed has carried)";
-const WINDOW_DESCRIPTION = `vendor, advisories (how many EchelonGraph holds from that vendor), earliest_vendor_published_at and latest_vendor_published_at (the earliest and latest vendor_published_at among them, null when none is held) and ${HISTORY_BACKFILL_DESCRIPTION}`;
+// #2803: where a vendor's window begins.
+const HELD_SINCE_DESCRIPTION =
+  "held_since (the start of the window EchelonGraph has read that vendor's advisories from, before which an advisory may not be held; null when none is held or the API does not say; for a vendor with no history read it is when its feed was first read from, and can be years after earliest_vendor_published_at, since an older advisory is held when the vendor revised it later, not the ones published beside it)";
+const WINDOW_DESCRIPTION = `vendor, advisories (how many EchelonGraph holds from that vendor), earliest_vendor_published_at and latest_vendor_published_at (the earliest and latest vendor_published_at among them, null when none is held), ${HELD_SINCE_DESCRIPTION} and ${HISTORY_BACKFILL_DESCRIPTION}`;
 const NOT_HELD_DESCRIPTION =
-  "An advisory a vendor published before its earliest_vendor_published_at is not held, so no advisory from a vendor is not a finding that it published none.";
+  "An advisory a vendor published before its held_since may not be held, even when its earliest_vendor_published_at is older, so no advisory from a vendor is not a finding that it published none.";
 // #2728: how a search matches, and its capped total.
 const SEARCH_MATCH_DESCRIPTION =
   "A query of 3 or more characters is matched case-insensitively as a substring of each advisory's title, description, vendor name, vendor_advisory_id, affected_products and cve_ids (search_match substring). A query of 1 or 2 characters matches whole words only (search_match word): it must equal, ignoring case, a whole word (a run of letters and digits) of one of those, so xz finds xz-utils but not xzibit, and a 1- or 2-character query with any other character, such as c#, matches nothing.";
@@ -259,8 +293,14 @@ const VendorWindowSchema = z.strictObject({
   earliest_vendor_published_at: z
     .string()
     .nullable()
-    .describe("The earliest vendor_published_at among them; null when none is held. An advisory this vendor published before it is not held."),
+    .describe("The earliest vendor_published_at among them; null when none is held. Not where the window begins: see held_since."),
   latest_vendor_published_at: z.string().nullable().describe("The latest vendor_published_at among them; null when none is held."),
+  held_since: z
+    .string()
+    .nullable()
+    .describe(
+      "The start of the window EchelonGraph has read this vendor's advisories from; null when none is held or the API does not say. An advisory this vendor published before it may not be held, even when earliest_vendor_published_at is older.",
+    ),
   // The four values the API sends today, and any later one as a string: a new state must not turn
   // the answer into a failure.
   history_backfill: z
@@ -306,7 +346,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
         .array(z.string())
         .nullable()
         .describe(
-          "The vendors with no advisory in this answer that may have published one EchelonGraph does not hold: none held, the earliest held dated after 1 January of cve_year, or history_backfill in_progress or not_started. No advisory from them is not a finding that they published none. null when the windows could not be read.",
+          "The vendors with no advisory in this answer that may have published one EchelonGraph does not hold: none held, held_since after 1 January of cve_year or not known, or history_backfill in_progress or not_started. No advisory from them is not a finding that they published none. null when the windows could not be read.",
         ),
     }),
     freshness: null,
@@ -554,7 +594,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "vendor_advisories_for_cve",
     {
       title: "Vendor advisories for one CVE",
-      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_display_name, vendor_advisory_id, title, severity and cvss_v3_score where the vendor gives them. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means that none of the advisories EchelonGraph holds from those feeds names the CVE, not that no vendor published one (see vendor_windows and vendors_not_fully_held). ${DATES_DESCRIPTION} Pass a CVE ID like CVE-2024-21412. coverage gives returned, cap and at_cap (true: the answer is full, so there may be more); cve_year, the year in the CVE ID; vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}; and vendors_not_fully_held, the vendors with no advisory in the answer of which EchelonGraph holds none, whose earliest held advisory is dated after 1 January of cve_year, or whose history is still being read, which the note names. ${NOT_HELD_DESCRIPTION} vendor_windows and vendors_not_fully_held are null when the windows could not be read, and the note says so. measured_at is null. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
+      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_display_name, vendor_advisory_id, title, severity and cvss_v3_score where the vendor gives them. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means that none of the advisories EchelonGraph holds from those feeds names the CVE, not that no vendor published one (see vendor_windows and vendors_not_fully_held). ${DATES_DESCRIPTION} Pass a CVE ID like CVE-2024-21412. coverage gives returned, cap and at_cap (true: the answer is full, so there may be more); cve_year, the year in the CVE ID; vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}; and vendors_not_fully_held, the vendors with no advisory in the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known, or whose history is still being read, which the note names. ${NOT_HELD_DESCRIPTION} vendor_windows and vendors_not_fully_held are null when the windows could not be read, and the note says so. measured_at is null. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
       inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2024-21412") }),
       outputSchema: FOR_CVE_OUTPUT,
       annotations: kit.annotations,

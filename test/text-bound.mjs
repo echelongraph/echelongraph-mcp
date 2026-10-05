@@ -53,6 +53,12 @@ export function assertBoundUnderCeiling(label, size) {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const LIVE_RECORD = path.join(HERE, "fixtures", "text-bound-live.json");
 export const PROD_ANSWERS = path.join(HERE, "fixtures", "prod-answers");
+// #2822: the source text-bound-live.mjs writes when it re-measures the answers kept here
+// (--answers test/fixtures/prod-answers): probe-prod's answers, read when they were kept.
+export const KEPT_SOURCE = "probe-prod answers kept in fixtures/prod-answers";
+// Every source text-bound-live.mjs writes into the record, and nothing else: a source written by
+// hand is not one of these (#2822).
+export const RECORD_SOURCE = /^(probe-prod|probe-prod answers kept in fixtures\/prod-answers|answers in \S.*|hosted https?:\/\/\S+, its data replayed to this checkout's server|the hosted endpoint's own text \(.+\), not this checkout's)$/;
 
 /** The tools whose answer is production-wide (no input), measured live, and the API paths each one reads. */
 export const LIVE_TOOLS = {
@@ -72,6 +78,26 @@ export const answerFile = (apiPath) => path.join(PROD_ANSWERS, `${apiPath.replac
 export function readLiveRecord() {
   return JSON.parse(fs.readFileSync(LIVE_RECORD, "utf8"));
 }
+
+/**
+ * #2822: each SHAPED case measured on kept production answers (`kept`) whose size is more than
+ * MARGIN from the record's total for that tool, with the size to set. The suite measures those
+ * answers on every run and holds the text within MARGIN of the case's size, so a re-record that
+ * moves the total without moving the size fails the release; text-bound-live.mjs --record names
+ * them and exits 1, and text-bound.test.mjs fails on them, each saying what to set.
+ */
+export function keptSizesOffRecord(record = readLiveRecord()) {
+  return SHAPED.filter((c) => c.kept && record.tools?.[c.kept] && Math.abs(c.size - record.tools[c.kept].total) > MARGIN).map((c) => ({
+    label: c.label,
+    size: c.size,
+    total: record.tools[c.kept].total,
+    measured_at: record.tools[c.kept].measured_at,
+  }));
+}
+
+/** What to do about one keptSizesOffRecord entry. */
+export const setKeptSize = (o) =>
+  `${o.label}: SHAPED's size is ${o.size}, but the record (${o.measured_at}) measured ${o.total}, more than MARGIN ${MARGIN} away: set its size to ${o.total} in test/text-bound.mjs, run npm test, and commit it with the record`;
 
 /** The kept production answers for `tool`, as stub overrides (request URL -> body); undefined when any is missing. */
 export function keptAnswers(tool) {
@@ -111,7 +137,22 @@ export function keptAnswers(tool) {
 //   resource a resource read instead of a tool call (cve://{cve_id}, #2801): its text is measured,
 //            under the same ceiling; `tool` is then the tool whose answer it reads.
 //   live     set: text-bound-live.mjs does not measure it on production, and why.
+//   annotate {list: {key, values, otherwise}}: fields set on each row of `list` by the value of its
+//            field `key` (values[row[key]], else otherwise): an answer field production does not
+//            serve yet, on production's rows (#2817).
 export const SHAPED_DIR = path.join(HERE, "fixtures", "prod-shaped");
+// #2817: the ranges of OSV GHSA-jfh8-c2jp-5v3q (CVE-2021-44228) per package, as core-backend's
+// fixed_branches serves them (cve/fixed_branches.go: fixed and last_affected kept apart, each null
+// when absent, and each range naming the OSV record that published it, advisory_id and source).
+// log4j-core's are in the record's order; the order of the others does not change the size.
+const range = (introduced, fixed, last_affected = null) => ({ introduced, fixed, last_affected, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" });
+export const LOG4SHELL_FIXED_BRANCHES = {
+  "org.apache.logging.log4j:log4j-core": { fixed_branches: [range("2.13.0", "2.15.0"), range("2.0-beta9", "2.3.1"), range("2.4", "2.12.2")] },
+  "org.ops4j.pax.logging:pax-logging-log4j2": { fixed_branches: [range("1.8.0", "1.9.2"), range("1.10.0", "1.10.8"), range("1.11.0", "1.11.10"), range("2.0.0", "2.0.11")] },
+  "com.guicedee.services:log4j-core": { fixed_branches: [range("0", null, "1.2.1.2-jre17")] },
+  "org.xbib.elasticsearch:log4j": { fixed_branches: [] },
+  "uk.co.nichesolutions.logging.log4j:log4j-core": { fixed_branches: [] },
+};
 const JUICE_SHOP = path.join(HERE, "fixtures", "juice-shop-11.1.2-50.cdx.json");
 // 2,000 distinct purls, check_sbom's most per call (MAX_PURLS).
 export const SBOM_MAX_PURLS = 2000;
@@ -136,7 +177,7 @@ export const SHAPED = [
     size: 23_705,
   },
   { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_365 },
-  { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 40_997 },
+  { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 41_315 },
   { label: "kev_recent, default page (limit 50)", tool: "kev_recent", page: "default", args: {}, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 50 }, set: { limit: 50, count: 50 }, size: 29_160 },
   { label: "kev_recent, largest page (limit 200)", tool: "kev_recent", page: "max", args: { limit: 200 }, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 200 }, set: { limit: 200, count: 200 }, size: 31_854 },
   { label: "epss_history, CVE-2021-44228", tool: "epss_history", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "epss_history", answers: ["CVE-2021-44228"], size: 2_379 },
@@ -183,7 +224,34 @@ export const SHAPED = [
     live: "it spends production's whole budget of 1,200 components a minute per caller and is then refused; the suite measures the same rows, repeated, and the 429",
     size: 36_534,
   },
-  { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 14_511 },
+  // #2817: production's answer after core-backend with #2817 was deployed and before the OSV
+  // backfill has run (prod-shaped/cve_intel.json, read again 2026-10-05T07:38Z): every
+  // affected_packages row carries fixed_branches, each range with source and advisory_id null
+  // (log4j-core: [2.0-beta9, 2.3.1), [2.4, 2.12.2), [2.13.0, 2.15.0)), and the answer carries
+  // failed_sections []. 17,355 characters, production's own text for the call (text-bound-live.mjs,
+  // 2026-10-05T07:37:21Z); through the 2026-10-04 read, with no fixed_branches and no
+  // failed_sections, it was 14,693.
+  { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 17_355 },
+  // #2817: the same rows once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE, pending) has filled
+  // each range's record: the ranges of GHSA-jfh8-c2jp-5v3q (api.osv.dev, 2026-10-05) with
+  // advisory_id and source, log4j-core's three in the record's order, pax-logging-log4j2's four,
+  // guicedee's one range with a last_affected bound, and [] for the two packages the record gives no
+  // range; the Debian rows keep production's own ranges (otherwise {}), source and advisory_id null,
+  // since this case does not know their record. 17,539 characters, under the 30,000 ceiling (17,001
+  // when built on the 2026-10-04 read, the Debian rows then set to null). Not measured on production
+  // (live) until the backfill has run: re-measure there then (text-bound-live.mjs).
+  {
+    label: "cve_intel, CVE-2021-44228, with fixed_branches (#2817)",
+    tool: "cve_intel",
+    page: "default",
+    args: { cve_id: "CVE-2021-44228" },
+    fixture: "cve_intel",
+    answers: ["CVE-2021-44228"],
+    repeat: { timeline: 100 },
+    annotate: { affected_packages: { key: "package_name", values: LOG4SHELL_FIXED_BRANCHES, otherwise: {} } },
+    live: "production's rows with each range's advisory_id and source, which production serves only once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE) has run",
+    size: 17_539,
+  },
   { label: "get_cwe, CWE-79", tool: "get_cwe", page: "default", args: { cwe_id: "CWE-79" }, fixture: "get_cwe", answers: ["CWE-79"], repeat: { cves: 50 }, size: 28_716 },
   // #2800 review: no answer the API serves reaches get_cwe's cut. It cuts each row's description to
   // 240 characters (core-backend cve/cwe_landing_store.go ListCVEsByCWE) in pages of 50, so a page
@@ -202,12 +270,15 @@ export const SHAPED = [
     live: "a forced cut: no page the API serves reaches it (each row's description is cut to 240 characters at the source)",
     size: 20_018,
   },
-  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 14_850 },
+  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 15_405 },
   // #2800 review: nor does any answer reach vendor_advisories_for_cve's cut: the API sends at most 20
   // advisories for a CVE (core-backend vendoradv/store.go ListAdvisoriesByCVE, LIMIT 20), each
   // without summary, affected_products or cve_ids: CVE-2021-44228's 20 are 9,753 characters of
   // pretty JSON.
   // Its cut levels are search_vendor_advisories' (ROW_CUT_LEVELS), but its TextCut is its own.
+  // #2803: re-measured for held_since. The coverage answer in the fixture is 2.6.4's API, which has
+  // no held_since, so each vendor with no complete history read is written "not known to be
+  // without a gap" and relayed with held_since null (the two search cases below likewise).
   // Forced: CVE-2021-44228's rows, each title twenty times over.
   {
     label: "vendor_advisories_for_cve, CVE-2021-44228, each title twenty times over (a forced cut)",
@@ -219,11 +290,11 @@ export const SHAPED = [
     stretch: { advisories: { title: 20 } },
     extra: ["coverage"],
     live: "a forced cut: no answer the API serves reaches it (at most 20 advisories, each a few hundred characters)",
-    size: 14_290,
+    size: 14_845,
   },
   { label: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", page: "default", args: { vendor: "aws", advisory_id: "2026-098-AWS" }, fixture: "get_vendor_advisory", answers: ["aws 2026-098-AWS"], extra: ["coverage"], size: 3_038 },
-  { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 33_396 },
-  { label: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", page: "max", args: { query: "log4j", limit: 50 }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 50 }, set: { limit: 50 }, extra: ["coverage"], size: 22_268 },
+  { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 33_676 },
+  { label: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", page: "max", args: { query: "log4j", limit: 50 }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 50 }, set: { limit: 50 }, extra: ["coverage"], size: 22_548 },
 ];
 
 // How far a case's size may be from production's text for the same call, as text-bound-live.mjs
@@ -268,6 +339,7 @@ export function shapedAnswers(c) {
     let body = { ...a.body, ...(c.set ?? {}) };
     for (const [key, n] of Object.entries(c.repeat ?? {})) body[key] = cycled(a.body[key], n);
     for (const [key, fields] of Object.entries(c.stretch ?? {})) body[key] = body[key].map((r) => stretched(r, fields));
+    for (const [key, { key: by, values, otherwise }] of Object.entries(c.annotate ?? {})) body[key] = body[key].map((r) => ({ ...r, ...(values[r[by]] ?? otherwise) }));
     if (c.recount) body = recounted(body);
     out[a.path] = body;
   }

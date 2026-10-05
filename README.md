@@ -34,21 +34,32 @@ API call a tool needs to answer.
 ## Quick start
 
 The local server runs through `npx` and needs Node.js 20 or later; nothing is installed
-globally. Add one of the blocks below to your client, restart it, then ask: *"Is
+globally. Claude Desktop's one-click extension, below, needs neither. Add one of the blocks below to your client, restart it, then ask: *"Is
 CVE-2023-44487 actively exploited, and how many exposed services does EchelonGraph's radar
 have on record for it?"*
 
 ### Claude Desktop
 
-Two ways in. The first needs nothing installed; the second runs the server on your machine.
+Three ways in. The first two need no Node.js: a one-click extension that runs the server on your
+machine, and a custom connector to the hosted endpoint. The third runs the server through `npx`.
 
-**1. Custom connector (no install).** Claude Desktop uses your claude.ai account's connectors:
+**1. [Install in Claude Desktop](https://github.com/echelongraph/echelongraph-mcp/releases/latest/download/echelongraph-mcp.mcpb)
+(one click, no Node.js).** The link downloads `echelongraph-mcp.mcpb`, a Claude Desktop extension.
+Open it, or in Claude Desktop choose Settings → Extensions → Advanced settings → Install Extension
+and pick it, then choose **Install**. Claude Desktop runs the server with the Node.js it ships and
+writes its own configuration: no PATH and no JSON to edit. To update, install the next release's
+bundle the same way. Every new release on GitHub carries the bundle (releases up to 2.6.5 do not),
+built from the release's tag by the workflow that publishes the npm package, and signed with a SLSA
+build-provenance attestation. To check a download:
+`gh attestation verify echelongraph-mcp.mcpb --repo echelongraph/echelongraph-mcp`.
+
+**2. Custom connector (no install).** Claude Desktop uses your claude.ai account's connectors:
 Customize → Connectors → **+ Add** → **Add custom connector**. Name it `EchelonGraph`, paste
 `https://mcp.echelongraph.io/mcp`, choose **No sign in**, and add it. No Node.js, no PATH and no
 JSON to edit. A connector added on claude.ai shows up in Claude Desktop too, and the plan rules
 are claude.ai's (see "Remote (no install)" below).
 
-**2. Local server through `npx`.**
+**3. Local server through `npx`.**
 
 1. **Check Node.js.** In Terminal (macOS) or PowerShell (Windows), run `node -v`. It must print
    `v20` or later. If it prints an older version or `command not found`, install the LTS release
@@ -228,7 +239,7 @@ The example questions are ones a client can answer with that tool alone.
 | `epss_history` | EPSS change history for one CVE | How one CVE's EPSS score has changed, as EchelonGraph recorded it: one point per recorded change (`series_kind` `change_only`), never a daily series, with the value now and `series_starts_at`, when recording began; before it a missing point means not recorded, not unchanged. | *How has CVE-2023-44487's EPSS score changed, as EchelonGraph recorded it?* |
 | `check_affected` | Am I affected? (product or package at a version) | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed`, and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. | *Is openssl 3.0.0 affected by known CVEs? Is lodash 4.17.15 on npm?* |
 | `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 2,000 distinct purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it by the MCP server and only they are sent to the API, in POST bodies of at most 200 each, one after another; the document itself is not sent on. Run from npm, the server is on your machine; over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the document is the request body. When the API's per-component rate limit answers 429, the tool waits the `Retry-After` it names, within 50 seconds per call; past that it answers what it has, with the purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and the list in `data.not_sent_purls`, never dropped silently. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
-| `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
+| `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. Each `affected_packages` row carries `fixed_branches`, every affected range of the package with its fix (`introduced`, and `fixed` or, where no fix is on record, `last_affected`), each naming the OSV record that published it (`advisory_id`, `source`) and in that record's order: an installed version's fix is the `fixed` of the range that holds it, compared in the ecosystem's version order. `fixed_version` is one range's fix, kept for compatibility, not the fix for every range (CVE-2021-44228's log4j-core: 2.12.2, the fix for 2.4 to 2.12.1, while 2.14.1's range is fixed in 2.15.0); `fixed_branches` is null where a package's ranges were never loaded, and `[]` where no version range is on record, which is not a finding that no fix exists. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
 | `get_cwe` | CWE and its CVEs | One CWE (weakness class) and the CVEs classified under it: `name` and `description` from the MITRE CWE catalog EchelonGraph embeds, `total`, and one page of 50 `cves`, ordered as `order` states (CISA-KEV-listed first, then EchelonGraph score). A `total` of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. | *Which CVEs are classified under CWE-79, CISA-KEV-listed first?* |
 | `vendor_advisories_for_cve` | Vendor advisories for one CVE | The vendor-published advisories (Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks, GitHub GHSA and the other feeds EchelonGraph polls) that name one CVE, newest first, at most 20. | *Which vendor advisories name CVE-2024-3400?* |
 | `get_vendor_advisory` | Vendor advisory detail | One vendor advisory in full: description, severity, `cve_ids` and the subset with a CVE record here (`known_cve_ids`), `affected_products`, `remediation` and `references`. | *Show one of those advisories in full: affected products, remediation and references.* |
@@ -237,6 +248,18 @@ The example questions are ones a client can answer with that tool alone.
 The three vendor-advisory tools relay `vendor_published_at` (the vendor's date), `our_first_seen_at`
 (when EchelonGraph first recorded the advisory) and `withdrawn` (the vendor rescinded it; the note
 names each one, and the search leaves them out).
+
+Each also relays every vendor's window in `coverage` (`vendor_windows`, or `vendor_window` for the
+detail): the advisories held, the earliest and latest `vendor_published_at` among them,
+`held_since` and `history_backfill`. `held_since` is the start of the window EchelonGraph has read the
+vendor's advisories from: one published before it may not be held. For a vendor with no history read (`history_backfill`
+`not_supported`) it can be years after the earliest advisory held: Cisco's poller first read the
+advisories Cisco had changed in the last 90 days, Red Hat's and GitHub's the last 7, so an older
+advisory the vendor revised later is held while the ones published beside it are not.
+`vendor_advisories_for_cve` lists in `vendors_not_fully_held` each vendor with no advisory in the
+answer of which EchelonGraph holds none, whose `held_since` is after 1 January of the CVE ID's year
+or not known, or whose history is still being read: no advisory from such a vendor is not a finding
+that it published none.
 
 Every figure is as fresh as the schedule that refreshes it. The CVE feed is polled from its
 sources on a schedule; each radar refreshes on its own.
@@ -443,8 +466,9 @@ feed, matched by hostname pattern; no Shodan data is used. Each is checked by Ec
 identified MCP probe: a `server/discover` request, and `initialize` only if that is refused. It
 never sends `tools/call`. The answer is counts and timestamps only, with no hostname, version or
 server name, and the tool repeats no string it carries but its timestamps. Each hostname is
-counted once, by its latest verdict on record, and EchelonGraph's own control servers are left
-out. The unit is a hostname, not an ip:port service.
+counted once, by its latest verdict on record. EchelonGraph's own control servers are left
+out, and so is every hostname whose owner opted out of scanning, since it is not checked again
+while the opt-out stands and its last verdict cannot be re-checked. The unit is a hostname, not an ip:port service.
 
 | Field | What it counts |
 |---|---|
@@ -454,6 +478,7 @@ out. The unit is a hostname, not an ip:port service.
 | `mcp_servers.pending_readjudication` | Verdicts decided by a rule EchelonGraph has since replaced and not yet re-checked under the current rules. They are in neither `mcp_servers.protected` nor `mcp_servers.not_assessed`. |
 | `mcp_servers.not_assessed` | The rest, whose protection the radar could not assess. Not assessed does not mean unprotected. `mcp_servers.not_assessed_by_reason` puts each of them in exactly one bucket (below). |
 | `mcp_servers.own_controls_excluded` | EchelonGraph's own control servers, left out of every other `mcp_servers` number. |
+| `mcp_servers.withheld_opted_out` | Hostnames whose owner opted out of scanning, left out of every other `mcp_servers` number. Such a hostname is not checked again while the opt-out stands, so its last verdict cannot be re-checked; the API's unparameterised answer withholds the same hostnames under the same name. An answer that does not carry this field (an API that predates it) counted them, and the note says so. |
 | `mcp_servers.window.from`, `mcp_servers.window.to` | Timestamps, not counts: when the oldest and the newest of the verdicts counted were last checked. The counts are each hostname's latest verdict, not one sweep at one time. With no verdict counted there is no window. |
 | `mcp_servers.last_run_at` | A timestamp, not a count: when the AI-exposure radar, which checks other AI services as well as MCP servers, last completed a check (a cycle whose reads succeeded and whose scan opt-out register answered). It is not the time of every verdict counted. |
 | `mcp_servers.enabled` | Whether the API reports the radar running: true when a check completed within 45 minutes of its answer. |
@@ -544,10 +569,10 @@ never "not affected", and each figure cites its `measured_at`. A prompt makes no
 
 | Prompt | Arguments | What it asks the model to do |
 |---|---|---|
-| `triage_cve` | `cve_id` | `get_cve` (with CISA's due date, `kev_due_date`, when the CVE is KEV-listed), `cve_intel`, `vendor_advisories_for_cve`, `epss_history` and `cve_exposure`, then a decision template: exploited, likelihood, reachable, patch, deadline, decision. The patch line gives `cve_intel`'s `fixed_version` as what it records for the package, one per package (the advisory's last range's), never as the fix for every affected branch, and points to `get_cve`'s references tagged Vendor Advisory or Patch for a branch's fix. |
+| `triage_cve` | `cve_id` | `get_cve` (with CISA's due date, `kev_due_date`, when the CVE is KEV-listed), `cve_intel`, `vendor_advisories_for_cve`, `epss_history` and `cve_exposure`, then a decision template: exploited, likelihood, reachable, patch, deadline, decision. The patch line gives each affected range with its fix from `cve_intel`'s `fixed_branches`; where a package has none, it gives `fixed_version` as what `cve_intel` records for the package, one per package (the advisory's last range's as a rule), never as the fix for every affected branch, and points to `get_cve`'s references tagged Vendor Advisory or Patch for a branch's fix. |
 | `kev_weekly_brief` | `days` (1 to 365, default 7) | Work out the start date from `days`, page through `kev_recent` from it 50 rows a page, and write a brief grouped by vendor with ransomware flags and due dates. |
 | `am_i_affected` | `product`, or `ecosystem` and `package`; `version` | `check_affected`, read `assessed` before `count`, with the not-assessed wording. |
-| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom` (and, once more, the purls a rate limit or the time budget left unsent: `data.not_sent_purls`, or, where the text cuts that list, the document's purls from the position and in the order its note gives), read each component's ecosystem, package and version from its purl, as `check_sbom` maps them (every purl type it maps, and `deb`, `apk`, `alpine` and `rpm` by a `distro` qualifier naming a Debian, Ubuntu or Alpine release; any other is unknown, and given no fixed version), look up each affected CVE with `get_cve` and `cve_intel`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. A fixed version is given where it is above the component's installed version: the advisory interval in `check_sbom`'s `match_reason` first, else `cve_intel`'s `fixed_version`, which is one per package (the advisory's last range's) and need not be the fix on the component's branch; otherwise the line says the results give no fixed version for that branch and points to the CVE's advisory. |
+| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom` (and, once more, the purls a rate limit or the time budget left unsent: `data.not_sent_purls`, or, where the text cuts that list, the document's purls from the position and in the order its note gives), read each component's ecosystem, package and version from its purl, as `check_sbom` maps them (every purl type it maps, and `deb`, `apk`, `alpine` and `rpm` by a `distro` qualifier naming a Debian, Ubuntu or Alpine release; any other is unknown, and given no fixed version), look up each affected CVE with `get_cve` and `cve_intel`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. A fixed version is given where it is above the component's installed version: the advisory interval in `check_sbom`'s `match_reason` first (B of `[A, B)`, a fixed bound; the B of `[A, B]`, read by its closing bracket alone, is the last affected version, still affected, and neither it nor any version at or below it is given; an interval clipped before its closing bracket gives none), else the `fixed` of the `cve_intel` `fixed_branches` range that holds the installed version, else, for a package without `fixed_branches`, `cve_intel`'s `fixed_version`, which is one per package (the advisory's last range's) and need not be the fix on the component's branch; otherwise the line says the results give no fixed version for that branch and points to the CVE's advisory. |
 
 ## Resources
 
@@ -631,7 +656,7 @@ pretty-printed and whole. The same answer is always cut the same way. The `cve:/
 resource cuts its `data` as `get_cve`'s first text block is cut, and says so in a note starting
 `DATA CUT`. The prompts ask only for what the text keeps: `kev_weekly_brief` reads `kev_recent`
 50 rows a page, which the text holds whole; `triage_cve` reads CISA's due date from `get_cve`;
-and `sbom_review` reads fixed versions from `cve_intel`.
+and `sbom_review` reads fixed versions from `cve_intel`, the fix of each affected range in `fixed_branches`.
 
 ## Structured results
 
@@ -768,7 +793,11 @@ only those to the API, and neither logs nor keeps the document. To keep the docu
 machine, run the npm package, or pass `check_sbom` the purls. When a client passes the
 per-client limit it logs that client's address key. It passes your client's public address to
 the API, in a header the API trusts only with a token it checks, so the API's rate limit counts
-you and not the hosted service.
+you and not the hosted service. The API's access line then records each of those calls under
+your address (an IPv6 address by its /64) with its URL path: for a CVE, CWE or advisory lookup,
+the ID you asked about. It does not record the query string or the header-carried terms above
+(for `search_cves`, whether a term was given and its length, not the term), and of `check_sbom`'s
+purls it records how many, not which.
 
 EchelonGraph's privacy policy: <https://echelongraph.io/privacy>.
 
@@ -808,6 +837,16 @@ instance serves at most 64 requests at once; the next waits up to 10 seconds for
 and is then answered the same way. A `subscriptions/listen` stream, which stays open until its
 client leaves, is not one of the 64.
 
+A call whose client goes away (its own timeout, a closed tab) is stopped only once the server
+learns of it. Its API calls are then cancelled, `check_sbom` sends no further batch, and its
+large-body slot is freed. Over HTTP/1.1, Cloud Run does not pass a client's disconnect on to the
+server at all (<https://docs.cloud.google.com/run/docs/troubleshooting>). The hosted endpoint
+speaks HTTP/2 to Cloud Run, where the same page says a disconnect is passed on. Measured on
+2026-10-05, Cloud Run reset the stream of a client that stopped reading its answer 15 s in, and the
+call was logged as a client that closed. Whether a client that aborts mid-call is passed on at once
+has not been observed yet. Until it is, an abandoned `check_sbom` call may run for up to its
+50-second budget and hold its slot that long.
+
 ## Configuration
 
 The npm package (stdio):
@@ -835,6 +874,7 @@ It reads the three variables above and:
 | `MCP_LARGE_BODY_SLOTS` | `2` | How many bodies over `MCP_MAX_BODY_BYTES` it reads and serves at once; past that, 503 with `Retry-After`. |
 | `MCP_MAX_IN_FLIGHT` | `64` | How many requests it serves at once, not counting `subscriptions/listen` streams; the next, its body read, waits. |
 | `MCP_ADMISSION_WAIT_MS` | `10000` | How long a request waits to be served before it is answered 503 with `Retry-After`. |
+| `MCP_H2C` | unset | `1`: serve HTTP/2 cleartext (h2c, prior knowledge) instead of HTTP/1.1, as Cloud Run's `--use-http2` requires; an HTTP/1.1 request then gets no answer. Over h2c, a stream the client resets stops its call. |
 | `ECHELONGRAPH_FORWARD_TOKEN`, `ECHELONGRAPH_FORWARD_HOST`, `MCP_REQUIRE_FORWARD_TOKEN` | unset | EchelonGraph's hosted deployment only: the token with which it names each client to the API. Leave them unset when you run it yourself; the API then counts every request as coming from your server. |
 
 ## Develop

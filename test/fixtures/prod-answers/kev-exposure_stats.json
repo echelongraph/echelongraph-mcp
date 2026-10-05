@@ -1,136 +1,136 @@
 {
-  "distinct_hosts": 23017,
+  "distinct_hosts": 23334,
   "kev_cves_exposed": 58,
-  "correlations": 68191,
+  "correlations": 69406,
   "ransomware_cves": 24,
-  "ransomware_hosts": 6298,
+  "ransomware_hosts": 6387,
   "top_products": [
     {
       "product": "tomcat",
-      "hosts": 5713
+      "hosts": 5821
     },
     {
       "product": "mongodb",
-      "hosts": 3831
+      "hosts": 3919
     },
     {
       "product": "netscaler_gateway",
-      "hosts": 3522
+      "hosts": 3543
     },
     {
       "product": "esxi",
-      "hosts": 2978
+      "hosts": 2982
     },
     {
       "product": "http_server",
-      "hosts": 2351
+      "hosts": 2418
     },
     {
       "product": "jenkins",
-      "hosts": 1602
+      "hosts": 1645
     },
     {
       "product": "nginx",
-      "hosts": 1398
+      "hosts": 1406
     },
     {
       "product": "wordpress",
-      "hosts": 1178
+      "hosts": 1151
     },
     {
       "product": "fortios",
-      "hosts": 276
+      "hosts": 278
     },
     {
       "product": "internet_information_services",
-      "hosts": 131
+      "hosts": 134
     },
     {
       "product": "pan-os",
-      "hosts": 46
+      "hosts": 44
     }
   ],
   "top_cves": [
     {
       "cve_id": "CVE-2025-24813",
-      "hosts": 5713,
+      "hosts": 5821,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
       "epss_score": 0.99927
     },
     {
       "cve_id": "CVE-2023-44487",
-      "hosts": 5450,
+      "hosts": 5570,
       "severity": "HIGH",
       "cvss_v3_score": 7.5,
       "epss_score": 0.99999
     },
     {
       "cve_id": "CVE-2016-8735",
-      "hosts": 5399,
+      "hosts": 5505,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
       "epss_score": 0.90338
     },
     {
       "cve_id": "CVE-2025-14847",
-      "hosts": 3831,
+      "hosts": 3919,
       "severity": "HIGH",
       "cvss_v3_score": 7.5,
       "epss_score": 0.83218
     },
     {
       "cve_id": "CVE-2026-19490",
-      "hosts": 3486,
+      "hosts": 3508,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
       "epss_score": 0.23158
     },
     {
       "cve_id": "CVE-2026-3055",
-      "hosts": 3486,
+      "hosts": 3508,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
       "epss_score": 0.87166
     },
     {
       "cve_id": "CVE-2026-8452",
-      "hosts": 3486,
+      "hosts": 3508,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
       "epss_score": 0.01606
     },
     {
       "cve_id": "CVE-2025-7775",
-      "hosts": 3340,
+      "hosts": 3358,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
-      "epss_score": 0.19631
+      "epss_score": 0.20284
     },
     {
       "cve_id": "CVE-2023-6548",
-      "hosts": 3309,
+      "hosts": 3327,
       "severity": "MEDIUM",
       "cvss_v3_score": 5.5,
       "epss_score": 0.03191
     },
     {
       "cve_id": "CVE-2023-6549",
-      "hosts": 3309,
+      "hosts": 3327,
       "severity": "HIGH",
       "cvss_v3_score": 8.2,
       "epss_score": 0.57633
     },
     {
       "cve_id": "CVE-2025-6543",
-      "hosts": 3301,
+      "hosts": 3322,
       "severity": "CRITICAL",
       "cvss_v3_score": 9.8,
       "epss_score": 0.10562
     },
     {
       "cve_id": "CVE-2025-5777",
-      "hosts": 3298,
+      "hosts": 3318,
       "severity": "HIGH",
       "cvss_v3_score": 7.5,
       "epss_score": 0.99972,
@@ -140,46 +140,55 @@
   "top_countries": [
     {
       "country": "United States",
-      "hosts": 4431
+      "hosts": 4496
     },
     {
       "country": "China",
-      "hosts": 2895
+      "hosts": 2962
     },
     {
       "country": "Germany",
-      "hosts": 2796
+      "hosts": 2855
     },
     {
       "country": "Australia",
-      "hosts": 1524
+      "hosts": 1528
     },
     {
       "country": "France",
-      "hosts": 1090
+      "hosts": 1119
     },
     {
       "country": "Korea, Republic of",
-      "hosts": 798
+      "hosts": 800
     },
     {
       "country": "Japan",
-      "hosts": 769
+      "hosts": 770
     },
     {
       "country": "Brazil",
-      "hosts": 756
-    },
-    {
-      "country": "United Kingdom",
-      "hosts": 582
+      "hosts": 760
     },
     {
       "country": "India",
-      "hosts": 579
+      "hosts": 593
+    },
+    {
+      "country": "United Kingdom",
+      "hosts": 580
     }
   ],
   "newest_kev": [
+    {
+      "cve_id": "CVE-2026-88779",
+      "added_date": "2026-10-04",
+      "severity": "HIGH",
+      "cvss_v3_score": 8.7,
+      "epss_score": 0.00276,
+      "vuln_name": "Citrix NetScaler Improper Restriction of Operations within the Bounds of a Memory Buffer Vulnerability",
+      "exposed_hosts": 0
+    },
     {
       "cve_id": "CVE-2026-102489",
       "added_date": "2026-10-02",
@@ -232,7 +241,7 @@
       "cvss_v3_score": 9.8,
       "epss_score": 0.01063,
       "vuln_name": "Citrix NetScaler Improper Input Validation Vulnerability",
-      "exposed_hosts": 1451
+      "exposed_hosts": 1694
     },
     {
       "cve_id": "CVE-2026-88772",
@@ -241,7 +250,7 @@
       "cvss_v3_score": 8.1,
       "epss_score": 0.01301,
       "vuln_name": "Citrix NetScaler Improper Restriction of Operations within the Bounds of a Memory Buffer Vulnerability",
-      "exposed_hosts": 1451
+      "exposed_hosts": 1694
     },
     {
       "cve_id": "CVE-2026-65660",
@@ -259,7 +268,7 @@
       "cvss_v3_score": 8.1,
       "epss_score": 0.45501,
       "vuln_name": "WordPress Core Remote File Inclusion Vulnerability",
-      "exposed_hosts": 407
+      "exposed_hosts": 420
     },
     {
       "cve_id": "CVE-2026-67279",
@@ -305,61 +314,48 @@
       "epss_score": 0.07546,
       "vuln_name": "Check Point Multiple Products Improper Certificate Validation Vulnerability",
       "exposed_hosts": 0
-    },
-    {
-      "cve_id": "CVE-2026-93616",
-      "added_date": "2026-09-22",
-      "severity": "CRITICAL",
-      "cvss_v3_score": 9.8,
-      "epss_score": 0.19654,
-      "vuln_name": "Check Point Multiple Products Path Traversal Vulnerability",
-      "exposed_hosts": 0
     }
   ],
   "trend": [
     {
-      "week": "2026-07-06",
-      "new_exposures": 1
-    },
-    {
       "week": "2026-07-13",
-      "new_exposures": 43
+      "new_exposures": 42
     },
     {
       "week": "2026-07-20",
-      "new_exposures": 36
+      "new_exposures": 34
     },
     {
       "week": "2026-07-27",
-      "new_exposures": 417
+      "new_exposures": 408
     },
     {
       "week": "2026-08-03",
-      "new_exposures": 367
+      "new_exposures": 361
     },
     {
       "week": "2026-08-10",
-      "new_exposures": 652
+      "new_exposures": 639
     },
     {
       "week": "2026-08-17",
-      "new_exposures": 4040
+      "new_exposures": 3967
     },
     {
       "week": "2026-08-24",
-      "new_exposures": 3064
+      "new_exposures": 2949
     },
     {
       "week": "2026-08-31",
-      "new_exposures": 7507
+      "new_exposures": 7459
     },
     {
       "week": "2026-09-07",
-      "new_exposures": 6230
+      "new_exposures": 4894
     },
     {
       "week": "2026-09-14",
-      "new_exposures": 15929
+      "new_exposures": 15928
     },
     {
       "week": "2026-09-21",
@@ -367,10 +363,14 @@
     },
     {
       "week": "2026-09-28",
-      "new_exposures": 13522
+      "new_exposures": 15111
+    },
+    {
+      "week": "2026-10-05",
+      "new_exposures": 1234
     }
   ],
-  "generated_at": "2026-10-04T10:18:00.12223972Z",
-  "last_run_at": "2026-10-04T09:39:41Z",
+  "generated_at": "2026-10-05T07:36:49.349480384Z",
+  "last_run_at": "2026-10-05T06:49:53Z",
   "attribution": "The services counted here are derived from Shodan data: Shodan banner matches, re-checked against Shodan InternetDB. Shodan data is owned by Shodan, which holds its copyright (© Shodan). EchelonGraph claims no ownership of it or copyright in it."
 }

@@ -6,6 +6,114 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.6.6 — 2026-10-05
+
+- Correction to 2.6.5 (#2775). Its entry says: "On the hosted endpoint it is the client going away
+  (its own timeout, a closed tab): every API call of that request is cancelled". That was not true
+  of the hosted endpoint. Cloud Run does not pass a client's disconnect on to a container it
+  speaks HTTP/1.1 to ("When you use HTTP/1.1 on Cloud Run, client disconnect events are not
+  propagated to the Cloud Run container",
+  <https://docs.cloud.google.com/run/docs/troubleshooting>). In production on 2026-10-05, four
+  `check_sbom` calls had their client abort after 0.4 s or 1.5 s. Each was logged `status` 200
+  with `client_closed` false and ran to its end, 2.0 to 5.3 s. Together they held both large-body
+  slots, so a large body sent 1 s later was answered 503. The same page says HTTP/2 does pass the
+  disconnect on. So `dist/http.js` now serves HTTP/2 cleartext (h2c) when `MCP_H2C=1`, and the
+  hosted deployment sets it together with Cloud Run's `--use-http2`. With that flag, Cloud Run
+  speaks only h2c to the container. The server acts on a reset stream the moment it arrives, with
+  any error code including `NO_ERROR`: the API calls are cancelled, `check_sbom` sends no further
+  batch and ends a `Retry-After` wait, the large-body slot is freed, and the `mcp_request` line
+  says `status` 499 with `client_closed` true. What Cloud Run forwards is only partly measured.
+  On test deployments with `--use-http2` on 2026-10-05, ordinary calls, sessions and `/health`
+  were all answered over h2c. A client that stopped reading a streamed answer had its stream reset
+  by Cloud Run 15 s in (`rst_code` 2), and that was logged 499. A client that aborts mid-call
+  before any answer was not observed, because every probe call was answered first, so whether
+  Cloud Run forwards that reset at once is not yet shown. Until it is, an abandoned call may still
+  run to its end, a `check_sbom` call for at most its 50-second budget, holding its slot. A new line, `mcp_client_gone`,
+  records when the server learned the client went: `after_ms` from the request's start, whether
+  the answer had started (`answer_started`), and an HTTP/2 stream's `rst_code`. It holds nothing
+  of the request. Run yourself, `dist/http.js` speaks HTTP/1.1 as before. With `MCP_H2C=1` it
+  speaks h2c with prior knowledge only, and an HTTP/1.1 request gets no answer.
+- README, "Privacy: what is sent where": the hosted endpoint's paragraph now also says what the API logs
+  of the calls it makes for you (#2797): each under your address, with its URL path (for a CVE, CWE or
+  advisory lookup, the ID), and not its query string, the header-carried terms or which purls. The
+  privacy policy's new Section 11, https://echelongraph.io/privacy#hosted-mcp-endpoint , says the same.
+- `exposure_radar` relays and labels `mcp_servers.withheld_opted_out` (#2822): how many hostnames
+  whose owner opted out of scanning the API left out of every other `mcp_servers` number. Such a
+  hostname is not checked again while the opt-out stands, so its last verdict cannot be re-checked;
+  the API now withholds it from the MCP-server counts as its unparameterised AI-exposure answer
+  already did. An answer without the field, from an API that predates it, counted those hostnames,
+  and the note says so instead of reading the absence as 0; a value that is not a whole number is
+  left out and named.
+- Claude Desktop in one click (#2815). From this release on, every GitHub release of
+  [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp/releases)
+  carries `echelongraph-mcp.mcpb`, a Claude Desktop extension: open it and choose Install. It needs
+  no Node.js on your machine, since Claude Desktop runs it with the Node.js it ships, and no JSON to edit.
+  The README's Claude Desktop section links it as "Install in Claude Desktop", ahead of the custom
+  connector and the `npx` setup. The release workflow builds it from the release tag, the same tag
+  the npm package is published from: `listings/mcpb/build.sh` validates the manifest with the pinned
+  MCPB CLI and packs. Then, on a separate read-only runner that never ran the MCPB CLI,
+  `listings/mcpb/check-bundle.mjs` refuses a bundle that holds a top-level file `build.sh` does not
+  stage, a symlink, or a file where `build.sh` stages a directory; that lacks the icon or entry point
+  its manifest names, or `node_modules/`; whose `package.json`, `LICENSE`, `README.md` or `dist/` is not the tested npm
+  tarball's, byte for byte (a file changed, missing or added); whose `node_modules/` adds or changes
+  a file a production install from the lockfile does not have; that is at another version; or whose
+  own server, started with `PATH`, `HOME` and `ECHELONGRAPH_API_BASE` only (none of the caller's
+  `NODE_PATH`, `NODE_OPTIONS` or other variables), does not list the
+  manifest's 14 tools with their titles. npm publishes only after that check passes, so a manifest
+  or bundle defect stops the release before npm has the version. A separate job, which runs no
+  dependency code, signs the checked bundle with a SLSA build-provenance attestation (Sigstore,
+  keyless), attaches it and its Sigstore bundle to the release, each on its own, and checks the
+  file the release serves with `gh attestation verify`. To check a download yourself:
+  `gh attestation verify echelongraph-mcp.mcpb --repo echelongraph/echelongraph-mcp`.
+  Releases up to 2.6.5 carry no bundle.
+- Repository only, not in the package: `listings/mcpb/check-bundle.mjs` and
+  `test/mcpb-release.test.mjs`; `test/mcp-stdio-client.mjs` takes a `cwd`.
+- `sbom_review` reads the advisory interval in `check_sbom`'s `match_reason` by its closing
+  bracket, without the hedge of 2.6.5 and earlier. `[A, B)` is a fixed bound: B, the first version the advisory
+  records as not affected, is given as the fixed version (`[A, ∞)` names none). `[A, B] (B is the
+  last affected version, not a fix)` is an OSV `last_affected` bound: B is still affected and the
+  range records no fix, so neither B nor any version at or below it is given as a fixed version.
+  The bracket alone decides: a cut text clips `match_reason` to 200 characters, which can drop the
+  words after it for a long package name, and where it is clipped before the closing bracket
+  (`[A, B…`), no fixed version is taken from that `match_reason`.
+  Through 2.6.5 core-backend rendered both bounds as `[A, B)`, so the prompt gave B only as "the
+  end of that interval"; core-backend now renders a `last_affected` bound closed (#2830). This
+  wording assumes the API serves the new rendering: it is released after core-backend is deployed.
+- `cve_intel` relays `fixed_branches` on each `affected_packages` row: every affected range of the
+  package on record, each with `introduced` and `fixed` (the range's fix) or, where no fix is on
+  record, `last_affected` (never in a field named fixed), and with `advisory_id` (the OSV record that
+  published the range) and `source` (the loader's label for that record), from core-backend's
+  `/api/v1/public/cves/:id/enrichment` since #2817. Ranges that name their record are in the order
+  the record lists them; ranges loaded before the record was stored (both null) are oldest first.
+  `fixed_branches` is null where a package's ranges were never loaded, and `[]` where no version
+  range is on record (none in the advisory, only commit ranges, or more than are stored), which is
+  not a finding that no fix exists. `fixed_version` is one range's fix per package,
+  kept for compatibility: for CVE-2021-44228 production served log4j-core 2.12.2 alone (2026-10-04),
+  the fix for 2.4 to 2.12.1, older than an affected 2.14.1, while the advisory
+  (GHSA-jfh8-c2jp-5v3q) gives three ranges, fixed in 2.3.1, 2.12.2 and 2.15.0. The description says
+  how to pick the range for an installed version, and the note counts the rows with more than one
+  range, and those with no range on record (`fixed_branches` null, or `[]` beside a `fixed_version`),
+  where `fixed_version` is all the answer holds. An API older than #2817 is said to be one (#2817).
+- `triage_cve`'s patch line gives each affected range with its fix from `fixed_branches`, and
+  `fixed_version` only for a package without them; `sbom_review` gives a component the fix of the
+  `fixed_branches` range that holds its installed version (log4j-core 2.14.1: 2.15.0), after the
+  advisory interval in `check_sbom`'s `match_reason`, and `fixed_version` only for a package without
+  `fixed_branches` (#2817).
+- `vendor_advisories_for_cve`, `search_vendor_advisories` and `get_vendor_advisory` relay each
+  vendor's `held_since`, which the coverage API now serves: the start of the window EchelonGraph has
+  read the vendor's advisories from, before which an advisory may not be held.
+  `vendors_not_fully_held` reads it, not the earliest held advisory. For a vendor with no history read
+  the earliest held advisory is not where its window begins: Cisco's poller first read the advisories
+  Cisco had changed in the last 90 days, Red Hat's and GitHub's the last 7, so an older advisory the
+  vendor revised later is held while the ones published beside it are not. Cisco's earliest held
+  advisory is dated 2024-10-23 and Red Hat's 2009-02-04, so CVE-2025-20188 left out Cisco and
+  CVE-2014-0160 left out Red Hat, and their empty answers read as the vendor having published nothing;
+  both are listed now. GitHub is now listed too for any CVE ID year that begins before the start of
+  its first poll's 7-day window (`held_since`), not only for years up to that of its earliest held
+  advisory (2017). Against an API without `held_since`, a vendor is taken as held from its earliest
+  advisory only when its history read is complete, and otherwise listed, its window written "not known
+  to be without a gap" (#2803).
+
 ## 2.6.5 — 2026-10-05
 
 2.6.4 was tagged and never published: its Release run failed `test/http-memory.test.mjs` on Node 24,
