@@ -821,7 +821,7 @@ The npm package (stdio):
 The HTTP entrypoint, `dist/http.js` (`npm run start:http`), serves the same tools over
 Streamable HTTP on `POST /mcp`, with a liveness check on `GET /health`. In a container with
 little memory, start it with V8's heap capped below the container's limit, as EchelonGraph's
-hosted deployment does at half of 256 MiB (`node --max-old-space-size=128 dist/http.js`): Node
+hosted deployment does at half of 256 MiB (`node --max-old-space-size=128 --max-semi-space-size=16 dist/http.js`): Node
 otherwise sizes its heap from the memory the system reports, which in a container can be the
 host's, and the container is then killed before V8 collects.
 It reads the three variables above and:

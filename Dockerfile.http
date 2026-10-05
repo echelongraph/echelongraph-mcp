@@ -35,4 +35,8 @@ EXPOSE 8080
 # reports is not verified (one that reports 256 MiB gets a default near this cap already): the
 # start-up line's heap_limit_mb says what a revision runs with. httpPolicy.ts "Requests in flight
 # per instance" has the measurements, and test/http-memory.test.mjs runs http.js with these flags.
-CMD ["node", "--max-old-space-size=128", "dist/http.js"]
+# --max-semi-space-size=16 pins the young generation at Node 22's own default, so the heap limit
+# is 176 MiB on Node 22 AND on Node 24. Node 24 sizes the semi-space from the host as well: with
+# the old-space cap alone it allowed 320 MiB, over the 256 MiB instance (measured 2026-10-05,
+# v8 heap_size_limit; the v2.6.4 Release run, on Node 24, failed http-memory.test.mjs on it).
+CMD ["node", "--max-old-space-size=128", "--max-semi-space-size=16", "dist/http.js"]

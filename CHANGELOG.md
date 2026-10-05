@@ -6,7 +6,15 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
-## 2.6.4 — 2026-10-04
+## 2.6.5 — 2026-10-05
+
+2.6.4 was tagged and never published: its Release run failed `test/http-memory.test.mjs` on Node 24,
+where `--max-old-space-size=128` alone allowed a 320 MiB heap in a 256 MiB instance. 2.6.5 is 2.6.4
+plus the fix below; the `v2.6.4` tag stays, unpublished, because a tag is never moved.
+
+- Hosted endpoint only: `Dockerfile.http` also passes `--max-semi-space-size=16`, so V8's heap limit is
+  176 MiB on Node 22 (unchanged: the production image) and on Node 24 (was 320 MiB). The memory cap of
+  #2773 now holds whichever Node the image uses.
 
 - README: the header links the directories that list this server, Smithery and Glama (#2723). Smithery's
   verification looks for that link; `test/listings.test.mjs` pins it.
