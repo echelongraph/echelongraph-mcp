@@ -102,11 +102,15 @@ describe("bounded access-log fields", () => {
 });
 
 describe("#2747: the request-body caps and the large-body slots", () => {
-  it("the large cap is for check_sbom alone, above its document cap and below Cloud Run's 32 MiB", async () => {
+  it("the large cap is for check_sbom and scan_manifest alone, above their content caps and below Cloud Run's 32 MiB", async () => {
     const S = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
-    assert.deepEqual(P.LARGE_BODY_TARGETS, { "tools/call": S.CHECK_SBOM, "prompts/get": "sbom_review" });
+    // #2835: scan_manifest takes a project's lockfiles, up to the same number of characters.
+    const M = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "scan_manifest.js")).href);
+    assert.deepEqual(P.LARGE_BODY_TARGETS, { "tools/call": [S.CHECK_SBOM, M.SCAN_MANIFEST], "prompts/get": ["sbom_review"] });
     assert.equal(P.DEFAULT_MAX_BODY_BYTES, 64 * 1024);
     assert.ok(P.DEFAULT_MAX_SBOM_BODY_BYTES > S.MAX_SBOM_CHARS, "a document at check_sbom's own cap could never arrive");
+    assert.ok(P.DEFAULT_MAX_SBOM_BODY_BYTES > M.MAX_MANIFEST_CHARS, "lockfiles at scan_manifest's own cap could never arrive");
+    assert.equal(P.LARGE_BODY_TARGETS_TEXT, "a tools/call of check_sbom or scan_manifest, or a prompts/get of sbom_review");
     assert.ok(P.DEFAULT_MAX_SBOM_BODY_BYTES < 32 * 1024 * 1024, "over Cloud Run's HTTP/1 request limit");
   });
   it("largeBodyAdmissible: absent headers, or a target named by them, may be large; any other named method or name may not", () => {
@@ -114,9 +118,14 @@ describe("#2747: the request-body caps and the large-body slots", () => {
     assert.equal(P.largeBodyAdmissible("tools/call", "check_sbom"), true);
     assert.equal(P.largeBodyAdmissible("tools/call", undefined), true);
     assert.equal(P.largeBodyAdmissible("prompts/get", "sbom_review"), true);
+    assert.equal(P.largeBodyAdmissible("tools/call", "scan_manifest"), true);
+    assert.equal(P.largeBodyAdmissible(undefined, "scan_manifest"), true);
+    assert.equal(P.largeBodyAdmissible("prompts/get", "scan_manifest"), false);
     assert.equal(P.largeBodyAdmissible("tools/call", "cve_summary"), false);
     assert.equal(P.largeBodyAdmissible("tools/call", "sbom_review"), false);
     assert.equal(P.largeBodyAdmissible("prompts/get", "check_sbom"), false);
+    // #2846: workload_triage takes no workload data (one optional source word), so it is no large-body target.
+    assert.equal(P.largeBodyAdmissible("prompts/get", "workload_triage"), false);
     assert.equal(P.largeBodyAdmissible("tools/list", undefined), false);
     assert.equal(P.largeBodyAdmissible("initialize", "check_sbom"), false);
     assert.equal(P.largeBodyAdmissible("toString", undefined), false);
@@ -126,7 +135,10 @@ describe("#2747: the request-body caps and the large-body slots", () => {
     const b = (o) => P.bodyFacts(Buffer.from(JSON.stringify(o)));
     assert.equal(P.isLargeBodyTarget(b({ method: "tools/call", params: { name: "check_sbom" } })), true);
     assert.equal(P.isLargeBodyTarget(b({ method: "prompts/get", params: { name: "sbom_review" } })), true);
+    assert.equal(P.isLargeBodyTarget(b({ method: "tools/call", params: { name: "scan_manifest" } })), true);
+    assert.equal(P.isLargeBodyTarget(b({ method: "prompts/get", params: { name: "scan_manifest" } })), false);
     assert.equal(P.isLargeBodyTarget(b({ method: "tools/call", params: { name: "sbom_review" } })), false);
+    assert.equal(P.isLargeBodyTarget(b({ method: "prompts/get", params: { name: "workload_triage" } })), false);
     assert.equal(P.isLargeBodyTarget(b({ method: "tools/list" })), false);
     assert.equal(P.isLargeBodyTarget(b([{ method: "tools/call", params: { name: "check_sbom" } }])), false, "a batch");
   });

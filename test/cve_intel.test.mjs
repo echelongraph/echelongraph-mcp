@@ -206,6 +206,17 @@ function schemaNames(s, out = new Set()) {
   for (const [k, x] of Object.entries(s)) if (k !== "enum" && k !== "description") schemaNames(x, out);
   return out;
 }
+// Every description string a schema holds, at any depth.
+function schemaDescriptions(s, out = []) {
+  if (Array.isArray(s)) for (const x of s) schemaDescriptions(x, out);
+  else if (s !== null && typeof s === "object") {
+    for (const [k, x] of Object.entries(s)) {
+      if (k === "description" && typeof x === "string") out.push(x);
+      else schemaDescriptions(x, out);
+    }
+  }
+  return out;
+}
 
 for (const era of ERAS) {
   describe(`#2720 cve_intel, get_cwe and get_cve's cpe_configurations [${era}]`, () => {
@@ -245,7 +256,9 @@ for (const era of ERAS) {
       // The full order is tools.test.mjs's LISTED; here, the two together, where createServer registers them.
       const names = tools.map((t) => t.name);
       const at = names.indexOf("check_sbom");
-      assert.deepEqual(names.slice(at, at + 3), ["check_sbom", "cve_intel", "get_cwe"]);
+      // #2841: cve_remediation is registered between them (cve_remediation.test.mjs); #2835:
+      // scan_manifest right after check_sbom (scan_manifest.test.mjs).
+      assert.deepEqual(names.slice(at, at + 5), ["check_sbom", "scan_manifest", "cve_intel", "cve_remediation", "get_cwe"]);
       for (const name of ["cve_intel", "get_cwe"]) {
         const t = tools.find((x) => x.name === name);
         assert.ok(t.title, name);
@@ -339,8 +352,13 @@ for (const era of ERAS) {
       assert.equal(core.fixed_branches[0].source, "osv_bulk");
       assertTextIsStructure("cve_intel fixed_branches", res);
 
-      // The description says how to pick the range for an installed version, and what fixed_version is.
-      const d = tools.find((t) => t.name === "cve_intel").description;
+      // The description says how to pick the range for an installed version, and what fixed_version is;
+      // since #2842 the rule in full is the outputSchema's description of fixed_branches, beside the
+      // description's head, which keeps the rule within the client cut.
+      const intel = tools.find((t) => t.name === "cve_intel");
+      const d = [intel.description, ...schemaDescriptions(intel.outputSchema)].join(" ");
+      assert.match(intel.description, /a version is in a range when it is at or above introduced \("0" is the first version\) and below fixed, or at or below last_affected; that range's fixed is the fix for it/);
+      assert.match(intel.description, /fixed_version is one range's fix, kept for compatibility, not the fix for every affected range/);
       assert.match(d, /affected_packages \(ecosystem, package_name, version_range, fixed_version, fixed_branches\)/);
       assert.match(d, /To pick the range for an installed version, compare in the ecosystem's version order/);
       assert.match(d, /at or above introduced \("0" is the first version\) and below fixed, or at or below last_affected; that range's fixed is the fix for it/);

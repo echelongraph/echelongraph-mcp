@@ -347,6 +347,44 @@ describe("hosted-endpoint disclosure of the check_sbom document (#2796)", () => 
     }
     assert.deepEqual(privacyDenials(privacySection()).denials, []);
   });
+
+  // #2835: scan_manifest takes a project's files, which over the hosted endpoint are the request
+  // body as check_sbom's document is: its tools/list entry and its README Tools row are held to the
+  // same list (#2796, #2831, #2795), and each must say where the files go.
+  const manifestEntry = () => {
+    const e = tools.find((t) => t.name === "scan_manifest");
+    assert.ok(e?.description, "tools/list has no scan_manifest: re-aim this check");
+    return e;
+  };
+  const manifestRow = () => {
+    const rows = (README.split(/^## Tools$/m)[1]?.split(/^## /m)[0] ?? "").split("\n").filter((l) => l.startsWith("| `scan_manifest` |"));
+    assert.equal(rows.length, 1, "the README Tools table has no single scan_manifest row: re-aim this check");
+    return rows[0];
+  };
+  const MANIFEST_HOSTED = "over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body";
+  it("#2835: scan_manifest's entry says the hosted endpoint receives the files as the request body, and no string of it denies they are sent", () => {
+    const e = manifestEntry();
+    assert.ok(e.description.includes(MANIFEST_HOSTED), e.description);
+    assert.ok(e.inputSchema.properties.files.description.includes("over the hosted endpoint (mcp.echelongraph.io) the files are the request body"));
+    assert.deepEqual(entryDenials(e), []);
+  });
+  it("#2835: the README Tools table's scan_manifest row says the same, and denies nothing", () => {
+    const row = manifestRow();
+    assert.ok(row.includes("over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the files are the request body"), row);
+    assert.deepEqual(rowDenials(row), []);
+  });
+  it("#2835 control: a denial in scan_manifest's description, its files argument or its Tools row is caught", () => {
+    const e = manifestEntry();
+    const ON = "; filenames and file contents are not sent on.";
+    assert.ok(e.description.includes(ON), "scan_manifest's sentence changed: re-aim this control");
+    const row = manifestRow();
+    const ROW_ON = "; filenames and file contents are not sent on.";
+    assert.ok(row.includes(ROW_ON), "the Tools row's sentence changed: re-aim this control");
+    for (const bad of [...DENIAL_VARIANTS, "the files never leave your machine.", "The lockfile is read locally."]) {
+      assert.notDeepEqual(entryDenials({ ...e, description: e.description.replace(ON, `; ${bad}`) }), [], `the description passes: ${bad}`);
+      assert.notDeepEqual(rowDenials(row.replace(ROW_ON, `; ${bad}`)), [], `the Tools row passes: ${bad}`);
+    }
+  });
 });
 
 // #2771: cve_summary leaves out a poller field the answer sends in another JSON type, and a poller

@@ -60,6 +60,20 @@ const DETAIL = {
   withdrawn_reason: "",
 };
 const DETAIL_WITHDRAWN = { ...DETAIL, vendor_advisory_id: "RHSA-2024:0001", withdrawn: true, withdrawn_at: "2024-03-01T00:00:00Z", withdrawn_reason: "superseded" };
+// #2865: CVE-2026-7936, rejected at CVE.org while MSRC's entry reads as a normal advisory.
+const CVE_REJ = "CVE-2026-7936";
+const CVE_LIVE = "CVE-2026-7937";
+const CVE_UNCHECKED = "CVE-2026-7938";
+const REJ_ROW = row({ vendor_advisory_id: CVE_REJ, title: "Chromium: CVE-2026-7936 Object lifecycle issue in V8", rejected_cve_ids: [CVE_REJ] });
+// A Red Hat erratum naming the rejected CVE and another rejected one.
+const REJ_MULTI = row({ vendor: "redhat", vendor_display_name: "Red Hat", vendor_advisory_id: "RHSA-2026:0099", cve_ids: [CVE_REJ, "CVE-2026-0001", "CVE-2024-21412"], rejected_cve_ids: [CVE_REJ, "CVE-2026-0001"] });
+const DETAIL_REJ = {
+  ...DETAIL,
+  vendor_advisory_id: "RHSA-2026:0100",
+  cve_ids: ["CVE-2024-21412", "CVE-2026-0001"],
+  known_cve_ids: ["CVE-2024-21412"],
+  rejected_cve_ids: ["CVE-2026-0001"],
+};
 
 // #2729: GET /api/v1/public/vendor-advisories/coverage as core-backend's CoverageHandler writes it
 // (vendors by slug; "" for a date that does not exist), in production's shape on 2026-10-04 before
@@ -116,6 +130,12 @@ async function startStub() {
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE}`) return send(200, { cve_id: CVE, advisories: [row(), WITHDRAWN], total: 2 });
     for (const empty of [CVE_3400, CVE_OLD, CVE_20188, CVE_HEARTBLEED]) if (pathname === `/api/v1/public/vendor-advisories/by-cve/${empty}`) return send(200, { cve_id: empty, advisories: [], total: 0 });
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_FULL}`) return send(200, { cve_id: CVE_FULL, advisories: Array.from({ length: 20 }, () => row()), total: 20 });
+    // #2865
+    if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_REJ}`) return send(200, { cve_id: CVE_REJ, cve_rejected: true, advisories: [REJ_ROW, REJ_MULTI], total: 2 });
+    if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_LIVE}`) return send(200, { cve_id: CVE_LIVE, cve_rejected: false, advisories: [row({ vendor_advisory_id: CVE_LIVE, rejected_cve_ids: [] })], total: 1 });
+    if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_UNCHECKED}`) return send(200, { cve_id: CVE_UNCHECKED, cve_rejected: null, advisories: [row({ vendor_advisory_id: CVE_UNCHECKED, rejected_cve_ids: null })], total: 1 });
+    if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2026%3A0100") return send(200, DETAIL_REJ);
+    if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2026%3A0101") return send(200, { ...DETAIL_REJ, vendor_advisory_id: "RHSA-2026:0101", rejected_cve_ids: [] });
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_NONE}`) return send(200, { cve_id: CVE_NONE, advisories: [], total: 0 });
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2024%3A1234") return send(200, DETAIL);
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2024%3A0001") return send(200, DETAIL_WITHDRAWN);
@@ -496,7 +516,8 @@ for (const era of [MODERN, "2025-06-18"]) {
       }
       assert.ok(d("vendor_advisories_for_cve").includes("vendors_not_fully_held"));
       for (const n of ["vendor_advisories_for_cve", "search_vendor_advisories"]) {
-        assert.ok(d(n).includes("An advisory a vendor published before its held_since may not be held, even when its earliest_vendor_published_at is older, so no advisory from a vendor is not a finding that it published none."), n);
+        // #2842: the short form within the client cut; the full sentence is the windows' outputSchema description.
+        assert.ok(d(n).includes("An advisory published before its vendor's held_since may not be held, so no advisory from a vendor is not a finding that it published none."), n);
         // #2803: no description says the window begins at the earliest held advisory.
         assert.doesNotMatch(d(n), /before its earliest_vendor_published_at is not held|earliest held advisory is dated after/, n);
       }
@@ -569,6 +590,75 @@ for (const era of [MODERN, "2025-06-18"]) {
       } finally {
         stub.state.coverage = COVERAGE;
       }
+    });
+
+    // #2865: an advisory that names a rejected CVE, while its vendor has not withdrawn it.
+    it("#2865: vendor_advisories_for_cve on a rejected CVE says so first, keeps the vendor's withdrawn, and names a multi-CVE row's other rejected ID", async () => {
+      const res = await call("vendor_advisories_for_cve", { cve_id: CVE_REJ });
+      assert.notEqual(res.isError, true, textOf(res));
+      const note = noteOf(res);
+      assert.ok(
+        note.startsWith(
+          `vendor_advisories_for_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. CVE REJECTED: the CVE record of ${CVE_REJ} was rejected (withdrawn) by its numbering authority (cve_rejected true). It is a rejected record, not an active vulnerability: report it that way, even where a vendor advisory below reads as a current one. 2 vendor advisories name ${CVE_REJ}.`,
+        ),
+        note,
+      );
+      // The Red Hat row's other rejected CVE is named; the queried one is not repeated per row.
+      assert.match(note, /CVE REJECTED: 1 of these 2 advisories, not withdrawn by its vendor, names a CVE ID whose CVE record was rejected \(withdrawn\) by its numbering authority \(rejected_cve_ids\): redhat\/RHSA-2026:0099 \(CVE-2026-0001\)\./);
+      assert.doesNotMatch(note, /WITHDRAWN:/, "the vendors did not withdraw these");
+      const data = res.structuredContent.data;
+      assert.equal(data.cve_rejected, true);
+      assert.deepEqual(data.advisories[0].rejected_cve_ids, [CVE_REJ]);
+      assert.equal(data.advisories[0].withdrawn, false);
+    });
+
+    it("#2865: controls: a CVE that is not rejected, and an API without the fields, add no CVE REJECTED note; an unchecked state is said to be unknown", async () => {
+      for (const cve of [CVE_LIVE, CVE]) {
+        const res = await call("vendor_advisories_for_cve", { cve_id: cve });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.doesNotMatch(noteOf(res), /CVE REJECTED|could not be checked/, `${cve}: ${noteOf(res)}`);
+      }
+      const res = await call("vendor_advisories_for_cve", { cve_id: CVE_UNCHECKED });
+      assert.notEqual(res.isError, true, textOf(res));
+      assert.match(noteOf(res), new RegExp(`Whether the CVE record of ${CVE_UNCHECKED} was rejected could not be checked \\(cve_rejected null\\), which is not a finding that it was not\\.`));
+      assert.doesNotMatch(noteOf(res), /CVE REJECTED/);
+    });
+
+    it("#2865: get_vendor_advisory names the rejected CVE IDs of a live advisory; [] adds nothing", async () => {
+      const res = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2026:0100" });
+      assert.notEqual(res.isError, true, textOf(res));
+      assert.match(
+        noteOf(res),
+        /Returned the advisory redhat\/RHSA-2026:0100\. CVE REJECTED: 1 of the CVE IDs it lists was rejected \(withdrawn\) by its numbering authority \(rejected_cve_ids\): CVE-2026-0001\. Report it as a rejected record, not as an active vulnerability, even though the vendor has not withdrawn this advisory and its text reads as a current one\./,
+      );
+      assert.deepEqual(res.structuredContent.data.rejected_cve_ids, ["CVE-2026-0001"]);
+      const none = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2026:0101" });
+      assert.notEqual(none.isError, true, textOf(none));
+      assert.doesNotMatch(noteOf(none), /CVE REJECTED|could not be checked/);
+    });
+
+    it("#2865: search_vendor_advisories names each listed advisory that names a rejected CVE, and not the others", async () => {
+      stub.state.searchApplied = true;
+      stub.state.list = { advisories: [REJ_ROW, row({ vendor_advisory_id: CVE_LIVE, rejected_cve_ids: [] }), row({ vendor_advisory_id: "CVE-2026-7939", rejected_cve_ids: null, cve_ids: ["CVE-2026-7939"] })], total: 3 };
+      try {
+        const res = await call("search_vendor_advisories", { vendor: "microsoft" });
+        assert.notEqual(res.isError, true, textOf(res));
+        const note = noteOf(res);
+        assert.match(note, /The list holds 3 vendor advisories; 3 returned in this page \(offset 0\)\. CVE REJECTED: 1 of these 3 advisories, not withdrawn by its vendor, names a CVE ID whose CVE record was rejected \(withdrawn\) by its numbering authority \(rejected_cve_ids\): microsoft\/CVE-2026-7936 \(CVE-2026-7936\)\./);
+        assert.doesNotMatch(note, new RegExp(CVE_LIVE));
+        assert.match(note, /For 1 of these advisories rejected_cve_ids is null: whether a CVE ID they name was rejected could not be checked, which is not a finding that none was\./);
+      } finally {
+        stub.state.list = {};
+      }
+    });
+
+    it("#2865: the three descriptions state rejected_cve_ids, and vendor_advisories_for_cve states cve_rejected", async () => {
+      const { tools } = await client.listTools();
+      for (const name of ["vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"]) {
+        const d = tools.find((t) => t.name === name).description;
+        assert.match(d, /rejected_cve_ids: the CVE IDs it names whose CVE record was rejected \(withdrawn\) by its numbering authority/, name);
+      }
+      assert.match(tools.find((t) => t.name === "vendor_advisories_for_cve").description, /cve_rejected is true when the CVE record of the CVE asked for was rejected/);
     });
 
     it("every structuredContent received validates against its tool's outputSchema (ajv)", () => {

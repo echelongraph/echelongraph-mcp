@@ -59,9 +59,10 @@ const PLAIN = {
   am_i_affected: ["count", "assessed", "capped", "degraded", "ransomware"],
   sbom_review: ["verdict", "purl", "summary", "ecosystem", "package", "version", "references"],
   triage_cve: ["severity", "cwes", "exploits", "references"],
+  workload_triage: ["verdict", "purl", "ransomware"],
 };
 // Snake_case words a prompt uses as values, not fields.
-const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input"]);
+const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source"]);
 
 // sbom_review's step 2: a component's ecosystem, package and version read from its purl, as the
 // prompt says (and as core-backend's matcher maps a purl: cve/matchbatch.go purlNameVersion,
@@ -124,6 +125,34 @@ const DERIVED = {
 // (text-bound.mjs SHAPED), which the prompts now read.
 const INTEL_2817 = "cve_intel, CVE-2021-44228, with fixed_branches (#2817)";
 const LOG4J = { label:"check_sbom, log4j-core 2.14.1 (one purl)", args: { purls: ["pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"] }, fixture: "check_sbom-log4j-core", answers: ["batch"] };
+// #2834: LOG4J's answer with the fields core-backend adds to each registry match since #2834
+// (cve/pkgmatch.go): fixed_in, the fixed bound of the interval that holds 2.14.1, and interval; or
+// fixed_in null with fixed_in_reason. Production's answer (2026-10-05) does not carry them yet, so
+// these are set here: the Log4Shell family's fixes for the 2.13.0 branch, and null for the rest.
+const LOG4J_FIXED_IN = {
+  "CVE-2021-44228": "2.15.0",
+  "CVE-2021-45046": "2.16.0",
+  "CVE-2021-45105": "2.17.0",
+  "CVE-2021-44832": "2.17.1",
+};
+const withFixedIn = (answers, fixes = LOG4J_FIXED_IN) =>
+  Object.fromEntries(
+    Object.entries(answers).map(([path, body]) => [
+      path,
+      {
+        ...body,
+        results: body.results.map((r) => ({
+          ...r,
+          matches: (r.matches ?? []).map((m) =>
+            Object.hasOwn(fixes, m.cve_id)
+              ? { ...m, fixed_in: fixes[m.cve_id], interval: { introduced: "2.13.0", fixed: fixes[m.cve_id] } }
+              : { ...m, fixed_in: null, fixed_in_reason: "no fixed version is recorded for the interval that holds this version" },
+          ),
+        })),
+      },
+    ]),
+  );
+const LOG4J_2834 = { ...LOG4J, label: "check_sbom, log4j-core 2.14.1, with fixed_in (#2834)" };
 
 // a < b, a = b or a > b (-1, 0, 1) for release versions of dot-separated numbers; undefined for
 // any other (a pre-release, a qualifier, a revision), which the prompt says not to give.
@@ -145,6 +174,14 @@ function releaseOrder(a, b) {
 const HALF_OPEN_END = /falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\)/;
 const LAST_AFFECTED = /falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\]/;
 function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
+  const above = (v, floor) => releaseOrder(v, floor) === 1;
+  // #2834: a match that has a fixed_in field decides: a version is the fix, null is none, and the
+  // rest of the rule is not read for that CVE.
+  const decided = (row.matches ?? []).filter((x) => x.cve_id === cve && Object.hasOwn(x, "fixed_in"));
+  if (decided.length) {
+    const fromFixedIn = decided.filter((m) => typeof m.fixed_in === "string").map((m) => ({ from: "fixed_in", version: m.fixed_in }));
+    return { candidates: fromFixedIn, offered: fromFixedIn.filter((c) => above(c.version, installed)) };
+  }
   const candidates = [];
   const lastAffected = [];
   for (const m of (row.matches ?? []).filter((x) => x.cve_id === cve)) {
@@ -174,7 +211,6 @@ function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
       if (r.ecosystem === ecosystem && r.package_name === pkg && r.fixed_version) candidates.push({ from: "cve_intel", version: r.fixed_version });
     }
   }
-  const above = (v, floor) => releaseOrder(v, floor) === 1;
   return { candidates, offered: candidates.filter((c) => above(c.version, installed) && lastAffected.every((l) => above(c.version, l))) };
 }
 
@@ -274,11 +310,26 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const django = caseOf("check_affected, PyPI django 1.11.0 (the registry path)");
     const [[djangoPath, djangoBody]] = Object.entries(shapedAnswers(django));
     const matches = Array.from({ length: 200 }, (_, i) => ({ ...djangoBody.matches[i % djangoBody.matches.length], cve_id: `CVE-2026-${String(20000 + i)}` }));
+    // #2834: registry matches carry fixed_in (a version, or null with fixed_in_reason), which the
+    // registry text names; production's django answer (2026-10-04) predates it, so it is set here,
+    // on django's own 29 matches. At the cap of 200 beside 50 undetermined, fixed_in costs about
+    // 22 characters a match and pushes 15 matches out of check_affected's text (29,871 characters,
+    // 185 of 200, measured 2026-10-05). No field of check_affected's last level can go, so its
+    // description says a registry list near the cap can leave its last matches out, and the note
+    // says how many (text-bound.test.mjs holds that case at the cap); the 200-match case below is
+    // held as production answered it before fixed_in.
+    const withFixedIn = Object.fromEntries(
+      Object.entries(shapedAnswers(django)).map(([p, body]) => [
+        p,
+        { ...body, matches: body.matches.map((m, i) => ({ ...m, ...(i % 4 === 3 ? { fixed_in: null, fixed_in_reason: "no fixed version is recorded for the interval that holds this version" } : { fixed_in: "2.2.28", interval: { introduced: "0", fixed: "2.2.28" } }) })) },
+      ]),
+    );
     const undetermined = Array.from({ length: 50 }, (_, i) => ({ cve_id: `CVE-2025-${String(30000 + i)}`, package: "django", ecosystem: "PyPI", reason: "collapsed_fix_boundary", detail: "the advisory's affected range collapses to its fix boundary" }));
     const inputs = [
       [{ product: "linux_kernel", version: "5.10.0" }, shapedAnswers(caseOf("check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)"))],
       [{ product: "flash_player", version: "10.0.0" }, shapedAnswers(caseOf("check_affected, flash_player 10.0.0 (200 matches and an excluded sample of 50)"))],
       [{ ecosystem: "PyPI", package: "django", version: "1.11.0" }, { [djangoPath]: { ...djangoBody, matches, cve_ids: matches.map((m) => m.cve_id), count: 200, capped: true, undetermined, undetermined_count: 73 } }],
+      [{ ecosystem: "PyPI", package: "django", version: "1.11.0" }, withFixedIn],
     ];
     const carried = new Set();
     let named;
@@ -286,12 +337,15 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
       const prompt = textOf(await client.getPrompt({ name: "am_i_affected", arguments: args }));
       named = namedFields("am_i_affected", prompt);
       for (const f of ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed"]) assert.ok(named.includes(f), `am_i_affected no longer names ${f}`);
+      // #2834: the registry text names fixed_in; the CPE text, whose matches carry none, does not.
+      assert.equal(named.includes("fixed_in"), args.product === undefined, `${JSON.stringify(args)}: fixed_in named ${named.includes("fixed_in")}`);
       const asked = JSON.parse(prompt.match(/1\. Call check_affected with these arguments: (\{.*\})\.\n/)?.[1] ?? "null");
       assert.deepEqual(asked, args);
       const res = await call("check_affected", asked, answers);
       const shown = JSON.parse(blocksOf(res)[0]);
       t.diagnostic(`${JSON.stringify(args)}: first text block ${blocksOf(res)[0].length} characters, ${shown.matches.length} matches, each with ${Object.keys(shown.matches[0]).join(", ")}`);
-      assert.equal(shown.matches.length, 200, `${JSON.stringify(args)}: matches left out of the text`);
+      assert.equal(shown.matches.length, res.structuredContent.data.matches.length, `${JSON.stringify(args)}: matches left out of the text`);
+      assert.ok(shown.matches.length === 200 || answers === withFixedIn, `${JSON.stringify(args)}: ${shown.matches.length} matches, not the cap of 200`);
       for (const f of heldTo(`check_affected ${JSON.stringify(args)}`, res, named)) carried.add(f);
     }
     allCarried(t, "am_i_affected", named, carried, ["check_affected"]);
@@ -319,7 +373,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify(doc);
     const prompt = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } }));
     const named = namedFields("sbom_review", prompt);
-    for (const f of ["verdict", "purl", "cve_ids", "not_assessed_reason", "summary", "not_sent", "not_sent_reason", "not_sent_purls", "fixed_version", "match_reason", "ecosystem", "package", "version"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
+    for (const f of ["verdict", "purl", "cve_ids", "not_assessed_reason", "summary", "not_sent", "not_sent_reason", "not_sent_purls", "fixed_in", "fixed_version", "match_reason", "ecosystem", "package", "version", "vendor_remediations", "remediation_kinds"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
     // The prompt passes the document as given.
     assert.ok(prompt.includes(`\`\`\`json\n${sbom}\n\`\`\``));
     assert.match(prompt, /data\.not_sent_purls lists them; where the note says the first text block cuts not_sent_purls to its first entries, rebuild the list from the document instead, as the note says: the document's distinct purls from the position the note gives on, counted in the order it gives\./);
@@ -367,11 +421,15 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     // log4j-core 2.14.1 (LOG4J).
     const small = await call("check_sbom", LOG4J.args, shapedAnswers(LOG4J));
     for (const f of heldTo(LOG4J.label, small, named, derived)) carried.add(f);
-    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817]) {
+    // #2834: the same, as core-backend answers since #2834, each match with fixed_in.
+    const small2834 = await call("check_sbom", LOG4J.args, withFixedIn(shapedAnswers(LOG4J)));
+    for (const f of heldTo(LOG4J_2834.label, small2834, named, derived)) carried.add(f);
+    // #2841: cve_remediation for the first CVEs of the list, on its longest production-shaped answer.
+    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817, "cve_remediation, CVE-2021-44228"]) {
       const c = caseOf(label);
       for (const f of heldTo(label, await call(c.tool, argsOf(c), shapedAnswers(c)), named, derived)) carried.add(f);
     }
-    allCarried(t, "sbom_review", named, carried, ["check_sbom", "get_cve", "cve_intel"]);
+    allCarried(t, "sbom_review", named, carried, ["check_sbom", "get_cve", "cve_intel", "cve_remediation"]);
   });
 
   // #2817: production's cve_intel for CVE-2021-44228 (prod-shaped/cve_intel.json, read again on the
@@ -606,6 +664,60 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed: "2.15.0" }).offered, [], "2.15.0 is in no range, and is given no fixed version");
   });
 
+  // #2834: sbom_review reads each match's fixed_in first. On LOG4J as core-backend answers since
+  // #2834, CVE-2021-44228's match carries fixed_in 2.15.0, the fix of the interval holding 2.14.1,
+  // and the rule gives it; a match whose fixed_in is null gives no fixed version, whatever cve_intel
+  // holds, where the rule without fixed_in (an API before #2834) would give cve_intel's value.
+  it("sbom_review's fix rule with fixed_in (#2834): a version is given, null gives none and stops the rule there", async (t) => {
+    const [purl] = LOG4J.args.purls;
+    const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
+    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
+    assert.match(own, /First, where the text keeps the component's match for the CVE and the match carries fixed_in: a version there is the fixed bound of the advisory interval that holds the installed version, so give it as the fixed version; null says the advisory records no fixed version for the installed version's range, so give none for that CVE on that component/);
+    assert.match(own, /Where the match has no fixed_in field, or the text keeps no match for the component, the rest of this rule applies\./);
+    const shown = async (answers) => JSON.parse(blocksOf(await call("check_sbom", LOG4J.args, answers))[0]).results[0];
+    const row = await shown(withFixedIn(shapedAnswers(LOG4J)));
+    const { ecosystem, package: pkg, version: installed } = fromPurl(row.purl);
+    const target = { ecosystem, pkg, installed };
+    const c = caseOf(INTEL_2817);
+    const intel = JSON.parse(blocksOf(await call("cve_intel", argsOf(c), shapedAnswers(c)))[0]);
+    // A version: given, from fixed_in.
+    assert.equal(row.matches.find((m) => m.cve_id === "CVE-2021-44228").fixed_in, "2.15.0", "check_sbom's text does not keep fixed_in");
+    assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, target).offered, [{ from: "fixed_in", version: "2.15.0" }]);
+    // null: none, though cve_intel would offer one.
+    const nulled = await shown(withFixedIn(shapedAnswers(LOG4J), {}));
+    const m = nulled.matches.find((x) => x.cve_id === "CVE-2021-44228");
+    assert.ok(Object.hasOwn(m, "fixed_in") && m.fixed_in === null, JSON.stringify(m));
+    t.diagnostic(`fixed_in null: ${JSON.stringify(fixRule(nulled, "CVE-2021-44228", intel, target))}`);
+    assert.deepEqual(fixRule(nulled, "CVE-2021-44228", intel, target), { candidates: [], offered: [] }, "a null fixed_in still gives a fixed version");
+    // Control: the same row without the fixed_in field reads the rest of the rule, and cve_intel's
+    // fixed_branches give 2.15.0, so the null case above is decided by fixed_in, not by the data.
+    const absent = { ...nulled, matches: nulled.matches.map(({ fixed_in, fixed_in_reason, interval, ...x }) => x) };
+    assert.deepEqual(fixRule(absent, "CVE-2021-44228", intel, target).offered, [{ from: "fixed_branches", version: "2.15.0" }]);
+  });
+
+  // #2846: workload_triage on check_sbom at its most per call, the cut that keeps cve_ids without
+  // matches among them, on LOG4J with fixed_in, and on get_cve, which it calls for the CVEs of a row
+  // whose matches the text leaves out.
+  it("workload_triage: each field it names is in the text of check_sbom (at 2,000 purls, and one purl with fixed_in) or get_cve", async (t) => {
+    const prompt = textOf(await client.getPrompt({ name: "workload_triage", arguments: {} }));
+    const named = namedFields("workload_triage", prompt);
+    for (const f of ["kev_listed", "ransomware", "epss_score", "fixed_in", "cve_ids", "kev_ransomware", "not_assessed_reason", "not_sent_purls"]) assert.ok(named.includes(f), `workload_triage no longer names ${f}`);
+    const carried = new Set();
+    const full = caseOf("check_sbom, 2,000 purls (10 batches of 200)");
+    const limited = caseOf("check_sbom, 2,000 purls, rate-limited after 6 batches (production's answer from a fresh budget)");
+    for (const c of [full, limited]) {
+      const res = await call("check_sbom", { purls: argsOf(full).purls }, shapedAnswers(c), c.limited);
+      const shown = JSON.parse(blocksOf(res)[0]);
+      // The leanest cut: cve_ids kept, matches left out, as step 5 says to read through get_cve.
+      assert.ok(shown.results.some((r) => r.verdict === "affected" && Array.isArray(r.cve_ids) && r.cve_ids.length && !Object.hasOwn(r, "matches")), `${c.label}: no affected row keeps cve_ids without matches`);
+      for (const f of heldTo(c.label, res, named)) carried.add(f);
+    }
+    for (const f of heldTo(LOG4J_2834.label, await call("check_sbom", LOG4J.args, withFixedIn(shapedAnswers(LOG4J))), named)) carried.add(f);
+    const g = caseOf("get_cve, CVE-2021-44228");
+    for (const f of heldTo(g.label, await call(g.tool, argsOf(g), shapedAnswers(g)), named)) carried.add(f);
+    allCarried(t, "workload_triage", named, carried, ["check_sbom", "get_cve"]);
+  });
+
   it("triage_cve: each tool it calls keeps, in its text, every field the prompt reads from it", async (t) => {
     const prompt = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: "CVE-2021-44228" } }));
     const named = namedFields("triage_cve", prompt);
@@ -613,7 +725,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     for (const f of ["kev_listed", "kev_added_date", "kev_due_date", "kev_ransomware"]) assert.ok(named.includes(f), `triage_cve no longer names ${f}`);
     const carried = new Set();
     const called = [];
-    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817, "vendor_advisories_for_cve, CVE-2021-44228", "get_vendor_advisory, aws 2026-098-AWS", "epss_history, CVE-2021-44228", "cve_exposure, CVE-2023-44487"]) {
+    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817, "cve_remediation, CVE-2021-44228", "vendor_advisories_for_cve, CVE-2021-44228", "get_vendor_advisory, aws 2026-098-AWS", "epss_history, CVE-2021-44228", "cve_exposure, CVE-2023-44487"]) {
       const c = caseOf(label);
       const held = heldTo(label, await call(c.tool, argsOf(c), shapedAnswers(c)), named);
       for (const f of held) carried.add(f);

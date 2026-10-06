@@ -192,9 +192,10 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
   }
 
   it("structuredContent.data is the API's answer whole, never the cut, wherever the tool relays the answer as sent", () => {
-    // exposure_radar and cve_intel relay their own cut of the answer (#2307, #2722), and check_sbom
-    // merges batches; every other tool's data is the one answer it read.
-    for (const c of TOOL_CASES.filter((x) => !["exposure_radar", "cve_intel"].includes(x.tool) && x.page !== "max" && x.tool !== "check_sbom")) {
+    // exposure_radar and cve_intel relay their own cut of the answer (#2307, #2722), check_sbom
+    // merges batches, and scan_manifest adds what it read of the files (#2835); every other tool's
+    // data is the one answer it read.
+    for (const c of TOOL_CASES.filter((x) => !["exposure_radar", "cve_intel"].includes(x.tool) && x.page !== "max" && !["check_sbom", "scan_manifest"].includes(x.tool))) {
       const [body] = Object.values(served[c.label]);
       assert.deepEqual(measured[c.label].structuredContent.data, body, c.label);
     }
@@ -234,10 +235,23 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
   // The registry path's largest answer: 200 matches (the cap), cve_ids naming each, and the
   // undetermined sample at its 50 (core-backend cve/pkgmatch.go maxUndeterminedReported), the
   // django rows repeated and the undetermined entries in the backend's UndeterminedMatch shape.
-  it("check_affected keeps every match at the registry path's largest answer: 200 matches, cve_ids and 50 undetermined, each match with ransomware and epss_score", async () => {
+  // #2834: each match as core-backend serves it from e732f635, with fixed_in, and with
+  // fixed_in_reason where fixed_in is null and interval where it is set (every fourth match null,
+  // as prompt-fields.test.mjs's am_i_affected case). fixed_in, which every level keeps, puts the last level's
+  // 200 rows alone past the budget, so the text keeps 185 of them (29,863 characters, 2026-10-05).
+  // The description said every match stays in the text, which held only before fixed_in; it now
+  // says a registry list near the cap can leave its last matches out, and the note says how many.
+  // Control: the description's earlier sentence ("so that every match stays in the text") fails it.
+  it("check_affected at the registry path's largest answer: 200 matches carrying fixed_in, cve_ids and 50 undetermined; the text and the description agree on which matches stay", async () => {
     const c = SHAPED.find((x) => x.label.startsWith("check_affected, PyPI django"));
     const [[path, body]] = Object.entries(shapedAnswers(c));
-    const matches = Array.from({ length: 200 }, (_, i) => ({ ...body.matches[i % body.matches.length], cve_id: `CVE-2026-${String(20000 + i)}` }));
+    const matches = Array.from({ length: 200 }, (_, i) => ({
+      ...body.matches[i % body.matches.length],
+      cve_id: `CVE-2026-${String(20000 + i)}`,
+      ...(i % 4 === 3
+        ? { fixed_in: null, fixed_in_reason: "interval ends at last_affected 1.11.29; no fixed version recorded" }
+        : { fixed_in: "2.2.28", interval: { introduced: "0", fixed: "2.2.28" } }),
+    }));
     const undetermined = Array.from({ length: 50 }, (_, i) => ({
       cve_id: `CVE-2025-${String(30000 + i)}`,
       package: "django",
@@ -252,8 +266,23 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     const [first, note] = blocksOf(res);
     const shown = JSON.parse(first);
     assert.ok(first.length <= DATA_TEXT_BUDGET);
-    assert.deepEqual(shown.matches.map((m) => m.cve_id), matches.map((m) => m.cve_id), "a match left the text");
-    for (const k of ["ransomware", "epss_score"]) assert.ok(shown.matches.every((m) => Object.hasOwn(m, k)), `a match in the text leaves out ${k}`);
+    // The matches in the text are the first of the answer's, in order, each with every field the
+    // description says a match keeps, fixed_in among them, null where the answer's is null.
+    const n = shown.matches.length;
+    assert.ok(n > 0 && n <= 200);
+    assert.deepEqual(shown.matches.map((m) => m.cve_id), matches.slice(0, n).map((m) => m.cve_id), "the matches in the text are not the answer's first, in order");
+    for (const k of ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in"]) {
+      assert.ok(shown.matches.every((m, i) => Object.hasOwn(m, k) && m[k] === matches[i][k]), `a match in the text leaves out or changes ${k}`);
+    }
+    // What the description says of the text is what the text holds.
+    const description = tools.find((x) => x.name === "check_affected").description;
+    if (n < 200) {
+      assert.doesNotMatch(description, /every match stays in the text/, `the text keeps ${n} of 200 registry matches, and the description says every match stays in the text`);
+      assert.match(description, /near the cap, a registry list's last matches can leave it, and the note says how many\./);
+      assert.match(note, new RegExp(`Only ${n} of the 200 rows of matches are in it; the other ${200 - n} are in structuredContent\\.data only, the last ${200 - n} in order\\.`));
+    } else {
+      assert.doesNotMatch(note, /Only \d+ of the \d+ rows of matches are in it/);
+    }
     assert.deepEqual(shown.undetermined, undetermined.slice(0, 10).map(({ cve_id, reason }) => ({ cve_id, reason })), "the undetermined sample does not keep its first 10 entries, each its cve_id and reason");
     assert.match(note, /In it, cve_ids keeps its first 10 of 200 entries\. cve_ids lists each match's cve_id, in the order of matches\./);
     assert.match(note, /In it, undetermined keeps its first 10 of 50 entries; each entry of undetermined in it leaves out package, ecosystem and detail\./);
@@ -358,7 +387,11 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       tool: "check_affected",
       rows: "matches",
       said: AT_LEAST,
-      fields: ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed"],
+      fields: ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in"],
+      // #2834: the production-shaped answers were recorded before the API sent fixed_in. Every
+      // level keeps it where an answer has it; once production's answers are re-measured with it,
+      // it leaves this list and is held present.
+      absent: ["fixed_in"],
       sides: { said: /the excluded and undetermined samples keep their first 10 entries, each its cve_id and reason/, lists: ["excluded", "undetermined"], fields: ["cve_id", "reason"] },
     },
     { tool: "check_sbom", rows: "results", said: AT_LEAST, fields: ["index", "purl", "verdict", "not_assessed_reason", "cve_ids"] },
@@ -400,6 +433,78 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       // Every field is one some case's answer has, so each is held somewhere, not vacuously.
       for (const f of k.fields.filter((x) => !k.absent?.includes(x))) assert.ok(keys.has(f), `${k.tool}: no production-shaped row has ${f}`);
       for (const f of k.absent ?? []) assert.ok(!keys.has(f), `${k.tool}: a production-shaped row has ${f}, so it is no longer absent`);
+    });
+  }
+  // #2857: the loop above checks only the levels the SHAPED cases happen to stop at, and two levels
+  // were never reached: search_cves's second and kev_recent's last. Removing score_assessed from the
+  // one, or kev_ransomware from the other, left the suite green, though both are on the lists
+  // tools/list advertises and a page with slightly fuller rows than the fixtures' goes there. So
+  // each tool's page is grown (its production-shaped rows cycled as SHAPED cycles them), from one
+  // row until rows have to leave the text, which happens only
+  // once no level fits, and every level the cut stops at on the way is found and held to the list.
+  // The levels are told apart by what they leave in a row (the text rows' fields, and the longest
+  // string, which shows the level's clip); the level a page is cut at only moves on as the page
+  // grows, so a range whose two ends are cut at the same level holds no other, and bisecting the
+  // ranges whose ends differ finds every level, including one added later. check_sbom is not walked:
+  // its rows are merged from many batch answers, and its one level is reached by its own cases.
+  const textRows = (res, rows) => {
+    const shown = JSON.parse(blocksOf(res)[0]);
+    return Array.isArray(shown?.[rows]) ? shown[rows] : [];
+  };
+  const longest = (v) => (typeof v === "string" ? v.length : v && typeof v === "object" ? Math.max(0, ...Object.values(v).map(longest)) : 0);
+  for (const k of KEEPS.filter((x) => x.tool !== "check_sbom")) {
+    it(`${k.tool}: every level its text is cut at keeps ${k.fields.join(", ")} on every row, the levels no SHAPED case reaches too (#2857)`, async (t) => {
+      const cases = TOOL_CASES.filter((c) => c.tool === k.tool && c.fixture);
+      const base = cases.find((c) => c.page === "max") ?? cases.find((c) => c.page === "default") ?? cases[0];
+      assert.ok(base, `${k.tool}: no SHAPED case with a fixture to grow`);
+      const at = new Map();
+      const call = async (n) => {
+        if (at.has(n)) return at.get(n);
+        const c = { ...base, repeat: { ...(base.repeat ?? {}), [k.rows]: n }, set: { ...(base.set ?? {}), ...(base.set?.count !== undefined ? { count: n } : {}) } };
+        stub.state.limited = undefined;
+        stub.state.requests = 0;
+        stub.state.answers = shapedAnswers(c);
+        const res = await client.callTool({ name: k.tool, arguments: argsOf(base) });
+        assert.notEqual(res.isError, true, `${k.tool}, ${n} rows: no answer: ${blocksOf(res)[0]?.slice(0, 300)}`);
+        const note = blocksOf(res)[1];
+        const shown = textRows(res, k.rows);
+        const cut = note.includes("TEXT CUT: ");
+        const fields = [...new Set(shown.flatMap((r) => (r && typeof r === "object" ? Object.keys(r) : [])))].sort();
+        const level = cut ? `${fields.join(",")} | longest string ${Math.max(0, ...shown.map(longest))}` : "not cut";
+        const r = { n, res, cut, level, dropped: /Only \d+ of the \d+ rows of /.test(note) };
+        at.set(n, r);
+        return r;
+      };
+      // From one row, double until rows leave the text: every level has been passed.
+      const start = 1;
+      let lo = await call(start);
+      let hi = lo;
+      while (!hi.dropped) {
+        assert.ok(hi.n < 8192, `${k.tool}: ${hi.n} rows and no row has left the text yet; the walk cannot reach the cut's last level`);
+        lo = hi;
+        hi = await call(hi.n * 2);
+      }
+      const ranges = [[await call(start), hi]];
+      while (ranges.length) {
+        const [a, b] = ranges.pop();
+        if (a.level === b.level || b.n - a.n < 2) continue;
+        const m = await call(Math.floor((a.n + b.n) / 2));
+        ranges.push([a, m], [m, b]);
+      }
+      const levels = new Map();
+      for (const r of [...at.values()].sort((x, y) => x.n - y.n)) if (r.cut && !levels.has(r.level)) levels.set(r.level, r);
+      assert.ok(levels.size > 0, `${k.tool}: no page was cut`);
+      t.diagnostic(`${k.tool}: ${at.size} pages called; cut levels found at ${[...levels.values()].map((r) => `${r.n} rows (${r.level.split(" | ")[0].split(",").length} fields)`).join(", ")}`);
+      for (const r of levels.values()) {
+        const pairs = cutPairs(JSON.parse(blocksOf(r.res)[0]), r.res.structuredContent.data);
+        const rowAt = new RegExp(`^data\\.${k.rows}\\[\\d+\\]$`);
+        const rows = pairs.filter((p) => rowAt.test(p.at));
+        assert.ok(rows.length > 0, `${k.tool}, ${r.n} rows: no row of ${k.rows} in the text`);
+        for (const f of k.fields) {
+          const lost = rows.filter((p) => Object.hasOwn(p.answer, f) && !Object.hasOwn(p.text, f));
+          assert.equal(lost.length, 0, `${k.tool}, a page of ${r.n} rows: ${lost.length} of the ${rows.length} rows in the text leave out ${f}, which the description says each keeps (the cut level keeping ${r.level})`);
+        }
+      }
     });
   }
   // #2802: through 2.6.3 the TEXT CUT sentences said "get_cve returns any one of these CVEs' records

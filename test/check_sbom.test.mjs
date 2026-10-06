@@ -482,6 +482,55 @@ for (const era of [MODERN, "2025-06-18"]) {
       });
     });
 
+    // #2836 and #2834, in the shape core-backend's batch route answers them (matchbatch.go,
+    // pkgmatch_fixedin.go): a deb binary purl matched by its upstream source package, with
+    // matched_package / matched_via / purl_name, and matches carrying fixed_in (a version, and
+    // null with fixed_in_reason).
+    it("relays upstream rows and fixed_in, says so in the note, and the schema accepts fixed_in null", async () => {
+      const LIBSSL = "pkg:deb/debian/libssl3@3.0.11-1~deb12u2?distro=debian-12&upstream=openssl";
+      const row = ROWS.affected(0, LIBSSL, "openssl", "3.0.11-1~deb12u2", ["CVE-2024-0727", "CVE-2023-5678"]);
+      Object.assign(row, { ecosystem: "Debian:12", matched_package: "openssl", matched_via: "upstream", matched_version_from: "purl", purl_name: "libssl3" });
+      row.matches[0] = {
+        ...row.matches[0],
+        match_reason: "registry package (confidence 0.95): Debian:12/openssl — version 3.0.11-1~deb12u2 falls inside the advisory interval [0, 3.0.13-1~deb12u1) [matched by the purl's upstream qualifier: source package openssl, purl name libssl3]",
+        interval: { introduced: "0", fixed: "3.0.13-1~deb12u1" },
+        fixed_in: "3.0.13-1~deb12u1",
+      };
+      row.matches[1] = { ...row.matches[1], interval: { introduced: "0", last_affected: "3.0.11-1~deb12u2" }, fixed_in: null, fixed_in_reason: "the interval that holds this version ends at last_affected 3.0.11-1~deb12u2; no fixed version is recorded" };
+      fresh("ok", { 1: { status: 200, body: batchAnswer([row]) } });
+      const res = await call({ purls: [LIBSSL] });
+      assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+      const got = res.structuredContent.data.results[0];
+      assert.equal(got.matched_package, "openssl");
+      assert.equal(got.matched_via, "upstream");
+      assert.equal(got.matches[0].fixed_in, "3.0.13-1~deb12u1");
+      assert.equal(got.matches[1].fixed_in, null);
+      const note = noteOf(res);
+      assert.match(note, /1 component was matched by the source package its purl's upstream qualifier names \(matched_via upstream, matched_package\)/);
+      assert.match(note, /Each match's fixed_in is the fixed bound of the advisory interval that holds the component's version/);
+      const v = validator.getValidator(tool.outputSchema)(res.structuredContent);
+      assert.ok(v.valid, v.errorMessage);
+      // Control: fixed_in typed as a number is refused, so the schema does describe it.
+      const broken = structuredClone(res.structuredContent);
+      broken.data.results[0].matches[0].fixed_in = 3;
+      assert.equal(validator.getValidator(tool.outputSchema)(broken).valid, false);
+    });
+    it("an answer without upstream rows or fixed_in says neither", async () => {
+      fresh();
+      const res = await call({ purls: ["pkg:npm/lodash@4.17.19"] });
+      const note = noteOf(res);
+      assert.match(note, /Affected: /);
+      assert.doesNotMatch(note, /fixed_in|matched_via upstream/);
+    });
+    it("every cut level that keeps matches keeps each match's fixed_in, and the first keeps matched_package and matched_via", async () => {
+      const { sbomText } = await import("../dist/tools/check_sbom.js");
+      const levels = sbomText(0).levels;
+      const withMatches = levels.filter((l) => l.keep.some((k) => Array.isArray(k) && k[0] === "matches"));
+      assert.equal(withMatches.length, 2);
+      for (const l of withMatches) assert.ok(l.keep.find((k) => Array.isArray(k) && k[0] === "matches")[1].includes("fixed_in"), JSON.stringify(l.keep));
+      assert.ok(levels[0].keep.includes("matched_package") && levels[0].keep.includes("matched_via"));
+    });
+
     it("ajv: every structured result above validates against check_sbom's outputSchema", () => {
       assert.ok(collected.length >= 23, `only ${collected.length} results collected`);
       const v = validator.getValidator(tool.outputSchema);

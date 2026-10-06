@@ -153,9 +153,12 @@ function send(res: http.ServerResponse, status: number, body: string, headers: R
 }
 
 // clientPublic (#2737): this request named a public client address, so its API calls carried the
-// forward headers. false on an /mcp request means its calls went WITHOUT them and core-backend
-// keyed them on this service: the one innocent reason core-backend's forward-token-mismatch alert
-// can fire (infrastructure/monitoring/create-mcp-remote-monitoring.sh).
+// forward headers. false on an /mcp request means its calls went WITHOUT them (runtime.ts
+// upstreamHeaders sends neither header without a public client), so core-backend reads
+// mcp_forward=absent and keys them on this service by design. That does NOT fire core-backend's
+// forward-token-mismatch alert: no state the alert matches, client_refused included, comes from a
+// request of ours without a fault, because isPublic accepts no address core-backend's
+// publicUnicast refuses (infrastructure/monitoring/create-mcp-remote-monitoring.sh, #2794).
 // clientClosed (#2775): the client went before its answer was written; logged as status 499 (the
 // "client closed request" of nginx and of the SDK), whatever status line had already been sent.
 // inFlight / queuedMs (#2773): the requests in flight when this one was admitted, itself
@@ -248,7 +251,7 @@ function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outco
     413,
     rpcError(
       BODY_TOO_LARGE_CODE,
-      `Request body too large: at most ${MAX_BODY_BYTES} bytes, or ${MAX_SBOM_BODY_BYTES} bytes for ${LARGE_BODY_TARGETS_TEXT}. A larger SBOM can be passed to check_sbom as its purls.`,
+      `Request body too large: at most ${MAX_BODY_BYTES} bytes, or ${MAX_SBOM_BODY_BYTES} bytes for ${LARGE_BODY_TARGETS_TEXT}. A larger SBOM or lockfile can be passed to check_sbom as its purls.`,
       { max_bytes: MAX_BODY_BYTES, max_bytes_sbom: MAX_SBOM_BODY_BYTES },
     ),
     { ...cors, Connection: "close" },
@@ -346,7 +349,7 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
           503,
           rpcError(
             BUSY_CODE,
-            `Server busy: this instance is already reading its ${LARGE_BODY_SLOTS} large request bodies at once. Retry after ${BUSY_RETRY_AFTER_SEC} s, or pass check_sbom the SBOM's purls.`,
+            `Server busy: this instance is already reading its ${LARGE_BODY_SLOTS} large request bodies at once. Retry after ${BUSY_RETRY_AFTER_SEC} s, or pass check_sbom the document's purls.`,
             { retry_after_seconds: BUSY_RETRY_AFTER_SEC },
           ),
           { ...cors, "Retry-After": String(BUSY_RETRY_AFTER_SEC), Connection: "close" },

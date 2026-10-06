@@ -64,6 +64,35 @@ export const SBOM_PROBE_PURLS = [
   ...Array.from({ length: 199 }, (_, i) => `pkg:npm/lodash@4.17.${22 + i}`),
 ];
 
+// scan_manifest's input (#2835): one package-lock.json (lockfileVersion 3), as npm writes it, past
+// the hosted endpoint's general 64 KiB body cap on every leg, so the large-body admission that
+// scan_manifest shares with check_sbom (httpPolicy.ts LARGE_BODY_TARGETS) is probed on every run.
+// Its 20 top-level packages are real packages at real versions, lodash 4.17.15 first (production
+// lists CVE-2020-8203 against it); each of the 20 is also installed nested under every other one
+// at the same version (node_modules/a/node_modules/b), which npm writes when hoisting is blocked,
+// so the file holds 400 entries and 112,923 characters but only 20 distinct purls: 20 components
+// of the API's 1,200 a minute per caller on each of the run's four legs. resolved is the
+// registry's tarball URL; integrity is the SHA-512 of the purl (the probe's own, so the document
+// is fixed), not the tarball's.
+export const MANIFEST_PROBE_PACKAGES = [
+  ["lodash", "4.17.15"], ["minimist", "1.2.5"], ["axios", "0.21.0"], ["node-fetch", "2.6.0"], ["qs", "6.5.2"],
+  ["ws", "7.4.5"], ["semver", "7.3.5"], ["glob-parent", "5.1.1"], ["ansi-regex", "5.0.0"], ["y18n", "4.0.0"],
+  ["path-parse", "1.0.6"], ["hosted-git-info", "2.8.8"], ["trim-newlines", "3.0.0"], ["normalize-url", "4.5.0"], ["ini", "1.3.5"],
+  ["kind-of", "6.0.2"], ["dot-prop", "4.2.0"], ["handlebars", "4.7.6"], ["underscore", "1.12.0"], ["moment", "2.29.1"],
+];
+function packageLockOf(pkgs) {
+  const entry = (name, version) => ({
+    version,
+    resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`,
+    integrity: `sha512-${createHash("sha512").update(`pkg:npm/${name}@${version}`).digest("base64")}`,
+  });
+  const packages = { "": { name: "echelongraph-mcp-synthetic-probe", version: "1.0.0", dependencies: Object.fromEntries(pkgs.map(([n, v]) => [n, v])) } };
+  for (const [n, v] of pkgs) packages[`node_modules/${n}`] = entry(n, v);
+  for (const [parent] of pkgs) for (const [n, v] of pkgs) if (n !== parent) packages[`node_modules/${parent}/node_modules/${n}`] = entry(n, v);
+  return { name: "echelongraph-mcp-synthetic-probe", version: "1.0.0", lockfileVersion: 3, requires: true, packages };
+}
+export const MANIFEST_PROBE_LOCK = JSON.stringify(packageLockOf(MANIFEST_PROBE_PACKAGES), null, 2);
+
 // In createServer()'s registration order, which is tools/list's.
 export const PROBES = {
   cve_summary: [{}],
@@ -81,7 +110,11 @@ export const PROBES = {
     { product: "openssl", version: "3.0.0" },
   ],
   check_sbom: [{ purls: SBOM_PROBE_PURLS }],
+  // #2835: the package-lock above, past 64 KiB on every leg.
+  scan_manifest: [{ files: [{ filename: "package-lock.json", content: MANIFEST_PROBE_LOCK }] }],
   cve_intel: [{ cve_id: CVE }],
+  // #2841: how Log4Shell is fixed, as its sources state it.
+  cve_remediation: [{ cve_id: CVE }],
   get_cwe: [{ cwe_id: "CWE-79" }],
   vendor_advisories_for_cve: [{ cve_id: CVE }],
   get_vendor_advisory: [(seen) => advisoryFrom(seen.vendor_advisories_for_cve)],
@@ -116,6 +149,20 @@ export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
 //                       (docs/RUNBOOK_MIGRATION_099_VERSION_INTERVALS.md 4c), and this image is
 //                       rebuilt by any later infrastructure/mcp-synthetic/deploy.sh, so holding it
 //                       would page every 15 minutes until that write ran. 4c checks it instead.
+//   cve_remediation (#2840, #2841)  for CVE-2021-44228, data.cisa.required_action is CISA's text
+//                       (Log4Shell is KEV-listed), and every row of data.vendor_remediations
+//                       carries a remediation_state. Unmet means the route serves no KEV text
+//                       (core-backend without #2839, or the KEV poll has not written it) or a
+//                       vendor row without its state (core-backend without #2840); detail says
+//                       which. It does not hold a parsed Red Hat row: that needs the remediation
+//                       backfill to have run, which the backfill's own log line reports.
+//   scan_manifest (#2835)  the package-lock was read (coverage.files_read 1, its 400 entries
+//                       pinned, 20 distinct purls), every purl was sent (not_sent 0), and at least
+//                       one component is affected (summary.affected >= 1: lodash 4.17.15). Unmet
+//                       means the file was not read as a package-lock (a reader regression), the
+//                       batch route did not answer every purl (detail quotes not_sent_reason), or
+//                       production no longer finds lodash 4.17.15 affected (the corpus lost its
+//                       lodash advisories, or the matcher regressed).
 export const LOG4J_CORE = "org.apache.logging.log4j:log4j-core";
 export const EXPECT = {
   check_sbom: (sc) => {
@@ -132,6 +179,26 @@ export const EXPECT = {
     if (!Array.isArray(fb)) return `${LOG4J_CORE} fixed_branches ${fb === undefined ? "absent" : JSON.stringify(fb)} (fixed_version ${JSON.stringify(row.fixed_version ?? null)}); want at least 3 ranges, one fixed in 2.15.0`;
     const fixes = fb.map((b) => b?.fixed ?? null);
     if (fb.length < 3 || !fixes.includes("2.15.0")) return `${LOG4J_CORE} fixed_branches has ${fb.length} ranges, fixes ${JSON.stringify(fixes)}; want at least 3, one fixed in 2.15.0`;
+    return undefined;
+  },
+  scan_manifest: (sc) => {
+    const c = sc?.coverage;
+    const want = MANIFEST_PROBE_PACKAGES.length;
+    if (c?.files_read !== 1 || c?.entries_pinned !== want * want || c?.distinct_purls !== want) {
+      return `coverage.files_read ${JSON.stringify(c?.files_read ?? null)}, entries_pinned ${JSON.stringify(c?.entries_pinned ?? null)}, distinct_purls ${JSON.stringify(c?.distinct_purls ?? null)}; want 1, ${want * want}, ${want}`;
+    }
+    if (c.not_sent !== 0) return `coverage.not_sent ${c.not_sent} (not_sent_reason ${JSON.stringify(c.not_sent_reason ?? null)}); want 0`;
+    const affected = sc?.data?.summary?.affected;
+    if (typeof affected !== "number" || affected < 1) return `data.summary.affected ${JSON.stringify(affected ?? null)}; want at least 1 (lodash 4.17.15)`;
+    return undefined;
+  },
+  cve_remediation: (sc) => {
+    const action = sc?.data?.cisa?.required_action;
+    if (typeof action !== "string" || !action.trim()) return `data.cisa.required_action ${JSON.stringify(action ?? null)}; want CISA's text for CVE-2021-44228`;
+    const rows = sc?.data?.vendor_remediations;
+    if (!Array.isArray(rows)) return `data.vendor_remediations ${rows === undefined ? "absent" : "not a list"} (failed_sections ${JSON.stringify(sc?.data?.failed_sections ?? null)})`;
+    const without = rows.filter((r) => typeof r?.remediation_state !== "string").length;
+    if (without) return `${without} of ${rows.length} vendor_remediations rows carry no remediation_state`;
     return undefined;
   },
 };

@@ -153,15 +153,44 @@ export const LOG4SHELL_FIXED_BRANCHES = {
   "org.xbib.elasticsearch:log4j": { fixed_branches: [] },
   "uk.co.nichesolutions.logging.log4j:log4j-core": { fixed_branches: [] },
 };
+// #2839: CISA's KEV text for CVE-2021-44228 as core-backend serves it on the record
+// (kev_required_action, kev_short_description, kev_notes_urls), copied verbatim from CISA's
+// known_exploited_vulnerabilities.json, catalogVersion 2026.10.04 (read 2026-10-05). Production's
+// get_cve answer kept in fixtures/prod-shaped/ predates the fields, so the get_cve cases `set` them
+// on it until that answer is re-captured from production after core-backend ships them.
+export const LOG4SHELL_KEV_TEXT = {
+  kev_required_action:
+    "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks. Temporary mitigations using one of the measures provided at https://www.cisa.gov/uscert/ed-22-02-apache-log4j-recommended-mitigation-measures are only acceptable until updates are available.",
+  kev_short_description:
+    "Apache Log4j2 contains a vulnerability where JNDI features do not protect against attacker-controlled JNDI-related endpoints, allowing for remote code execution.",
+  kev_notes_urls: ["https://nvd.nist.gov/vuln/detail/CVE-2021-44228"],
+};
 const JUICE_SHOP = path.join(HERE, "fixtures", "juice-shop-11.1.2-50.cdx.json");
 // 2,000 distinct purls, check_sbom's most per call (MAX_PURLS).
 export const SBOM_MAX_PURLS = 2000;
 const manyPurls = () => Array.from({ length: SBOM_MAX_PURLS }, (_, i) => `pkg:npm/shaped-${i}@1.0.${i % 10}`);
+// #2835: scan_manifest's files. A real package-lock (fixtures/manifests/tree.v3.package-lock.json,
+// npm 10, 64 registry packages and 3 entries not checked), and the same file's registry entries
+// cycled under new names to a 1,500-entry lockfile, 100 of them installed from git (not checked):
+// 1,400 distinct purls, seven batches of 200.
+const MANIFESTS = path.join(HERE, "fixtures", "manifests");
+export const TREE_LOCK = () => fs.readFileSync(path.join(MANIFESTS, "tree.v3.package-lock.json"), "utf8");
+export function bigLock(entries = 1500, git = 100) {
+  const tree = JSON.parse(TREE_LOCK());
+  const registry = Object.entries(tree.packages).filter(([k, e]) => k.startsWith("node_modules/") && !e.link && String(e.resolved ?? "").startsWith("https://registry.npmjs.org/"));
+  const packages = { "": tree.packages[""] };
+  for (let i = 0; i < entries; i++) {
+    const [key, e] = registry[i % registry.length];
+    const name = `${key.split("node_modules/").pop().replace("@", "")}-r${i}`;
+    packages[`node_modules/${name}`] = i < git ? { ...e, name: undefined, resolved: `git+ssh://git@github.com/example/${name}.git#${String(i).padStart(40, "0")}` } : { ...e, name: undefined };
+  }
+  return JSON.stringify({ ...tree, packages }, null, 2);
+}
 export const SHAPED = [
   { label: "cve_summary", tool: "cve_summary", page: "default", args: {}, kept: "cve_summary", size: 2_708 },
   { label: "search_cves, default page (search openssl)", tool: "search_cves", page: "default", args: { search: "openssl" }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 20 }, set: { limit: 20 }, size: 13_621 },
   { label: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", page: "max", args: { search: "openssl", limit: 50 }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 50 }, set: { limit: 50 }, size: 30_904 },
-  { label: "get_cve, CVE-2021-44228", tool: "get_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "get_cve", answers: ["CVE-2021-44228"], repeat: { cpe_match: 396, references: 103 }, size: 23_295 },
+  { label: "get_cve, CVE-2021-44228", tool: "get_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "get_cve", answers: ["CVE-2021-44228"], repeat: { cpe_match: 396, references: 103 }, set: LOG4SHELL_KEV_TEXT, size: 24_216 },
   // #2801: the cve:// resource reads get_cve's answer; through 2.6.3 it was that answer's structured
   // result pretty-printed whole, 86,559 characters for this CVE on the hosted endpoint (2026-10-04).
   {
@@ -173,14 +202,18 @@ export const SHAPED = [
     fixture: "get_cve",
     answers: ["CVE-2021-44228"],
     repeat: { cpe_match: 396, references: 103 },
+    set: LOG4SHELL_KEV_TEXT,
     live: "it reads get_cve's answer for the same CVE, which the get_cve case measures on production; text-bound-live.mjs reads tools only",
-    size: 23_705,
+    size: 24_639,
   },
   { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_365 },
   { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 41_315 },
   { label: "kev_recent, default page (limit 50)", tool: "kev_recent", page: "default", args: {}, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 50 }, set: { limit: 50, count: 50 }, size: 29_160 },
   { label: "kev_recent, largest page (limit 200)", tool: "kev_recent", page: "max", args: { limit: 200 }, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 200 }, set: { limit: 200, count: 200 }, size: 31_854 },
-  { label: "epss_history, CVE-2021-44228", tool: "epss_history", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "epss_history", answers: ["CVE-2021-44228"], size: 2_379 },
+  // #2867: 2,379 through 2.6.8. The fixture is production's answer from before core-backend served
+  // complete_since and coverage, so the note now says the answer does not say from when the record
+  // is complete, and the envelope's coverage carries the completeness fields (null / []).
+  { label: "epss_history, CVE-2021-44228", tool: "epss_history", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "epss_history", answers: ["CVE-2021-44228"], size: 2_771 },
   { label: "check_affected, openssl 3.0.0", tool: "check_affected", page: "default", args: { product: "openssl", version: "3.0.0" }, fixture: "check_affected", answers: ["openssl"], repeat: { matches: 71 }, size: 26_152 },
   { label: "check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)", tool: "check_affected", page: "max", args: { product: "linux_kernel", version: "5.10.0" }, fixture: "check_affected", answers: ["linux_kernel"], repeat: { matches: 200 }, size: 29_694 },
   // The cap with the CPE path's excluded sample beside it: 50 entries, each with a sentence of detail.
@@ -231,6 +264,20 @@ export const SHAPED = [
   // failed_sections []. 17,355 characters, production's own text for the call (text-bound-live.mjs,
   // 2026-10-05T07:37:21Z); through the 2026-10-04 read, with no fixed_branches and no
   // failed_sections, it was 14,693.
+  // #2835: production's batch rows (prod-shaped/check_sbom.json), one per distinct purl.
+  { label: "scan_manifest, package-lock.json (64 packages)", tool: "scan_manifest", page: "default", args: () => ({ files: [{ filename: "package-lock.json", content: TREE_LOCK() }] }), fixture: "check_sbom", answers: ["batch"], repeat: { results: 64 }, recount: true, live: "not recorded yet: the batch route it calls is deployed, but text-bound-live.mjs --record has not been run with this checkout (#2835's release step); run it, and drop this", size: 15_665 },
+  {
+    label: "scan_manifest, package-lock.json of 1,500 entries (1,400 distinct purls, 100 from git)",
+    tool: "scan_manifest",
+    page: "max",
+    args: () => ({ files: [{ filename: "package-lock.json", content: bigLock() }] }),
+    fixture: "check_sbom",
+    answers: ["batch"],
+    repeat: { results: 200 },
+    recount: true,
+    live: "1,400 lookups would pass production's 1,200 components a minute per caller; the suite measures the same rows, repeated",
+    size: 36_439,
+  },
   { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 17_355 },
   // #2817: the same rows once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE, pending) has filled
   // each range's record: the ranges of GHSA-jfh8-c2jp-5v3q (api.osv.dev, 2026-10-05) with
@@ -251,6 +298,21 @@ export const SHAPED = [
     annotate: { affected_packages: { key: "package_name", values: LOG4SHELL_FIXED_BRANCHES, otherwise: {} } },
     live: "production's rows with each range's advisory_id and source, which production serves only once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE) has run",
     size: 17_539,
+  },
+  // #2841: cve_remediation for Log4Shell on production's data (prod-shaped/cve_remediation.json,
+  // assembled 2026-10-05 from the stored advisories by the parsers, before the route is live): 20
+  // vendor advisories, 19 of them Red Hat's with their vendor_fix and workaround texts, the
+  // packages' fixed_branches, CISA's text and the Patch/Mitigation references. Its JSON is past the
+  // 30,000-character budget, so the cut is measured: texts shortened first, kinds, states and URLs kept.
+  {
+    label: "cve_remediation, CVE-2021-44228",
+    tool: "cve_remediation",
+    page: "default",
+    args: { cve_id: "CVE-2021-44228" },
+    fixture: "cve_remediation",
+    answers: ["CVE-2021-44228"],
+    live: "the route (GET /cves/:id/remediation) is not deployed yet: measure it there once it is (text-bound-live.mjs)",
+    size: 20_644,
   },
   { label: "get_cwe, CWE-79", tool: "get_cwe", page: "default", args: { cwe_id: "CWE-79" }, fixture: "get_cwe", answers: ["CWE-79"], repeat: { cves: 50 }, size: 28_716 },
   // #2800 review: no answer the API serves reaches get_cwe's cut. It cuts each row's description to

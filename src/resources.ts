@@ -75,7 +75,9 @@ A count of 0 is a finding of none when the answer measured it. Under assessed: f
 - epss_history: measured_at is current.epss_updated_at, when EchelonGraph last wrote a changed EPSS value; the series is change-only, so a missing point is not recorded, not unchanged.
 - check_affected: measured when the answer says assessed true; not_assessed when it says false or does not say. measured_at and freshness are null.
 - check_sbom: measured when at least one component got a verdict, else not_assessed; measured_at null. not_affected is the one clean verdict; undetermined and not_assessed are not clean.
+- scan_manifest: as check_sbom, on the purls this server reads from the lockfiles passed; not_assessed, with no API call, when no entry pins one registry version. Each entry not sent (a range, an unresolved version, a local path, a VCS checkout or a line not read) is listed in data.not_checked with its reason and is not clean; a refused file (package.json, go.sum and the other manifests of ranges) is named in the note, and nothing in it is checked.
 - cve_intel: measured_at null: each row carries its own first_seen_at or enriched_at. An empty exploits list is not evidence that no public exploit exists.
+- cve_remediation: measured with measured_at null, or not_assessed for a CVE record rejected by its numbering authority. Every text is its source's, verbatim and untested by EchelonGraph; each vendor item's kind is the vendor's own category. remediation_state none_in_source or not_parsed, and an empty list, are not a finding that no fix exists.
 - get_cwe: measured_at null: each row carries its own published date. A total of 0 says no CVE in EchelonGraph's feed is classified under that CWE.
 - vendor_advisories_for_cve, search_vendor_advisories: measured_at null (each row carries vendor_published_at and our_first_seen_at). get_vendor_advisory: measured_at is our_first_seen_at, when EchelonGraph first recorded the advisory.
 

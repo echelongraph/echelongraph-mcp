@@ -52,7 +52,7 @@ const answer = (over = {}) => ({
   filters: { since: null, until: null, ransomware: null, vendor: null },
   catalog: catalog(),
   method: "EchelonGraph polls CISA's known_exploited_vulnerabilities.json every 5 minutes with a conditional GET.",
-  notes: ["CISA's requiredAction and shortDescription are not stored, so they are not served."],
+  notes: ["CISA's requiredAction, shortDescription and notes are on each CVE's record (/cves/{id}), not in these rows."],
   generated_at: "2026-10-03T12:00:00Z",
   ...over,
 });

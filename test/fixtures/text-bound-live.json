@@ -116,13 +116,13 @@
       "source": "probe-prod"
     },
     "epss_history, CVE-2021-44228": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 2379,
+      "measured_at": "2026-10-05T20:16:16.149Z",
+      "package_version": "2.6.8",
+      "total": 2771,
       "blocks": [
         697,
-        395,
-        1287
+        571,
+        1503
       ],
       "source": "probe-prod"
     },

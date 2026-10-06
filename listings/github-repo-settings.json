@@ -1,6 +1,6 @@
 {
   "repository": "echelongraph/echelongraph-mcp",
-  "description": "MCP server for CVE intelligence: 14 read-only tools for CVE records, CISA KEV, EPSS history, exploits, version and SBOM checks, vendor advisories, and per-CVE exposure from Shodan data (© Shodan). Free and keyless.",
+  "description": "MCP server for CVE intelligence: 16 read-only tools for CVE records, CISA KEV, EPSS history, exploits, fix guidance as sources state it, version, SBOM and lockfile checks, vendor advisories, and per-CVE exposure from Shodan data (© Shodan). Free and keyless.",
   "homepage": "https://echelongraph.io/pulse/mcp",
   "topics": [
     "mcp",

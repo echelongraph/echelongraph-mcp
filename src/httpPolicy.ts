@@ -221,7 +221,8 @@ export class FixedWindowLimiter {
 //
 //   - 64 KiB for every request: far above any real request but an SBOM's, and the cap the
 //     endpoint shipped with (#2316).
-//   - 6 MiB for one tools/call of check_sbom, or one prompts/get of sbom_review, which takes the
+//   - 6 MiB for one tools/call of check_sbom or scan_manifest (#2835: a project's lockfiles, up to
+//     the same 5,000,000 characters), or one prompts/get of sbom_review, which takes the
 //     same document to hand to check_sbom (LARGE_BODY_TARGETS). The sbom argument is up to MAX_SBOM_CHARS
 //     (5,000,000) characters, and over this endpoint that document IS the JSON-RPC body: JSON
 //     text passed as a string is escaped once more (every '"' and newline doubles), which for a
@@ -250,25 +251,29 @@ export class FixedWindowLimiter {
 export const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 export const DEFAULT_MAX_SBOM_BODY_BYTES = 6 * 1024 * 1024;
 export const DEFAULT_LARGE_BODY_SLOTS = 2;
-/** The requests whose body may pass DEFAULT_MAX_BODY_BYTES: JSON-RPC method → the one tool or prompt name. */
-export const LARGE_BODY_TARGETS: Readonly<Record<string, string>> = { "tools/call": "check_sbom", "prompts/get": "sbom_review" };
+/** The requests whose body may pass DEFAULT_MAX_BODY_BYTES: JSON-RPC method → the tools or prompts it may name.
+ *  #2835: scan_manifest takes a project's lockfiles as text, up to the same 5,000,000 characters as
+ *  check_sbom's document (scan_manifest.ts MAX_MANIFEST_CHARS), so it is admitted the same way. */
+export const LARGE_BODY_TARGETS: Readonly<Record<string, readonly string[]>> = { "tools/call": ["check_sbom", "scan_manifest"], "prompts/get": ["sbom_review"] };
 /** LARGE_BODY_TARGETS in words, for the refusals. */
 export const LARGE_BODY_TARGETS_TEXT = Object.entries(LARGE_BODY_TARGETS)
-  .map(([m, n]) => `a ${m} of ${n}`)
-  .join(" or ");
+  .map(([m, ns]) => `a ${m} of ${ns.join(" or ")}`)
+  .join(", or ");
+
+const targetsOf = (method: string): readonly string[] => (Object.hasOwn(LARGE_BODY_TARGETS, method) ? LARGE_BODY_TARGETS[method] : []);
 
 /** Whether a request's own Mcp-Method / Mcp-Name headers leave it free to be one of LARGE_BODY_TARGETS. Absent headers do (a 2025-era client sends neither). */
 export function largeBodyAdmissible(mcpMethod: string | undefined, mcpName: string | undefined): boolean {
   const name = mcpName?.trim();
-  if (mcpMethod === undefined) return name === undefined || Object.values(LARGE_BODY_TARGETS).includes(name);
-  const want = Object.hasOwn(LARGE_BODY_TARGETS, mcpMethod.trim()) ? LARGE_BODY_TARGETS[mcpMethod.trim()] : undefined;
-  return want !== undefined && (name === undefined || name === want);
+  if (mcpMethod === undefined) return name === undefined || Object.values(LARGE_BODY_TARGETS).some((ns) => ns.includes(name));
+  const want = targetsOf(mcpMethod.trim());
+  return want.length > 0 && (name === undefined || want.includes(name));
 }
 
 /** Whether a read body is one of LARGE_BODY_TARGETS, by its bodyFacts. */
 export function isLargeBodyTarget(facts: BodyFacts): boolean {
   const name = facts.rpc_method === "tools/call" ? facts.tool : facts.rpc_method === "prompts/get" ? facts.prompt : undefined;
-  return name !== undefined && Object.hasOwn(LARGE_BODY_TARGETS, facts.rpc_method) && LARGE_BODY_TARGETS[facts.rpc_method] === name;
+  return name !== undefined && targetsOf(facts.rpc_method).includes(name);
 }
 
 /** A counting semaphore that never waits: tryAcquire answers at once. */

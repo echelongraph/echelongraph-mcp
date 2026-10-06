@@ -13,7 +13,7 @@ import http from "node:http";
 import { connect, MODERN, RpcError, StdioMcpClient, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
 import { PKG, serverCommand } from "./server-under-test.mjs";
 
-const TOOLS = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "cve_intel", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
+const TOOLS = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "scan_manifest", "cve_intel", "cve_remediation", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
 // The legacy revisions this server negotiates through initialize (SDK 2.1.0
 // SUPPORTED_PROTOCOL_VERSIONS): a client asking for one of them gets it back.
 const LEGACY = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -48,7 +48,7 @@ const KEV_RECENT = {
   filters: { since: null, until: null, ransomware: null, vendor: null },
   catalog: { source: "CISA KEV catalog", feed_url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", last_successful_fetch_at: "2026-10-03T11:55:01Z", catalog_version: "2026.10.02", date_released: "2026-10-02T17:00:41.1622Z", catalog_count: 1452 },
   method: "EchelonGraph polls CISA's known_exploited_vulnerabilities.json every 5 minutes.",
-  notes: ["CISA's requiredAction and shortDescription are not stored, so they are not served."],
+  notes: ["CISA's requiredAction, shortDescription and notes are on each CVE's record (/cves/{id}), not in these rows."],
   generated_at: "2026-10-03T12:00:00Z",
 };
 const ANSWERS = {

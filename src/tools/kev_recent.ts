@@ -62,7 +62,7 @@ const KEV_RECENT_METHOD =
 const KEV_RECENT_COVERAGE = "CISA KEV catalog";
 
 const KEV_RECENT_DESCRIPTION =
-  "The CVEs CISA has added to its Known Exploited Vulnerabilities (KEV) catalog, newest first, from EchelonGraph's copy of that catalog, which polls CISA's feed every 5 minutes. Each row in kev gives cve_id, kev_added_date (CISA's dateAdded), kev_due_date, kev_vendor, kev_product, kev_vuln_name and kev_ransomware (known ransomware-campaign use), EchelonGraph's severity, cvss_v3_score, epss_score, epss_percentile and eg_kev_tier for the CVE, and our_first_seen_kev, when EchelonGraph's poller first recorded the CVE entering the catalog (null where no such record exists). Filter by since and until (YYYY-MM-DD, inclusive, on kev_added_date; an RFC 3339 timestamp, such as the kev_added_date 2024-04-12T00:00:00Z that CVE records carry, is read as the date written in it, with the time and offset dropped, and anything else is refused), ransomware, and vendor (an exact, case-insensitive match on kev_vendor); page with limit (1 to 200, default 50) and cursor, passing back the previous page's next_cursor with the same filters. Rows within one date are ordered by cve_id. total counts the CVEs matching the filters; kev_listed_total counts every CVE EchelonGraph holds as KEV-listed, and catalog.catalog_count is CISA's own count in the catalog last fetched, so a gap between the two is entries not yet in EchelonGraph's CVE table, which no page returns. CISA's requiredAction and shortDescription are not returned. Its structured result carries state (measured), measured_at (our last successful fetch of CISA's feed, null when the API does not give it), method, coverage (the CISA KEV catalog: total, returned, kev_listed_total, catalog_count, limit, has_more), freshness (last_successful_fetch_at, catalog_version, date_released) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends." +
+  "The CVEs CISA has added to its Known Exploited Vulnerabilities (KEV) catalog, newest first, from EchelonGraph's copy of that catalog, which polls CISA's feed every 5 minutes. Each row in kev gives cve_id, kev_added_date (CISA's dateAdded), kev_due_date, kev_vendor, kev_product, kev_vuln_name and kev_ransomware (known ransomware-campaign use), EchelonGraph's severity, cvss_v3_score, epss_score, epss_percentile and eg_kev_tier for the CVE, and our_first_seen_kev, when EchelonGraph's poller first recorded the CVE entering the catalog (null where no such record exists). Filter by since and until (YYYY-MM-DD, inclusive, on kev_added_date), ransomware, and vendor (an exact, case-insensitive match on kev_vendor); page with limit (1 to 200, default 50) and cursor, passing back the previous page's next_cursor with the same filters. total counts the CVEs matching the filters; kev_listed_total counts every CVE EchelonGraph holds as KEV-listed, and catalog.catalog_count is CISA's own count in the catalog last fetched, so a gap between the two is entries not yet in EchelonGraph's CVE table, which no page returns. CISA's requiredAction, shortDescription and notes are not in these rows: each CVE's own record carries them, verbatim and labelled as CISA's. Its structured result's measured_at is our last successful fetch of CISA's feed (null when the API does not give it), coverage counts the CISA KEV catalog (total, returned, kev_listed_total, catalog_count, limit, has_more) and freshness gives last_successful_fetch_at, catalog_version and date_released." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
   " Cut, each row keeps fewer fields, cve_id, kev_added_date, kev_vendor and kev_ransomware at least, or rows are left out, and next_cursor still continues after the last row of the page, not of the text.";
@@ -93,7 +93,7 @@ const KEVRow = z.looseObject({
   our_first_seen_kev: opt(z.string()).describe("When EchelonGraph's poller first recorded the CVE entering the catalog; null where no such record exists."),
 });
 const Data = z.looseObject({
-  kev: z.array(KEVRow).optional(),
+  kev: z.array(KEVRow).optional().describe("Newest kev_added_date first; rows within one date are ordered by cve_id."),
   count: opt(z.number()),
   total: opt(z.number()),
   kev_listed_total: opt(z.number()),
@@ -281,8 +281,8 @@ export function registerKevRecent(server: McpServer, d: KevRecentDeps): void {
       title: "Recent CISA KEV additions",
       description: KEV_RECENT_DESCRIPTION,
       inputSchema: z.object({
-        since: z.string().optional().describe("earliest kev_added_date to include, YYYY-MM-DD (an RFC 3339 timestamp is read as the date written in it)"),
-        until: z.string().optional().describe("latest kev_added_date to include, YYYY-MM-DD (an RFC 3339 timestamp is read as the date written in it)"),
+        since: z.string().optional().describe("earliest kev_added_date to include, YYYY-MM-DD (an RFC 3339 timestamp is read as the date written in it, with the time and offset dropped; anything else is refused)"),
+        until: z.string().optional().describe("latest kev_added_date to include, YYYY-MM-DD (an RFC 3339 timestamp is read as the date written in it, with the time and offset dropped; anything else is refused)"),
         ransomware: z.boolean().optional().describe("true: only CVEs with known ransomware-campaign use; false: only those without"),
         vendor: z.string().optional().describe("CISA vendorProject, an exact case-insensitive match, e.g. 'Microsoft'"),
         limit: z.number().int().min(1).max(KEV_RECENT_MAX_LIMIT).optional().describe("page size (default 50, max 200)"),

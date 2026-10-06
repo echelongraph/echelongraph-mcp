@@ -1,0 +1,59 @@
+GIT
+  remote: https://github.com/ku1ik/rainbow.git
+  revision: accffb58fb0dedd17d68f484031a571fd905acb3
+  tag: v3.1.1
+  specs:
+    rainbow (3.1.1)
+
+PATH
+  remote: localgem
+  specs:
+    localgem (0.4.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    nokogiri (1.16.2-aarch64-linux)
+      racc (~> 1.4)
+    nokogiri (1.16.2-arm-linux)
+      racc (~> 1.4)
+    nokogiri (1.16.2-arm64-darwin)
+      racc (~> 1.4)
+    nokogiri (1.16.2-x86-linux)
+      racc (~> 1.4)
+    nokogiri (1.16.2-x86_64-darwin)
+      racc (~> 1.4)
+    nokogiri (1.16.2-x86_64-linux)
+      racc (~> 1.4)
+    racc (1.8.1)
+    rack (2.2.3)
+
+PLATFORMS
+  aarch64-linux
+  arm-linux
+  arm64-darwin
+  x86-linux
+  x86_64-darwin
+  x86_64-linux
+
+DEPENDENCIES
+  localgem!
+  nokogiri (= 1.16.2)
+  rack (= 2.2.3)
+  rainbow!
+
+CHECKSUMS
+  bundler (4.0.17) sha256=214e21431b5665dd2f99df8a5511c6b151d7a72e8015c8b38f8b775b61cbb6c1
+  localgem (0.4.0)
+  nokogiri (1.16.2-aarch64-linux) sha256=69ba15d2a2498324489ed63850997f0b8f684260114ea81116d3082f16551d2d
+  nokogiri (1.16.2-arm-linux) sha256=6a05ce42e3587a40cf8936ece0beaa5d32922254215d2e8cf9ad40588bb42e57
+  nokogiri (1.16.2-arm64-darwin) sha256=c957226c8e36b31be6a3afb8602e2128282bf8b40ea51016c4cd21aa2608d3f8
+  nokogiri (1.16.2-x86-linux) sha256=833efddeb51a6c2c9f6356295623c2b2e0d50050d468695c59bd929162953323
+  nokogiri (1.16.2-x86_64-darwin) sha256=5def799e5f139f21a79d7cf71172313a7b6fb0e4b2a31ab9bd5d4ad305994539
+  nokogiri (1.16.2-x86_64-linux) sha256=5b146240ac6ec6c40fd4367623e74442bca45a542bd3282b1d4d18b07b8e5dfe
+  racc (1.8.1) sha256=4a7f6929691dbec8b5209a0b373bc2614882b55fc5d2e447a21aaa691303d62f
+  rack (2.2.3) sha256=2638e7eb6689a5725c7e16f30cc4aa4e31694dc3ca30d790952526781bd0bb44
+  rainbow (3.1.1)
+
+BUNDLED WITH
+  4.0.17

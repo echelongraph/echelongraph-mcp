@@ -1,6 +1,6 @@
 {
   "name": "echelongraph-mcp",
-  "version": "2.6.8",
+  "version": "2.7.0",
   "mcpName": "io.echelongraph/echelongraph-mcp",
   "description": "MCP server for CVE lookups: EchelonGraph scores, CISA KEV, EPSS, CWE, exploits, version and SBOM checks, vendor advisories, and per-CVE exposure derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan). Keyless.",
   "type": "module",
@@ -39,6 +39,8 @@
     "cwe",
     "cvss",
     "sbom",
+    "lockfile",
+    "sca",
     "security-advisories",
     "threat-intelligence",
     "exposure",

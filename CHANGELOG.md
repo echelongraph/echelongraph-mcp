@@ -6,6 +6,132 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.7.0 — 2026-10-06
+
+- New tool scan_manifest (#2835): a project's lockfiles or pinned manifests checked against the
+  advisory corpus, one verdict per dependency, in one call. Pass `files` (1 to 20 of `filename` and
+  `content`, up to 5,000,000 characters in all). This server reads them into purls and sends only
+  the purls, through the same batch route, batches of 200, 50-second budget, `Retry-After` waits
+  and cancellation as check_sbom (that loop now lives in `src/tools/match_batch.ts`, shared by both
+  tools, check_sbom's behaviour unchanged). Read: requirements.txt (`==` and `===` pins only),
+  go.mod (`require` with `replace` and `exclude` applied), package-lock.json and
+  npm-shrinkwrap.json (lockfileVersion 1 to 3), Cargo.lock (v1 to v4), Gemfile.lock,
+  composer.lock, poetry.lock and gradle.lockfile, each tested on files written by the ecosystem's
+  own tool. Every entry not sent is listed in `data.not_checked` with its file, line and reason
+  (`version_unpinned`, `version_unresolved`, `local_path`, `vcs_source`, `unsupported_line`) and is
+  not clean: `django>=4` is never sent as `pkg:pypi/django@4`. package.json, pyproject.toml,
+  Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle are refused with the lockfile to
+  pass; go.sum is refused, as it lists versions the build does not select. No fixed version is
+  derived: each match's `fixed_in` is the API's. TOML is read by a small reader in this package
+  (`src/tools/manifests/toml.ts`), so no runtime dependency is added. 16 tools.
+- The hosted endpoint admits a `tools/call` of scan_manifest up to 6 MiB, as it does check_sbom
+  (`LARGE_BODY_TARGETS` now lists names per method); the files are read in memory and neither
+  logged nor kept. The 413 and 503 texts name no single tool.
+- check_sbom's outputSchema names `kev_listed` and `epss_score` on each match, which the API
+  already sent.
+- New tool cve_remediation (#2841): how one CVE is fixed, as its sources state it, in one answer:
+  CISA's KEV text (its required action is directed at US federal civilian agencies), every
+  affected range with its fix, each vendor advisory's remediation categorised by the vendor's own
+  category (vendor_fix, workaround, mitigation, no_fix_planned, none_available, other), the
+  references NVD tagged Patch or Mitigation, and patches. Nothing is generated; every text is its
+  source's, untested by EchelonGraph. none_in_source, not_parsed and an empty list are not a
+  finding that no fix exists; a REJECTED CVE answers not_assessed. 15 tools. Its text for
+  CVE-2021-44228 on production's data is 20,644 characters (assembled before the route was
+  deployed; re-measure live).
+- get_cve relays remediation, a capped summary (at most 1,500 characters of JSON) of the same.
+- vendor_advisories_for_cve rows carry remediation_kinds and remediation_state, and
+  get_vendor_advisory carries remediations, each item with its kind, verbatim text and URL
+  (#2840). Red Hat, Microsoft and Palo Alto are parsed; other vendors are not_parsed.
+- vendor_advisories_for_cve, get_vendor_advisory and search_vendor_advisories now say when an
+  advisory names a CVE ID whose CVE record was rejected (withdrawn) by its numbering authority
+  (#2865). Through 2.6.8 such an advisory read as a normal one when its vendor had not withdrawn
+  it: measured in production on 2026-10-05, 767 single-CVE advisories that their vendors had not
+  withdrawn named a CVE that EchelonGraph holds as REJECTED (GitHub 740, Microsoft 25, Red Hat 2),
+  and `vendor_advisories_for_cve` for CVE-2026-7936 returned Microsoft's "Chromium: CVE-2026-7936
+  Object lifecycle issue in V8" with nothing saying the CVE was rejected. core-backend now serves
+  `rejected_cve_ids` on each advisory: the CVE IDs it names that were rejected, `[]` when none
+  was, null when that could not be checked. vendor_advisories_for_cve also gets `cve_rejected`
+  for the CVE asked for. The vendor's own `withdrawn` is unchanged: it still says only whether the
+  vendor rescinded its advisory. The note opens with `CVE REJECTED` for a rejected CVE, names each
+  advisory that names a rejected CVE ID, and says when the state could not be checked. The three
+  descriptions and the outputSchema describe both fields. When a row is cut to fit the text, it
+  keeps `rejected_cve_ids` at both cut levels.
+- GitHub advisories whose text is a CVE rejection notice ("Rejected reason: …") are now served
+  with `withdrawn: true` (#2864; core-backend). search_vendor_advisories leaves them out, as it
+  does every withdrawn advisory.
+- get_cve relays CISA's own KEV text for a KEV-listed CVE (#2839; core-backend):
+  `kev_required_action` (CISA's requiredAction), `kev_short_description` and `kev_notes_urls`
+  (the https URLs in CISA's notes, at most 10), alongside `kev_due_date`, which the API already
+  served. Through 2.6.8 none of the three was stored. The note says the text is CISA's, under BOD
+  22-01, and not EchelonGraph's advice. triage_cve quotes the required action, attributed to CISA.
+- `patch_evidence` has two more labels (#2889, #2890; core-backend):
+  - `release_reference`: EchelonGraph's GitHub release, PR or commit reading found a published,
+    non-draft release that contains the fix.
+  - `cna_patch_reference`: the CVE's numbering authority tagged one of its references `patch` in
+    its CVE record.
+
+  Measured in production on 2026-10-05, 6,395 CVEs held one of these and read
+  `patch_available: false`. Among them were CVE-2026-97724, whose fix release worklets-0.12.2
+  EchelonGraph had read, and CVE-2026-69486, which Microsoft tagged `patch`. A reference that is
+  only marked from page wording, such as an advisory page that mentions a patch, is still not
+  counted as evidence.
+- epss_history now says where its record becomes complete (#2867; core-backend). Through 2.6.8
+  it presented 2026-05-18 onward as a complete record. Measured on 2026-10-05, every FIRST score
+  date in that span had been applied. But the old write path dropped many per-CVE changes within
+  a night's refresh: on 2026-09-21, 202 of 300 sampled CVEs whose EPSS changed got no history row.
+  The answer now carries:
+  - `complete_since`: 2026-10-04 23:14:54Z, the first refresh of the new write path;
+  - `series_complete`;
+  - a `score_date` on each point;
+  - a coverage block of days held, partial and missing. It comes from a new per-refresh run log,
+    so it is exact from the deploy onward.
+
+  The note names the incomplete stretch. It never calls the record complete without
+  `complete_since`.
+- check_sbom follows a Debian or Alpine purl's `upstream=` qualifier to the source package it was
+  built from (#2836; core-backend). Advisories are keyed by source package. Measured on
+  2026-10-05, Debian 12 holds 0 rows for `libssl3` and 262 for `openssl`. Through 2.6.8,
+  `pkg:deb/debian/libssl3@…?upstream=openssl` and `pkg:apk/alpine/libcrypto3@…` came back
+  not_assessed, while the same version under `openssl` was affected. Each row now says
+  `matched_package` and `matched_via` (`purl_name`, `upstream` or `coordinates`), and a match found
+  through `upstream=` says so in its `match_reason`. The binary name is never silently tried
+  instead.
+- check_affected and check_sbom registry matches carry `fixed_in` (#2834; core-backend): the fixed
+  bound of the interval that matched the version asked about. For example, log4j-core 2.14.1 →
+  2.15.0 and 2.11.0 → 2.12.2. It is `null` with a `fixed_in_reason` when that interval has no fix
+  (it ends at last_affected, or has no upper bound). CPE matches carry no `fixed_in`.
+  Every cut level of check_affected's text keeps `fixed_in`, so a registry list near the cap of
+  200 no longer fits whole: on django's rows at 200 matches beside 50 undetermined, the text keeps
+  185 (29,863 characters) and the note says the last 15 are in `structuredContent.data` only. Its
+  description said every match stays in the text; it now says that of CPE matches, and that a
+  registry list near the cap can leave its last matches out.
+- The server instructions and every tool description now fit in 2,048 characters (#2842). Claude
+  Code cuts each MCP tool description and each server's instructions at 2,048 characters
+  (`CLIENT_DESCRIPTION_CUT`, the strictest limit any client documents). On this release's text before the cut, 13 of 14
+  descriptions and the instructions (2,521) were over it, so a model in Claude Code read them cut.
+  `exposure_radar` was 11,807 characters. Detail moved into the outputSchema description of the
+  field it describes. A test fails if any text grows past the limit, or if a required sentence
+  (the Shodan attribution, the hosted-endpoint disclosure, each tool's load-bearing rule) falls
+  after it.
+- exposure_radar relays an observation window for kev_exposure (#2438; core-backend): the
+  Shodan banner times of the oldest and newest service×CVE pairs it counts, as
+  `kev_exposure.window`. That is passed through only when every counted pair has such a time.
+  Until then the note says how many have none. core-backend stores Shodan's banner `timestamp` as
+  `banner_seen_at`, and never our own write time; existing rows get one when a search matches
+  them again. `state` stays not_assessed and `measured_at` stays null: a window is a span of
+  observations made at different times, not one observation time.
+- New prompt `workload_triage` (#2846). It ranks an agent's own pods, images or CI containers by
+  CISA-KEV status, caller-asserted exposure and EPSS. The agent lists its workloads and makes an
+  SBOM per image digest with its own tools, then sends check_sbom only purls: no workload, image,
+  registry or exposure label goes to EchelonGraph. Exposure is labelled caller-asserted, and
+  unknown is never treated as not exposed. check_sbom's description says its input for container
+  images is an SBOM of each image, or its purls.
+- triage_cve, sbom_review and am_i_affected read the 2.7.0 fields (#2834, #2841). sbom_review and
+  am_i_affected give a registry match's `fixed_in` first: a null `fixed_in` means no fixed version
+  for that version's range, not that no fix exists. triage_cve and sbom_review call
+  cve_remediation, and relay a vendor's stated workaround or mitigation as that vendor's, untested
+  by EchelonGraph and not a fix.
+
 ## 2.6.8 — 2026-10-05
 
 - get_cve and search_cves now say what `patch_available` means, and describe `patch_evidence`

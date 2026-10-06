@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "echelongraph-mcp",
   "display_name": "EchelonGraph CVE & Exposure",
-  "version": "2.6.8",
+  "version": "2.7.0",
   "description": "CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.",
   "long_description": "CVE and internet-exposure data for Claude, Cursor, Cline, and any MCP client, from EchelonGraph's free public feed: NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, plus a per-CVE internet-exposure footprint: how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to the CVE. Exposure counts are derived from Shodan data. Shodan data is owned by Shodan, which holds its copyright (© Shodan).\n\nFree and keyless: no API key, no auth, read-only. The server makes no request other than the API call a tool needs to answer. Every result carries a structured envelope (state, measured_at, method, coverage, freshness, notes), and a CVE outside the exposure radar's tracked set is reported as not assessed, not as zero.",
   "author": {
@@ -37,7 +37,9 @@
     { "name": "epss_history", "description": "EPSS change history for one CVE" },
     { "name": "check_affected", "description": "Am I affected? (product or package at a version)" },
     { "name": "check_sbom", "description": "Check an SBOM against the advisory corpus" },
+    { "name": "scan_manifest", "description": "Check a lockfile against the advisory corpus" },
     { "name": "cve_intel", "description": "CVE weakness, exploits and packages" },
+    { "name": "cve_remediation", "description": "How one CVE is fixed" },
     { "name": "get_cwe", "description": "CWE and its CVEs" },
     { "name": "vendor_advisories_for_cve", "description": "Vendor advisories for one CVE" },
     { "name": "get_vendor_advisory", "description": "Vendor advisory detail" },

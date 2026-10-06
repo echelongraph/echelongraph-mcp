@@ -11,12 +11,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect, MODERN, RpcError } from "./mcp-stdio-client.mjs";
-import { serverCommand } from "./server-under-test.mjs";
+import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 
 const ERAS = [MODERN, "2025-06-18"];
-const PROMPTS = ["triage_cve", "kev_weekly_brief", "am_i_affected", "sbom_review"];
+const PROMPTS = ["triage_cve", "kev_weekly_brief", "am_i_affected", "sbom_review", "workload_triage"];
 const RESOURCES = ["echelongraph://methodology", "echelongraph://sources"];
 const SNAPSHOTS = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "prompts");
 const UPDATE = process.env.UPDATE_PROMPT_SNAPSHOTS === "1";
@@ -142,6 +142,45 @@ function inOrder(where, t, tools) {
   assert.deepEqual([...at].sort((a, b) => a - b), at, `${where} names ${tools.join(", ")} out of order`);
 }
 
+// #2846: what workload_triage must say, as a list of what its text lacks or carries wrongly, so a
+// control can hand it a changed copy. Exposure is the agent's, labelled caller-asserted, and
+// EchelonGraph measured none of it; not_assessed rows are counted and never clean; the order is
+// KEV, then exposure (exposed, unknown, not exposed), then EPSS, then score; check_sbom is sent
+// purls, not the document; and no EchelonGraph internet-exposure tool is named, since its counts are
+// not about the user's workloads and are no ranking input.
+const SBOM_TOOLS = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
+const WORKLOAD_MUST = [
+  ["caller-asserted exposure", /label it caller-asserted/],
+  ["EchelonGraph measured none of it", /EchelonGraph measured none of (this|it)/],
+  ["the closing caller-asserted statement", /Say plainly that every exposure label is caller-asserted: it came from the user's own cluster or CI data, read by you, and EchelonGraph measured none of it\./],
+  ["not_assessed is never clean", /not_assessed are not clean/],
+  ["the OS-package not_assessed count", /state how many of its OS-package rows are not_assessed, and never count them as clean/],
+  ["the upstream qualifier", /a deb or apk purl without an upstream qualifier/],
+  ["the order", /1\. a workload with a KEV-listed CVE \(kev_listed true\) first; 2\. then exposure: exposed, then unknown, then not exposed; 3\. then the highest epss_score, highest first; 4\. then the highest score/],
+  ["unknown is never not exposed", /Unknown is never treated as not exposed\./],
+  ["purls, not the document", /Pass purls, not the SBOM document/],
+  ["no workload data in arguments", /put no workload, namespace, image or registry name, no credential and no exposure label into any argument of any EchelonGraph tool/],
+  ["the call", /Call check_sbom with purls set to/],
+];
+const WORKLOAD_MUST_NOT = [
+  ["an EchelonGraph exposure tool as a ranking input", /\b(cve_exposure|exposure_radar)\b/],
+  ["the SBOM document passed to check_sbom", /check_sbom with sbom set to/],
+  ["the match_reason prose", /match_reason/],
+];
+// Where check_sbom's routing sentence ends in a description: past the cut, or Infinity where it is
+// not there, fails the head check.
+const routingEnd = (d) => {
+  const at = d.indexOf(SBOM_TOOLS.CHECK_SBOM_ROUTING);
+  return at < 0 ? Infinity : at + SBOM_TOOLS.CHECK_SBOM_ROUTING.length;
+};
+const CLIENT_CUT = 2048;
+function workloadProblems(t) {
+  return [
+    ...WORKLOAD_MUST.filter(([, re]) => !re.test(t)).map(([what]) => `lacks ${what}`),
+    ...WORKLOAD_MUST_NOT.filter(([, re]) => re.test(t)).map(([what]) => `carries ${what}`),
+  ];
+}
+
 for (const era of ERAS) {
   describe(`#2722 prompts and resources, era ${era}`, () => {
     let client;
@@ -158,7 +197,7 @@ for (const era of ERAS) {
       assert.ok(client.opening.capabilities.tools);
     });
 
-    it("prompts/list lists the four prompts with their arguments", async () => {
+    it("prompts/list lists the five prompts with their arguments", async () => {
       const { prompts } = await client.listPrompts();
       assert.deepEqual(prompts.map((p) => p.name), PROMPTS);
       const args = Object.fromEntries(prompts.map((p) => [p.name, p.arguments.map((a) => [a.name, a.required])]));
@@ -167,6 +206,7 @@ for (const era of ERAS) {
         kev_weekly_brief: [["days", false]],
         am_i_affected: [["product", false], ["ecosystem", false], ["package", false], ["version", true]],
         sbom_review: [["sbom", true]],
+        workload_triage: [["source", false]],
       });
       for (const p of prompts) {
         assert.ok(p.title && p.description, p.name);
@@ -181,16 +221,20 @@ for (const era of ERAS) {
     });
 
     const GETS = [
-      ["triage_cve", { cve_id: "cve-2024-3400" }, ["get_cve", "cve_intel", "vendor_advisories_for_cve", "epss_history", "cve_exposure"]],
+      ["triage_cve", { cve_id: "cve-2024-3400" }, ["get_cve", "cve_intel", "cve_remediation", "vendor_advisories_for_cve", "epss_history", "cve_exposure"]],
       ["kev_weekly_brief", undefined, ["kev_recent"]],
       ["kev_weekly_brief_30", { days: "30" }, ["kev_recent"]],
       ["am_i_affected_product", { product: "openssl", version: "3.0.0" }, ["check_affected"]],
       ["am_i_affected_registry", { ecosystem: "npm", package: "lodash", version: "4.17.20" }, ["check_affected"]],
-      ["sbom_review", { sbom: SBOM }, ["check_sbom", "get_cve", "cve_intel"]],
+      ["sbom_review", { sbom: SBOM }, ["check_sbom", "get_cve", "cve_intel", "cve_remediation"]],
+      ["workload_triage", undefined, ["check_sbom", "get_cve"]],
+      ["workload_triage_kubernetes", { source: "kubernetes" }, ["check_sbom", "get_cve"]],
+      ["workload_triage_github_actions", { source: "github_actions" }, ["check_sbom", "get_cve"]],
+      ["workload_triage_images", { source: "images" }, ["check_sbom", "get_cve"]],
     ];
     for (const [snap, args, named] of GETS) {
       it(`prompts/get ${snap}: names ${named.join(", ")} in order, carries the envelope rules, matches its snapshot`, async () => {
-        const name = snap.replace(/_(30|product|registry)$/, "");
+        const name = snap.replace(/_(30|product|registry|kubernetes|github_actions|images)$/, "");
         const t = textOf(await client.getPrompt({ name, arguments: args }));
         for (const tool of named) assert.ok(tools.has(tool), `${snap} names ${tool}, which tools/list does not list`);
         inOrder(snap, t, named);
@@ -228,6 +272,58 @@ for (const era of ERAS) {
       assert.match(t, /1\. CISA-KEV listed \(kev_listed true\) first; 2\. then EPSS score, highest first; 3\. then echelongraph_score/);
     });
 
+    it("#2834: am_i_affected's registry text reads each match's fixed_in, and its product text, whose CPE matches carry none, names none", async () => {
+      const reg = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" } }));
+      assert.match(reg, /For each match, give its fixed_in where it is a version: the fixed bound of the advisory interval that holds this version\. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists\./);
+      const cpe = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { product: "openssl", version: "3.0.0" } }));
+      assert.doesNotMatch(cpe, /fixed_in/);
+    });
+    it("#2834: sbom_review reads fixed_in first, null as no fix on that branch, and the match_reason and cve_intel rule where a match carries none", async () => {
+      const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      const rule = own.split("\n").find((l) => l.startsWith("For each line give the component"));
+      const at = (re) => rule.search(re);
+      assert.ok(at(/First, where the text keeps the component's match for the CVE and the match carries fixed_in: a version there is the fixed bound of the advisory interval that holds the installed version, so give it as the fixed version; null says the advisory records no fixed version for the installed version's range, so give none for that CVE on that component/) >= 0, rule);
+      assert.ok(at(/Where the match has no fixed_in field, or the text keeps no match for the component, the rest of this rule applies\./) >= 0, rule);
+      // fixed_in comes before the match_reason prose and cve_intel's values.
+      assert.ok(at(/carries fixed_in/) < at(/Prefer the match's match_reason/) && at(/carries fixed_in/) < at(/fixed_branches/), rule);
+    });
+    it("#2841: triage_cve and sbom_review read cve_remediation's vendor remediation as the vendor's, untested, and not_parsed and none_in_source as no finding of no fix", async () => {
+      const triage = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: CVE } }));
+      const patch = triage.split("\n").find((l) => l.startsWith("- Patch:"));
+      const review = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      for (const [where, t] of [["triage_cve's Patch line", patch], ["sbom_review", review]]) {
+        assert.match(t, /a workaround or mitigation as the step that vendor states, which EchelonGraph has not tested and which is not a fix/, where);
+        assert.match(t, /a remediation_state of not_parsed or none_in_source is not a finding that the vendor lists no fix/, where);
+      }
+      assert.match(triage, /^3\. cve_remediation: how it is fixed, as its sources state it/m);
+      assert.match(review, /Then, for the first 5 CVEs of the list \(fewer if it has fewer\), call cve_remediation with the CVE's cve_id/);
+    });
+    it("#2846: workload_triage says each thing it must, in every source's text, and names no EchelonGraph exposure tool", async () => {
+      for (const args of [undefined, {}, { source: "kubernetes" }, { source: "github_actions" }, { source: "images" }]) {
+        const t = textOf(await client.getPrompt({ name: "workload_triage", arguments: args }));
+        assert.deepEqual(workloadProblems(t), [], JSON.stringify(args));
+        // Exposure is never sourced from EchelonGraph: the text names neither of its exposure tools.
+        for (const tool of ["cve_exposure", "exposure_radar"]) assert.ok(tools.has(tool) && !t.includes(tool), tool);
+      }
+      const k8s = textOf(await client.getPrompt({ name: "workload_triage", arguments: { source: "kubernetes" } }));
+      assert.match(k8s, /kubectl get pods -A -o json/);
+      assert.match(k8s, /\.status\.containerStatuses\[\]\.imageID/);
+      assert.match(k8s, /hostNetwork: true/);
+      assert.doesNotMatch(k8s, /\.github\/workflows/, "a kubernetes text lists another source");
+      const gha = textOf(await client.getPrompt({ name: "workload_triage", arguments: { source: "github_actions" } }));
+      assert.match(gha, /container: and services:/);
+      assert.doesNotMatch(gha, /kubectl/, "a github_actions text lists another source");
+      // With no source, every way of listing is described.
+      const all = textOf(await client.getPrompt({ name: "workload_triage" }));
+      for (const re of [/kubectl get pods/, /\.github\/workflows/, /the image references the user gives you/]) assert.match(all, re);
+    });
+    it("#2846: check_sbom's description carries its container-image routing sentence inside the client cut", async () => {
+      const d = (await client.listTools()).tools.find((t) => t.name === "check_sbom").description;
+      assert.match(SBOM_TOOLS.CHECK_SBOM_ROUTING, /container images and Kubernetes pods/);
+      assert.ok(routingEnd(d) <= CLIENT_CUT, `the routing sentence ends at ${routingEnd(d)}: ${d}`);
+      assert.ok(d.length <= CLIENT_CUT, `check_sbom's description is ${d.length} characters`);
+    });
+
     const BAD = [
       ["triage_cve with no arguments", "triage_cve", undefined],
       ["triage_cve with no cve_id", "triage_cve", {}],
@@ -241,6 +337,8 @@ for (const era of ERAS) {
       ["am_i_affected with ecosystem but no package", "am_i_affected", { ecosystem: "npm", version: "1.0.0" }],
       ["sbom_review with no sbom", "sbom_review", {}],
       ["sbom_review with an empty sbom", "sbom_review", { sbom: "" }],
+      ["workload_triage with a source it does not know", "workload_triage", { source: "docker" }],
+      ["workload_triage with an empty source", "workload_triage", { source: "" }],
       ["a prompt that does not exist", "no_such_prompt", {}],
     ];
     for (const [what, name, args] of BAD) {
@@ -402,8 +500,10 @@ for (const era of ERAS) {
     // of one day, which on a day of more than a page (2021-11-03: 287) need not hold the CVE's row.
     it("triage_cve reads kev_due_date from get_cve, whose record carries it, and calls no kev_recent", async () => {
       const t = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: CVE } }));
-      assert.match(t, /1\. get_cve: .*the CISA-KEV fields kev_listed, kev_added_date, kev_due_date and kev_ransomware\./);
+      assert.match(t, /1\. get_cve: .*the CISA-KEV fields kev_listed, kev_added_date, kev_due_date and kev_ransomware, and, where the record carries it, kev_required_action, CISA's own text\./);
       assert.match(t, /- Deadline: get_cve's kev_due_date when the CVE is KEV-listed/);
+      // #2839: CISA's required action is quoted as CISA's, never as EchelonGraph's advice.
+      assert.match(t, /Where get_cve carries kev_required_action, quote it, attributed to CISA, as the action CISA requires of those agencies, not as EchelonGraph's advice\./);
       assert.doesNotMatch(t, /kev_recent/);
       const call = await client.callTool({ name: "get_cve", arguments: { cve_id: CVE } });
       assert.equal(JSON.parse(call.content[0].text).kev_due_date, RECORD.kev_due_date);
@@ -430,3 +530,48 @@ for (const era of ERAS) {
     });
   });
 }
+
+// #2846 controls: each clause workloadProblems reads, taken out of (or put into) the served text,
+// fails it; and the routing check fails with the sentence moved past the cut.
+describe("#2846 controls: workload_triage's checker and check_sbom's routing head", () => {
+  let base;
+  before(async () => {
+    const P = await import(pathToFileURL(path.join(PKG_DIR, "dist", "prompts.js")).href);
+    base = P.workloadTriageText("kubernetes");
+    assert.deepEqual(workloadProblems(base), []);
+  });
+  const without = (re) => {
+    assert.ok(re.test(base), `re-aim this control: the text no longer holds ${re}`);
+    return base.replace(re, "");
+  };
+  it("dropping the caller-asserted label fails it", () => {
+    assert.ok(workloadProblems(without(/label it caller-asserted/)).includes("lacks caller-asserted exposure"));
+  });
+  it("dropping 'EchelonGraph measured none of' fails it", () => {
+    assert.ok(workloadProblems(base.replaceAll(/EchelonGraph measured none of (this|it)/g, "")).includes("lacks EchelonGraph measured none of it"));
+  });
+  it("dropping the not_assessed clauses fails it", () => {
+    assert.ok(workloadProblems(without(/not_assessed are not clean/)).includes("lacks not_assessed is never clean"));
+    assert.ok(workloadProblems(without(/state how many of its OS-package rows are not_assessed, and never count them as clean/)).includes("lacks the OS-package not_assessed count"));
+  });
+  it("exposure sorted before KEV, or unknown after not exposed, fails it", () => {
+    const swapped = base.replace("1. a workload with a KEV-listed CVE (kev_listed true) first; 2. then exposure: exposed, then unknown, then not exposed;", "1. exposure: exposed, then unknown, then not exposed; 2. then a workload with a KEV-listed CVE (kev_listed true);");
+    assert.notEqual(swapped, base);
+    assert.ok(workloadProblems(swapped).includes("lacks the order"));
+    const unsafe = base.replace("exposed, then unknown, then not exposed", "exposed, then not exposed, then unknown");
+    assert.notEqual(unsafe, base);
+    assert.ok(workloadProblems(unsafe).includes("lacks the order"));
+  });
+  it("naming cve_exposure or exposure_radar, or passing the document, fails it", () => {
+    assert.ok(workloadProblems(`${base}\nRank exposure by cve_exposure's exposed_hosts.`).includes("carries an EchelonGraph exposure tool as a ranking input"));
+    assert.ok(workloadProblems(`${base}\nUse exposure_radar for the totals.`).includes("carries an EchelonGraph exposure tool as a ranking input"));
+    assert.ok(workloadProblems(base.replace("Call check_sbom with purls set to", "Call check_sbom with sbom set to")).length >= 2);
+  });
+  it("the routing sentence moved past 2,048 characters is out of the head", () => {
+    const r = SBOM_TOOLS.CHECK_SBOM_ROUTING;
+    const d = SBOM_TOOLS.CHECK_SBOM_DESCRIPTION;
+    assert.ok(routingEnd(d) <= CLIENT_CUT);
+    assert.ok(routingEnd(`${d.replace(r, "")} ${"x".repeat(CLIENT_CUT)} ${r}`) > CLIENT_CUT, "moved past the cut, the sentence still reads as in the head");
+    assert.equal(routingEnd(d.replace(r, "")), Infinity, "dropped, the sentence still reads as in the head");
+  });
+});

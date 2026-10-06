@@ -73,6 +73,8 @@ after(() => new Promise((resolve) => stub.close(resolve)));
 const stubBase = () => `http://127.0.0.1:${stub.address().port}`;
 
 // ── the server under test ──
+// Every stdout line of every server this file starts, for #2863's key-set check at the end.
+const EVERY_LINE = [];
 // Spawns dist/http.js on an ephemeral port and resolves once it logs that it is listening.
 // stdout is kept line by line: it is the access log the tests read.
 async function startHttp(extraEnv = {}) {
@@ -100,6 +102,7 @@ async function startHttp(extraEnv = {}) {
         const line = buf.slice(0, i);
         buf = buf.slice(i + 1);
         lines.push(line);
+        EVERY_LINE.push(line);
         try {
           const j = JSON.parse(line);
           if (j.message === "mcp_remote_listening") {
@@ -446,6 +449,52 @@ describe("#2747: check_sbom takes a real SBOM document over the hosted endpoint"
     assert.ok(text.length <= 5_000_000 && text.length > 4_900_000, `${text.length}`);
     const bytes = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "check_sbom", arguments: { sbom: text } } }));
     assert.ok(bytes < P.DEFAULT_MAX_SBOM_BODY_BYTES, `${bytes} bytes`);
+  });
+});
+
+// #2835: scan_manifest's files are the request body over the hosted endpoint, as check_sbom's
+// document is. A real package-lock (fixtures/manifests/tree.v3.package-lock.json, written by npm
+// 10), its registry entries cycled under new names to 700 distinct packages: ~200 KiB of
+// lockfile, three times the general 64 KiB cap. Control: before #2835, LARGE_BODY_TARGETS named
+// check_sbom alone, and this body was refused 413.
+describe("#2835: scan_manifest takes a lockfile past 64 KiB over the hosted endpoint", () => {
+  const TREE = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "manifests", "tree.v3.package-lock.json"), "utf8"));
+  const registry = Object.entries(TREE.packages).filter(([k, e]) => k.startsWith("node_modules/") && !e.link && String(e.resolved ?? "").startsWith("https://registry.npmjs.org/"));
+  const packages = { "": TREE.packages[""] };
+  for (let i = 0; i < 700; i++) {
+    const [key, e] = registry[i % registry.length];
+    // name: undefined drops an alias's own name, so each copy is its own package.
+    packages[`node_modules/${key.split("node_modules/").pop().replace("@", "")}-r${i}`] = { ...e, name: undefined };
+  }
+  const LOCK = JSON.stringify({ ...TREE, packages }, null, 2);
+  const call = { name: "scan_manifest", arguments: { files: [{ filename: "package-lock.json", content: LOCK }] } };
+  const bodyBytes = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: call }));
+  let srv;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000" });
+  });
+  after(() => srv?.stop());
+
+  it("control: the lockfile is far past the 64 KiB general cap", () => {
+    assert.ok(bodyBytes > 3 * 64 * 1024, `${bodyBytes}`);
+  });
+  for (const era of ["modern", "legacy 2025-06-18"]) {
+    it(`${era}: tools/call scan_manifest with the lockfile answers 200, measured, every purl checked`, async () => {
+      const before = batchPurls.length;
+      const r = era === "modern" ? await modern(srv.url, "tools/call", call) : await legacy(srv.url, "tools/call", call, { revision: "2025-06-18" });
+      assert.equal(r.status, 200, r.text.slice(0, 500));
+      assert.notEqual(r.message.result.isError, true, r.text.slice(0, 500));
+      const sc = r.message.result.structuredContent;
+      assert.equal(sc.state, "measured");
+      assert.deepEqual([sc.coverage.files_read, sc.coverage.entries_pinned, sc.coverage.distinct_purls, sc.coverage.sent, sc.coverage.not_sent], [1, 700, 700, 700, 0]);
+      assert.equal(batchPurls.length - before, 700, "the batch route did not receive every purl");
+    });
+  }
+  it("the access line names the tool and the size, and no line holds anything from the lockfile", async () => {
+    await new Promise((r) => setTimeout(r, 100));
+    const big = accessLines(srv).filter((l) => l.tool === "scan_manifest" && l.body_bytes > 64 * 1024);
+    assert.equal(big.length, 2, JSON.stringify(accessLines(srv)));
+    for (const line of srv.lines) assert.ok(!line.includes("node_modules") && !line.includes("-r1") && !line.includes("pkg:npm"), `a log line carries the lockfile: ${line.slice(0, 300)}`);
   });
 });
 
@@ -1270,5 +1319,81 @@ describe("the npm stdio entry never sends the forward headers (no-telemetry prom
     assert.equal(calls.length, 1);
     assert.equal(calls[0].clientIp, undefined);
     assert.equal(calls[0].token, undefined);
+  });
+});
+
+// #2863: /privacy Section 11 lists what the hosted endpoint's access line records (the first word of
+// the client's User-Agent and nothing else of it; no client address), and only a marketing-site
+// test (privacyMcpEndpoint.test.ts) held http.ts's log calls to that list. That test runs in the
+// marketing deploy alone, so adding the client address and the whole User-Agent to mcp_request
+// passed this suite, the npm publish (scripts/npm-publish-mcp.sh runs only this suite) and the
+// mcp-remote deploy, and made Section 11 false until an unrelated marketing deploy. Here every line
+// the servers above wrote, whatever made it, has exactly its reviewed keys, as mcp_client_gone's
+// test above holds its own. A new key, or a new line, fails here first: say it in Section 11, then
+// add it below and to privacyMcpEndpoint.test.ts's ACCESS_FIELDS / OTHER_LINES.
+describe("#2863: every stdout line carries exactly the keys /privacy Section 11 was reviewed against", () => {
+  const ENVELOPE = ["message", "severity"];
+  // The access line: http.ts finish(), plus BodyFacts (httpPolicy.ts bodyFacts), which adds tool for
+  // a tools/call and prompt for a prompts/get, and nothing else.
+  const ACCESS = [
+    "body_bytes",
+    "client_closed",
+    "client_public",
+    "duration_ms",
+    "in_flight",
+    "method",
+    "origin_present",
+    "path",
+    "protocol_version",
+    "queued_ms",
+    "refused",
+    "rpc_method",
+    "status",
+    "throttled",
+    "ua_family",
+  ];
+  const BODY_FACTS = { "tools/call": ["tool"], "prompts/get": ["prompt"] };
+  const LINES = {
+    mcp_remote_refusing_to_start: ["reason"],
+    mcp_remote_heap_unbounded: ["heap_limit_mb", "memory_limit_mb", "reason"],
+    mcp_handler_error: ["error_name"],
+    mcp_request_failed: ["error_name"],
+    mcp_large_body_busy: ["slots"],
+    mcp_busy: ["max_in_flight", "waiting"],
+    mcp_rate_limited: ["client", "limit"],
+    mcp_client_gone: ["after_ms", "answer_started", "rst_code"],
+  };
+  // The lines this file's servers are driven to write; a reviewed line it never makes is no check.
+  const MUST_SEE = ["mcp_request", "mcp_remote_listening", "mcp_busy", "mcp_large_body_busy", "mcp_rate_limited", "mcp_client_gone"];
+  const sorted = (xs) => [...xs].sort();
+
+  it("mcp_request has exactly the access-line keys, plus tool or prompt for the methods that name one", () => {
+    const access = EVERY_LINE.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request");
+    assert.ok(access.length > 0, "no mcp_request line was written");
+    assert.ok(access.some((j) => j.tool !== undefined), "control: no access line for a tools/call");
+    for (const j of access) {
+      const want = sorted([...ENVELOPE, ...ACCESS, ...(BODY_FACTS[j.rpc_method] ?? [])]);
+      assert.deepEqual(sorted(Object.keys(j)), want, `an access line's keys are not the ones /privacy Section 11 names: ${JSON.stringify(j)}`);
+      // Section 11: "the first word of your client's User-Agent ... not the rest of it".
+      assert.match(j.ua_family, /^[^\s/]+$/, `ua_family is more than the User-Agent's first word: ${JSON.stringify(j)}`);
+    }
+  });
+
+  it("every other line has exactly its reviewed keys, and no line is one nobody reviewed", () => {
+    const seen = new Set();
+    for (const line of EVERY_LINE) {
+      const j = JSON.parse(line);
+      seen.add(j.message);
+      if (j.message === "mcp_request") continue;
+      if (j.message === "mcp_remote_listening") {
+        // Start-up configuration, written before any request: no key may name a client or a request.
+        for (const k of Object.keys(j)) assert.doesNotMatch(k, /client_|addr|address|^ip$|user_agent|^ua$|header|origin|body$|params|arguments/, `mcp_remote_listening carries ${k}: ${line}`);
+        continue;
+      }
+      const want = LINES[j.message];
+      assert.ok(want, `http.ts writes a line nobody reviewed for /privacy Section 11: ${line}`);
+      assert.deepEqual(sorted(Object.keys(j)), sorted([...ENVELOPE, ...want]), `${j.message}'s keys are not the reviewed ones: ${line}`);
+    }
+    for (const m of MUST_SEE) assert.ok(seen.has(m), `no ${m} line was written by this file's servers, so its keys are not checked`);
   });
 });

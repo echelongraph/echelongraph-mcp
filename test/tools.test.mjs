@@ -32,6 +32,7 @@ import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, CALL_ANSWER, CALL_ANSWER_EMPTY } from "./fixtures/match-batch.mjs";
 import { CEILING, LIVE_TOOLS, MARGIN, PROD_BASE, assertBoundUnderCeiling, keptAnswers, readLiveRecord, shareOfCeiling, textSize } from "./text-bound.mjs";
+import { REQUIRED, cutProblems } from "./client-cut.mjs";
 
 // The era this run of the suite opens its connections with.
 const ERA = globalThis.MCP_TEST_ERA ?? MODERN;
@@ -391,6 +392,9 @@ const CALLS = {
   check_affected: { product: "openssl", version: "3.0.0" },
   // #2721: its own suite is check_sbom.test.mjs; here it meets every cross-tool rule.
   check_sbom: { purls: ["pkg:npm/lodash@4.17.20", "pkg:deb/debian/openssl@3.0.11-1~deb12u1"] },
+  // #2835: its own suite is scan_manifest.test.mjs; here it meets every cross-tool rule. The lock
+  // pins the purl CALL_ANSWER answers first.
+  scan_manifest: { files: [{ filename: "package-lock.json", content: JSON.stringify({ name: "x", lockfileVersion: 3, packages: { "": { name: "x" }, "node_modules/lodash": { version: "4.17.20", resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz" } } }) }] },
   // #2719 (fixtures: VADV_* below; the tool-specific tests are in vendor-advisories.test.mjs).
   vendor_advisories_for_cve: { cve_id: VADV_CVE },
   get_vendor_advisory: { vendor: "redhat", advisory_id: VADV_ID },
@@ -399,8 +403,8 @@ const CALLS = {
 const TOOLS = Object.keys(CALLS);
 // What tools/list answers, in createServer()'s registration order. Tools registered from
 // src/tools/ that are not in CALLS have their own suites (kev_recent: kev_recent.test.mjs, #2717).
-const PROMPT_NAMES = ["triage_cve", "kev_weekly_brief", "am_i_affected", "sbom_review"];
-const LISTED = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "cve_intel", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
+const PROMPT_NAMES = ["triage_cve", "kev_weekly_brief", "am_i_affected", "sbom_review", "workload_triage"];
+const LISTED = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar", "kev_recent", "epss_history", "check_affected", "check_sbom", "scan_manifest", "cve_intel", "cve_remediation", "get_cwe", "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories"];
 
 // #2535: score_assessed. A CVE EchelonGraph has not scored carries score_assessed false, and
 // any echelongraph_score it carries is a placeholder, not a rating (core-backend cve/store.go,
@@ -1047,6 +1051,11 @@ function schemaDescriptions(s, out = []) {
   }
   return out;
 }
+// #2842: what a tool's tools/list entry says of its result: the description, which fits the client
+// cut (src/requiredText.ts), and every description in its outputSchema, where the detail of what each
+// field counts moved. A sentence pinned here may sit in either; what must sit in the description's
+// head is pinned by REQUIRED_IN_HEAD ("client 2,048-character cut" below).
+const toolText = (t) => [t.description, ...schemaDescriptions(t.outputSchema)].join(" ");
 // #2465: a sentence that denies the numbers in an answer are findings, in any of the ways it has
 // been or could be written: 2.1.0's schema said "no number in it is a finding", and its code
 // comment "Its numbers are not findings". Scoped to numbers, counts and figures, so a failure's
@@ -1713,7 +1722,7 @@ describe(`against a stub API [${ERA}]`, () => {
       note = noteOf(res);
     });
     it("the description no longer calls the total exposed AI services", () => {
-      const d = tools.find((t) => t.name === "exposure_radar").description;
+      const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       assert.doesNotMatch(d, /exposed AI services/, d);
       assert.match(d, /shadow_ai\.observed counts every Certificate Transparency or Shodan observation on record, whatever its verification state: its numbers are observed, not exposed\./, d);
       assert.match(d, /confirmed_exposed\.total is the sum of confirmed_exposed\.by_category/, d);
@@ -1763,7 +1772,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.deepEqual(found, Object.keys(SHADOW_AI_LABELLED).sort());
     });
     it("each labelled field is named in the note, the tool description and the README", () => {
-      const d = tools.find((t) => t.name === "exposure_radar").description;
+      const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       const readme = readPkgFile("README.md");
       for (const name of new Set(Object.values(SHADOW_AI_LABELLED))) {
         assert.ok(note.includes(name), `the note does not label ${name}: ${note}`);
@@ -1800,7 +1809,7 @@ describe(`against a stub API [${ERA}]`, () => {
       }
     });
     it("no sentence that names an observed or authentication field calls it exposed: note, description, README", () => {
-      const d = tools.find((t) => t.name === "exposure_radar").description;
+      const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       const n = assertObservedFieldsNotCalledExposed("note", sentencesOf(note));
       const dn = assertObservedFieldsNotCalledExposed("description", sentencesOf(d));
       const rn = assertObservedFieldsNotCalledExposed("README.md", readmeUnits(readPkgFile("README.md")));
@@ -1916,7 +1925,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.deepEqual(relayed.poller, { running: true, last_run_at: FLEET_RUNNING.last_run_at });
     });
     it("the description says what running and last_run_at mean", () => {
-      const d = tools.find((t) => t.name === "exposure_radar").description;
+      const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       assert.match(d, /last_run_at is when the radar's leader last completed a Certificate Transparency \(crt\.sh\) cycle, and its running is true only when that was within 30 minutes of the answer/, d);
     });
 
@@ -2012,7 +2021,7 @@ describe(`against a stub API [${ERA}]`, () => {
       res = await client.callTool({ name: "exposure_radar", arguments: {} });
       data = JSON.parse(res.content[0].text);
       note = noteOf(res);
-      description = tools.find((t) => t.name === "exposure_radar").description;
+      description = toolText(tools.find((t) => t.name === "exposure_radar"));
       readme = readPkgFile("README.md");
     });
 
@@ -2332,7 +2341,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.deepEqual(relayed.exposed_databases.window, { from: "2026-09-20T01:00:00Z", to: "2026-10-03T22:00:00Z" });
       assert.deepEqual(relayed.leaked_credentials.window, { from: "2026-09-05T00:00:00Z", to: "2026-10-03T23:00:00Z" });
       assert.deepEqual(relayed.shadow_ai.confirmed_exposed.window, { from: "2026-10-01T10:00:00Z", to: "2026-10-04T06:00:00Z" });
-      assert.equal(relayed.kev_exposure.window, undefined, "kev_exposure serves no window, and none is made up");
+      assert.equal(relayed.kev_exposure.window, undefined, "this kev_exposure answer serves no window, and none is made up");
       assert.match(n, /exposed_databases\.window\.from \(2026-09-20T01:00:00Z\) and exposed_databases\.window\.to \(2026-10-03T22:00:00Z\) are timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication\./);
       assert.match(n, /leaked_credentials\.window\.from \(2026-09-05T00:00:00Z\) and leaked_credentials\.window\.to \(2026-10-03T23:00:00Z\) are timestamps, not counts/);
       assert.match(n, /shadow_ai\.confirmed_exposed\.window\.from \(2026-10-01T10:00:00Z\) and shadow_ai\.confirmed_exposed\.window\.to \(2026-10-04T06:00:00Z\) are timestamps, not counts/);
@@ -2342,6 +2351,42 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(sc.measured_at, null, "a window's end is not measured_at");
       // Not a number anywhere: the windows add no unlabelled numeric path.
       assert.deepEqual(unlabelledIn(relayed), []);
+    });
+
+    // kev_exposure's observed_window is Shodan's banner timestamps over the KEV rows the headline
+    // counts (core-backend kevexposure store.go Stats, banner_seen_at). Both polarities, and the
+    // control: the API before it serves no window, and none is relayed, made up or named.
+    const KEV = "/api/v1/public/kev-exposure/stats";
+    it("kev_exposure: a window over every counted pair is relayed and labelled as Shodan's banner times, and the envelope stays undated", async () => {
+      const { r, relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, observed_window: W("2026-09-02T03:04:05Z", "2026-10-04T22:10:00Z") } });
+      assert.deepEqual(relayed.kev_exposure.window, { from: "2026-09-02T03:04:05Z", to: "2026-10-04T22:10:00Z" });
+      assert.match(n, /kev_exposure\.window\.from \(2026-09-02T03:04:05Z\) and kev_exposure\.window\.to \(2026-10-04T22:10:00Z\) are timestamps, not counts: when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, Shodan's own times, not when EchelonGraph stored or re-checked a pair\. They span observations made at different times, not one observation time\./);
+      assert.doesNotMatch(n, /observed_window/, "a served window was named as left out");
+      const sc = r.structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null, "the window's end is not measured_at (#2438 decision, 2026-10-04)");
+      assert.doesNotMatch(JSON.stringify({ ...sc, data: undefined, notes: undefined }), /2026-10-04T22:10:00Z/, "the window's end appears outside data and the note");
+      assert.deepEqual(unlabelledIn(relayed), []);
+    });
+
+    it("kev_exposure: a window that leaves counted pairs undated is not relayed, and the note says how many", async () => {
+      const { r, relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, observed_window: W("2026-10-01T00:00:00Z", "2026-10-04T22:10:00Z", 69931) } });
+      assert.equal(relayed.kev_exposure.window, undefined);
+      assert.match(n, /kev_exposure carries no window: 69931 of the rows it counts have no observation time on record/);
+      assert.equal(r.structuredContent.measured_at, null);
+    });
+
+    it("kev_exposure control: an API without observed_window gets no window, none made up and nothing named", async () => {
+      assert.equal(PROD_KEV_STATS.observed_window, undefined, "fixture broken: the production-shaped answer already serves a window");
+      const { relayed, n } = await run({ [KEV]: PROD_KEV_STATS });
+      assert.equal(relayed.kev_exposure.window, undefined);
+      assert.doesNotMatch(n, /kev_exposure\.window|kev_exposure carries no window|observed_window/);
+    });
+
+    it("kev_exposure: observed_window null (an aggregate persisted before the field) is no window and is not named", async () => {
+      const { relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, observed_window: null } });
+      assert.equal(relayed.kev_exposure.window, undefined);
+      assert.doesNotMatch(n, /observed_window|kev_exposure carries no window/);
     });
 
     it("a window that leaves counted rows undated is not relayed, and the note says how many", async () => {
@@ -2360,9 +2405,9 @@ describe(`against a stub API [${ERA}]`, () => {
 
     it("the description and the README label every window", async () => {
       const { tools } = await client.listTools();
-      const d = tools.find((t) => t.name === "exposure_radar").description;
+      const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       const readme = readPkgFile("README.md");
-      for (const f of ["exposed_databases.window.from", "leaked_credentials.window.from", "confirmed_exposed.window.from"]) {
+      for (const f of ["kev_exposure.window.from", "exposed_databases.window.from", "leaked_credentials.window.from", "confirmed_exposed.window.from"]) {
         assert.ok(d.includes(f), `the description does not label ${f}`);
         assert.ok(readme.includes(f), `the README does not label ${f}`);
       }
@@ -2417,7 +2462,7 @@ describe(`against a stub API [${ERA}]`, () => {
     before(async () => {
       stub.state.mode = "ok";
       ({ tools } = await client.listTools());
-      description = tools.find((t) => t.name === "exposure_radar").description;
+      description = toolText(tools.find((t) => t.name === "exposure_radar"));
       readme = readPkgFile("README.md");
       const res = await client.callTool({ name: "exposure_radar", arguments: {} });
       data = JSON.parse(res.content[0].text);
@@ -2614,7 +2659,7 @@ describe(`against a stub API [${ERA}]`, () => {
       res = await client.callTool({ name: "exposure_radar", arguments: {} });
       data = JSON.parse(res.content[0].text);
       note = noteOf(res);
-      description = tools.find((t) => t.name === "exposure_radar").description;
+      description = toolText(tools.find((t) => t.name === "exposure_radar"));
       readme = readPkgFile("README.md");
     });
 
@@ -2648,7 +2693,7 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(sc.state, "not_assessed");
       assert.equal(sc.measured_at, null);
       assert.deepEqual(sc.freshness.mcp_servers, { last_run_at: MCP_STATS.last_run_at, enabled: true });
-      assert.match(sc.notes[0], /mcp_servers date what they count at most by a window \(exposed_databases\.window, leaked_credentials\.window, shadow_ai\.confirmed_exposed\.window, mcp_servers\.window\), from the oldest observation among the rows counted to the newest, so no count here is presented as a dated measurement and measured_at is null\./);
+      assert.match(sc.notes[0], /mcp_servers date what they count at most by a window \(kev_exposure\.window, exposed_databases\.window, leaked_credentials\.window, shadow_ai\.confirmed_exposed\.window, mcp_servers\.window\), from the oldest observation among the rows counted to the newest, so no count here is presented as a dated measurement and measured_at is null\./);
       assert.match(sc.notes[1], /freshness\.mcp_servers\.last_run_at with freshness\.mcp_servers\.enabled/);
       assert.match(sc.method, /; mcp_servers, the latest verdict on record per hostname named like an MCP server in EchelonGraph's own Certificate Transparency feed, from EchelonGraph's identified MCP probe \(server\/discover, and initialize only if that is refused; never tools\/call\), where protected means the endpoint's RFC 9728 protected-resource metadata validated\.$/);
       assert.equal(assertEnvelopeInText("exposure_radar with mcp_servers", res).state, "not_assessed");
@@ -2876,6 +2921,86 @@ describe(`against a stub API [${ERA}]`, () => {
 
   // #2311: every tool carries a title, the four annotations and an outputSchema, and the opening
   // exchange carries the server instructions.
+  // #2842: Claude Code cuts every tool description and the server instructions at 2,048 characters
+  // (src/requiredText.ts says where that is documented), and through 2.6.8 the instructions (2,521)
+  // and 12 of the 14 descriptions were longer: the Shodan attribution and ownership in the
+  // instructions, and exposure_radar's ownership sentence at character 10,613, never reached the
+  // model there. Every text tools/list and the opening exchange serve now fits the cut whole, and
+  // the sentences src/requiredText.ts names sit in each head (test/client-cut.mjs says how).
+  describe(`#2842: the client ${REQUIRED.CLIENT_DESCRIPTION_CUT.toLocaleString("en-US")}-character cut`, () => {
+    let tools, served;
+    before(async () => {
+      ({ tools } = await client.listTools());
+      served = { instructions: client.opening.instructions, tools };
+    });
+    // A copy of what is served with one tool's description replaced.
+    const withDescription = (name, f) => ({ ...served, tools: served.tools.map((t) => (t.name === name ? { ...t, description: f(t.description) } : t)) });
+    // The same text with `sentence` moved past the cut.
+    const pastCut = (text, sentence) => {
+      assert.ok(text.includes(sentence), `re-aim this control: the text no longer holds ${sentence}`);
+      return `${text.replace(sentence, "")} ${"x".repeat(REQUIRED.CLIENT_DESCRIPTION_CUT)} ${sentence}`;
+    };
+    const has = (problems, re) => problems.some((p) => re.test(p));
+
+    it("the instructions and every description fit the cut, each head holds its required sentences, and every tool has an entry", () => {
+      assert.equal(REQUIRED.CLIENT_DESCRIPTION_CUT, 2048);
+      assert.deepEqual(cutProblems(served), []);
+      for (const t of tools) assert.ok(t.description.length <= REQUIRED.CLIENT_DESCRIPTION_CUT, `${t.name}: ${t.description.length}`);
+      assert.ok(served.instructions.length <= REQUIRED.CLIENT_DESCRIPTION_CUT, `instructions: ${served.instructions.length}`);
+    });
+    it("control: a description grown past the cut fails (b)", () => {
+      const grown = withDescription("get_cwe", (d) => `${d} ${"y".repeat(REQUIRED.CLIENT_DESCRIPTION_CUT - d.length)}`);
+      assert.ok(has(cutProblems(grown), /^\(b\) get_cwe: its description is 2049 characters; the cut is 2048$/), cutProblems(grown).join("\n"));
+      // One character under it passes.
+      assert.deepEqual(cutProblems(withDescription("get_cwe", (d) => `${d}${"y".repeat(REQUIRED.CLIENT_DESCRIPTION_CUT - d.length)}`)), []);
+    });
+    // The attribution and ownership, moved together, so only the cut can fail them.
+    const ATTRIBUTION = `Exposure counts are derived from Shodan data. ${REQUIRED.SHODAN_OWNERSHIP}`;
+    it("control A: the instructions padded past the cut, attribution and ownership last, fail (a) and (d)", () => {
+      const p = cutProblems({ ...served, instructions: pastCut(served.instructions, ATTRIBUTION) });
+      assert.ok(has(p, /^\(a\) the instructions are \d+ characters/) && has(p, /^\(a\) the instructions' first 2048 characters lack/), p.join("\n"));
+      assert.ok(has(p, /^\(d\) the instructions' head names Shodan/), p.join("\n"));
+    });
+    it("control B: cve_exposure's ownership moved past the cut fails (b) and (d)", () => {
+      const p = cutProblems(withDescription("cve_exposure", (d) => pastCut(d, REQUIRED.SHODAN_OWNERSHIP)));
+      assert.ok(has(p, /^\(b\) cve_exposure: its description's first 2048 characters lack: Shodan data is owned by Shodan/), p.join("\n"));
+      assert.ok(has(p, /^\(d\) cve_exposure's description head names Shodan/), p.join("\n"));
+    });
+    // 2.6.8's exposure_radar description was 11,807 characters, its ownership sentence last.
+    it("control B2: an exposure_radar description shaped like 2.6.8's, ownership last, fails (b) and (d)", () => {
+      const old = `${"Aggregate totals from EchelonGraph's internet-exposure radars: kev_exposure, derived from Shodan data (no Shodan data) its 0 is not one. "}${"z".repeat(11_640)} ${REQUIRED.SHODAN_OWNERSHIP}`;
+      const p = cutProblems(withDescription("exposure_radar", () => old));
+      assert.ok(has(p, /^\(b\) exposure_radar: its description is \d+ characters/) && has(p, /^\(b\) exposure_radar: its description's first 2048 characters lack: Shodan data is owned/), p.join("\n"));
+      assert.ok(has(p, /^\(d\) exposure_radar's description head names Shodan/), p.join("\n"));
+    });
+    it("control C: a tool registered with no REQUIRED_IN_HEAD entry fails (c), and so does an entry for no tool", () => {
+      const dummy = { name: "dummy_tool", description: "A tool with no entry.", outputSchema: {} };
+      assert.ok(has(cutProblems({ ...served, tools: [...tools, dummy] }), /^\(c\) dummy_tool: no REQUIRED_IN_HEAD entry/));
+      assert.ok(has(cutProblems({ ...served, tools: tools.filter((t) => t.name !== "get_cwe") }), /^\(c\) REQUIRED_IN_HEAD names get_cwe/));
+    });
+    it("control D: check_sbom's hosted-endpoint sentence moved past the cut fails (b)", () => {
+      const p = cutProblems(withDescription("check_sbom", (d) => pastCut(d, "over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's")));
+      assert.ok(has(p, /^\(b\) check_sbom: its description's first 2048 characters lack: over the hosted endpoint/), p.join("\n"));
+    });
+    // #2835: scan_manifest's privacy sentences and its not-clean rule, each moved past the cut.
+    it("control: scan_manifest's hosted-endpoint, purls-only and not_checked sentences moved past the cut each fail (b)", () => {
+      for (const sentence of ["over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's", "only the purls are sent to the API", "not_checked entries are not clean", "go.sum is refused"]) {
+        const p = cutProblems(withDescription("scan_manifest", (d) => pastCut(d, sentence)));
+        assert.ok(p.includes(`(b) scan_manifest: its description's first 2048 characters lack: ${sentence}`), `${sentence}\n${p.join("\n")}`);
+      }
+    });
+    it("control: an outputSchema description naming Shodan without its ownership fails (d)", () => {
+      const t = tools.find((x) => x.name === "cve_exposure");
+      const bad = { ...t, outputSchema: { properties: { data: { description: "Derived from Shodan data." } } } };
+      assert.ok(has(cutProblems({ ...served, tools: tools.map((x) => (x === t ? bad : x)) }), /^\(d\) cve_exposure outputSchema\.properties\.data names Shodan/));
+    });
+    it("neutralisation: with no cut (1e9) the grown description and control A pass, so the cut is what fails them", () => {
+      const open = { ...REQUIRED, CLIENT_DESCRIPTION_CUT: 1e9 };
+      const grown = withDescription("get_cwe", (d) => `${d} ${"y".repeat(REQUIRED.CLIENT_DESCRIPTION_CUT)}`);
+      assert.deepEqual(cutProblems(grown, open), []);
+      assert.deepEqual(cutProblems({ ...served, instructions: pastCut(served.instructions, ATTRIBUTION) }, open), []);
+    });
+  });
   describe("#2311: tools/list, the opening exchange and the server instructions", () => {
     let tools;
     before(async () => {
@@ -3243,8 +3368,9 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(sc.state, "not_assessed");
       assert.equal(sc.measured_at, null);
       // #2315: mcp_servers dates its verdicts by a window, which is not one observation time.
-      // #2438: three more radars date what they count by a window; kev_exposure gives none (#2439).
-      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure gives none, and exposed_databases, leaked_credentials, shadow_ai's confirmed_exposed and mcp_servers date what they count at most by a window/);
+      // #2438: the other four radars date what they count at most by a window too; kev_exposure's
+      // is Shodan's banner timestamps (never last_seen, #2439).
+      assert.match(sc.notes[0], /^state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure, exposed_databases, leaked_credentials, shadow_ai's confirmed_exposed and mcp_servers date what they count at most by a window \(kev_exposure\.window, /);
       assert.deepEqual(sc.freshness, {
         kev_exposure: { last_run_at: LAST_RUN.kev_exposure },
         exposed_databases: { last_run_at: LAST_RUN.exposed_databases },
@@ -3573,6 +3699,18 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.deepEqual(JSON.parse(textBlocks(res)[0]).patch_evidence, []);
     });
 
+    // #2889 / #2890: rule 2's labels. CVE-2026-97724 (a GitHub release of the fix found by the
+    // reference enrichment) and CVE-2026-69486 (MSRC's guide tagged "patch" by the CNA) read
+    // false with [] before it; both shapes are synthetic here.
+    it("get_cve: release_reference and cna_patch_reference are relayed as sent, in both places", async () => {
+      for (const [id, ev] of [["CVE-2026-97724", ["release_reference"]], ["CVE-2026-69486", ["cna_patch_reference"]], [NAMED, ["fixed_version", "release_reference", "nvd_patch_reference", "cna_patch_reference"]]]) {
+        const res = await getCve({ ...WITH_EVIDENCE, cve_id: id, patch_evidence: ev });
+        assert.notEqual(res.isError, true, brief(res));
+        assert.deepEqual(res.structuredContent.data.patch_evidence, ev, id);
+        assert.deepEqual(JSON.parse(textBlocks(res)[0]).patch_evidence, ev, id);
+      }
+    });
+
     it("get_cve: a label the API adds later is relayed, never a failed call", async () => {
       const body = { ...WITH_EVIDENCE, patch_evidence: ["vendor_patch", "a_later_source"] };
       const res = await getCve(body);
@@ -3596,16 +3734,21 @@ describe(`against a stub API [${ERA}]`, () => {
       for (const name of ["search_cves", "get_cve"]) {
         const t = tools.find((x) => x.name === name);
         const d = t.description;
-        assert.ok(d.includes("patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names the sources of that evidence, strongest first: vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range) and nvd_patch_reference (an NVD reference tagged Patch)."), `${name}: ${d}`);
+        // #2842: the sources, named in full, are the outputSchema's (patch_evidence, below).
+        assert.ok(d.includes("patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names its sources, strongest first."), `${name}: ${d}`);
+        const ev = branchOf(t.outputSchema, "measured").properties.data;
+        const evRec = name === "get_cve" ? ev : ev.properties.cves.items;
+        assert.ok(evRec.properties.patch_evidence.description.includes("release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), nvd_patch_reference (an NVD reference tagged Patch) and cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record)"), name);
         assert.ok(d.includes("patch_available false means no fix evidence is on record, which is not a finding that no fix exists."), `${name}: ${d}`);
-        assert.ok(d.includes("An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either."), `${name}: ${d}`);
+        // #2842: and the API-older rule is patch_available's field description.
+        assert.ok(toolText(t).includes("An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either."), `${name}`);
         const data = branchOf(t.outputSchema, "measured").properties.data;
         const rec = name === "get_cve" ? data : data.properties.cves.items;
         assert.match(rec.properties.patch_available.description, /^true: EchelonGraph holds evidence of a fix for the CVE, its sources named in patch_evidence\. false: no fix evidence is on record, which is not a finding that no fix exists\./, name);
         assert.match(rec.properties.patch_evidence.description, /^The sources of the fix evidence EchelonGraph holds for the CVE, strongest first: vendor_patch .* Absent \(an API older than the field\): the answer does not name the evidence\.$/, name);
         assert.deepEqual(rec.properties.patch_available.type, ["boolean", "null"], name);
         const labels = JSON.stringify(rec.properties.patch_evidence);
-        for (const l of ["vendor_patch", "fixed_version", "nvd_patch_reference"]) assert.ok(labels.includes(`"${l}"`), `${name}: ${l} is not a value of patch_evidence`);
+        for (const l of ["vendor_patch", "fixed_version", "release_reference", "nvd_patch_reference", "cna_patch_reference"]) assert.ok(labels.includes(`"${l}"`), `${name}: ${l} is not a value of patch_evidence`);
       }
     });
   });
@@ -3849,7 +3992,10 @@ describe(`against a stub API [${ERA}]`, () => {
     it("the description says what the nvd_ counts, summary.nvd_none and summary.rejected are, and the outputSchema describes each", async () => {
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "cve_summary");
-      const d = t.description;
+      // #2842: the full wording is the outputSchema's description of summary; the description's
+      // head keeps what the counts are (REQUIRED_IN_HEAD).
+      const d = toolText(t);
+      assert.ok(t.description.includes("count the same active CVEs as summary.total by NVD's CVSS severity label: provenance, never EchelonGraph's severity band."), t.description);
       assert.ok(
         d.includes(
           `${ALL_FIVE} count the same active CVEs as summary.total by NVD's CVSS severity label (v3.x, else v4.0; before NVD's record arrives, or where it gives none, a pre-NVD label from the CVE.org record or a GitHub advisory can stand in): provenance, never EchelonGraph's severity band.`,
@@ -3943,11 +4089,13 @@ describe(`against a stub API [${ERA}]`, () => {
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "cve_summary");
       assert.ok(
-        t.description.includes(
+        // #2842: the counters by name are the outputSchema's description of poller.
+        toolText(t).includes(
           "poller holds the in-memory counters of the NVD poller of the one API instance that answered (cves_ingested, cves_skipped, http_retries, poll_count, poll_errors, last_poll_at, last_poll_dur_ms, interval), counted since that instance last started and zeroed on every restart: they describe that instance, never the feed's size, intake, reliability or freshness. Whenever the answer carries poller the note says so.",
         ),
-        t.description,
+        toolText(t),
       );
+      assert.ok(t.description.includes("they describe that instance, never the feed's size, intake, reliability or freshness. Whenever the answer carries poller the note says so."), t.description);
       // #2610's control on the site: these words are backed by SUMMARY_NONE_DESCRIPTION alone.
       const pollerSentence = t.description.slice(t.description.indexOf("poller holds"), t.description.indexOf("Whenever the answer carries poller"));
       assert.doesNotMatch(pollerSentence, /\b(any|not|rating|scored|source|yet)\b/i, pollerSentence);
@@ -4063,7 +4211,10 @@ describe(`against a stub API [${ERA}]`, () => {
     }
     it("the description says a poller field of another JSON type is left out and named, and summary is relayed either way", async () => {
       const { tools } = await client.listTools();
-      const d = tools.find((x) => x.name === "cve_summary").description;
+      const t = tools.find((x) => x.name === "cve_summary");
+      // #2842: this sentence is the outputSchema's description of poller; the description's envelope
+      // says data is the API's JSON less what the note names.
+      const d = toolText(t);
       // A poller of JSON null is kept as sent (above), so the sentence leaves null out of what is
       // dropped whole.
       const sentence =
@@ -4071,7 +4222,8 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.ok(d.includes(sentence), d);
       // #2771's review: the envelope sentence, about 400 characters on, said data equals the API's
       // JSON outright (the shared FEED_ENVELOPE), which the left-out path makes false.
-      const envelope = "with data equal to the API's JSON less each poller field (or the whole poller) the note names as left out;";
+      const envelope = "data equal to the API's JSON less each poller field (or the whole poller) the note names as left out.";
+      assert.ok(t.description.includes(envelope), t.description);
       assert.ok(d.includes(envelope), d);
       assert.ok(!d.includes("with data equal to the API's JSON;"), `cve_summary's description still says data is the API's JSON outright: ${d}`);
       // #2610's six words stay out of what the poller sentences say (the site's control).

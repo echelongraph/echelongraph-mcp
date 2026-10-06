@@ -8,8 +8,10 @@
 // vendor_published_at is the date the vendor gives, our_first_seen_at is when EchelonGraph
 // first recorded the advisory. withdrawn is the vendor rescinding its own advisory; the list
 // and the search leave such advisories out, the per-CVE lookup and the detail keep them, and
-// the note names each one. Advisories of a vendor feed EchelonGraph has disabled are left out
-// of all three. None of the answers carries a time at which the pollers last completed a poll,
+// the note names each one. rejected_cve_ids (#2865) is separate from it: the CVE IDs a row names
+// whose CVE record was rejected by its numbering authority, while the vendor's own document may
+// still read as live; the note names those rows and the by-cve answer's cve_rejected. Advisories
+// of a vendor feed EchelonGraph has disabled are left out of all three. None of the answers carries a time at which the pollers last completed a poll,
 // so freshness is null.
 //
 // The search term never travels in a URL (#1983). search_vendor_advisories sends it in the
@@ -141,6 +143,32 @@ function withdrawnNote(rows: unknown[]): string {
   return ` WITHDRAWN: ${w.length} of these ${rows.length} ${plural(rows.length, "advisory", "advisories")} ${plural(w.length, "was", "were")} withdrawn (rescinded) by ${plural(w.length, "its", "their")} vendor (withdrawn true): ${w.join(", ")}. Report ${plural(w.length, "it", "them")} as withdrawn, not as a current advisory.`;
 }
 
+// #2865: a vendor advisory can name a CVE ID its numbering authority rejected while the vendor's own
+// text still reads as a live advisory (CVE-2026-7936's MSRC entry). core-backend serves
+// rejected_cve_ids, the CVE IDs of the row whose CVE record was rejected, beside the vendor's own
+// withdrawn, which it leaves as the vendor set it. A row the vendor withdrew is named by
+// withdrawnNote already, so this names the live ones.
+const rejectedIDs = (r: unknown): string[] => {
+  const v = field(r, "rejected_cve_ids");
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x !== "") : [];
+};
+function rejectedCVENote(rows: unknown[]): string {
+  const hit = rows.flatMap((r, i) =>
+    field(r, "withdrawn") !== true && rejectedIDs(r).length
+      ? [`${str(r, "vendor") ?? "?"}/${str(r, "vendor_advisory_id") ?? `advisories[${i}]`} (${rejectedIDs(r).join(", ")})`]
+      : [],
+  );
+  if (!hit.length) return "";
+  const k = hit.length;
+  return ` CVE REJECTED: ${k} of these ${rows.length} ${plural(rows.length, "advisory", "advisories")}, not withdrawn by ${plural(k, "its", "their")} vendor, ${plural(k, "names", "name")} a CVE ID whose CVE record was rejected (withdrawn) by its numbering authority (rejected_cve_ids): ${hit.join("; ")}. Report each such CVE ID as a rejected record, not as an active vulnerability, even where the vendor's text reads as a current advisory.`;
+}
+// The rows' rejected_cve_ids could not be checked (null on every row that names a CVE).
+function rejectedUnknownNote(rows: unknown[]): string {
+  const unknown = rows.filter((r) => Array.isArray(field(r, "cve_ids")) && (field(r, "cve_ids") as unknown[]).length > 0 && field(r, "rejected_cve_ids") === null);
+  if (!unknown.length) return "";
+  return ` For ${unknown.length} of these advisories rejected_cve_ids is null: whether a CVE ID they name was rejected could not be checked, which is not a finding that none was.`;
+}
+
 // ── Each vendor's window (#2729) ──
 
 // One vendor's window as relayed in coverage: the API's row, its "" dates as null.
@@ -244,13 +272,42 @@ function backfillingNote(windows: VendorWindow[]): string {
   return ` The older advisories of ${plural(k, "1 vendor", `${k} vendors`)} are still being read (history_backfill in_progress or not_started): ${b.map((w) => windowItem(w, false)).join("; ")}. EchelonGraph does not yet hold all of ${plural(k, "its", "their")} older advisories, so none found from ${plural(k, "it", "them")} is not a finding that ${plural(k, "it", "they")} published none.`;
 }
 
+// #2840: what the rows say of their remediation, where the API sends remediation_state.
+function remediationNote(cve: string, rows: unknown[]): string {
+  const states = rows.map((r) => field(r, "remediation_state")).filter((x): x is string => typeof x === "string");
+  if (!states.length) return "";
+  const count = (st: string) => states.filter((x) => x === st).length;
+  const kinds = new Map<string, number>();
+  for (const r of rows) {
+    const ks = field(r, "remediation_kinds");
+    if (Array.isArray(ks)) for (const k of ks) if (typeof k === "string") kinds.set(k, (kinds.get(k) ?? 0) + 1);
+  }
+  const listedKinds = [...kinds].map(([k, n]) => `${k} (${n})`).join(", ");
+  const parts = [
+    listedKinds ? ` By the vendors' own categories, the advisories list for ${cve}: ${listedKinds}; each is the vendor's text, untested by EchelonGraph, and cve_remediation or get_vendor_advisory returns it.` : "",
+    count("none_in_source") ? ` ${count("none_in_source")} ${plural(count("none_in_source"), "lists", "list")} no remediation for ${cve} (none_in_source), which is not a finding that no fix exists.` : "",
+    count("not_parsed") ? ` EchelonGraph does not read the remediation of ${count("not_parsed")} (remediation_state not_parsed), which is not a finding that ${plural(count("not_parsed"), "it lists", "they list")} none.` : "",
+  ];
+  return parts.join("");
+}
+
 // ── Output schemas ──
 const opt = <T extends z.ZodType>(t: T) => t.nullable().optional();
 const DATE_FIELDS = {
   vendor_published_at: opt(z.string()).describe("The date the vendor gives for the advisory."),
   our_first_seen_at: opt(z.string()).describe("When EchelonGraph first recorded the advisory; not the vendor's date."),
   withdrawn: opt(z.boolean()).describe("true: the vendor withdrew (rescinded) this advisory, so it is a withdrawn advisory, not a current one."),
+  rejected_cve_ids: opt(z.array(z.string())).describe(
+    "The CVE IDs this advisory names whose CVE record was rejected (withdrawn) by its numbering authority: each is a rejected record, not an active vulnerability, whatever the advisory's text says. The vendor's withdrawn is separate and unchanged by it. [] when none is; null when that could not be checked.",
+  ),
 };
+// #2840: what remediation_kinds and remediation_state are, on a by-cve row and on the detail.
+const REMEDIATION_STATE_FIELD =
+  "parsed; none_in_source (EchelonGraph read the vendor's remediation, and it lists none for this CVE, which is not a finding that no fix exists); not_parsed (EchelonGraph does not read this vendor's remediation, or has not yet read this advisory: not a finding of none); withdrawn (the vendor rescinded the advisory).";
+const REMEDIATION_KINDS_FIELD =
+  "The kinds of remediation the advisory lists (for the CVE asked about, on a by-cve row), each the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other. [] with remediation_state not_parsed is not a finding that it lists none.";
+const REMEDIATION_KINDS = ["vendor_fix", "workaround", "mitigation", "no_fix_planned", "none_available", "other"] as const;
+const REMEDIATION_STATES = ["parsed", "none_in_source", "not_parsed", "withdrawn"] as const;
 const AdvisoryRow = z.looseObject({
   advisory_id: opt(z.string()),
   vendor: opt(z.string()),
@@ -263,14 +320,21 @@ const AdvisoryRow = z.looseObject({
   summary: opt(z.string()),
   affected_products: opt(z.array(z.string())),
   ...DATE_FIELDS,
+  remediation_kinds: opt(z.array(z.union([z.enum(REMEDIATION_KINDS), z.string()]))).describe(REMEDIATION_KINDS_FIELD),
+  remediation_state: opt(z.union([z.enum(REMEDIATION_STATES), z.string()])).describe(REMEDIATION_STATE_FIELD),
 });
 
 // Shared by the three descriptions. Top-level consts, so the site's tool-claims check
 // (marketing-site/lib/mcpToolClaims.test.ts) can fold the descriptions to their text.
 const DATES_DESCRIPTION =
-  "Each advisory carries vendor_published_at (the vendor's date), our_first_seen_at (when EchelonGraph first recorded it) and withdrawn (true: the vendor rescinded it; the note names each such advisory).";
-const ENVELOPE_DESCRIPTION =
-  "Its structured result carries state (measured), measured_at, method, coverage, freshness (null: the answer carries no poll-completion time) and notes, with data equal to the API's JSON; the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends.";
+  "Each advisory carries vendor_published_at (the vendor's date), our_first_seen_at (when EchelonGraph first recorded it) and withdrawn (true: the vendor rescinded it).";
+// #2865: the CVE-state flag beside the vendor's own withdrawn. #2842: the head the descriptions
+// carry; rejected_cve_ids' and cve_rejected's outputSchema descriptions say the rest (null: not checked).
+const REJECTED_CVE_DESCRIPTION =
+  "Each advisory also carries rejected_cve_ids: the CVE IDs it names whose CVE record was rejected (withdrawn) by its numbering authority, which are not active vulnerabilities.";
+// #2842: the generic rule for the result's last text block is in the README and the methodology
+// resource, not in each description.
+const ENVELOPE_DESCRIPTION = "Its freshness is null: the answer carries no poll-completion time.";
 // #2729: what a vendor's window is.
 const HISTORY_BACKFILL_DESCRIPTION =
   "history_backfill: complete (the vendor's published history has been read back as far as its source goes), in_progress or not_started (it is still being read, so the vendor's older advisories are not all held yet), or not_supported (EchelonGraph has no history read for that vendor, so what it holds is what the vendor's feed has carried)";
@@ -278,9 +342,22 @@ const HISTORY_BACKFILL_DESCRIPTION =
 const HELD_SINCE_DESCRIPTION =
   "held_since (the start of the window EchelonGraph has read that vendor's advisories from, before which an advisory may not be held; null when none is held or the API does not say; for a vendor with no history read it is when its feed was first read from, and can be years after earliest_vendor_published_at, since an older advisory is held when the vendor revised it later, not the ones published beside it)";
 const WINDOW_DESCRIPTION = `vendor, advisories (how many EchelonGraph holds from that vendor), earliest_vendor_published_at and latest_vendor_published_at (the earliest and latest vendor_published_at among them, null when none is held), ${HELD_SINCE_DESCRIPTION} and ${HISTORY_BACKFILL_DESCRIPTION}`;
+// #2842: what the descriptions say of a window, within the client cut (requiredText.ts);
+// WINDOW_DESCRIPTION in full is the outputSchema's description of a window.
+const WINDOW_HEAD =
+  "vendor, advisories, earliest_vendor_published_at, latest_vendor_published_at, held_since (where that window begins) and history_backfill (in_progress or not_started: older advisories not all held yet)";
 const NOT_HELD_DESCRIPTION =
   "An advisory a vendor published before its held_since may not be held, even when its earliest_vendor_published_at is older, so no advisory from a vendor is not a finding that it published none.";
+// #2842: the same rule within the client cut; NOT_HELD_DESCRIPTION whole is the windows' outputSchema description.
+const NOT_HELD_HEAD =
+  "An advisory published before its vendor's held_since may not be held, so no advisory from a vendor is not a finding that it published none.";
 // #2728: how a search matches, and its capped total.
+// #2842: what search_vendor_advisories' description says; SEARCH_MATCH_DESCRIPTION and
+// TOTAL_CAPPED_DESCRIPTION in full are the outputSchema's descriptions of search_match and total_capped.
+const SEARCH_MATCH_HEAD =
+  "A query of 3 or more characters is matched case-insensitively as a substring of each advisory's title, description, vendor name, IDs and affected_products (search_match substring). A query of 1 or 2 characters matches whole words only (search_match word).";
+const TOTAL_CAPPED_HEAD =
+  "A search counts at most 1,000 matches: past that, total is 1000 and total_capped is true, which means 1,000 or more (the note writes 1,000+), never exactly 1,000.";
 const SEARCH_MATCH_DESCRIPTION =
   "A query of 3 or more characters is matched case-insensitively as a substring of each advisory's title, description, vendor name, vendor_advisory_id, affected_products and cve_ids (search_match substring). A query of 1 or 2 characters matches whole words only (search_match word): it must equal, ignoring case, a whole word (a run of letters and digits) of one of those, so xz finds xz-utils but not xzibit, and a 1- or 2-character query with any other character, such as c#, matches nothing.";
 const TOTAL_CAPPED_DESCRIPTION =
@@ -307,7 +384,7 @@ const VendorWindowSchema = z.strictObject({
     .union([z.enum(["complete", "in_progress", "not_started", "not_supported"]), z.string()])
     .nullable()
     .describe(`${HISTORY_BACKFILL_DESCRIPTION}.`),
-});
+}).describe(`A vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}.`);
 const WINDOWS = z.array(VendorWindowSchema).nullable().describe(`Each vendor's window in what EchelonGraph holds; null when the windows could not be read. ${NOT_HELD_DESCRIPTION}`);
 
 // #2783: a production row is up to about 2,000 characters as pretty JSON (its summary, its
@@ -316,8 +393,8 @@ const WINDOWS = z.array(VendorWindowSchema).nullable().describe(`Each vendor's w
 // text block keeps what identifies and rates the advisory, every string cut to 200 characters and
 // every list to 20 entries; then fewer fields, strings to 100 and lists to 10.
 const ROW_CUT_LEVELS: TextCut["levels"] = [
-  { keep: ["vendor", "vendor_display_name", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "affected_products", "vendor_published_at", "withdrawn"], clip: 200, cap: 20 },
-  { keep: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids", "vendor_published_at", "withdrawn"], clip: 100, cap: 10 },
+  { keep: ["vendor", "vendor_display_name", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "affected_products", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"], clip: 200, cap: 20 },
+  { keep: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"], clip: 100, cap: 10 },
 ];
 // get_vendor_advisory's own first text block is cut too past the budget (#2802): only its
 // structuredContent.data is one advisory whole.
@@ -335,7 +412,14 @@ const ROW_CUT_DESCRIPTION = " Cut, each row keeps vendor, vendor_advisory_id, ti
 
 export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdvisoryKit): void {
   const FOR_CVE_OUTPUT = kit.envelopeSchema({
-    data: z.looseObject({ cve_id: opt(z.string()), advisories: opt(z.array(AdvisoryRow)), total: opt(z.number()) }),
+    data: z.looseObject({
+      cve_id: opt(z.string()),
+      advisories: opt(z.array(AdvisoryRow)),
+      total: opt(z.number()),
+      cve_rejected: opt(z.boolean()).describe(
+        "true: the CVE record of cve_id was rejected (withdrawn) by its numbering authority, so these advisories name a rejected record, not an active vulnerability; null when that could not be checked.",
+      ),
+    }),
     coverage: z.strictObject({
       returned: z.number().nullable().describe("The advisories in this answer."),
       cap: z.number().describe("The most the API returns for one CVE, newest first."),
@@ -355,7 +439,25 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     data: AdvisoryRow.extend({
       description: opt(z.string()),
       known_cve_ids: opt(z.array(z.string())).describe("The CVE IDs of cve_ids that have a record in EchelonGraph's CVE feed."),
-      remediation: opt(z.string()),
+      remediation: opt(z.string()).describe("The vendor's remediation as one text (the legacy field), beside remediations."),
+      remediations: opt(
+        z.array(
+          z.looseObject({
+            kind: opt(z.union([z.enum(REMEDIATION_KINDS), z.string()])),
+            source_category: opt(z.string()).describe("The vendor's own name for the category."),
+            source_subcategory: opt(z.string()),
+            text: opt(z.string()).describe("The vendor's text, verbatim but for HTML markup removed, untested by EchelonGraph; at most 2,000 characters (text_truncated, text_chars)."),
+            text_truncated: opt(z.boolean()),
+            text_chars: opt(z.number()),
+            url: opt(z.string()),
+            fixed_build: opt(z.string()),
+            cve_ids: opt(z.array(z.string())).describe("The CVEs the item covers; [] for the whole advisory."),
+            product_ids: opt(z.array(z.string())),
+            product_count: opt(z.number()),
+          }),
+        ),
+      ).describe("Each remediation the vendor lists, with its kind, the vendor's own category."),
+      remediation_items_not_stored: opt(z.number()).describe("Items past the 64 stored per advisory."),
       references: z.unknown().optional(),
       vendor_modified_at: opt(z.string()),
       withdrawn_at: opt(z.string()),
@@ -373,8 +475,8 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
       limit: opt(z.number()),
       offset: opt(z.number()),
       search_applied: opt(z.boolean()).describe("Whether a free-text search filtered this answer."),
-      search_match: opt(z.string()).describe("How the query was matched: word (a query of 1 or 2 characters, whole words only) or substring; null without a query."),
-      total_capped: opt(z.boolean()).describe("true: the search stopped counting at total, so total is a lower bound (1,000+), not the count."),
+      search_match: opt(z.string()).describe(`How the query was matched: word (a query of 1 or 2 characters, whole words only) or substring; null without a query. ${SEARCH_MATCH_DESCRIPTION}`),
+      total_capped: opt(z.boolean()).describe(`true: the search stopped counting at total, so total is a lower bound (1,000+), not the count. ${TOTAL_CAPPED_DESCRIPTION}`),
     }),
     coverage: z.strictObject({
       total: z.number().nullable().describe("The API's total; when total_capped is true, a lower bound, not the count."),
@@ -384,7 +486,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
       offset: z.number().nullable(),
       search_applied: z.boolean().nullable(),
       search_match: z.enum(["word", "substring"]).nullable().describe("word: a query of 1 or 2 characters, matched as a whole word only; substring: a longer query; null without a query."),
-      vendor_windows: WINDOWS,
+      vendor_windows: WINDOWS.describe(`Each vendor's window in what EchelonGraph holds, only that vendor's when vendor is given; null when the windows could not be read. ${NOT_HELD_DESCRIPTION}`),
     }),
     freshness: null,
   });
@@ -431,19 +533,30 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
       };
       const head = kit.okHead(tool, r.status);
       const held = w.ok ? notFullyHeldNote(cve, year, missing ?? []) : windowsUnknown(w.why);
+      // #2865: the queried CVE's own state, first, so no advisory below reads as a live CVE's.
+      const cveState = field(r.data, "cve_rejected");
+      const rejectedHead =
+        cveState === true
+          ? ` CVE REJECTED: the CVE record of ${cve} was rejected (withdrawn) by its numbering authority (cve_rejected true). It is a rejected record, not an active vulnerability: report it that way, even where a vendor advisory below reads as a current one.`
+          : cveState === null
+            ? ` Whether the CVE record of ${cve} was rejected could not be checked (cve_rejected null), which is not a finding that it was not.`
+            : "";
       if (returned === 0) {
         return kit.succeeded(
           r.data,
-          `${head} No vendor advisory on record names ${cve}: a measured empty result, EchelonGraph was queried successfully and found nothing (we looked and found nothing). This is not a lookup failure. ${ONLY_POLLED}${held}`,
+          `${head}${rejectedHead} No vendor advisory on record names ${cve}: a measured empty result, EchelonGraph was queried successfully and found nothing (we looked and found nothing). This is not a lookup failure. ${ONLY_POLLED}${held}`,
           env,
           FOR_CVE_TEXT,
         );
       }
-      if (rows === undefined) return kit.succeeded(r.data, `${head}${held}`, env, FOR_CVE_TEXT);
+      if (rows === undefined) return kit.succeeded(r.data, `${head}${rejectedHead}${held}`, env, FOR_CVE_TEXT);
       const cap = atCap ? ` The API returns at most ${BY_CVE_CAP} advisories for one CVE, newest first, and this answer is full (at_cap true), so there may be more.` : "";
+      // With cve_rejected true the head has said it of the one CVE every row names; the per-row
+      // note then only adds the other rejected IDs a multi-CVE advisory names.
+      const perRow = cveState === true ? rejectedCVENote(rows.map((x) => ({ ...(x as object), rejected_cve_ids: rejectedIDs(x).filter((id) => id.toUpperCase() !== cve) }))) : rejectedCVENote(rows);
       return kit.succeeded(
         r.data,
-        `${head} ${rows.length} vendor ${plural(rows.length, "advisory names", "advisories name")} ${cve}.${cap}${withdrawnNote(rows)} ${ONLY_POLLED}${held}`,
+        `${head}${rejectedHead} ${rows.length} vendor ${plural(rows.length, "advisory names", "advisories name")} ${cve}.${cap}${withdrawnNote(rows)}${perRow}${rejectedUnknownNote(rows)}${remediationNote(cve, rows)} ${ONLY_POLLED}${held}`,
         env,
         FOR_CVE_TEXT,
       );
@@ -495,7 +608,14 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
           ? ` Of the ${cveIDs.length} CVE IDs it lists (cve_ids), ${known.length} ${plural(known.length, "has", "have")} a record in EchelonGraph's CVE feed (known_cve_ids); the others have no record there yet, which does not mean they are not CVEs.`
           : "";
       const held = !w.ok ? windowsUnknown(w.why) : window ? backfillingNote([window]) : "";
-      return kit.succeeded(r.data, `${kit.okHead(tool, r.status)} Returned the advisory ${shown}.${withdrawn}${cves}${held}`, env);
+      // #2865: the CVE IDs it names that were rejected, said whether or not the vendor withdrew it.
+      const rej = rejectedIDs(r.data);
+      const rejectedCVEs = rej.length
+        ? ` CVE REJECTED: ${rej.length} of the CVE IDs it lists ${plural(rej.length, "was", "were")} rejected (withdrawn) by ${plural(rej.length, "its", "their")} numbering authority (rejected_cve_ids): ${rej.join(", ")}. Report ${plural(rej.length, "it", "each")} as a rejected record, not as an active vulnerability${field(r.data, "withdrawn") === true ? "" : ", even though the vendor has not withdrawn this advisory and its text reads as a current one"}.`
+        : field(r.data, "rejected_cve_ids") === null && Array.isArray(cveIDs) && cveIDs.length > 0
+          ? " Whether a CVE ID it lists was rejected could not be checked (rejected_cve_ids null), which is not a finding that none was."
+          : "";
+      return kit.succeeded(r.data, `${kit.okHead(tool, r.status)} Returned the advisory ${shown}.${withdrawn}${rejectedCVEs}${cves}${held}`, env);
     } catch (e) {
       return kit.crashed(tool, e);
     }
@@ -584,7 +704,8 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
       const counted = isCapped
         ? `${total.toLocaleString("en-US")}+ vendor advisories (total_capped true: the API stops counting a search's matches at ${total.toLocaleString("en-US")}, so total is a lower bound, not the count; paging past it still works)`
         : `${total} vendor ${plural(total, "advisory", "advisories")}`;
-      return kit.succeeded(r.data, `${head} ${what} ${counted}${page}.${wordOnly}${held}`, env, searchText(a));
+      const rejected = rows === undefined ? "" : `${rejectedCVENote(rows)}${rejectedUnknownNote(rows)}`;
+      return kit.succeeded(r.data, `${head} ${what} ${counted}${page}.${rejected}${wordOnly}${held}`, env, searchText(a));
     } catch (e) {
       return kit.crashed(tool, e);
     }
@@ -594,7 +715,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "vendor_advisories_for_cve",
     {
       title: "Vendor advisories for one CVE",
-      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_display_name, vendor_advisory_id, title, severity and cvss_v3_score where the vendor gives them. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means that none of the advisories EchelonGraph holds from those feeds names the CVE, not that no vendor published one (see vendor_windows and vendors_not_fully_held). ${DATES_DESCRIPTION} Pass a CVE ID like CVE-2024-21412. coverage gives returned, cap and at_cap (true: the answer is full, so there may be more); cve_year, the year in the CVE ID; vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}; and vendors_not_fully_held, the vendors with no advisory in the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known, or whose history is still being read, which the note names. ${NOT_HELD_DESCRIPTION} vendor_windows and vendors_not_fully_held are null when the windows could not be read, and the note says so. measured_at is null. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
+      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_display_name, vendor_advisory_id, title, severity and cvss_v3_score where the vendor gives them. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means that none of the advisories EchelonGraph holds from those feeds names the CVE, not that no vendor published one. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} The answer's cve_rejected is true when the CVE record of the CVE asked for was rejected (withdrawn) by its numbering authority. Each row has remediation_kinds and remediation_state (not_parsed is not none). coverage gives returned, cap, at_cap (true: there may be more) and cve_year; vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_HEAD}; and vendors_not_fully_held, the vendors with no advisory in the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known, or whose history is still being read, which the note names. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
       inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2024-21412") }),
       outputSchema: FOR_CVE_OUTPUT,
       annotations: kit.annotations,
@@ -606,7 +727,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "get_vendor_advisory",
     {
       title: "Vendor advisory detail",
-      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id of a vendor advisory row): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. ${DATES_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
+      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id of a vendor advisory row): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations lists each remediation the vendor lists, with kind (the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), source_category, text, url and the cve_ids and product_ids it covers; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state is parsed, none_in_source, not_parsed or withdrawn: none_in_source and not_parsed are not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_HEAD}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
       inputSchema: z.object({
         vendor: z.string().describe("the vendor slug, e.g. microsoft, redhat, github"),
         advisory_id: z.string().describe("the vendor's advisory ID, e.g. RHSA-2024:1234 or GHSA-xxxx-xxxx-xxxx"),
@@ -621,7 +742,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "search_vendor_advisories",
     {
       title: "Search vendor advisories",
-      description: `Search or list vendor-published advisories, newest first. ${SEARCH_MATCH_DESCRIPTION} Filter by vendor (slug), by severity band, and by whether the advisory names any CVE ID. Advisories their vendor withdrew are left out. Returns advisories, each with vendor, vendor_advisory_id, title, severity, cvss_v3_score, cve_ids, summary and affected_products where present, and the answer's total, total_capped, limit, offset, search_applied and search_match. ${TOTAL_CAPPED_DESCRIPTION} ${DATES_DESCRIPTION} The query is sent in a request header, never in the URL. coverage repeats total, total_capped, limit, offset, search_applied and search_match, and gives returned, the rows in this page, and vendor_windows, each vendor's window in what EchelonGraph holds (only that vendor's when vendor is given): ${WINDOW_DESCRIPTION}. ${NOT_HELD_DESCRIPTION} measured_at is null. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}, or rows are left out and the note gives the offset to call next.`,
+      description: `Search or list vendor-published advisories, newest first. ${SEARCH_MATCH_HEAD} Filter by vendor (slug), severity band and whether the advisory names any CVE ID. Advisories their vendor withdrew are left out. Returns advisories, each with vendor, vendor_advisory_id, title, severity, cvss_v3_score, cve_ids, summary and affected_products where present, and total, total_capped, limit, offset, search_applied and search_match. ${TOTAL_CAPPED_HEAD} ${REJECTED_CVE_DESCRIPTION} The query is sent in a request header, never in the URL. coverage repeats those beside returned, and gives vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_HEAD}. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}, or rows are left out and the note gives the offset to call next.`,
       inputSchema: z.object({
         query: z.string().optional().describe("free text, at most 100 bytes: a product, an advisory ID, a CVE ID or a keyword, e.g. 'exchange server'; 1 or 2 characters match whole words only"),
         vendor: z.string().optional().describe("a vendor slug, e.g. microsoft, redhat, github"),

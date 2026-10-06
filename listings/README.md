@@ -27,7 +27,7 @@ below) at 10:57 UTC, npm `latest` 2.6.2:
 | Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; scan read 2.6.7 at 12:08Z: 14 tools, release SUCCESS after one retry: Smithery's own build step hit an internal database error) | proxies the hosted endpoint | set display name and description; Settings → Verification | founder (Smithery sign-in) |
 | mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |
 | PulseMCP | no | shows none | nothing: submissions paused; it reads the official registry | nobody |
-| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.6.7 (`1a8ffdf1`); validate and build pass (2026-10-05) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
+| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.6.8 (commit `e9829fa6`; the v2.6.7 pin `1a8ffdf1` was the annotated tag object, not its commit `d1f68b30`); validate and build pass (2026-10-05) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
 | Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passes; tools are dynamic, so no pin to move | serves the hosted endpoint | Docker's review | Docker |
 | Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth, 14 read-only tools, served at 2.6.7) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
 
@@ -92,7 +92,7 @@ CVE and internet-exposure data for Claude, Cursor, Cline, and any MCP client, fr
 
 Free and keyless: no API key, no auth, read-only. The server makes no request other than the API call a tool needs to answer. Every result carries a structured envelope (state, measured_at, method, coverage, freshness, notes), and a CVE outside the exposure radar's tracked set is reported as not assessed, not as zero.
 
-14 read-only tools: cve_summary (CVE feed summary), search_cves (Search CVEs), get_cve (CVE detail), cve_exposure (Internet exposure for one CVE), exposure_radar (Exposure radar totals), kev_recent (Recent CISA KEV additions), epss_history (EPSS change history for one CVE), check_affected (Am I affected? (product or package at a version)), check_sbom (Check an SBOM against the advisory corpus), cve_intel (CVE weakness, exploits and packages), get_cwe (CWE and its CVEs), vendor_advisories_for_cve (Vendor advisories for one CVE), get_vendor_advisory (Vendor advisory detail), search_vendor_advisories (Search vendor advisories).
+16 read-only tools: cve_summary (CVE feed summary), search_cves (Search CVEs), get_cve (CVE detail), cve_exposure (Internet exposure for one CVE), exposure_radar (Exposure radar totals), kev_recent (Recent CISA KEV additions), epss_history (EPSS change history for one CVE), check_affected (Am I affected? (product or package at a version)), check_sbom (Check an SBOM against the advisory corpus), scan_manifest (Check a lockfile against the advisory corpus), cve_intel (CVE weakness, exploits and packages), cve_remediation (How one CVE is fixed), get_cwe (CWE and its CVEs), vendor_advisories_for_cve (Vendor advisories for one CVE), get_vendor_advisory (Vendor advisory detail), search_vendor_advisories (Search vendor advisories).
 
 Install: npx -y echelongraph-mcp (Node.js 20 or later), or connect a Streamable HTTP client to https://mcp.echelongraph.io/mcp with no install.
 ```
@@ -259,7 +259,7 @@ Website: https://echelongraph.io/pulse/mcp
 
 Description: CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
 
-Tools (14, all read-only): cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, cve_intel, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
+Tools (16, all read-only): cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, scan_manifest, cve_intel, cve_remediation, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories.
 
 Remote (Streamable HTTP, no install, no key): https://mcp.echelongraph.io/mcp
 
@@ -408,7 +408,7 @@ CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (©
 - Source: https://github.com/echelongraph/echelongraph-mcp (MIT), pinned commit in server.yaml
 - Dockerfile at the repo root; base image pinned by digest, npm ci from the lockfile, runs the stdio server as uid 1000
 - No secrets or configuration; the server calls https://app.echelongraph.io (allowHosts)
-- 14 tools, all annotated readOnlyHint: cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, cve_intel, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories
+- 16 tools, all annotated readOnlyHint: cve_summary, search_cves, get_cve, cve_exposure, exposure_radar, kev_recent, epss_history, check_affected, check_sbom, scan_manifest, cve_intel, cve_remediation, get_cwe, vendor_advisories_for_cve, get_vendor_advisory, search_vendor_advisories
 - Also in the official MCP Registry as io.echelongraph/echelongraph-mcp
 ```
 
@@ -431,7 +431,7 @@ developer portal. Checked against each requirement on the submission page:
 |---|---|
 | "Your server is remote and reachable over HTTPS" | yes: `https://mcp.echelongraph.io/mcp` |
 | "Authentication works for Claude's client: OAuth 2.0 if your tools act on a user's account, or no authentication for public data". The authentication page lists `none`, "No authentication (authless server)", as "Supported by default". | yes: no authentication, public data |
-| "Every tool has a `title` and a `readOnlyHint` or `destructiveHint` annotation" | yes: all 14 have a title and `readOnlyHint: true` (`test/listings.test.mjs`, both protocol eras) |
+| "Every tool has a `title` and a `readOnlyHint` or `destructiveHint` annotation" | yes: all 16 have a title and `readOnlyHint: true` (`test/listings.test.mjs`, both protocol eras) |
 | "You've tested it in Claude" | founder: add it as a custom connector and call each tool |
 | "documentation URL, privacy policy URL, support contact, an icon" | yes, in "Paste text"; the privacy policy URL is `/privacy`, whose Section 11 covers the hosted endpoint (below) |
 | "You have a test account for reviewers: credentials for a fully populated account". The review checklist: "Test credentials: required". | **no account exists**: the server is keyless. Say so in Test & launch (block below). A reviewer may ask about it. |
@@ -482,13 +482,13 @@ clients, #2304: read the served Section 11 from a browser before submitting.)
 Use cases:
 
 ```text
-Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Read its weakness (CWE), public exploit code, affected packages, fixed versions, EPSS history and the vendor advisories that name it. List the CVEs CISA has added to its KEV catalog, newest first. Check whether a product or package at a version is affected by known CVEs, or check an SBOM's components against the advisory corpus. Search and filter CVEs and vendor advisories. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
+Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Read its weakness (CWE), public exploit code, affected packages, fixed versions, EPSS history and the vendor advisories that name it. List the CVEs CISA has added to its KEV catalog, newest first. Check whether a product or package at a version is affected by known CVEs, or check an SBOM's components or a project's lockfiles (package-lock.json, go.mod, requirements.txt and others) against the advisory corpus. Search and filter CVEs and vendor advisories. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
 ```
 
 Test & launch:
 
 ```text
-No test account exists, and none is needed: the server is keyless and read-only, so there are no credentials to give. Connect https://mcp.echelongraph.io/mcp with no authentication and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, and check_sbom with purls ["pkg:npm/lodash@4.17.15"]. Each client may send up to 120 requests a minute.
+No test account exists, and none is needed: the server is keyless and read-only, so there are no credentials to give. Connect https://mcp.echelongraph.io/mcp with no authentication and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, check_sbom with purls ["pkg:npm/lodash@4.17.15"], and scan_manifest with a requirements.txt whose text is "django==3.2.0". Each client may send up to 120 requests a minute.
 ```
 
 Sources (fetched 2026-10-04): https://claude.com/docs/connectors/building/submission.md ,

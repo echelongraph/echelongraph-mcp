@@ -84,8 +84,8 @@ describe("tool descriptions state facts only (Anthropic MCP Directory policy)", 
     await client?.close();
   });
 
-  it("serves the 14 tools, each with a description", () => {
-    assert.equal(tools.length, 14, tools.map((t) => t.name).join(", "));
+  it("serves the 16 tools, each with a description", () => {
+    assert.equal(tools.length, 16, tools.map((t) => t.name).join(", "));
     for (const t of tools) assert.ok(typeof t.description === "string" && t.description.length > 0, t.name);
   });
 

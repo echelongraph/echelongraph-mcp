@@ -15,6 +15,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { existsSync, readFileSync } from "node:fs";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
@@ -211,6 +212,47 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       assert.equal(sc.coverage.match_layer, "registry");
       assert.deepEqual(sc.data.cve_ids, ["CVE-2020-8203"]);
       assert.match(noteOf(res), /evaluated npm package lodash at version 4\.17\.15\. AFFECTED: 1 CVE matches this version\./);
+    });
+    // #2834, in the shape core-backend answers (pkgmatch_fixedin.go): Log4Shell's 2.14.1 on the
+    // exact-list path still carries the interval holding it and that interval's fix, and a
+    // last_affected interval carries fixed_in null with its reason.
+    it("registry matches relay interval and fixed_in (a version, or null with fixed_in_reason), and the note counts them", async () => {
+      const log4j = {
+        ...LODASH_MATCH, cve_id: "CVE-2021-44228", matched_criteria: "pkg:maven/org.apache.logging.log4j:log4j-core", version_evidence: "exact_version_list",
+        interval: { introduced: "2.13.0", fixed: "2.15.0" }, fixed_in: "2.15.0",
+      };
+      const lastAffected = {
+        ...LODASH_MATCH, cve_id: "CVE-2099-28341", version_evidence: "advisory_interval",
+        match_reason: "registry package (confidence 0.95): Maven/x — version 2.14.1 falls inside the advisory interval [2.0, 2.14.1] (2.14.1 is the last affected version, not a fix)",
+        interval: { introduced: "2.0", last_affected: "2.14.1" }, fixed_in: null, fixed_in_reason: "the interval that holds this version ends at last_affected 2.14.1; no fixed version is recorded",
+      };
+      const res = await call(
+        { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" },
+        withMatches(registry, [log4j, lastAffected], { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" }),
+      );
+      assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+      const m = res.structuredContent.data.matches;
+      assert.equal(m[0].fixed_in, "2.15.0");
+      assert.equal(m[1].fixed_in, null);
+      assert.match(noteOf(res), /fixed_in, the fixed bound of the advisory interval that holds this version: set on 1 of 2 matches; null on 1, where the advisory records no fix for this version \(fixed_in_reason says why\)\./);
+      const v = validator.getValidator(schema)(res.structuredContent);
+      assert.ok(v.valid, v.errorMessage);
+      const broken = structuredClone(res.structuredContent);
+      broken.data.matches[0].fixed_in = 2.15;
+      assert.equal(validator.getValidator(schema)(broken).valid, false, "the schema does not type fixed_in");
+    });
+    it("a CPE answer, whose matches carry no fixed_in, says nothing about fixed_in", async () => {
+      const res = await call({ product: "openssl", version: "3.0.0" }, withMatches(cpe, [OPENSSL_MATCH]));
+      assert.doesNotMatch(noteOf(res), /fixed_in/);
+    });
+    // A source read: npm packs dist/ only, so a run inside the unpacked tarball skips this one.
+    const CUT_SRC = new URL("../src/tools/check_affected.ts", import.meta.url);
+    it("every cut level of the text keeps each match's fixed_in", { skip: existsSync(CUT_SRC) ? false : "no src/ here (npm does not pack it)" }, () => {
+      const src = readFileSync(CUT_SRC, "utf8");
+      const block = src.slice(src.indexOf("const CHECK_AFFECTED_TEXT"), src.indexOf("sides:", src.indexOf("const CHECK_AFFECTED_TEXT")));
+      const levels = block.match(/keep: \[[^\]]*\]/g);
+      assert.equal(levels.length, 6, block);
+      for (const l of levels) assert.match(l, /"fixed_in"/, l);
     });
     it("assessed with 0 matches is measured, worded as a measured empty result, and clears only the not_affected advisories", async () => {
       const res = await call({ ecosystem: "npm", package: "lodash", version: "4.17.21" }, registry({ version: "4.17.21", not_affected_count: 10 }));

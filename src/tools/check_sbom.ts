@@ -3,8 +3,8 @@
 //
 // Where the SBOM is parsed: HERE, in this MCP server — on the caller's machine when it runs from
 // npm, on EchelonGraph's hosted endpoint when it is called there (http.ts, whose body cap admits
-// a document only for this tool, #2747). The backend accepts only a list of
-// components ({purl} or {ecosystem, package, version}); a CycloneDX or SPDX document posted to it
+// a document only for this tool and scan_manifest, #2747, #2835). The backend accepts only a list
+// of components ({purl} or {ecosystem, package, version}); a CycloneDX or SPDX document posted to it
 // whole is refused. So this tool reads the document, takes each component's purl, and sends only
 // those, in a POST body (never a URL, #1983). The document's metadata, licences, hashes and free
 // text never leave the machine, and the public route parses nothing but a flat list
@@ -19,30 +19,38 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import {
+  CLEAN_NOTE,
+  DISTRO_NOTE,
+  FRESHNESS_NOTE,
+  MAX_PURLS,
+  MEASURED_AT_NOTE,
+  METHOD,
+  batchDataShape,
+  dedupe,
+  field,
+  isObj,
+  plural,
+  purlsRefusal,
+  sendBatches,
+  sendingCoverage,
+  sendingCoverageShape,
+  sendingSentences,
+  verdictSentences,
+  type FailureLike,
+  type MatchBatchDeps,
+  type Sending,
+  type ToolResult,
+} from "./match_batch.js";
+
+// #2835: the batch loop, its constants and the row schema moved to match_batch.ts, which
+// scan_manifest shares; re-exported here, where the tests and prompts.ts import them.
+export { API_COMPONENTS_PER_MINUTE, BATCH_PATH, MAX_COMPONENTS, MAX_PURLS, TIME_BUDGET_MS, mergeAnswers, type ToolResult } from "./match_batch.js";
 
 // What index.ts hands this module, so the tool uses the server's one api(), envelope and failure
-// contract instead of a copy (and index.ts stays the only place that defines them).
-type Text = { type: "text"; text: string };
-export type ToolResult = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
-type ApiOk = { ok: true; status: number; data: object };
-// The part of index.ts's Failure this module reads: a 429's Retry-After (whole seconds), #2734.
-type FailureLike = { ok: false; kind: string; status?: number; retryAfter?: number };
-export type CheckSbomDeps<F extends FailureLike> = {
-  // init.timeoutMs: what is left of the call's budget, the most this request may take (#2756).
-  // init.signal: the call's own (below); api() answers a failure at once when it has aborted.
-  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal }) => Promise<ApiOk | F>;
-  failed: (tool: string, f: F) => ToolResult;
-  // index.ts's one sentence for a failure: quoted when a batch after the first fails.
-  describeFailure: (f: F) => string;
-  // For a caller that must not wait in real time; production uses the clock and setTimeout. A
-  // wait ends early when `signal` aborts.
-  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  now?: () => number;
-  // #2775: the call's cancellation, the handler's ctx.mcpReq.signal: the SDK aborts it when the
-  // client sends notifications/cancelled, or when the hosted request's client has gone (its
-  // transport closes). Each batch request carries it, a Retry-After wait ends on it, and once it
-  // has aborted no further batch is sent: the SDK sends nothing for a cancelled call.
-  signal?: AbortSignal;
+// contract instead of a copy (and index.ts stays the only place that defines them). The batch
+// loop's part is match_batch.ts's MatchBatchDeps.
+export type CheckSbomDeps<F extends FailureLike> = MatchBatchDeps<F> & {
   // #2775: on the hosted endpoint, runtime.ts holdRequest: the request's admission and large-body
   // slot are held until the call has stopped. Absent, the call runs unheld.
   hold?: <T>(p: Promise<T>) => Promise<T>;
@@ -61,45 +69,10 @@ export type CheckSbomDeps<F extends FailureLike> = {
 };
 
 export const CHECK_SBOM = "check_sbom";
-export const BATCH_PATH = "/api/v1/public/cves/match/batch";
-// The backend's cap per request (cveBatchMaxComponents): the batch size. A longer list is sent
-// as consecutive batches of at most this many, one after another (#2734).
-export const MAX_COMPONENTS = 200;
-// The backend charges the batch route per component: 1,200 components a minute per caller
-// (core-backend internal/waf/weighted.go, CVEMatchBatchComponentsPerWindow). Over it, it answers
-// 429 with Retry-After and looks nothing up.
-export const API_COMPONENTS_PER_MINUTE = 1200;
-// The most distinct purls one call checks: two minutes of that budget. From a fresh budget, 2,000
-// purls are 10 batches: six go at once, the API then asks for a wait of at most a minute, and the
-// other four follow, and waiting out that minute would pass TIME_BUDGET_MS, so the call answers partial:
-// the first 1,200 checked, the rest named for a second call. A list with
-// more is refused before any request, never truncated: a dropped component would read as clean.
-export const MAX_PURLS = 2000;
-// How long one call may spend, waits for Retry-After included. When the next wait would pass it,
-// the call stops and answers what it has, with the purls not sent counted in coverage.not_sent
-// and listed in data.not_sent_purls, never dropped silently.
-// 50 s, not more: MCP clients time a tools/call out (the TypeScript SDK's default request timeout is
-// 60 s), and a call that outlives its client returns nothing at all — not even the partial answer
-// below. From a fresh budget, 1,200 purls (6 batches) go at once; a larger list answers partial
-// with the rest in data.not_sent_purls, for a call a minute later.
-// The budget bounds the whole call, not only when a batch may start (#2756): each batch's request
-// may take at most what is left of it (api()'s init.timeoutMs), so a batch started at 49.9 s is cut
-// off at 50 s and its purls answered as not sent (time_budget), instead of running on for the
-// request timeout (15 s) past the client's and the hosted endpoint's 60 s.
-export const TIME_BUDGET_MS = 50_000;
-// Retry-After 0 is waited this long; a 429 without Retry-After is not retried. At most MAX_WAITS
-// waits per call.
-const MIN_WAIT_MS = 1000;
-const MAX_WAITS = 10;
-// The backend's per-purl cap (cveBatchMaxPurlLen).
-const MAX_PURL_LEN = 512;
 // The document's size cap, as JSON text. OWASP Juice Shop 11.1.2's full CycloneDX SBOM (840
 // components) is 0.74 MB; this leaves room for a much larger one while bounding what this process
 // parses.
 export const MAX_SBOM_CHARS = 5_000_000;
-// How many affected components the note names, and how many CVE ids per component.
-const NOTE_AFFECTED_MAX = 25;
-const NOTE_CVES_MAX = 5;
 // CycloneDX nests components; this bounds the walk.
 const MAX_DEPTH = 32;
 // The order in which extract() reads and counts the distinct purls (#2799 review): purls as listed;
@@ -110,29 +83,26 @@ const MAX_DEPTH = 32;
 const READ_ORDER =
   "counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place)";
 
-const METHOD =
-  "EchelonGraph's registry advisory matcher (POST /api/v1/public/cves/match/batch): each component's purl is mapped to its OSV ecosystem, package name and version, and matched against the affected version ranges EchelonGraph holds from OSV.dev advisory records, the same matcher GET /api/v1/public/cves/match uses when given an ecosystem. No CPE matching, no score, no ranking.";
-
-// Always in the envelope's notes, whatever the answer: the refusals a model must not read as clean.
-const DISTRO_NOTE =
-  "A deb, apk or rpm purl without a distro qualifier naming its release (for example ?distro=debian-12 or ?distro=alpine-3.20) is not assessed (distro_release_unknown): the advisory corpus is keyed per distro release, and EchelonGraph does not guess one.";
-const CLEAN_NOTE =
-  "Only not_affected is a clean verdict, and only for the advisories decided at that version: an undetermined or not_assessed component is not a finding of no vulnerability, and is reported as unchecked, never as clean.";
-const MEASURED_AT_NOTE =
-  "measured_at is null: the corpus rows are read through a cache whose maximum age the answer states (summary.corpus_cache_max_age_ms), so the answer gives no single time at which they were read.";
-const FRESHNESS_NOTE = "freshness is null: the answer carries no time at which the advisory corpus was last refreshed.";
-
 export const CHECK_SBOM_TITLE = "Check an SBOM against the advisory corpus";
+// #2846: the routing sentence for the pods-and-images question, inside the description's first
+// 2,048 characters (test/prompts-resources.test.mjs holds it there, with a control). The workload
+// itself never reaches this tool: the workload_triage prompt has the agent build each image's SBOM
+// with its own tools and pass the purls.
+export const CHECK_SBOM_ROUTING =
+  "For container images and Kubernetes pods, the input is an SBOM of each image, or its purls.";
 export const CHECK_SBOM_DESCRIPTION =
-  "Check a dependency list against EchelonGraph's advisory corpus, one verdict per component. Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX JSON or SPDX JSON document, as JSON text or as an object, up to 5,000,000 characters). The purls are read from the document by this MCP server and only they are sent to the API, in POST bodies of at most 200 purls each, one after another, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. A component without a purl is counted and not checked. Each purl is mapped to its OSV ecosystem, package name and version and matched against the affected version ranges EchelonGraph holds from OSV.dev advisory records; there is no ranking and no score. data.results holds one row per component sent, in order (index counts across batches), with verdict (affected, not_affected, undetermined or not_assessed), assessed, not_assessed_reason, cve_ids, matches, count, not_affected_count and undetermined_count; data.summary counts the verdicts, summed over the batches (partial is true when any batch's was). not_affected is the only clean verdict. undetermined: advisories name the package but at least one could not be decided at this version and none matched. not_assessed: no verdict at all, because the package is not in the corpus, the purl type has no OSV ecosystem, a deb, apk or rpm purl carries no distro qualifier naming its release (EchelonGraph does not guess one), the version is missing, the lookup failed, or the batch's time budget ran out first (time_budget). Neither undetermined nor not_assessed is clean, and the note gives their counts. The API allows 1,200 components a minute per caller; when it answers 429 with Retry-After, the tool waits as asked and sends the batch again, within 50 seconds per call. When the next wait would pass that, or a batch after the first fails, the tool stops and answers what it has: coverage.not_sent counts the purls not sent and coverage.not_sent_reason says why (time_budget, rate_limited or request_failed), data.not_sent_purls lists them for a later call, and they are not checked and not clean. A list or document with more than 2,000 distinct purls is refused, not truncated: split it. Its structured result carries state (measured when at least one component got a verdict, else not_assessed), measured_at (null: the corpus is read through a cache, so no single read time exists), method, coverage (what the input held, what was sent in how many batches, and what was not sent and why), freshness (null) and notes, with data equal to the API's JSON (for more than one batch, the batches' answers merged); the result's last text block repeats it without data (the first text block) and without the note's sentences (the text block before it), with which notes ends." +
+  "Check a dependency list against EchelonGraph's advisory corpus, one verdict per component. " +
+  CHECK_SBOM_ROUTING +
+  " Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX JSON or SPDX JSON document, up to 5,000,000 characters). The purls are read from the document by this MCP server and only they are sent to the API, in POST bodies of at most 200 purls each, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. data.results holds one row per component sent, in order, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids, matched_package and matched_via (a deb or apk purl's upstream qualifier is matched as its source package); each match carries fixed_in, its advisory interval's fixed bound, or null with fixed_in_reason. data.summary counts the verdicts. not_affected is the only clean verdict. not_assessed is no verdict, as for a deb, apk or rpm purl without a distro qualifier naming its release (EchelonGraph does not guess one); neither it nor undetermined is clean, and the note counts both. The API allows 1,200 components a minute per caller; on a 429 the tool waits out Retry-After, up to 50 seconds a call, then answers what it has: data.not_sent_purls lists the unsent purls, unchecked and not clean. A list or document with more than 2,000 distinct purls is refused, not truncated." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
-  " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least, and the rows whose verdict is not_affected, then not_assessed, are left out of the text before any other; not_sent_purls keeps its first 10, and the note says from which position of the input the purls not sent run.";
+  " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least, and each match its fixed_in while matches are kept; not_affected rows leave the text first, then not_assessed ones, and not_sent_purls keeps its first 10.";
 
 // #2783: a production row is about 2,200 characters as pretty JSON, most of it its matches, each
 // a CVE with its description, so the 50-component Juice Shop document was 112,820 characters of
 // text, and 2,000 purls about 1,200,000. Past DATA_TEXT_BUDGET each row in the first text block
-// keeps its verdict, counts and cve_ids, and each match its scores, flags and match_reason (the
+// keeps its verdict, counts, cve_ids, matched_package and matched_via (#2836), and each match its
+// scores, flags, fixed_in (#2834) and match_reason (the
 // advisory interval the version falls inside: "[A, B)" names the fixed version B, "[A, B]" the last
 // affected one, #2830) without the
 // description; then the same without match_reason; then only index, purl, verdict,
@@ -148,8 +118,10 @@ export const CHECK_SBOM_DESCRIPTION =
 // reading the list. noteFor gives that order (READ_ORDER) beside the position, so this sentence
 // points to it.
 export function sbomText(sent: number): TextCut {
-  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed"];
-  const row = ["index", "purl", "ecosystem", "package", "version", "verdict", "assessed", "not_assessed_reason", "count", "not_affected_count", "undetermined_count", "cve_ids"];
+  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed", "fixed_in"];
+  const row = [
+    "index", "purl", "ecosystem", "package", "version", "verdict", "assessed", "not_assessed_reason", "count", "not_affected_count", "undetermined_count", "cve_ids", "matched_package", "matched_via",
+  ];
   return {
     rows: "results",
     levels: [
@@ -185,19 +157,6 @@ export type Extracted = {
   duplicates_removed: number;
   purls: string[];
 };
-
-const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-
-function dedupe(all: string[]): { purls: string[]; removed: number } {
-  const seen = new Set<string>();
-  const purls: string[] = [];
-  for (const p of all) {
-    if (seen.has(p)) continue;
-    seen.add(p);
-    purls.push(p);
-  }
-  return { purls, removed: all.length - purls.length };
-}
 
 // The purls of a CycloneDX JSON document: every components[] entry, nested ones included.
 // metadata.component (the subject of the SBOM, not a dependency of it) is not checked.
@@ -288,33 +247,7 @@ export function extract(a: { purls?: unknown; sbom?: unknown }): Extracted | str
 
 // ── The answer ──
 
-const field = (o: unknown, k: string): unknown => (isObj(o) ? o[k] : undefined);
-const count = (o: unknown, k: string): number | undefined => {
-  const v = field(o, k);
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
-};
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-
-// How the batches went: what the note and the coverage say about sending.
-type NotSentReason = "time_budget" | "rate_limited" | "request_failed";
-type Sending = {
-  batches: number;
-  batches_sent: number;
-  sent: number;
-  not_sent_purls: string[];
-  not_sent_reason: NotSentReason | null;
-  not_sent_detail: string | null;
-  waits: number;
-  waited_ms: number;
-};
-
 function noteFor(head: string, x: Extracted, d: object, g: Sending): { note: string; assessed: number } {
-  const s = field(d, "summary");
-  const affected = count(s, "affected") ?? 0;
-  const notAffected = count(s, "not_affected") ?? 0;
-  const undetermined = count(s, "undetermined") ?? 0;
-  const notAssessed = count(s, "not_assessed") ?? 0;
-  const components = count(s, "components") ?? g.sent;
   const out: string[] = [head];
 
   if (x.input === "purls") {
@@ -326,235 +259,30 @@ function noteFor(head: string, x: Extracted, d: object, g: Sending): { note: str
       `Read ${plural(x.components_in_document ?? 0, unit, `${unit}s`)} from the ${kind} document: ${x.with_purl} with a purl${x.without_purl ? `, and ${x.without_purl} without one, which ${x.without_purl === 1 ? "was" : "were"} not checked and ${x.without_purl === 1 ? "is" : "are"} not clean` : ""}${x.duplicates_removed ? `; ${plural(x.duplicates_removed, "duplicate purl was", "duplicate purls were")} sent once` : ""}; sent ${g.sent}.`,
     );
   }
-  if (g.batches > 1) {
-    out.push(
-      `The ${x.purls.length} distinct purls make ${g.batches} batches of at most ${MAX_COMPONENTS}, sent one after another; the API answered ${g.batches_sent} of them, and data.summary sums those answers.`,
-    );
-  }
-  if (g.waits > 0) {
-    out.push(
-      `The API's component budget (${API_COMPONENTS_PER_MINUTE} components a minute) ran out ${g.waits === 1 ? "once" : `${g.waits} times`}: the tool waited ${Math.round(g.waited_ms / 1000)} s in all, as its Retry-After asked, and sent the batch again.`,
-    );
-  }
-  // #2799: the position, not only the list. Past DATA_TEXT_BUDGET the first text block keeps the
-  // first 10 of data.not_sent_purls (sbomText), so a model that reads the text alone cannot send
-  // "that list"; the purls not sent are always the input's distinct purls from position sent + 1 on
-  // (x.purls.slice(answers.length * MAX_COMPONENTS)), which it can rebuild from its own input, given
-  // the order they are counted in (READ_ORDER), which this sentence says whenever it gives the
-  // position, not only when the text cuts the list.
-  const notSent = g.not_sent_purls.length;
-  if (notSent > 0) {
-    const one = notSent === 1;
-    const where = one ? `it is the input's distinct purl at position ${g.sent + 1}` : `they are the input's distinct purls from position ${g.sent + 1} on`;
-    out.push(
-      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${one ? "it is" : "they are"} not checked and not clean; ${where}, ${READ_ORDER}, and data.not_sent_purls lists ${one ? "it" : "them"}: call check_sbom again with purls set to ${one ? "it" : "them"}${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
-    );
-  }
-  out.push(`Of the ${components} components checked: ${affected} affected, ${notAffected} not affected, ${undetermined} undetermined, ${notAssessed} not assessed.`);
-
-  const by = field(s, "not_assessed_by_reason");
-  if (isObj(by)) {
-    const parts = Object.entries(by)
-      .filter(([, n]) => typeof n === "number" && n > 0)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([r, n]) => `${r} ${n}`);
-    if (parts.length) out.push(`Not assessed, by not_assessed_reason: ${parts.join(", ")}.`);
-    const tb = count(by, "time_budget") ?? 0;
-    if (tb > 0) {
-      out.push(`The batch's time budget ran out before ${plural(tb, "component was", "components were")} looked up: ${tb === 1 ? "it is" : "they are"} not assessed, not clean; check ${tb === 1 ? "it" : "them"} again.`);
-    }
-  }
-
-  const rows = field(d, "results");
-  if (Array.isArray(rows)) {
-    const hits = rows.filter((r) => field(r, "verdict") === "affected");
-    if (hits.length) {
-      const named = hits.slice(0, NOTE_AFFECTED_MAX).map((r) => {
-        const who = (typeof field(r, "purl") === "string" && (field(r, "purl") as string)) || `${field(r, "ecosystem") ?? ""} ${field(r, "package") ?? ""} ${field(r, "version") ?? ""}`.trim();
-        const ids = field(r, "cve_ids");
-        const list = Array.isArray(ids) ? ids.filter((i): i is string => typeof i === "string") : [];
-        const shown = list.slice(0, NOTE_CVES_MAX).join(", ");
-        return `${who} (${shown}${list.length > NOTE_CVES_MAX ? `, and ${list.length - NOTE_CVES_MAX} more` : ""})`;
-      });
-      out.push(`Affected: ${named.join("; ")}${hits.length > NOTE_AFFECTED_MAX ? `; and ${hits.length - NOTE_AFFECTED_MAX} more affected components in data.results` : ""}.`);
-    }
-  }
-  return { note: out.join(" "), assessed: affected + notAffected + undetermined };
+  // The batches, the waits and the purls not sent, at their position in READ_ORDER (#2799).
+  out.push(...sendingSentences(g, x.purls.length, READ_ORDER, "check_sbom again with purls set to"));
+  const v = verdictSentences(d, g);
+  out.push(...v.sentences);
+  return { note: out.join(" "), assessed: v.assessed };
 }
-
-// Summary fields summed over the batches, and bounds that hold per batch (the largest held for all).
-const SUMMED = ["components", "affected", "not_affected", "undetermined", "not_assessed", "lookups", "elapsed_ms"];
-const MAXED = ["time_budget_ms", "corpus_cache_max_age_ms"];
-
-// The batches' answers as one (#2734): results concatenated with index counted across batches
-// (batch b's row i becomes index b*MAX_COMPONENTS+i, its position in the list sent), summaries
-// summed, not_assessed_by_reason summed per reason, partial true when any batch's was, answered_at
-// the last batch's. A count some batch did not send is left out, never summed as 0.
-export function mergeAnswers(answers: object[]): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...(answers[0] as Record<string, unknown>) };
-  const results: unknown[] = [];
-  answers.forEach((a, b) => {
-    const rows = field(a, "results");
-    if (!Array.isArray(rows)) return;
-    for (const r of rows) {
-      const i = field(r, "index");
-      results.push(isObj(r) && typeof i === "number" ? { ...r, index: i + b * MAX_COMPONENTS } : r);
-    }
-  });
-  const total = (vs: unknown[]): number | undefined =>
-    vs.every((v) => typeof v === "number" && Number.isFinite(v)) ? (vs as number[]).reduce((t, v) => t + v, 0) : undefined;
-
-  const comps = total(answers.map((a) => field(a, "components")));
-  if (comps === undefined) delete out.components;
-  else out.components = comps;
-
-  const ss = answers.map((a) => field(a, "summary"));
-  if (ss.every(isObj)) {
-    const sums = ss as Record<string, unknown>[];
-    const m: Record<string, unknown> = { ...sums[0] };
-    for (const k of SUMMED) {
-      const t = total(sums.map((x) => x[k]));
-      if (t === undefined) delete m[k];
-      else m[k] = t;
-    }
-    for (const k of MAXED) {
-      const vs = sums.map((x) => x[k]).filter((v): v is number => typeof v === "number");
-      if (vs.length) m[k] = Math.max(...vs);
-    }
-    if (sums.some((x) => typeof x.partial === "boolean")) m.partial = sums.some((x) => x.partial === true);
-    if (sums.some((x) => isObj(x.not_assessed_by_reason))) {
-      const by: Record<string, number> = {};
-      for (const x of sums) {
-        if (!isObj(x.not_assessed_by_reason)) continue;
-        for (const [r, n] of Object.entries(x.not_assessed_by_reason)) if (typeof n === "number") by[r] = (by[r] ?? 0) + n;
-      }
-      m.not_assessed_by_reason = by;
-    }
-    out.summary = m;
-  } else {
-    delete out.summary;
-  }
-  const last = answers[answers.length - 1];
-  if (field(last, "answered_at") !== undefined) out.answered_at = field(last, "answered_at");
-  out.results = results;
-  return out;
-}
-
-const realSleep = (ms: number, signal?: AbortSignal) =>
-  new Promise<void>((r) => {
-    if (signal?.aborted) return r();
-    const done = (): void => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      r();
-    };
-    const timer = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-  });
 
 export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a: { purls?: unknown; sbom?: unknown }): Promise<ToolResult> {
   const tool = CHECK_SBOM;
-  const sleep = deps.sleep ?? realSleep;
-  const now = deps.now ?? Date.now;
   try {
     const x = extract(a);
     if (typeof x === "string") return deps.badInput(tool, x);
     if (x.purls.length === 0) {
       return deps.badInput(tool, x.input === "purls" ? "purls holds no package URL" : `the document holds ${x.components_in_document ?? 0} components and none carries a purl, so there is nothing to check`);
     }
-    if (x.purls.length > MAX_PURLS) {
-      return deps.badInput(
-        tool,
-        `${x.purls.length} distinct purls; at most ${MAX_PURLS} are checked per call (in batches of ${MAX_COMPONENTS}, within the API's budget of ${API_COMPONENTS_PER_MINUTE} components a minute), and none is dropped silently: split the list into calls of ${MAX_PURLS} or fewer`,
-      );
-    }
-    const long = x.purls.findIndex((p) => p.length > MAX_PURL_LEN);
-    if (long >= 0) return deps.badInput(tool, `purl ${long + 1} is longer than ${MAX_PURL_LEN} characters`);
+    const refused = purlsRefusal(x.purls, `split the list into calls of ${MAX_PURLS} or fewer`);
+    if (refused) return deps.badInput(tool, refused);
 
-    const batches: string[][] = [];
-    for (let i = 0; i < x.purls.length; i += MAX_COMPONENTS) batches.push(x.purls.slice(i, i + MAX_COMPONENTS));
-    const started = now();
-    const budgetS = TIME_BUDGET_MS / 1000;
-    const answers: object[] = [];
-    let status = 200;
-    let waits = 0;
-    let waitedMs = 0;
-    let stop: { reason: NotSentReason; detail: string } | null = null;
-    // The 429 last waited out, for the one way the budget can be gone before anything answered.
-    let waitedFor: F | undefined;
-    // One batch at a time, in order; a 429 with Retry-After is waited out and the same batch sent
-    // again, while the wait fits in the call's budget.
-    while (answers.length < batches.length) {
-      const left = TIME_BUDGET_MS - (now() - started);
-      if (left <= 0 && answers.length === 0 && waitedFor) {
-        // A wait that ended at the budget's end: no time is left to send the first batch again, and
-        // nothing was measured, so that 429 is the answer, not a request given no time at all.
-        return deps.failed(tool, waitedFor);
-      }
-      if (answers.length > 0 && left <= 0) {
-        stop = { reason: "time_budget", detail: `the call's ${budgetS} s budget ran out after ${answers.length} of ${batches.length} batches` };
-        break;
-      }
-      // At most what is left of the budget (#2756): a slow batch is cut off at its end.
-      const r = await deps.api(BATCH_PATH, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ components: batches[answers.length].map((purl) => ({ purl })) }),
-        timeoutMs: Math.max(0, left),
-        signal: deps.signal,
-      });
-      if (r.ok) {
-        answers.push(r.data);
-        status = r.status;
-        continue;
-      }
-      // Cancelled (#2775): this batch was cut off, or never sent after a wait the signal ended.
-      // Nothing more is sent, and the answer goes nowhere.
-      if (deps.signal?.aborted) return deps.failed(tool, r);
-      if (r.kind === "http" && r.status === 429) {
-        if (r.retryAfter === undefined) {
-          stop = { reason: "rate_limited", detail: "the API answered 429 without a Retry-After to wait for" };
-        } else if (waits >= MAX_WAITS) {
-          stop = { reason: "rate_limited", detail: `the API answered 429 again after ${MAX_WAITS} waits` };
-        } else {
-          const waitMs = Math.max(MIN_WAIT_MS, r.retryAfter * 1000);
-          if (now() - started + waitMs <= TIME_BUDGET_MS) {
-            await sleep(waitMs, deps.signal);
-            waits++;
-            waitedMs += waitMs;
-            waitedFor = r;
-            continue;
-          }
-          stop = { reason: "time_budget", detail: `the API answered 429 asking for a wait of ${r.retryAfter} s (Retry-After), which would pass the call's ${budgetS} s budget` };
-        }
-      } else if (r.kind === "timeout" && now() - started >= TIME_BUDGET_MS) {
-        // Cut off by the budget, not by the API failing: the purls are not sent for want of time.
-        stop = { reason: "time_budget", detail: `the call's ${budgetS} s budget ran out while batch ${answers.length + 1} of ${batches.length} was unanswered, so it was cut off` };
-      } else {
-        stop = { reason: "request_failed", detail: deps.describeFailure(r).replace(/\.$/, "") };
-      }
-      // Nothing answered yet: nothing was measured, so the failure is the answer.
-      if (answers.length === 0) return deps.failed(tool, r);
-      break;
-    }
-
-    const notSentPurls = x.purls.slice(answers.length * MAX_COMPONENTS);
-    const g: Sending = {
-      batches: batches.length,
-      batches_sent: answers.length,
-      sent: x.purls.length - notSentPurls.length,
-      not_sent_purls: notSentPurls,
-      not_sent_reason: notSentPurls.length ? (stop?.reason ?? null) : null,
-      not_sent_detail: notSentPurls.length ? (stop?.detail ?? null) : null,
-      waits,
-      waited_ms: waitedMs,
-    };
-    // One batch: data is the API's JSON as it came. More: the merged answer.
-    const data: Record<string, unknown> = batches.length === 1 ? (answers[0] as Record<string, unknown>) : mergeAnswers(answers);
-    if (notSentPurls.length) data.not_sent_purls = notSentPurls;
+    // match_batch.ts: one batch at a time, Retry-After waited out within the budget (#2734,
+    // #2756), stopped on cancellation (#2775).
+    const run = await sendBatches(deps, tool, x.purls);
+    if (!run.ok) return run.result;
+    const { data, status, sending: g } = run;
     const { note, assessed } = noteFor(deps.okHead(tool, status), x, data, g);
-    const s = field(data, "summary");
-    const summaryPartial = typeof field(s, "partial") === "boolean" ? (field(s, "partial") as boolean) : null;
     return deps.succeeded(data, note, {
       state: assessed > 0 ? "measured" : "not_assessed",
       measured_at: null,
@@ -565,17 +293,7 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
         with_purl: x.with_purl,
         without_purl: x.without_purl,
         duplicates_removed: x.duplicates_removed,
-        distinct_purls: x.purls.length,
-        batch_size: MAX_COMPONENTS,
-        batches: g.batches,
-        batches_sent: g.batches_sent,
-        sent: g.sent,
-        not_sent: notSentPurls.length,
-        not_sent_reason: g.not_sent_reason,
-        rate_limit_waits: waits,
-        waited_ms: waitedMs,
-        not_assessed: count(s, "not_assessed") ?? null,
-        partial: notSentPurls.length > 0 ? true : summaryPartial,
+        ...sendingCoverage(g, x.purls.length, field(data, "summary")),
       },
       freshness: null,
       notes: [DISTRO_NOTE, CLEAN_NOTE, MEASURED_AT_NOTE, FRESHNESS_NOTE],
@@ -587,96 +305,17 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
 
 // ── Schemas ──
 
-const opt = <T extends z.ZodType>(t: T) => t.nullable().optional();
-
-const Row = z.looseObject({
-  index: opt(z.number()),
-  input_kind: opt(z.string()),
-  purl: opt(z.string()),
-  verdict: opt(z.string()).describe(
-    "affected (count > 0); not_affected (assessed, no match, nothing undetermined: the only clean verdict); undetermined (advisories name the package, at least one could not be decided, none matched: not clean); not_assessed (no verdict: not clean).",
-  ),
-  ecosystem: opt(z.string()),
-  package: opt(z.string()),
-  version: opt(z.string()),
-  assessed: opt(z.boolean()).describe("Whether the matcher produced a verdict for this component. false is never clean."),
-  not_assessed_reason: opt(z.string()).describe(
-    "Why assessed is false: package_not_in_advisory_corpus, no_decidable_advisory, advisory_lookup_failed, candidate_window_truncated, time_budget, distro_release_unknown, purl_type_unsupported, version_missing or invalid_component.",
-  ),
-  code: opt(z.string()),
-  error: opt(z.string()),
-  cve_ids: opt(z.array(z.string())),
-  matches: opt(z.array(z.looseObject({ cve_id: opt(z.string()) }))),
-  count: opt(z.number()),
-  advisories_considered: opt(z.number()),
-  not_affected_count: opt(z.number()),
-  undetermined_count: opt(z.number()),
-  undetermined: opt(z.array(z.looseObject({ cve_id: opt(z.string()) }))),
-  capped: opt(z.boolean()),
-  candidates_capped: opt(z.boolean()),
-});
-
 export function checkSbomOutput(envelopeSchema: CheckSbomDeps<FailureLike>["envelopeSchema"]): z.ZodType {
   return envelopeSchema({
-    data: z.looseObject({
-      match_layer: opt(z.string()),
-      components: opt(z.number()),
-      summary: z
-        .looseObject({
-          components: opt(z.number()),
-          affected: opt(z.number()),
-          not_affected: opt(z.number()).describe("Components with a decided, clean verdict."),
-          undetermined: opt(z.number()).describe("Components whose advisories could not all be decided and none matched: not clean."),
-          not_assessed: opt(z.number()).describe("Components with no verdict: not clean."),
-          not_assessed_by_reason: opt(
-            z.looseObject({
-              package_not_in_advisory_corpus: z.number().optional(),
-              no_decidable_advisory: z.number().optional(),
-              advisory_lookup_failed: z.number().optional(),
-              candidate_window_truncated: z.number().optional(),
-              time_budget: z.number().optional().describe("Components the batch's time budget ran out before: not clean; check them again."),
-              distro_release_unknown: z.number().optional().describe("deb, apk or rpm purls without a distro qualifier naming the release, which EchelonGraph does not guess."),
-              purl_type_unsupported: z.number().optional(),
-              version_missing: z.number().optional(),
-              invalid_component: z.number().optional(),
-            }),
-          ).describe("The not_assessed components, counted by not_assessed_reason."),
-          lookups: opt(z.number()),
-          partial: opt(z.boolean()).describe("true when the time budget ran out before every component was looked up."),
-          time_budget_ms: opt(z.number()),
-          elapsed_ms: opt(z.number()),
-          corpus_cache_max_age_ms: opt(z.number()),
-        })
-        .optional(),
-      answered_at: opt(z.string()),
-      results: z.array(Row).optional(),
-      not_sent_purls: opt(z.array(z.string())).describe("The distinct purls not sent (coverage.not_sent_reason says why): not checked, and not clean. Present only when some were not sent."),
-    }),
+    // match_batch.ts batchDataShape: the batch route's answer, merged over the batches.
+    data: z.looseObject(batchDataShape),
     coverage: z.strictObject({
       input: z.enum(["purls", "cyclonedx", "spdx"]).describe("What was passed: a purl list, a CycloneDX JSON document or an SPDX JSON document."),
       components_in_document: z.number().int().nullable().describe("Components (CycloneDX) or packages (SPDX) in the document; null for a purl list."),
       with_purl: z.number().int().describe("Of those, the ones carrying a purl."),
       without_purl: z.number().int().describe("The ones without a purl: not checked, and not clean."),
       duplicates_removed: z.number().int().describe("Purls that appeared more than once and were sent once."),
-      distinct_purls: z.number().int().describe("Distinct purls to check: sent plus not_sent."),
-      batch_size: z.number().int().describe("The most purls one request carries (the API's cap per request)."),
-      batches: z.number().int().describe("Requests the distinct purls make, at batch_size each."),
-      batches_sent: z.number().int().describe("Of those, the ones the API answered."),
-      sent: z.number().int().describe("Distinct purls sent and answered."),
-      not_sent: z.number().int().describe("Distinct purls not sent, listed in data.not_sent_purls: not checked, and not clean."),
-      not_sent_reason: z
-        .enum(["time_budget", "rate_limited", "request_failed"])
-        .nullable()
-        .describe(
-          "Why not_sent is above 0: time_budget (the call's 50 s budget ran out, before a batch or while one was unanswered, which is then cut off; or waiting out the API's Retry-After would pass it), rate_limited (a 429 without Retry-After, or a 429 after 10 waits), request_failed (a batch after the first failed; the note quotes how). null when every purl was sent.",
-        ),
-      rate_limit_waits: z.number().int().describe("How many times the API answered 429 and the tool waited its Retry-After before sending the batch again."),
-      waited_ms: z.number().int().describe("Milliseconds spent in those waits."),
-      not_assessed: z.number().int().nullable().describe("Of those sent, the components with no verdict, as the answer counts them."),
-      partial: z
-        .boolean()
-        .nullable()
-        .describe("true when not every purl was sent (not_sent above 0) or any batch's summary.partial was true (its time budget ran out first); otherwise the answer's summary.partial."),
+      ...sendingCoverageShape,
     }),
     freshness: null,
   });

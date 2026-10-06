@@ -16,12 +16,13 @@
 //     inputSchema, and a listed tool with no entry is called with {} when that fits.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MODERN } from "../test/mcp-stdio-client.mjs";
-import { modern } from "../test/mcp-http-client.mjs";
+import { connect, MODERN } from "../test/mcp-stdio-client.mjs";
+import { connectHttp, modern } from "../test/mcp-http-client.mjs";
 import { chooseInput, COMPLETE_MESSAGE, HTTP, judge, judgePrompt, judgeResource, LEGACY, probeOrder, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
 import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, LOG4J_CORE, PROBES, PROMPT_PROBE, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS } from "./probes.mjs";
@@ -31,7 +32,7 @@ const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "d
 // Every tool this package's dist lists, in createServer()'s registration order.
 const PUBLISHED = [
   "cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar",
-  "kev_recent", "epss_history", "check_affected", "check_sbom", "cve_intel", "get_cwe",
+  "kev_recent", "epss_history", "check_affected", "check_sbom", "scan_manifest", "cve_intel", "cve_remediation", "get_cwe",
   "vendor_advisories_for_cve", "get_vendor_advisory", "search_vendor_advisories",
 ];
 // A tool named in the probe table before a release lists it: added to PROBES for this file's
@@ -78,6 +79,19 @@ BODIES["/api/v1/public/cves/match"] = {
   product: "", product_named_count: 0, undecidable_excluded_count: 0, undecided_candidate_count: 0, vendor: "", vendor_advisory_count: 0, version: "4.17.20", matches: [],
 };
 BODIES[BATCH_PATH] = CALL_ANSWER;
+// #2841: GET /cves/:id/remediation as core-backend's cve/remediation.go serves Log4Shell.
+BODIES[`/api/v1/public/cves/${CVE}/remediation`] = {
+  cve_id: CVE, state: "assessed", not_assessed_reason: null,
+  cisa: { kev_listed: true, required_action: "Apply updates per vendor instructions.", due_date: "2021-12-24T00:00:00Z", short_description: "Apache Log4j2 contains a vulnerability.", notes_urls: [] },
+  fixed_branches: [{ ecosystem: "Maven", package_name: "org.apache.logging.log4j:log4j-core", fixed_version: "2.12.2", fixed_branches: [{ introduced: "2.13.0", fixed: "2.15.0", last_affected: null, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" }] }],
+  vendor_remediations: [
+    { vendor: "redhat", vendor_display_name: "Red Hat", vendor_advisory_id: "RHSA-2021:5129", vendor_published_at: AT, withdrawn: false, remediation_state: "parsed", remediation_kinds: ["vendor_fix"], items_total: 1,
+      items: [{ kind: "vendor_fix", source_category: "vendor_fix", source_subcategory: null, text: "For details on how to apply this update, refer to https://access.redhat.com/articles/11258", text_truncated: false, text_chars: 89, url: "https://access.redhat.com/errata/RHSA-2021:5129", fixed_build: null, product_ids: [], product_count: 0 }] },
+  ],
+  fix_references: [], patches: [],
+  coverage: { parsed_vendors: ["redhat", "microsoft", "paloalto"], vendors_not_parsed: [], vendor_advisories_listed: 1, vendor_advisory_limit: 20, item_text_cap: 2000, items_per_advisory_cap: 16 },
+  failed_sections: [],
+};
 BODIES[`/api/v1/public/cves/${CVE}/enrichment`] = {
   vendor_advisories: [], patches: [], fixed_versions: [],
   // #2817: what core-backend serves for log4j-core since #2817, which EXPECT.cve_intel holds.
@@ -215,8 +229,10 @@ describe("the synthetic against the stub API", () => {
       stub.state.batches.length = 0;
       r = await run(stub);
     });
+    // #2835: scan_manifest's probe, registered right after check_sbom, sends its 20 distinct purls
+    // as one batch.
     it("#2757: check_sbom is probed with 201 purls, so each era sends two batches, 200 and 1, and both are answered", () => {
-      assert.deepEqual(stub.state.batches, [200, 1, 200, 1]);
+      assert.deepEqual(stub.state.batches, [200, 1, 20, 200, 1, 20]);
       for (const era of [MODERN, LEGACY]) assert.equal(r.of("check_sbom", era).outcome, "success");
     });
     it("calls every published tool once per era and reports each a success", () => {
@@ -319,7 +335,8 @@ describe("the synthetic against the stub API", () => {
     } finally {
       stub.state.refuseSecondBatch = false;
     }
-    assert.deepEqual(stub.state.batches, [200, 1], "control: the second batch was sent, and refused");
+    // #2835: then scan_manifest's one batch of 20, answered.
+    assert.deepEqual(stub.state.batches, [200, 1, 20], "control: the second batch was sent, and refused");
     const l = r.of("check_sbom", LEGACY);
     assert.equal(l.outcome, "failure", JSON.stringify(l));
     assert.equal(l.reason, "expectation_unmet");
@@ -341,7 +358,8 @@ describe("the synthetic against the stub API", () => {
     } finally {
       stub.state.batchCap = null;
     }
-    assert.deepEqual(stub.state.batches, [200], "control: the first batch was sent, refused, and nothing after it");
+    // #2835: scan_manifest's one batch of 20 is under the lowered cap, and answered.
+    assert.deepEqual(stub.state.batches, [200, 20], "control: the first batch was sent, refused, and nothing after it");
     const l = r.of("check_sbom", LEGACY);
     assert.equal(l.outcome, "failure", JSON.stringify(l));
     // A 400 is the API refusing the input (index.ts failed()), so the state is invalid_input.
@@ -409,6 +427,30 @@ describe("#2817: what cve_intel's probe must show", () => {
   const GHSA = "GHSA-jfh8-c2jp-5v3q";
   const R = (introduced, fixed, advisory_id = GHSA) => ({ introduced, fixed, last_affected: null, source: advisory_id ? "osv_bulk" : null, advisory_id });
   it("the probe asks for CVE-2021-44228", () => assert.deepEqual(PROBES.cve_intel, [{ cve_id: "CVE-2021-44228" }]));
+  // #2835: EXPECT.scan_manifest, both polarities, and the probe's document as the tool reads it.
+  it("scan_manifest: the probe is one package-lock past 64 KiB, read as 400 entries and 20 distinct purls; EXPECT holds the read, the sending and an affected component", async () => {
+    const { readFiles } = await import(pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "tools", "scan_manifest.js")).href);
+    const [args] = PROBES.scan_manifest;
+    assert.equal(args.files.length, 1);
+    assert.ok(args.files[0].content.length > 64 * 1024, `${args.files[0].content.length}`);
+    const x = readFiles(args);
+    assert.deepEqual([x.read_purls, x.purls.length, x.not_checked.length], [400, 20, 0]);
+    assert.equal(x.purls[0], "pkg:npm/lodash@4.17.15");
+    const sc = (files_read, entries_pinned, distinct_purls, not_sent, affected) => ({ coverage: { files_read, entries_pinned, distinct_purls, not_sent, not_sent_reason: not_sent ? "rate_limited" : null }, data: { summary: { affected } } });
+    assert.equal(EXPECT.scan_manifest(sc(1, 400, 20, 0, 1)), undefined);
+    assert.equal(EXPECT.scan_manifest(sc(0, 0, 0, 0, 1)), "coverage.files_read 0, entries_pinned 0, distinct_purls 0; want 1, 400, 20");
+    assert.equal(EXPECT.scan_manifest(sc(1, 400, 20, 20, 0)), 'coverage.not_sent 20 (not_sent_reason "rate_limited"); want 0');
+    assert.equal(EXPECT.scan_manifest(sc(1, 400, 20, 0, 0)), "data.summary.affected 0; want at least 1 (lodash 4.17.15)");
+  });
+  // #2841: EXPECT.cve_remediation, both polarities.
+  it("cve_remediation: the probe asks for CVE-2021-44228; EXPECT holds CISA's text and every row's remediation_state", () => {
+    assert.deepEqual(PROBES.cve_remediation, [{ cve_id: "CVE-2021-44228" }]);
+    const ok = { data: { cisa: { required_action: "Apply updates." }, vendor_remediations: [{ remediation_state: "parsed" }, { remediation_state: "not_parsed" }] } };
+    assert.equal(EXPECT.cve_remediation(ok), undefined);
+    assert.equal(EXPECT.cve_remediation({ data: { cisa: { required_action: null }, vendor_remediations: [] } }), "data.cisa.required_action null; want CISA's text for CVE-2021-44228");
+    assert.equal(EXPECT.cve_remediation({ data: { cisa: { required_action: "x" }, vendor_remediations: [{ remediation_state: "parsed" }, {}] } }), "1 of 2 vendor_remediations rows carry no remediation_state");
+    assert.equal(EXPECT.cve_remediation({ data: { cisa: { required_action: "x" }, failed_sections: ["vendor_remediations"] } }), 'data.vendor_remediations absent (failed_sections ["vendor_remediations"])');
+  });
   it("holds log4j-core's three ranges, one fixed in 2.15.0", () => {
     assert.equal(EXPECT.cve_intel(row([R("2.13.0", "2.15.0"), R("2.0-beta9", "2.3.1"), R("2.4", "2.12.2")])), undefined);
   });
@@ -715,22 +757,40 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         assert.deepEqual([l.outcome, l.state, l.input], ["success", "measured", 0], JSON.stringify(l));
       }
     });
+    it("#2835: the hosted scan_manifest probe is a body past 64 KiB on each era, served 200, and measured", () => {
+      const lines = srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.tool === "scan_manifest");
+      assert.equal(lines.length, 2, JSON.stringify(lines));
+      for (const a of lines) {
+        assert.ok(a.body_bytes > 64 * 1024, `a ${a.body_bytes}-byte body: under the general cap`);
+        assert.equal(a.status, 200);
+      }
+      for (const era of [MODERN, LEGACY]) {
+        const l = r.probes.find((p) => p.transport === HTTP && p.tool === "scan_manifest" && p.era === era);
+        assert.deepEqual([l.outcome, l.state, l.input], ["success", "measured", 0], JSON.stringify(l));
+      }
+      // The endpoint's lines hold nothing from the file.
+      for (const line of srv.lines) assert.ok(!line.includes("node_modules/") && !line.includes("minimist"), `a log line carries the lockfile: ${line.slice(0, 300)}`);
+    });
   });
 
-  it("#2774: on a canary copy whose large-body cap is 64 KiB (MCP_MAX_SBOM_BODY_BYTES=65536), the hosted check_sbom probe fails, rpc_error -32600, and nothing else does", async () => {
+  // #2835: scan_manifest's probe is past 64 KiB too, so the canary refuses it as well.
+  const LARGE = ["check_sbom", "scan_manifest"];
+  it("#2774: on a canary copy whose large-body cap is 64 KiB (MCP_MAX_SBOM_BODY_BYTES=65536), the hosted check_sbom and scan_manifest probes fail, rpc_error -32600, and nothing else does", async () => {
     stub.state.mode = "ok";
     const canary = await startHttpEntry(stub.base, { MCP_MAX_SBOM_BODY_BYTES: "65536" });
     try {
       const r = await run(stub, { stdio: false, remoteUrl: canary.url });
       for (const era of [MODERN, LEGACY]) {
-        const l = r.of("check_sbom", era);
-        assert.equal(l.transport, HTTP);
-        assert.deepEqual([l.outcome, l.reason, l.rpc_code], ["failure", "rpc_error", -32600], JSON.stringify(l));
-        for (const tool of [...PUBLISHED.filter((t) => t !== "check_sbom"), ...EXTRAS]) assert.equal(r.of(tool, era).outcome, "success", tool);
+        for (const tool of LARGE) {
+          const l = r.of(tool, era);
+          assert.equal(l.transport, HTTP);
+          assert.deepEqual([l.outcome, l.reason, l.rpc_code], ["failure", "rpc_error", -32600], `${tool}: ${JSON.stringify(l)}`);
+        }
+        for (const tool of [...PUBLISHED.filter((t) => !LARGE.includes(t)), ...EXTRAS]) assert.equal(r.of(tool, era).outcome, "success", tool);
       }
       assert.equal(r.exitCode, 2);
       const refused = canary.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.status === 413);
-      assert.equal(refused.length, 2, "the endpoint logged each refusal");
+      assert.equal(refused.length, 2 * LARGE.length, "the endpoint logged each refusal");
       for (const a of refused) assert.equal(a.refused, "body_size");
     } finally {
       await canary.stop();
@@ -853,5 +913,86 @@ describe("#2737: judging a prompt and a resource", () => {
     assert.equal(judgeResource({ contents: [{ uri: "echelongraph://other", text: "x" }] }, uri).reason, "resource_uri_missing");
     assert.equal(judgeResource({ contents: [{ uri, text: "  " }] }, uri).reason, "resource_empty");
     assert.equal(judgeResource({ contents: [] }, uri).reason, "resource_no_contents");
+  });
+});
+
+// ── #2724: the probe table covers exactly what the server lists ───────────────────────────────
+// PUBLISHED above is a hand-kept list, and every run test is judged against it. So it is held
+// here to what this package's own dist answers to tools/list, over stdio and over the hosted entry
+// (dist/http.js), on both eras, and to the server.registerTool calls in src/. A tool added to the
+// server and not to PUBLISHED and probes.mjs fails this test, by name, before it ships: the
+// runner would still call it with {} (or fail it no_probe_input), but only a probes.mjs entry
+// gives it a known-good input that fits its inputSchema. And a PROBES, HTTP_PROBES, EXPECT or
+// AFTER entry for a tool the server no longer lists fails too: the runner would report it
+// not_published on every run, which reads as fine.
+describe("#2724: the probe table covers exactly what the server lists", () => {
+  const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+  // A row for get_vendor_advisory's candidate, which reads vendor_advisories_for_cve's answer.
+  const SEEN = { vendor_advisories_for_cve: { state: "measured", data: { advisories: [{ vendor: "redhat", vendor_advisory_id: ADVISORY }] } } };
+  const listed = {};
+  let stub, srv;
+  before(async () => {
+    stub = await startStub();
+    srv = await startHttpEntry(stub.base);
+    for (const era of [MODERN, LEGACY]) {
+      const c = await connect({ era, command: process.execPath, args: [DIST], env: { ...process.env, ECHELONGRAPH_API_BASE: stub.base }, stderr: "ignore" });
+      try {
+        listed[`stdio ${era}`] = (await c.listTools()).tools;
+      } finally {
+        await c.close();
+      }
+      const h = await connectHttp({ era, url: srv.url, userAgent: UA_TOKEN, clientInfo: { name: "coverage-test", version: "1.0.0" } });
+      try {
+        listed[`http ${era}`] = (await h.listTools()).tools;
+      } finally {
+        await h.close();
+      }
+    }
+  });
+  after(async () => {
+    await srv?.stop();
+    await stub?.close();
+  });
+
+  it("control: tools/list answered on every transport and era", () => {
+    assert.deepEqual(Object.keys(listed).sort(), [`http ${LEGACY}`, `http ${MODERN}`, `stdio ${LEGACY}`, `stdio ${MODERN}`]);
+    for (const [where, tools] of Object.entries(listed)) assert.ok(tools.length > 0, `${where}: no tools`);
+  });
+  it("PUBLISHED is exactly what tools/list answers, in its order, everywhere", () => {
+    for (const [where, tools] of Object.entries(listed)) assert.deepEqual(tools.map((t) => t.name), PUBLISHED, `${where}: tools/list and PUBLISHED differ`);
+  });
+  it("every server.registerTool call in src/ is listed: none is registered only under a condition the tests do not meet", () => {
+    const calls = [];
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (p.endsWith(".ts")) {
+          const code = fs.readFileSync(p, "utf8").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+          for (const m of code.matchAll(/server\.registerTool\(\s*("([a-z0-9_]+)"|[A-Za-z_.]+)/g)) calls.push({ file: path.relative(SRC, p), name: m[2] ?? null });
+        }
+      }
+    };
+    walk(SRC);
+    assert.equal(calls.length, PUBLISHED.length, `src/ registers ${calls.length} tools, tools/list answers ${PUBLISHED.length}: ${JSON.stringify(calls)}`);
+    for (const c of calls) if (c.name) assert.ok(PUBLISHED.includes(c.name), `${c.file} registers ${c.name}, which tools/list does not answer`);
+  });
+  it("every listed tool has a probes.mjs entry whose candidate fits the inputSchema it advertises, and an outputSchema to judge by, on every transport and era", () => {
+    for (const [where, tools] of Object.entries(listed)) {
+      const table = where.startsWith("http") ? { ...PROBES, ...HTTP_PROBES } : PROBES;
+      for (const tool of tools) {
+        assert.ok(Object.hasOwn(PROBES, tool.name), `${tool.name} is listed (${where}) but has no probes.mjs entry`);
+        const choice = chooseInput(tool.name, tool, SEEN, table);
+        assert.ok(choice.args && choice.index >= 0, `${tool.name} (${where}): no candidate fits its inputSchema: ${JSON.stringify(choice)}`);
+        assert.ok(tool.outputSchema && typeof tool.outputSchema === "object", `${tool.name} (${where}): no outputSchema, so its answer cannot be judged`);
+      }
+    }
+  });
+  it("probes.mjs names no tool the server does not list: a stale entry would read not_published on every run", () => {
+    const names = new Set(PUBLISHED);
+    for (const [label, table] of [["PROBES", PROBES], ["HTTP_PROBES", HTTP_PROBES], ["EXPECT", EXPECT], ["HTTP_EXPECT", HTTP_EXPECT], ["AFTER", AFTER]]) {
+      for (const k of Object.keys(table)) assert.ok(names.has(k), `${label} names ${k}, which tools/list does not answer`);
+    }
+    for (const deps of Object.values(AFTER)) for (const d of deps) assert.ok(names.has(d), `AFTER waits on ${d}, which tools/list does not answer`);
   });
 });

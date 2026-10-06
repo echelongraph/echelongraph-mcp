@@ -1,0 +1,22 @@
+# Shaped as pip-compile and hand-edited requirements files are written (pip's requirements file
+# format: pip.pypa.io/en/stable/reference/requirements-file-format/). Hashes are illustrative.
+--index-url https://pypi.org/simple
+-r requirements-base.txt
+-c constraints.txt
+
+Django==3.2.0 \
+    --hash=sha256:0604e84c4fb698a5e53e5857b5aea945b2f19a18f25f10b8748dbdf935788927
+requests[socks,security]==2.31.0 ; python_version >= "3.7"
+urllib3===1.26.5
+typing_extensions==4.7.1  # via pydantic
+django-filter>=4
+celery~=5.3.0
+pyyaml==6.0.*
+numpy>=1.24,<2
+-e git+https://github.com/pallets/click.git@8.1.7#egg=click
+-e ./libs/internal-tool
+attrs @ git+https://github.com/python-attrs/attrs.git@23.1.0
+mytool @ file:///opt/wheels/mytool-0.1.0-py3-none-any.whl
+https://files.example.invalid/pkg/simplejson-3.19.1.tar.gz
+./vendor/localpkg
+flask

@@ -18,8 +18,9 @@
 // (on to the API), which is check_sbom's own description. Each guard pins its fine cases.
 
 // Every noun check_sbom's description, its sbom argument and the page's row use for the input:
-// document, SBOM (or BOM), file, dependency list, JSON text, CycloneDX JSON or SPDX JSON, input.
-export const DOC = String.raw`(?:documents?|s?boms?|files?|dependency lists?|json texts?|(?:cyclonedx|spdx) json|inputs?)`;
+// document, SBOM (or BOM), file, dependency list, JSON text, CycloneDX JSON or SPDX JSON, input;
+// and scan_manifest's (#2835): lockfile (lock file), manifest, file contents.
+export const DOC = String.raw`(?:documents?|s?boms?|files?|lock ?files?|manifests?|file contents|dependency lists?|json texts?|(?:cyclonedx|spdx) json|inputs?)`;
 // A negation, "isn't" and "doesn't" among them (no word boundary inside the contraction).
 export const NEG = String.raw`(?:\bnever\b|\bnot\b|n[’']t\b|\bno longer\b|\bwithout\b)`;
 // Words between the noun and its negation, within a clause: "The document, once parsed, is never
@@ -42,14 +43,16 @@ const NOT_ONWARD = String.raw`(?!\s+on(?:wards?)?(?:\s+to\s+(?:the\s+)?(?:Echelo
 export const PURLS_ONLY = String.raw`(?:\b(?:only|just|nothing but|nothing except|nothing other than|no more than)\s+(?:(?:the|those|these)\s+)?(?:\w+\s+)?(?:purls|package urls)|\b(?:the\s+)?purls\s+alone)(?:\s+(?:in|from)\s+(?:it|them|the\s+\w+))?(?:\s+alone)?,?`;
 // "make(s) it" only before "to", which it leaves for TO_THE_API to read: "Only the purls make it to
 // the API" is true on both transports, "… make it to EchelonGraph" is not (#2831).
-const SENT = String.raw`(?:sent|transmitted|uploaded|posted|shared|travel(?:s|led)?|go(?:es)?|leaves?|reach(?:es)?|mak(?:es|e) it(?=\s+to\b))\b`;
+// "received" and "seen" are the same denial from the recipient's side: "Only purls are received by the
+// API" (#2856).
+const SENT = String.raw`(?:sent|transmitted|uploaded|posted|shared|received|seen|travel(?:s|led)?|go(?:es)?|leaves?|reach(?:es)?|mak(?:es|e) it(?=\s+to\b))\b`;
 
 export const DENIALS = [
   // "never the document", "not the document", "neither the document nor …"
   new RegExp(String.raw`\b(?:never|not|nor|neither)\s+(?:the |your |its |this |that |whole |full |entire |raw |complete )*${DOC}\b`, "i"),
   // "the document (itself) is not / is never / never … sent, leaves, reaches, is uploaded …"
   new RegExp(
-    String.raw`\b${DOC}\b${GAP(80)}${NOT_THEIRS}${NEG}[^.;!?]{0,30}?\b(?:sent|send|leaves?|left|leaving|uploaded|upload|transmitted|transmit|posted|shared|forwarded|forward|reach(?:es)?|goes|go|mak(?:es|e) it to|seen|touch(?:es|ed)?)\b${NOT_ONWARD}`,
+    String.raw`\b${DOC}\b${GAP(80)}${NOT_THEIRS}${NEG}[^.;!?]{0,30}?\b(?:sent|send|leaves?|left|leaving|uploaded|upload|transmitted|transmit|posted|shared|forwarded|forward|reach(?:es)?|goes|go|mak(?:es|e) it to|seen|touch(?:es|ed)?|received|arriv(?:es|ed|e)|exposed to|accessed)\b${NOT_ONWARD}`,
     "i",
   ),
   // "…; the document is not." — the clause ends on its negation, the verb left out
@@ -68,6 +71,14 @@ export const DENIALS = [
   // hosted server neither logs nor keeps the document (the README's privacy section), so a denial
   // that it is stored can be true, and is no denial that it is sent.
   new RegExp(String.raw`${NEG}[^.;!?]{0,30}?\b(?:see|sees|seeing|seen|saw|touch(?:es|ed|ing)?)\b[^.;!?]{0,20}?\b${DOC}\b`, "i"),
+  // The recipient as the subject (#2856): "EchelonGraph never receives the document", "We don't get
+  // your SBOM", "Our servers never get the file", "EchelonGraph never has access to the document".
+  // The hosted endpoint receives the whole document as the request body, so each is false beside
+  // it. "receive" and "get" were never in the lists above, which name the sender's verbs.
+  new RegExp(String.raw`${NEG}[^.;!?]{0,30}?\b(?:receiv(?:e|es|ed|ing)|get|gets|getting|got|(?:has|have|had|gets?|getting)\s+access\s+to|access(?:es|ed|ing)?)\b[^.;!?]{0,20}?\b${DOC}\b`, "i"),
+  // "The server receives only the purls", "EchelonGraph sees only the purls", "gets just the
+  // purls": the purls-only denial from the recipient's side (#2856)
+  new RegExp(String.raw`\b(?:receiv(?:e|es|ed|ing)|gets?|getting|got|sees?|seeing|saw)\s+${PURLS_ONLY}`, "i"),
   // "no document is sent", "no part of the document leaves", "none of the document leaves"
   new RegExp(
     String.raw`\b(?:no|none of)\s+(?:(?:part|copy|portion|byte|bytes) of\s+)?(?:the |your |its |this )*${DOC}\b[^.;!?]{0,40}?\b(?:sent|send|leaves?|uploaded|posted|reach(?:es)?|transmitted|goes|go)\b`,
@@ -207,4 +218,20 @@ export const DENIAL_VARIANTS = [
   "It is never POSTed to EchelonGraph.",
   "This MCP server never POSTs the SBOM.",
   "The SBOM is never seen by EchelonGraph.",
+  // #2856: the recipient's verbs (receive, get, access, arrive, exposed to), which no rule above had
+  "EchelonGraph never receives the document.",
+  "We never receive the document.",
+  "The API never receives the document.",
+  "The document is never received.",
+  "We don't get your SBOM.",
+  "The server receives only the purls.",
+  "Only purls are received by the API.",
+  "EchelonGraph sees only the purls.",
+  "EchelonGraph never receives your SBOM.",
+  "EchelonGraph does not receive the document.",
+  "The document is never received by EchelonGraph.",
+  "Our servers never get your SBOM.",
+  "EchelonGraph never has access to the document.",
+  "Your SBOM is never exposed to EchelonGraph.",
+  "The document never arrives at EchelonGraph.",
 ];
