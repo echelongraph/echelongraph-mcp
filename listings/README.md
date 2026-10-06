@@ -23,11 +23,11 @@ below) at 10:57 UTC, npm `latest` 2.6.2:
 |---|---|---|---|---|
 | Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, 6 active versions | 2.6.2, `isLatest` | nothing: each release publishes it | release script |
 | Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 2.6.2 (`/health`) | nothing | deploy |
-| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.6.5 at 2026-10-05 08:34Z, lagging npm 2.6.6 (Auto-Release or Admin → Sync Server) | set our one-line description under Admin → Listing if Glama's differs | founder (GitHub sign-in) |
+| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.7.0 at 2026-10-06 11:14Z, current, after a manual Admin → Sync Server (Auto-Release did not pick up 2.6.7, 2.6.8 or 2.7.0: sync by hand after each release) | set our one-line description under Admin → Listing if Glama's differs | founder (GitHub sign-in) |
 | Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; scan read 2.6.7 at 12:08Z: 14 tools, release SUCCESS after one retry: Smithery's own build step hit an internal database error) | proxies the hosted endpoint | set display name and description; Settings → Verification | founder (Smithery sign-in) |
 | mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |
 | PulseMCP | no | shows none | nothing: submissions paused; it reads the official registry | nobody |
-| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.6.8 (commit `e9829fa6`; the v2.6.7 pin `1a8ffdf1` was the annotated tag object, not its commit `d1f68b30`); validate and build pass (2026-10-05) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
+| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.7.0 (commit `7ca1bfaf`, the commit `v2.7.0^{}` names, not the tag object `286aba3e`); validate and build pass, 16 tools found (2026-10-06) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
 | Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passes; tools are dynamic, so no pin to move | serves the hosted endpoint | Docker's review | Docker |
 | Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth, 14 read-only tools, served at 2.6.7) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
 
@@ -386,8 +386,8 @@ Adds echelongraph-remote: EchelonGraph CVE & Exposure, hosted.
 CVE, KEV, EPSS, SBOM and advisory lookups; per-CVE exposure from Shodan data (© Shodan). Keyless.
 
 - Remote: https://mcp.echelongraph.io/mcp (streamable-http), no authentication, no secrets
-- tools.json is [] and dynamic tools are on; `go run ./cmd/validate` without dynamic lists 14 tools from the URL
-- 14 tools, all annotated readOnlyHint
+- tools.json is [] and dynamic tools are on; `go run ./cmd/validate` without dynamic lists 16 tools from the URL
+- 16 tools, all annotated readOnlyHint
 - Docs: https://github.com/echelongraph/echelongraph-mcp#readme (MIT)
 - Also in the official MCP Registry as io.echelongraph/echelongraph-mcp, with this remote
 ```
@@ -488,7 +488,7 @@ Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been s
 Test & launch:
 
 ```text
-No test account exists, and none is needed: the server is keyless and read-only, so there are no credentials to give. Connect https://mcp.echelongraph.io/mcp with no authentication and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, check_sbom with purls ["pkg:npm/lodash@4.17.15"], and scan_manifest with a requirements.txt whose text is "django==3.2.0". Each client may send up to 120 requests a minute.
+No test account exists, and none is needed: the server is keyless and read-only, so there are no credentials to give. Connect https://mcp.echelongraph.io/mcp with no authentication and call each tool, for example get_cve, cve_exposure, epss_history, cve_intel, cve_remediation and vendor_advisories_for_cve with CVE-2023-44487, cve_summary, exposure_radar and kev_recent with no arguments, search_cves with search "tomcat", check_affected with product "openssl" and version "3.0.0", get_cwe with CWE-79, check_sbom with purls ["pkg:npm/lodash@4.17.15"], scan_manifest with a requirements.txt whose text is "django==3.2.0", search_vendor_advisories with search "openssl", and get_vendor_advisory with a vendor and advisory id from that result. Each client may send up to 120 requests a minute.
 ```
 
 Sources (fetched 2026-10-04): https://claude.com/docs/connectors/building/submission.md ,

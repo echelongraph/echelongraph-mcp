@@ -16,8 +16,8 @@ package version is affected, check an SBOM or a project's lockfiles, and read a 
 it was measured (`state`, `measured_at`, `method`, `coverage`, `freshness`, `notes`), so a model
 cannot mistake an outage or an unassessed lookup for an all-clear.
 
-It also serves four prompts, ready-made workflows a client can show as slash commands
-(`triage_cve`, `kev_weekly_brief`, `am_i_affected`, `sbom_review`; see "Prompts"), and three
+It also serves five prompts, ready-made workflows a client can show as slash commands
+(`triage_cve`, `kev_weekly_brief`, `am_i_affected`, `sbom_review`, `workload_triage`; see "Prompts"), and three
 resources (`echelongraph://methodology`, `echelongraph://sources` and `cve://{cve_id}`; see
 "Resources").
 
@@ -181,7 +181,7 @@ and most others) take the same block as Cursor above.
 
 ### Remote (no install)
 
-The same 16 tools, four prompts and three resources are served over Streamable HTTP at:
+The same 16 tools, five prompts and three resources are served over Streamable HTTP at:
 
 ```text
 https://mcp.echelongraph.io/mcp
@@ -592,6 +592,7 @@ never "not affected", and each figure cites its `measured_at`. A prompt makes no
 | `kev_weekly_brief` | `days` (1 to 365, default 7) | Work out the start date from `days`, page through `kev_recent` from it 50 rows a page, and write a brief grouped by vendor with ransomware flags and due dates. |
 | `am_i_affected` | `product`, or `ecosystem` and `package`; `version` | `check_affected`, read `assessed` before `count`, with the not-assessed wording. |
 | `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom` (and, once more, the purls a rate limit or the time budget left unsent: `data.not_sent_purls`, or, where the text cuts that list, the document's purls from the position and in the order its note gives), read each component's ecosystem, package and version from its purl, as `check_sbom` maps them (every purl type it maps, and `deb`, `apk`, `alpine` and `rpm` by a `distro` qualifier naming a Debian, Ubuntu or Alpine release; any other is unknown, and given no fixed version), look up each affected CVE with `get_cve` and `cve_intel`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. A fixed version is given where it is above the component's installed version: the advisory interval in `check_sbom`'s `match_reason` first (B of `[A, B)`, a fixed bound; the B of `[A, B]`, read by its closing bracket alone, is the last affected version, still affected, and neither it nor any version at or below it is given; an interval clipped before its closing bracket gives none), else the `fixed` of the `cve_intel` `fixed_branches` range that holds the installed version, else, for a package without `fixed_branches`, `cve_intel`'s `fixed_version`, which is one per package (the advisory's last range's) and need not be the fix on the component's branch; otherwise the line says the results give no fixed version for that branch and points to the CVE's advisory. |
+| `workload_triage` | `source` (optional: `kubernetes`, `github_actions` or `images`; default: all three are described) | Rank your own pods, CI job containers or images: list the workloads and decide their exposure with your own tools, make an SBOM of each image digest, and pass `check_sbom` the purls alone (no workload, namespace, image, registry name, credential or exposure label is sent; the image's own `pkg:oci`/`pkg:docker` purl is left out). Rows are ordered by CISA-KEV listing, then caller-asserted exposure (unknown is never sorted with not exposed), then EPSS, then score, each key stated; past 30 CVEs it stops calling `get_cve`. `not_assessed` rows are counted and never reported as clean. The prompt takes no workload data. |
 
 ## Resources
 

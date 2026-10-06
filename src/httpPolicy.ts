@@ -491,3 +491,53 @@ export function uaFamily(ua: string | undefined): string {
   const fam = ua.split(/[/\s]/, 1)[0];
   return UA_FAMILY.test(fam) ? fam : "(other)";
 }
+
+// #2923: the SDK's onerror messages can quote what the client sent (a request id, a JSON body, a
+// method name), so the message is never logged. It is matched against the SDK's own fixed
+// prefixes and only the matching label is logged; anything unrecognised is "other". A
+// ProtocolError also carries its numeric JSON-RPC code, which is content-free.
+const HANDLER_ERROR_CLASSES: ReadonlyArray<readonly [string, string]> = [
+  ["Not Acceptable", "not_acceptable"],
+  ["Unsupported Media Type", "unsupported_media_type"],
+  ["Method not allowed", "method_not_allowed"],
+  ["Invalid Request: Batch must not exceed", "batch_too_large"],
+  ["Invalid Request: Server already initialized", "already_initialized"],
+  ["Invalid Request: Only one initialization", "duplicate_initialize"],
+  ["Invalid Request", "invalid_request"],
+  ["Parse error", "parse_error"],
+  ["Conflict", "conflict"],
+  ["Event store not configured", "no_event_store"],
+  ["Invalid event ID format", "bad_event_id"],
+  ["Received a response for an unknown", "unknown_response_id"],
+  ["Received a progress notification", "unknown_progress_token"],
+  ["Unknown message type", "unknown_message_type"],
+  ["Era mismatch", "era_mismatch"],
+  ["Dropped inbound request", "dropped_wrong_era"],
+  ["requestState verification rejected", "request_state_rejected"],
+  ["subscriptions/listen refused", "subscription_limit"],
+  ["Uncaught error in notification handler", "notification_handler_threw"],
+  ["Failed to write to the response stream", "response_stream_write_failed"],
+  ["Failed to encode result", "encode_result_failed"],
+  ["Failed to send", "send_failed"],
+];
+
+export function handlerErrorClass(e: unknown): string {
+  const message = e instanceof Error ? e.message : "";
+  const hit = HANDLER_ERROR_CLASSES.find(([prefix]) => message.startsWith(prefix));
+  return hit ? hit[1] : "other";
+}
+
+export function protocolErrorCode(e: unknown): number | undefined {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "number" && Number.isInteger(code) ? code : undefined;
+}
+
+export function classifyHandlerError(e: unknown): { error_name: string; error_class: string; error_code?: number } {
+  const out: { error_name: string; error_class: string; error_code?: number } = {
+    error_name: e instanceof Error ? e.name : typeof e,
+    error_class: handlerErrorClass(e),
+  };
+  const code = protocolErrorCode(e);
+  if (code !== undefined) out.error_code = code;
+  return out;
+}

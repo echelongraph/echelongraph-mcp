@@ -1356,13 +1356,16 @@ describe("#2863: every stdout line carries exactly the keys /privacy Section 11 
   const LINES = {
     mcp_remote_refusing_to_start: ["reason"],
     mcp_remote_heap_unbounded: ["heap_limit_mb", "memory_limit_mb", "reason"],
-    mcp_handler_error: ["error_name"],
+    // #2923: a fixed-vocabulary class, never the SDK message (which can quote the client).
+    mcp_handler_error: ["error_class", "error_name"],
     mcp_request_failed: ["error_name"],
     mcp_large_body_busy: ["slots"],
     mcp_busy: ["max_in_flight", "waiting"],
     mcp_rate_limited: ["client", "limit"],
     mcp_client_gone: ["after_ms", "answer_started", "rst_code"],
   };
+  // Keys a line may carry or omit: a ProtocolError's numeric JSON-RPC code (#2923).
+  const OPTIONAL = { mcp_handler_error: ["error_code"] };
   // The lines this file's servers are driven to write; a reviewed line it never makes is no check.
   const MUST_SEE = ["mcp_request", "mcp_remote_listening", "mcp_busy", "mcp_large_body_busy", "mcp_rate_limited", "mcp_client_gone"];
   const sorted = (xs) => [...xs].sort();
@@ -1392,7 +1395,8 @@ describe("#2863: every stdout line carries exactly the keys /privacy Section 11 
       }
       const want = LINES[j.message];
       assert.ok(want, `http.ts writes a line nobody reviewed for /privacy Section 11: ${line}`);
-      assert.deepEqual(sorted(Object.keys(j)), sorted([...ENVELOPE, ...want]), `${j.message}'s keys are not the reviewed ones: ${line}`);
+      const opt = (OPTIONAL[j.message] ?? []).filter((k) => k in j);
+      assert.deepEqual(sorted(Object.keys(j)), sorted([...ENVELOPE, ...want, ...opt]), `${j.message}'s keys are not the reviewed ones: ${line}`);
     }
     for (const m of MUST_SEE) assert.ok(seen.has(m), `no ${m} line was written by this file's servers, so its keys are not checked`);
   });

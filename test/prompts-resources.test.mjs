@@ -174,6 +174,14 @@ const routingEnd = (d) => {
   return at < 0 ? Infinity : at + SBOM_TOOLS.CHECK_SBOM_ROUTING.length;
 };
 const CLIENT_CUT = 2048;
+// #2924: every tool description keeps DESCRIPTION_HEADROOM characters under the cut, so a wording
+// fix (such as one the #1880 field guard forces) lands without a rewrite under pressure. Through
+// 2.7.0 check_affected was 2 characters under it, check_sbom 5 and vendor_advisories_for_cve 10.
+const DESCRIPTION_HEADROOM = 100;
+const headroomProblems = (tools) =>
+  tools
+    .filter((t) => (t.description ?? "").length > CLIENT_CUT - DESCRIPTION_HEADROOM)
+    .map((t) => `${t.name}: ${t.description.length} characters, ${CLIENT_CUT - t.description.length} under the ${CLIENT_CUT}-character cut; the floor is ${DESCRIPTION_HEADROOM}`);
 function workloadProblems(t) {
   return [
     ...WORKLOAD_MUST.filter(([, re]) => !re.test(t)).map(([what]) => `lacks ${what}`),
@@ -322,6 +330,11 @@ for (const era of ERAS) {
       assert.match(SBOM_TOOLS.CHECK_SBOM_ROUTING, /container images and Kubernetes pods/);
       assert.ok(routingEnd(d) <= CLIENT_CUT, `the routing sentence ends at ${routingEnd(d)}: ${d}`);
       assert.ok(d.length <= CLIENT_CUT, `check_sbom's description is ${d.length} characters`);
+    });
+    it(`#2924: every tool description in tools/list keeps ${DESCRIPTION_HEADROOM} characters of headroom under the ${CLIENT_CUT}-character client cut`, async () => {
+      const { tools: listed } = await client.listTools();
+      assert.ok(listed.length > 0 && listed.every((t) => typeof t.description === "string" && t.description.length > 0), "tools/list serves no descriptions: re-aim this check");
+      assert.deepEqual(headroomProblems(listed), []);
     });
 
     const BAD = [
@@ -573,5 +586,16 @@ describe("#2846 controls: workload_triage's checker and check_sbom's routing hea
     assert.ok(routingEnd(d) <= CLIENT_CUT);
     assert.ok(routingEnd(`${d.replace(r, "")} ${"x".repeat(CLIENT_CUT)} ${r}`) > CLIENT_CUT, "moved past the cut, the sentence still reads as in the head");
     assert.equal(routingEnd(d.replace(r, "")), Infinity, "dropped, the sentence still reads as in the head");
+  });
+});
+
+describe("#2924 controls: the description headroom check", () => {
+  const tool = (n) => ({ name: "dummy_tool", description: "d".repeat(n) });
+  it(`a description ${CLIENT_CUT - DESCRIPTION_HEADROOM} characters long passes; one character more fails, naming the tool`, () => {
+    assert.deepEqual(headroomProblems([tool(CLIENT_CUT - DESCRIPTION_HEADROOM)]), []);
+    assert.deepEqual(headroomProblems([tool(CLIENT_CUT - DESCRIPTION_HEADROOM + 1)]), [`dummy_tool: ${CLIENT_CUT - DESCRIPTION_HEADROOM + 1} characters, ${DESCRIPTION_HEADROOM - 1} under the ${CLIENT_CUT}-character cut; the floor is ${DESCRIPTION_HEADROOM}`]);
+  });
+  it("2.7.0's check_affected description length (2,046) fails it", () => {
+    assert.equal(headroomProblems([tool(2046)]).length, 1);
   });
 });

@@ -55,6 +55,8 @@ import {
   ORIGIN_REFUSED_CODE,
   RATE_LIMITED_CODE,
   bodyFacts,
+  handlerErrorClass,
+  protocolErrorCode,
   originVerdict,
   resolveClient,
   revisionLabel,
@@ -115,8 +117,9 @@ const handler = createMcpHandler(createServer, {
   // leg answers over SSE, as a 2025-era streamable HTTP server does.
   // The largest body readBody can hand on; which request may be that large is decided here first.
   maxRequestBodySize: MAX_SBOM_BODY_BYTES,
-  // Names only: an SDK error message can quote what the client sent.
-  onerror: (e) => log("WARNING", "mcp_handler_error", { error_name: e.name }),
+  // Never the message: an SDK error message can quote what the client sent. A fixed label and
+  // the JSON-RPC code instead, so each one can be told apart (#2923).
+  onerror: (e) => log("WARNING", "mcp_handler_error", { error_name: e.name, error_class: handlerErrorClass(e), error_code: protocolErrorCode(e) }),
 });
 
 const limiter = new FixedWindowLimiter(RATE_LIMIT_PER_MIN);

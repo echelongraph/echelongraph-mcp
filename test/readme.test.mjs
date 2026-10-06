@@ -420,6 +420,38 @@ describe("README on cve_summary's left-out poller fields (#2771)", () => {
 
 // #2770: the Resources table names what echelongraph://sources relays for the NVD poller, its two
 // counters as the one instance's, since it last started, never the feed's reliability.
+// The README's Prompts table and prose name exactly the prompts prompts/list answers, in its
+// order (2026-10-06: 2.7.0 added workload_triage while the README kept saying "four prompts").
+const NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function promptTable() {
+  const section = README.split(/^## /m).find((s) => s.startsWith("Prompts"));
+  assert.ok(section, "the README lost its ## Prompts section");
+  assert.match(section, /^\| Prompt \| Arguments \| What it asks the model to do \|$/m, "the Prompts table lost its header");
+  return [...section.matchAll(/^\| `([a-z_]+)` \| /gm)].map((m) => m[1]);
+}
+describe("README prompts equal prompts/list", () => {
+  let client, prompts;
+  before(async () => {
+    client = new StdioMcpClient({ ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    await client.open(MODERN);
+    ({ prompts } = await client.listPrompts());
+  });
+  after(() => client?.close());
+  it("the Prompts table lists exactly the prompts, in prompts/list order", () => {
+    assert.deepEqual(promptTable(), prompts.map((p) => p.name));
+  });
+  it("every prose count of prompts equals prompts/list, and the intro names each one", () => {
+    const counts = [...README.matchAll(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten) prompts\b/gi)];
+    assert.ok(counts.length > 0, "the README no longer says how many prompts there are");
+    for (const m of counts) {
+      const n = /^\d+$/.test(m[1]) ? Number(m[1]) : NUMBER_WORDS[m[1].toLowerCase()];
+      assert.equal(n, prompts.length, `"${m[0]}"`);
+    }
+    const intro = README.split("\n## ")[0];
+    for (const p of prompts) assert.ok(intro.includes(`\`${p.name}\``), `the README's opening does not name the ${p.name} prompt`);
+  });
+});
+
 describe("README Resources table (#2770)", () => {
   it("the echelongraph://sources row names interval, last_poll_at, poll_count and poll_errors, the counts as the one instance's", () => {
     const row = README.split("\n").find((l) => l.startsWith("| `echelongraph://sources` |"));

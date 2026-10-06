@@ -6,6 +6,20 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.7.1 — 2026-10-06
+
+- README: the server serves five prompts, not four; `workload_triage` (added in 2.7.0) is now in
+  the intro and in the Prompts table, and a test holds the README's prompt table and every
+  "N prompts" count equal to `prompts/list` (#2922).
+- Every tool description now keeps at least 100 characters under the 2,048-character cut some
+  clients apply. check_affected, check_sbom, vendor_advisories_for_cve, get_cve, scan_manifest,
+  kev_recent, cve_intel and cve_summary were reworded for length alone: no field, verdict or
+  not-assessed statement was removed. A test holds the headroom (#2924).
+- Hosted endpoint: `mcp_handler_error` log lines now carry `error_class`, a label from a fixed list
+  matched against the SDK's own error messages, and, for a protocol error, its numeric
+  `error_code`, so each can be told apart. The message itself is still never logged, as it can
+  quote what a client sent; /privacy Section 11 says so (#2923).
+
 ## 2.7.0 — 2026-10-06
 
 - New tool scan_manifest (#2835): a project's lockfiles or pinned manifests checked against the
