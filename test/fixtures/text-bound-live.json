@@ -2,14 +2,14 @@
   "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record. tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh). tools.*.measured_at is when this checkout's server last measured the kept answers and answers_read_at when they were read from production (#2822); a re-measure of the kept answers (--answers test/fixtures/prod-answers) moves measured_at, never answers_read_at. cases: every case of text-bound.mjs SHAPED, each tool at its default call and largest page, held to the ceiling, and text-bound.test.mjs holds each SHAPED case within SHAPED_DRIFT of its record here; source says where the answers came from (probe-prod, or the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text).",
   "tools": {
     "exposure_radar": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
+      "measured_at": "2026-10-11T07:45:57.182Z",
       "answers_read_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 41315,
+      "package_version": "2.7.1",
+      "total": 41885,
       "blocks": [
         21334,
-        17331,
-        2650
+        17895,
+        2656
       ],
       "answers_kept": true
     },
@@ -83,15 +83,15 @@
       "source": "probe-prod"
     },
     "exposure_radar": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 41315,
+      "measured_at": "2026-10-11T07:45:57.182Z",
+      "package_version": "2.7.1",
+      "total": 41885,
       "blocks": [
         21334,
-        17331,
-        2650
+        17895,
+        2656
       ],
-      "source": "probe-prod"
+      "source": "probe-prod answers kept in fixtures/prod-answers"
     },
     "kev_recent, default page (limit 50)": {
       "measured_at": "2026-10-05T07:37:21.576Z",

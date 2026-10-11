@@ -6,6 +6,26 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 2.7.2 — 2026-10-11
+
+- exposure_radar flags every radar whose last completed check is past its threshold, not only the
+  two whose answer carries a liveness verdict. kev_exposure and exposed_databases (12-hour cycles)
+  are flagged after 24 hours, leaked_credentials (a 10-minute cycle) after 1 hour; shadow_ai and
+  mcp_servers keep the API's own poller.running and enabled verdicts, and fall back to 30 and 45
+  minutes only where the answer gives none. A flagged radar's sentence gives the age and the cycle
+  and says its numbers may be stale. The age is taken against the clock when the answer is
+  composed, never the stats cache's generated_at. The closing sentence "Each radar refreshes on its
+  own schedule." is gone: it said the radars were refreshing while four of the five were stopped.
+  It now lists the radars that may be stale, or names each threshold when none is. A test reads
+  each radar's cadence from core-backend and fails when a threshold is under twice it (#3010).
+- README: the freshness sentence says a radar refreshes only while it runs (#3010). The setup steps
+  say to quit the client fully and reopen it, and no longer give a tool count to look for: `npx`
+  runs the newest release and a connector the hosted endpoint's, so a number could differ from a
+  working install's and read as a failure (#2813).
+- cve_intel: each exploits row carries `source_published_at`, the source's own date for the
+  reference (null where the source gives none), and `eg_first_seen_at`, when EchelonGraph recorded
+  it. `first_seen_at` is kept, deprecated, as `source_published_at` under its old key (#2876).
+
 ## 2.7.1 — 2026-10-06
 
 - README: the server serves five prompts, not four; `workload_triage` (added in 2.7.0) is now in

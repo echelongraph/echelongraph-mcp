@@ -10,6 +10,8 @@
 //              without failed_sections or exploits_total (an API older than #2720) worded as
 //              such, an empty exploits list never worded as "no exploit exists", no request but
 //              /enrichment (never /blast-radius), and invalid input refused before any request.
+//              #2876: each exploit's source_published_at (null where the source gives none) and
+//              eg_first_seen_at relayed as sent, validated, and never rendered as a made-up date.
 //   get_cwe    the API's JSON relayed as sent, the order repeated only when the answer states it,
 //              a served page that differs from the asked one, the pageable cap, a measured empty
 //              CWE, rows NOT YET SCORED, and input normalised (79 -> CWE-79) or refused.
@@ -112,6 +114,27 @@ const BRANCHES = {
     { ecosystem: "Go", package_name: "example.test/commit-ranges-only", fixed_version: "8a5e1f0d3c2b", fixed_branches: [], dependents_count: 0, source: "osv_bulk" },
   ],
 };
+// #2876: the exploit rows core-backend serves since #2876 (cve/enrichment_store.go ExploitRow), in
+// its order (verified first, then COALESCE(source_published_at, eg_first_seen_at's UTC date)
+// newest first). An Exploit-DB entry dated by Exploit-DB, as an API past the deprecation cycle
+// serves it (no first_seen_at); a nuclei template whose source gives no date (source_published_at
+// null, and first_seen_at null with it, where it was 1 January of the CVE's year before #2876); and
+// a GitHub proof of concept dated by its repository's created_at, with all three fields.
+const DATED_EXPLOITS = [
+  { kind: "exploit_db", source_name: "Apache Log4j 2 - Remote Code Execution (RCE)", source_url: "https://www.exploit-db.com/exploits/50592", source_published_at: "2021-12-14T00:00:00Z", eg_first_seen_at: "2026-10-10T03:12:45.123456Z", verified_status: "verified" },
+  { kind: "nuclei_template", source_name: "CVE-2021-44228", source_url: "https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2021/CVE-2021-44228.yaml", source_published_at: null, eg_first_seen_at: "2026-10-10T03:12:46Z", first_seen_at: null, verified_status: "reported" },
+  { kind: "github_poc", source_name: "kozmer/log4j-shell-poc", source_url: "https://github.com/kozmer/log4j-shell-poc", source_published_at: "2021-12-10T00:00:00Z", eg_first_seen_at: "2026-09-30T11:00:00Z", first_seen_at: "2021-12-10T00:00:00Z", verified_status: "reported" },
+];
+const DATED = {
+  ...LOG4SHELL_ENRICHMENT,
+  exploits: DATED_EXPLOITS,
+  exploits_total: 3,
+  exploits_capped: false,
+  exploits_by_kind: { exploit_db: 1, nuclei_template: 1, github_poc: 1 },
+  exploits_by_status: { verified: 1, reported: 2 },
+};
+// What a date renderer gets wrong: a null printed as text, a null or a placeholder read as a time.
+const BAD_DATE_TEXT = /"null"|Invalid Date|1970|first seen null|-01-01T00:00:00/i;
 
 const CWE79_ROWS = [
   { cve_id: "CVE-2024-27204", severity: "MEDIUM", cvss_v3_score: 6.1, echelongraph_score: 7.2, echelongraph_severity: "HIGH", score_assessed: true, published: "2024-03-01T00:00:00Z", description: "XSS", kev_listed: true },
@@ -162,6 +185,7 @@ const ANSWERS = {
   [ENRICH("CVE-2099-27304")]: ALL_FAILED,
   [ENRICH("CVE-2099-27305")]: { status: 500, body: { error: "boom" } },
   [ENRICH("CVE-2099-28170")]: BRANCHES,
+  [ENRICH("CVE-2099-28760")]: DATED,
   "/api/v1/public/cwes/CWE-79": CWE79,
   "/api/v1/public/cwes/CWE-79?page=3": { ...CWE79, page: 3 },
   "/api/v1/public/cwes/CWE-79?page=200": { ...CWE79, page: 200, cves: [] },
@@ -373,6 +397,74 @@ for (const era of ERAS) {
       // An answer older than #2817 (no fixed_branches on any row) is worded as such.
       const older = await call("cve_intel", { cve_id: LOG4SHELL });
       assert.ok(noteOf(older).includes("No affected_packages row carries fixed_branches (an API older than that field): each row's fixed_version is one range's fix, which need not be the fix for a given installed version."), noteOf(older));
+    });
+
+    it("#2876 cve_intel: source_published_at (null where the source gives none) and eg_first_seen_at relayed as sent, validated, and never rendered as a made-up date", async () => {
+      const res = await call("cve_intel", { cve_id: "CVE-2099-28760" });
+      assert.ok(!res.isError, noteOf(res));
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "measured");
+      // Relayed as sent: the null stays a JSON null (not dropped, not "null", not a stand-in date).
+      assert.deepEqual(sc.data.exploits, DATED_EXPLOITS);
+      const nuclei = sc.data.exploits.find((x) => x.kind === "nuclei_template");
+      assert.ok("source_published_at" in nuclei && nuclei.source_published_at === null);
+      assert.ok("first_seen_at" in nuclei && nuclei.first_seen_at === null);
+      assert.equal(nuclei.eg_first_seen_at, "2026-10-10T03:12:46Z");
+      assert.ok(!("first_seen_at" in sc.data.exploits[0]), "a row without the deprecated key is relayed without it");
+
+      // The advertised outputSchema names each date, says what it is, and lets the source's date be null.
+      const items = schemaOf("cve_intel").oneOf.find((b) => b.properties.state.enum.includes("measured")).properties.data.properties.exploits.items;
+      assert.deepEqual(items.properties.source_published_at.type, ["string", "null"]);
+      assert.deepEqual(items.properties.first_seen_at.type, ["string", "null"]);
+      assert.equal(items.properties.eg_first_seen_at.type, "string");
+      assert.ok(!(items.required ?? []).includes("eg_first_seen_at"), "eg_first_seen_at is optional: an API older than #2876 leaves it out");
+      assert.match(items.properties.source_published_at.description, /^The source's own date for the reference \(.*\); null where the source gives none, and EchelonGraph supplies no stand-in date\.$/);
+      assert.match(items.properties.eg_first_seen_at.description, /^When EchelonGraph first recorded the reference/);
+      assert.equal(items.properties.first_seen_at.description, "Deprecated: the same value as source_published_at, null when that is.");
+
+      // What an MCP client does with structuredContent: validate it against the advertised outputSchema.
+      const v = validator.getValidator(schemaOf("cve_intel"))(sc);
+      assert.ok(v.valid, v.errorMessage);
+
+      // No text block renders a date that is not there: the data block is the JSON (null as null),
+      // and no block prints "null" as a value, Invalid Date, the epoch, or a 1 January placeholder.
+      const blocks = textBlocks(res);
+      assert.equal(JSON.parse(blocks[0]).exploits[1].source_published_at, null);
+      for (const [i, b] of blocks.entries()) assert.doesNotMatch(b, BAD_DATE_TEXT, `text block ${i}`);
+      assert.doesNotMatch(noteOf(res), /\bnull\b/, "the note says nothing about a null date");
+      assert.ok(noteOf(res).includes("EchelonGraph holds 3 public exploit references for CVE-2099-28760 (exploits_total), 1 of them with verified_status verified."), noteOf(res));
+      assert.ok(sc.notes.includes("measured_at is null: the answer has no single observation time; each row carries its own (source_published_at and eg_first_seen_at, enriched_at)."), JSON.stringify(sc.notes));
+      assertTextIsStructure("cve_intel #2876 dates", res);
+
+      // The description names the two honest dates, not the deprecated key, and keeps its caveats.
+      const d = tools.find((t) => t.name === "cve_intel").description;
+      assert.match(d, /exploits \(each with kind, source_name, source_url, source_published_at \(the source's date, null if none\), eg_first_seen_at \(when EchelonGraph recorded it\) and verified_status; at most 10, verified first\)/);
+      assert.doesNotMatch(d, /\bfirst_seen_at\b/, "the description names the deprecated first_seen_at");
+      assert.match(d, /verified_status is the source's label, not a guarantee the exploit works on a given system\./);
+      assert.match(d, /An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment\./);
+      assert.match(d, /A section the API could not read is named in coverage\.sections_failed and left out of data, never relayed as an empty list\./);
+      assert.match(d, /fixed_branches \[\] is not a finding that no fix exists\./);
+      // The input hint left the description for the room (#2876); inputSchema carries it.
+      assert.equal(tools.find((t) => t.name === "cve_intel").inputSchema.properties.cve_id.description, "a CVE ID, e.g. CVE-2021-44228");
+    });
+
+    it("#2876 control: an outputSchema whose source_published_at or first_seen_at is a plain string rejects the nuclei row's null", () => {
+      const [, , res] = results.find(([n, a]) => n === "cve_intel" && a.cve_id === "CVE-2099-28760");
+      const real = schemaOf("cve_intel");
+      assert.ok(validator.getValidator(real)(res.structuredContent).valid, "GREEN: the advertised schema accepts the null");
+      for (const key of ["source_published_at", "first_seen_at"]) {
+        // A copy of the advertised schema, the one date made non-nullable; the advertised one is untouched.
+        const strict = structuredClone(real);
+        const ok = strict.oneOf.find((b) => b.properties.state.enum.includes("measured"));
+        ok.properties.data.properties.exploits.items.properties[key] = { type: "string" };
+        const v = validator.getValidator(strict)(res.structuredContent);
+        assert.equal(v.valid, false, `RED expected: ${key} as a plain string still accepted the null`);
+        assert.match(v.errorMessage, new RegExp(`exploits/1/${key}`), v.errorMessage);
+      }
+      assert.deepEqual(real.oneOf.find((b) => b.properties.state.enum.includes("measured")).properties.data.properties.exploits.items.properties.first_seen_at.type, ["string", "null"], "the control left the advertised schema as it was");
+      // The text check catches what it was written for, and passes the JSON null it must allow.
+      for (const bad of ['"source_published_at": "null"', "first seen Invalid Date", "1970-01-01T00:00:00.000Z", '"first_seen_at": "2021-01-01T00:00:00Z"', "first seen null"]) assert.match(bad, BAD_DATE_TEXT, bad);
+      assert.doesNotMatch(JSON.stringify({ source_published_at: null }, null, 2), BAD_DATE_TEXT);
     });
 
     it("cve_intel: a section the API could not read is left out of data and named, not relayed as empty", async () => {

@@ -34,9 +34,9 @@ API call a tool needs to answer.
 ## Quick start
 
 The local server runs through `npx` and needs Node.js 20 or later; nothing is installed
-globally. Claude Desktop's one-click extension, below, needs neither. Add one of the blocks below to your client, restart it, then ask: *"Is
-CVE-2023-44487 actively exploited, and how many exposed services does EchelonGraph's radar
-have on record for it?"*
+globally. Claude Desktop's one-click extension, below, needs neither. Add one of the blocks below
+to your client, quit it fully and reopen it, then ask: *"Is CVE-2023-44487 actively exploited, and
+how many exposed services does EchelonGraph's radar have on record for it?"*
 
 ### Claude Desktop
 
@@ -97,8 +97,8 @@ are claude.ai's (see "Remote (no install)" below).
    Claude → Quit Claude (⌘Q); on Windows right-click the Claude icon in the system tray and choose
    Quit. The first start can take longer while `npx` downloads the package.
 5. **Check that it worked.** Settings → Developer lists `echelongraph` as running, and the tools
-   menu in the chat box lists EchelonGraph's 16 tools. Then ask the question at the top of this
-   section.
+   menu in the chat box lists EchelonGraph's tools, the ones under "Tools" below. Then ask the
+   question at the top of this section.
 
 #### Troubleshooting Claude Desktop
 
@@ -263,8 +263,10 @@ answer of which EchelonGraph holds none, whose `held_since` is after 1 January o
 or not known, or whose history is still being read: no advisory from such a vendor is not a finding
 that it published none.
 
-Every figure is as fresh as the schedule that refreshes it. The CVE feed is polled from its
-sources on a schedule; each radar refreshes on its own.
+Every figure is as fresh as the last check that produced it. The CVE feed is polled from its
+sources on a schedule. Each radar has its own schedule and refreshes only while it runs, and
+`exposure_radar`'s `freshness` gives each radar's last completed check (`last_run_at`) where the
+API serves one.
 
 ### How `cve_summary` reads its counts
 

@@ -1352,6 +1352,92 @@ function lastCheck(radar: keyof typeof LAST_CHECK, data: Record<string, unknown>
   ];
 }
 
+// ── Staleness: a radar whose last completed check is older than its cycle allows (#3010) ──
+//
+// Through 2.7.1 the note flagged only the two radars whose answer carries a liveness verdict
+// (shadow_ai's poller.running, mcp_servers.enabled), and every answer ended "Each radar refreshes
+// on its own schedule.". So during the #2975 scanning pause exposed_databases (77 h since its last
+// completed check) and leaked_credentials (68 h) read as current. Each radar now has a threshold
+// keyed to the cadence core-backend runs it at (cmd/server/main.go builds each poller; an interval
+// of 0 takes the package's defaultInterval):
+//   kev_exposure        kevexposure/poller.go defaultInterval, 12 h: 24 h, two cycles
+//   exposed_databases   exposeddb/poller.go defaultInterval, 12 h: 24 h, two cycles
+//   leaked_credentials  leakedcreds/poller.go defaultInterval, 10 min: 1 h, six cycles, so a stopped
+//                       radar shows within the hour and a slow cycle or two never trips it
+//   shadow_ai           the API's own poller.running (shadowctlog pollerSilentAfter, 30 min) first;
+//                       only when the answer gives no verdict, 30 minutes by poller.last_run_at
+//   mcp_servers         the API's own enabled (aiexposure liveWindow, 45 min) first; only when the
+//                       answer gives no verdict, 45 minutes by last_run_at
+// These are copies of numbers core-backend owns, so test/radar-staleness.test.mjs reads the Go files
+// and fails when a threshold is under twice the cadence it parses, when a cycle named here is not
+// the one it parses, when a radar has no entry, or when a constant can no longer be parsed.
+//
+// The age is taken against this server's clock when the answer is composed, never against a
+// radar's generated_at: that is when the API's stats cache computed the totals, and the cache is
+// stale-while-revalidate (core-backend internal/cache/swr.go keeps serving its last value while a
+// refresh fails), so it can lag the answer by hours and would understate the age. last_run_at is
+// read fresh (the API omits it when its last good read is more than two minutes old). The note
+// gives the age and the cycle, says the numbers may be stale, and gives no cause: the answer gives
+// none.
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+type RadarName = (typeof RADARS)[number][0];
+// What a radar's reader gives the answer: the data it relays, the note's sentences about it, and
+// whether one of those says its numbers may be stale.
+type RadarNote = { data: object; sentences: string[]; stale: boolean };
+export const STALE_AFTER = {
+  kev_exposure: { after: 24 * HOUR, cycle: 12 * HOUR },
+  exposed_databases: { after: 24 * HOUR, cycle: 12 * HOUR },
+  leaked_credentials: { after: HOUR, cycle: 10 * MINUTE },
+  shadow_ai: { after: 30 * MINUTE },
+  mcp_servers: { after: 45 * MINUTE },
+} as const satisfies Record<RadarName, { after: number; cycle?: number }>;
+
+const counted = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? "" : "s"}`;
+// A threshold or a cycle: "24 hours", "1 hour", "45 minutes"; as an adjective, "12-hour".
+const span = (ms: number): string => (ms % HOUR === 0 ? counted(ms / HOUR, "hour") : counted(Math.round(ms / MINUTE), "minute"));
+const spanAdj = (ms: number): string => (ms % HOUR === 0 ? `${ms / HOUR}-hour` : `${Math.round(ms / MINUTE)}-minute`);
+// An age, rounded: minutes under two hours, hours under a week, days past that.
+const age = (ms: number): string =>
+  ms < 2 * HOUR ? counted(Math.round(ms / MINUTE), "minute") : ms < 168 * HOUR ? counted(Math.round(ms / HOUR), "hour") : counted(Math.round(ms / (24 * HOUR)), "day");
+
+// How long before `now` the instant `at` was, when that is past the radar's threshold; otherwise
+// (or when `at` is not a real instant) undefined.
+function staleBy(radar: RadarName, at: unknown, now: number): number | undefined {
+  if (typeof at !== "string" || !realInstant(at)) return undefined;
+  const ms = now - Date.parse(at);
+  return ms > STALE_AFTER[radar].after ? ms : undefined;
+}
+
+// The note's sentence for a stats radar whose relayed last_run_at is past its threshold. It does not
+// repeat the stamp, which lastCheck prints once.
+function staleCheck(radar: keyof typeof LAST_CHECK, data: Record<string, unknown>, now: number): string[] {
+  const ms = staleBy(radar, data.last_run_at, now);
+  if (ms === undefined) return [];
+  const { after, cycle } = STALE_AFTER[radar];
+  const times = after / cycle === 2 ? "twice" : `${after / cycle} times`;
+  return [`${radar}.last_run_at is about ${age(ms)} before this answer, more than ${times} the radar's ${spanAdj(cycle)} cycle, so the ${radar} numbers may be stale.`];
+}
+
+// The last sentence of every answer. "Each radar refreshes on its own schedule." said the radars
+// were refreshing whatever their last completed checks said. This says only what the answer
+// shows: each radar has a cycle of its own (not that it is running on it), and either the radars
+// that may be stale, the same ones whose own sentences above say so, or that nothing shows one past
+// its threshold, with each threshold named. "Nothing shows" stays true when the API serves no
+// last_run_at (#2335: the note then says nothing about a last completed check), and the envelope's
+// own note (RADAR_FRESHNESS_NOTE) already points to freshness on every answer.
+function freshnessClose(stale: RadarName[]): string {
+  if (stale.length) return `Each radar has its own cycle, and ${stale.length} of the ${RADARS.length} radars may be stale: ${listed(stale)}.`;
+  const byAfter = new Map<number, string[]>();
+  for (const [name] of RADARS) {
+    const s: { after: number; cycle?: number } = STALE_AFTER[name];
+    if (s.cycle !== undefined) byAfter.set(s.after, [...(byAfter.get(s.after) ?? []), name]);
+  }
+  const timed = [...byAfter].map(([after, names]) => `${span(after)} for ${listed(names)}`);
+  const verdicts = `for shadow_ai and mcp_servers, the API's own poller.running and enabled verdicts, or ${span(STALE_AFTER.shadow_ai.after)} and ${span(STALE_AFTER.mcp_servers.after)} where the answer gives none`;
+  return `Each radar has its own cycle, and neither freshness nor anything else in this answer shows a radar past its threshold for calling its numbers stale (${timed.join(", ")}; ${verdicts}).`;
+}
+
 // The first row of a relayed ranking, for the note: "(first: http_server, 9120 services)".
 function firstOf(rows: unknown, label: string, count: string, unit: string): string {
   const top = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | undefined) : undefined;
@@ -1437,7 +1523,7 @@ function newestKEVRow(r: Record<string, unknown>): { row: Record<string, unknown
   return { row, state, outside: tracked === false };
 }
 
-function readKEVExposure(body: unknown): { data: object; sentences: string[] } {
+function readKEVExposure(body: unknown, now: number): RadarNote {
   const { data, unknown, unusable, undated } = readRadar(body, KEV_SPEC);
   const sentences: string[] = [];
   const n = (k: string) => numIn(data, k);
@@ -1518,8 +1604,10 @@ function readKEVExposure(body: unknown): { data: object; sentences: string[] } {
     ),
   );
   sentences.push(...lastCheck("kev_exposure", data));
+  const stale = staleCheck("kev_exposure", data, now);
+  sentences.push(...stale);
   sentences.push(...leftOut("kev_exposure", unknown, unusable));
-  return { data, sentences };
+  return { data, sentences, stale: stale.length > 0 };
 }
 
 // ── exposed_databases: GET /api/v1/public/exposed-databases/stats (#2313 item 7) ──
@@ -1549,7 +1637,7 @@ const EXPOSED_DB_SPEC: RadarSpec = {
   window: "observed_window",
 };
 
-function readExposedDatabases(body: unknown): { data: object; sentences: string[] } {
+function readExposedDatabases(body: unknown, now: number): RadarNote {
   const { data, unknown, unusable, undated } = readRadar(body, EXPOSED_DB_SPEC);
   const sentences: string[] = [];
   const n = (k: string) => numIn(data, k);
@@ -1581,8 +1669,10 @@ function readExposedDatabases(body: unknown): { data: object; sentences: string[
     ),
   );
   sentences.push(...lastCheck("exposed_databases", data));
+  const stale = staleCheck("exposed_databases", data, now);
+  sentences.push(...stale);
   sentences.push(...leftOut("exposed_databases", unknown, unusable));
-  return { data, sentences };
+  return { data, sentences, stale: stale.length > 0 };
 }
 
 // ── leaked_credentials: GET /api/v1/public/leaked-credentials/stats (#2313 item 7) ──
@@ -1607,7 +1697,7 @@ const LEAKED_CREDS_SPEC: RadarSpec = {
   window: "observed_window",
 };
 
-function readLeakedCredentials(body: unknown): { data: object; sentences: string[] } {
+function readLeakedCredentials(body: unknown, now: number): RadarNote {
   const { data, unknown, unusable, undated } = readRadar(body, LEAKED_CREDS_SPEC);
   const sentences: string[] = [];
   const n = (k: string) => numIn(data, k);
@@ -1636,11 +1726,13 @@ function readLeakedCredentials(body: unknown): { data: object; sentences: string
     ),
   );
   sentences.push(...lastCheck("leaked_credentials", data));
+  const stale = staleCheck("leaked_credentials", data, now);
+  sentences.push(...stale);
   sentences.push(...leftOut("leaked_credentials", unknown, unusable));
-  return { data, sentences };
+  return { data, sentences, stale: stale.length > 0 };
 }
 
-function readShadowAI(sa: object): { data: object; sentences: string[] } {
+function readShadowAI(sa: object, now: number): RadarNote {
   const sentences: string[] = [];
   const stats = field(sa, "stats");
   const used = new Set<string>();
@@ -1770,6 +1862,10 @@ function readShadowAI(sa: object): { data: object; sentences: string[] } {
 
   const lastRun = strAt(sa, "poller", "last_run_at");
   const running = boolAt(sa, "poller", "running");
+  // #3010: running is the API's own verdict and decides; only a block with a real last_run_at and
+  // no verdict is judged by STALE_AFTER.shadow_ai, the API's own window, and that time is still
+  // not relayed (the block stays left out) or repeated: the note gives its age.
+  const unjudged = running === undefined ? staleBy("shadow_ai", lastRun, now) : undefined;
   if (realInstant(lastRun) && running === true) {
     data.poller = { running, last_run_at: lastRun };
     sentences.push(
@@ -1786,9 +1882,14 @@ function readShadowAI(sa: object): { data: object; sentences: string[] } {
     sentences.push(
       "Shadow-AI radar freshness is unknown: the answer's poller block does not give both a real time at which the radar's leader last completed a cycle (poller.last_run_at) and a running verdict (poller.running), so that block was left out of the data above.",
     );
+    if (unjudged !== undefined) {
+      sentences.push(
+        `The shadow-AI poller block gives no running verdict, but its last_run_at is about ${age(unjudged)} before this answer, more than the ${span(STALE_AFTER.shadow_ai.after)} after which the API reports the radar not running, so the shadow-AI figures may be stale.`,
+      );
+    }
   }
   if (realInstant(lastObservation)) sentences.push(`Latest shadow-AI observation on record: ${lastObservation}.`);
-  return { data, sentences };
+  return { data, sentences, stale: (realInstant(lastRun) && running === false) || unjudged !== undefined };
 }
 
 // ── mcp_servers: GET /api/v1/public/ai-exposure/stats?service=mcp (#2315) ──
@@ -1916,7 +2017,7 @@ function mcpRefusal(body: object): string | undefined {
   return undefined;
 }
 
-function readMCPServers(src: Record<string, unknown>): { data: object; sentences: string[] } {
+function readMCPServers(src: Record<string, unknown>, now: number): RadarNote {
   const data: Record<string, unknown> = {};
   const unusable: string[] = [];
   const unsummed: string[] = [];
@@ -2025,11 +2126,18 @@ function readMCPServers(src: Record<string, unknown>): { data: object; sentences
       "mcp_servers.last_run_at is not the time of every verdict the mcp_servers numbers count (mcp_servers.window says when those were checked); nor is it mcp_servers.counted_at, when the API read those numbers.",
     );
   }
+  // #3010: enabled is the API's own verdict and decides; only an answer without a usable one is
+  // judged by STALE_AFTER.mcp_servers, the API's own window, on the last_run_at relayed above.
+  const unjudged = data.enabled === undefined ? staleBy("mcp_servers", data.last_run_at, now) : undefined;
   if (data.enabled === true) {
     sentences.push(`mcp_servers.enabled is true: the API reports the AI-exposure radar running, a check having completed within ${MCP_ENABLED_WITHIN} of its answer.`);
   } else if (data.enabled === false) {
     sentences.push(
       `mcp_servers.enabled is false: the API does not report the AI-exposure radar running (no check completed within ${MCP_ENABLED_WITHIN} of its answer), so these numbers may be stale.`,
+    );
+  } else if (unjudged !== undefined) {
+    sentences.push(
+      `The answer gives no usable mcp_servers.enabled verdict, but mcp_servers.last_run_at is about ${age(unjudged)} before this answer, more than the ${span(STALE_AFTER.mcp_servers.after)} within which the API reports the AI-exposure radar running, so the mcp_servers numbers may be stale.`,
     );
   }
   if (typeof data.counted_at === "string") {
@@ -2042,7 +2150,7 @@ function readMCPServers(src: Record<string, unknown>): { data: object; sentences
       `Also left out of mcp_servers: ${unnamed} field${unnamed === 1 ? "" : "s"} whose name is not shaped like a field name, not repeated here, since a name could itself identify a server.`,
     );
   }
-  return { data, sentences };
+  return { data, sentences, stale: data.enabled === false || unjudged !== undefined };
 }
 
 // #2842: the description is a head that fits the client cut (requiredText.ts); what each radar's
@@ -2088,7 +2196,7 @@ const RADAR_MCP_FIELDS =
 // and the envelope's own note names it.
 const RADAR_METHOD =
   "Aggregate counts over what each radar holds on record: kev_exposure, Shodan banners whose version maps to a CISA-KEV-listed CVE; exposed_databases, services found through Shodan (LeakIX when Shodan query credits run low) and confirmed by EchelonGraph's own identified check; leaked_credentials, credential-shaped strings in public GitHub push events; shadow_ai, services found through Certificate Transparency logs and Shodan and checked by EchelonGraph's identified probes; mcp_servers, the latest verdict on record per hostname named like an MCP server in EchelonGraph's own Certificate Transparency feed, from EchelonGraph's identified MCP probe (server/discover, and initialize only if that is refused; never tools/call), where protected means the endpoint's RFC 9728 protected-resource metadata validated.";
-const RADAR_NAMES = RADARS.map(([name]) => name);
+export const RADAR_NAMES: RadarName[] = RADARS.map(([name]) => name);
 const RADAR_STATE_NOTE =
   "state is not_assessed: every radar answered, but none gives one time at which what it counts was observed: kev_exposure, exposed_databases, leaked_credentials, shadow_ai's confirmed_exposed and mcp_servers date what they count at most by a window (kev_exposure.window, exposed_databases.window, leaked_credentials.window, shadow_ai.confirmed_exposed.window, mcp_servers.window), from the oldest observation among the rows counted to the newest, so no count here is presented as a dated measurement and measured_at is null. Each count is what that radar holds on record, and the note labels each one by what it counts.";
 const RADAR_FRESHNESS_NOTE =
@@ -2128,45 +2236,53 @@ async function exposureRadar(): Promise<ToolResult> {
         { radars: RADAR_NAMES, answered, failed: failures.map(([name]) => name) },
       );
     }
-    // Each radar's answer is relayed cut to the fields its reader can label, in RADARS order.
-    const read = {
-      kev_exposure: readKEVExposure(data.kev_exposure),
-      exposed_databases: readExposedDatabases(data.exposed_databases),
-      leaked_credentials: readLeakedCredentials(data.leaked_credentials),
-      shadow_ai: readShadowAI(data.shadow_ai),
-      mcp_servers: readMCPServers(data.mcp_servers as Record<string, unknown>),
-    };
-    const relayed: Record<string, object> = {};
-    const said: string[] = [];
-    for (const [name] of RADARS) {
-      relayed[name] = read[name].data;
-      said.push(...read[name].sentences);
-    }
-    // Only what the readers relayed: a last_run_at that is not a real instant never got there.
-    const stamp = (radar: string, ...keys: string[]): string | null => instantOrNull(strAt(relayed[radar], ...keys));
-    const running = boolAt(relayed.shadow_ai, "poller", "running");
-    const enabled = boolAt(relayed.mcp_servers, "enabled");
-    return succeeded(
-      relayed,
-      `${okHead(tool)} All ${RADARS.length} radars answered: ${RADARS.map(([name]) => name).join(", ")}. Every number relayed is labelled below by what it counts, and a field this version cannot label is left out and named. ${said.join(" ")} ${RADAR_SOURCES} ${SHODAN_OWNERSHIP} Each radar refreshes on its own schedule.`,
-      {
-        state: "not_assessed",
-        measured_at: null,
-        method: RADAR_METHOD,
-        coverage: { radars: RADAR_NAMES, answered: RADAR_NAMES, failed: [] },
-        freshness: {
-          kev_exposure: { last_run_at: stamp("kev_exposure", "last_run_at") },
-          exposed_databases: { last_run_at: stamp("exposed_databases", "last_run_at") },
-          leaked_credentials: { last_run_at: stamp("leaked_credentials", "last_run_at") },
-          shadow_ai: { last_run_at: stamp("shadow_ai", "poller", "last_run_at"), running: running ?? null },
-          mcp_servers: { last_run_at: stamp("mcp_servers", "last_run_at"), enabled: enabled ?? null },
-        },
-        notes: [RADAR_STATE_NOTE, RADAR_FRESHNESS_NOTE],
-      },
-    );
+    return radarAnswer(data, Date.now());
   } catch (e) {
     return crashed(tool, e);
   }
+}
+
+// exposure_radar's answer once every radar has answered (and mcp_servers has passed mcpRefusal):
+// each radar's answer relayed cut to the fields its reader can label, in RADARS order, and the
+// note. `now` is the clock the radars' last completed checks are aged against (#3010; see
+// STALE_AFTER), a parameter so that the suite can set it.
+export function radarAnswer(data: Record<string, object>, now: number): ToolResult {
+  const read: Record<RadarName, RadarNote> = {
+    kev_exposure: readKEVExposure(data.kev_exposure, now),
+    exposed_databases: readExposedDatabases(data.exposed_databases, now),
+    leaked_credentials: readLeakedCredentials(data.leaked_credentials, now),
+    shadow_ai: readShadowAI(data.shadow_ai, now),
+    mcp_servers: readMCPServers(data.mcp_servers as Record<string, unknown>, now),
+  };
+  const relayed: Record<string, object> = {};
+  const said: string[] = [];
+  for (const [name] of RADARS) {
+    relayed[name] = read[name].data;
+    said.push(...read[name].sentences);
+  }
+  const stale = RADAR_NAMES.filter((name) => read[name].stale);
+  // Only what the readers relayed: a last_run_at that is not a real instant never got there.
+  const stamp = (radar: string, ...keys: string[]): string | null => instantOrNull(strAt(relayed[radar], ...keys));
+  const running = boolAt(relayed.shadow_ai, "poller", "running");
+  const enabled = boolAt(relayed.mcp_servers, "enabled");
+  return succeeded(
+    relayed,
+    `${okHead("exposure_radar")} All ${RADARS.length} radars answered: ${RADARS.map(([name]) => name).join(", ")}. Every number relayed is labelled below by what it counts, and a field this version cannot label is left out and named. ${said.join(" ")} ${RADAR_SOURCES} ${SHODAN_OWNERSHIP} ${freshnessClose(stale)}`,
+    {
+      state: "not_assessed",
+      measured_at: null,
+      method: RADAR_METHOD,
+      coverage: { radars: RADAR_NAMES, answered: RADAR_NAMES, failed: [] },
+      freshness: {
+        kev_exposure: { last_run_at: stamp("kev_exposure", "last_run_at") },
+        exposed_databases: { last_run_at: stamp("exposed_databases", "last_run_at") },
+        leaked_credentials: { last_run_at: stamp("leaked_credentials", "last_run_at") },
+        shadow_ai: { last_run_at: stamp("shadow_ai", "poller", "last_run_at"), running: running ?? null },
+        mcp_servers: { last_run_at: stamp("mcp_servers", "last_run_at"), enabled: enabled ?? null },
+      },
+      notes: [RADAR_STATE_NOTE, RADAR_FRESHNESS_NOTE],
+    },
+  );
 }
 
 // ── outputSchema: the envelope, per tool (#2311, #2313) ──

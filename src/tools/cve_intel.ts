@@ -25,6 +25,12 @@
 // does not say which ran, so no text here says a source is polled: it names the sources the data
 // model holds, and says coverage depends on which pollers run.
 //
+// Exploit dates (#2876). Until #2876 the collectors made dates up: a nuclei row's first_seen_at
+// was 1 January of its CVE's year, and a Metasploit row's was the vulnerability's disclosure
+// date. Each row now carries source_published_at (the source's own date, null where it gives
+// none) and eg_first_seen_at (when EchelonGraph recorded it); first_seen_at, deprecated, is
+// source_published_at under its old key. All three are relayed as sent, null included.
+//
 // Fixed versions (#2817). /enrichment keeps one affected_packages row per (CVE, ecosystem,
 // package), and its fixed_version is one range's fix: the last range's as the advisory was read
 // (core-backend cve/backfill_osv_packages.go summariseAffected). For CVE-2021-44228 production
@@ -101,7 +107,10 @@ const VERIFIED_STATUS_DESCRIPTION =
 const FIXED_BRANCHES_DESCRIPTION =
   'fixed_branches lists each affected range of the package on record: introduced, and fixed (the range\'s fix) or last_affected (its last affected version, where no fix is on record), each null when absent, with advisory_id (the OSV record that published the range) and source (the loader\'s label for that record), both null on a row loaded before they were stored. Ranges with an advisory_id are in the order their record lists them (records in id order); ranges without one are oldest first. To pick the range for an installed version, compare in the ecosystem\'s version order (release numbers part by part, as numbers: 2.4 is below 2.13.0): the version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; that range\'s fixed is the fix for it, and a version in no range is outside every range on record. fixed_branches is null where the package\'s ranges were never loaded, and [] where no version range is on record (the advisory gives none, only commit ranges, or more than are stored), which is not a finding that no fix exists: fixed_version can still name one. fixed_version is one range\'s fix, kept for compatibility (one per package: the range the loader kept, the advisory\'s last as a rule), not the fix for every affected range: for CVE-2021-44228, its advisory gives log4j-core three ranges, and fixed_version 2.12.2 is the fix for the one from 2.4, while the range holding 2.14.1 (from 2.13.0) is fixed in 2.15.0.';
 
-export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, first_seen_at and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (one row per fixed version, with the vulnerable_range it fixes) and timeline (the newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range of the package on record (introduced, and fixed or last_affected, with advisory_id (the OSV record that published the range) and source); in the ecosystem's version order, a version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; that range's fixed is the fix for it. fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is a label from the source, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which of them are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Pass a CVE ID like CVE-2021-44228. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
+// #2876: the exploit dates are named for what they are. Within the 100 characters of headroom
+// under the 2048-character client cut (prompts-resources.test.mjs), the room came from tighter
+// glosses and from the input hint, which inputSchema's cve_id description carries.
+export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (the newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (introduced, and fixed or last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, a version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; that range's fixed is the fix for it. fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
 
 // ── outputSchema ──
 const Rows = (shape: Record<string, z.ZodType>) => z.array(z.looseObject(shape));
@@ -120,7 +129,13 @@ function schemas() {
       source_name: opt(z.string()),
       source_url: opt(z.string()),
       description: opt(z.string()),
-      first_seen_at: opt(z.string()),
+      source_published_at: opt(z.string()).describe(
+        "The source's own date for the reference (Exploit-DB's date_published, a GitHub proof-of-concept repository's created_at, or the first commit of a nuclei template or Metasploit module where EchelonGraph derived it from the source's git history); null where the source gives none, and EchelonGraph supplies no stand-in date.",
+      ),
+      // Optional, not nullable: core-backend always serves it since #2876 (cve_exploits.created_at);
+      // an API older than #2876 leaves it out.
+      eg_first_seen_at: z.string().optional().describe("When EchelonGraph first recorded the reference, as a UTC timestamp: a date of EchelonGraph's, not the source's."),
+      first_seen_at: opt(z.string()).describe("Deprecated: the same value as source_published_at, null when that is."),
       verified_status: opt(z.string()).describe(VERIFIED_STATUS_DESCRIPTION),
     }).optional(),
     exploits_total: z.number().int().nullable().optional().describe("Every exploit reference on record for the CVE, not only those listed in exploits."),
@@ -361,7 +376,7 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
       coverage,
       freshness: null,
       notes: [
-        "measured_at is null: the answer has no single observation time; each row carries its own (first_seen_at, enriched_at).",
+        "measured_at is null: the answer has no single observation time; each row carries its own (source_published_at and eg_first_seen_at, enriched_at).",
         "freshness is null: the answer does not say when each source was last polled.",
       ],
     });

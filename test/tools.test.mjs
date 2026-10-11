@@ -160,10 +160,16 @@ const PROD_SHADOW_RELAYED = {
 // last COMPLETED a check, read from poller_run_state (pollerlock/published.go). The three are
 // distinct and none equals generated_at (when the 60 s stats cache recomputed the totals), so
 // a reader that relays one radar's stamp, or generated_at, as another's is caught.
+// #3010: the note ages each stamp against the clock when it answers and says a radar's numbers may
+// be stale past its threshold (24 h for these two 12-hour radars, 1 h for the 10-minute one), so the
+// stamps are set back from the time this file loads by what they were set back from generated_at
+// at 2026-09-27T09:00:00Z, well inside those thresholds. This is a healthy answer whenever the suite
+// runs; the #3010 block below sets stamps past them.
+const agoStamp = (ms) => new Date(Math.floor((Date.now() - ms) / 1000) * 1000).toISOString().replace(".000Z", "Z");
 const LAST_RUN = {
-  kev_exposure: "2026-09-27T03:12:44Z",
-  exposed_databases: "2026-09-27T02:18:06Z",
-  leaked_credentials: "2026-09-27T08:41:15Z",
+  kev_exposure: agoStamp((5 * 3600 + 47 * 60 + 16) * 1000), // 03:12:44 against 09:00:00
+  exposed_databases: agoStamp((6 * 3600 + 41 * 60 + 54) * 1000), // 02:18:06
+  leaked_credentials: agoStamp((18 * 60 + 45) * 1000), // 08:41:15
 };
 // newest_kev is the audit's case: of 15 rows, one CVE the radar tracks with 142 services on
 // record (CVE-2026-87902, tracked:true on /kev-exposure/cve/:id), and 14 at exposed_hosts 0,
@@ -2586,6 +2592,159 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #3010: during the #2975 scanning pause exposure_radar flagged only the two radars whose answer
+  // carries a liveness verdict (shadow_ai's poller.running, mcp_servers.enabled), and every answer
+  // ended "Each radar refreshes on its own schedule.", so exposed_databases (77 h since its last
+  // completed check) and leaked_credentials (68 h) read as current. Each radar now has a threshold
+  // keyed to the cadence core-backend runs it at (index.ts STALE_AFTER, held to the Go source by
+  // radar-staleness.test.mjs): 24 h for the 12-hour kev_exposure and exposed_databases, 1 h for the
+  // 10-minute leaked_credentials; shadow_ai and mcp_servers keep the API's own verdict, and only
+  // without one are judged by its window. The server ages a stamp against its own clock, so the
+  // stamps here are set back from now. Both polarities: past the threshold the note says the radar's
+  // numbers may be stale, and under it, though more than one cycle old, it says nothing.
+  describe("#3010: exposure_radar says which radars may be stale, each by its own threshold", () => {
+    const H = 3600_000;
+    const M = 60_000;
+    const PATHS = {
+      kev_exposure: "/api/v1/public/kev-exposure/stats",
+      exposed_databases: "/api/v1/public/exposed-databases/stats",
+      leaked_credentials: "/api/v1/public/leaked-credentials/stats",
+    };
+    const PROD = { kev_exposure: PROD_KEV_STATS, exposed_databases: PROD_EXPOSED_DB_STATS, leaked_credentials: PROD_LEAKED_CREDS_STATS };
+    const SA_PATH = "/api/v1/public/shadow-ai-radar/stats";
+    const CYCLE = { kev_exposure: "twice the radar's 12-hour cycle", exposed_databases: "twice the radar's 12-hour cycle", leaked_credentials: "6 times the radar's 10-minute cycle" };
+    const staleSaid = (n, r) => sentencesOf(n).filter((s) => s.startsWith(`${r}.last_run_at is about `));
+    const STALE = (r, age) => `${r}.last_run_at is about ${age} before this answer, more than ${CYCLE[r]}, so the ${r} numbers may be stale.`;
+    // The answer's last sentence: none stale, or the radars that may be.
+    const NONE_STALE =
+      "Each radar has its own cycle, and neither freshness nor anything else in this answer shows a radar past its threshold for calling its numbers stale (24 hours for kev_exposure and exposed_databases, 1 hour for leaked_credentials; for shadow_ai and mcp_servers, the API's own poller.running and enabled verdicts, or 30 minutes and 45 minutes where the answer gives none).";
+    const someStale = (...rs) => `Each radar has its own cycle, and ${rs.length} of the 5 radars may be stale: ${rs.length < 2 ? rs[0] : `${rs.slice(0, -1).join(", ")} and ${rs.at(-1)}`}.`;
+    const lastOf = (n) => sentencesOf(n).at(-1);
+    // shadow_ai's and mcp_servers' sentences as 2.7.1 words them, verbatim.
+    const SA_RUNNING = (t) => `Shadow-AI radar freshness: the radar's leader last completed a Certificate Transparency (crt.sh) discovery cycle at ${t} (poller.running is true: that was within 30 minutes of the API's answer).`;
+    const SA_STOPPED = (t) => `Shadow-AI radar freshness: no Certificate Transparency (crt.sh) discovery cycle has completed since ${t}, when the radar's leader last completed one (poller.running is false: that was more than 30 minutes before the API's answer), so the shadow-AI figures may be stale.`;
+    const SA_UNKNOWN = "Shadow-AI radar freshness is unknown: the answer's poller block does not give both a real time at which the radar's leader last completed a cycle (poller.last_run_at) and a running verdict (poller.running), so that block was left out of the data above.";
+    const MCP_ON = "mcp_servers.enabled is true: the API reports the AI-exposure radar running, a check having completed within 45 minutes of its answer.";
+    const MCP_OFF = "mcp_servers.enabled is false: the API does not report the AI-exposure radar running (no check completed within 45 minutes of its answer), so these numbers may be stale.";
+    const radarWith = async (overrides) => {
+      Object.assign(stub.state.overrides, overrides);
+      try {
+        const r = await client.callTool({ name: "exposure_radar", arguments: {} });
+        assert.notEqual(r.isError, true, brief(r));
+        return { relayed: JSON.parse(r.content[0].text), n: noteOf(r), sc: r.structuredContent };
+      } finally {
+        for (const p of Object.keys(overrides)) delete stub.state.overrides[p];
+      }
+    };
+    const withStamp = (r, ago) => ({ [PATHS[r]]: { ...PROD[r], last_run_at: agoStamp(ago) } });
+
+    it("the suite's own answer is a healthy one: no radar is said to be stale, and the last sentence names each threshold", async () => {
+      const { n } = await radarWith({});
+      assert.doesNotMatch(n, /may be stale/, n);
+      assert.equal(lastOf(n), NONE_STALE, n);
+    });
+    for (const [r, ago, said] of [
+      ["exposed_databases", 30 * H, "30 hours"],
+      ["leaked_credentials", 3 * H, "3 hours"],
+      ["kev_exposure", 30 * H, "30 hours"],
+    ]) {
+      it(`a stale ${r} (last completed check ${said} ago) is said to be stale, by its age and its cycle, and named last`, async () => {
+        const overrides = withStamp(r, ago);
+        const stamp = overrides[PATHS[r]].last_run_at;
+        const { n, sc } = await radarWith(overrides);
+        assert.deepEqual(staleSaid(n, r), [STALE(r, said)], n);
+        // Only that radar: the others are fresh, and shadow_ai's block (a follower's) and mcp_servers
+        // (enabled true) say nothing of staleness.
+        assert.deepEqual(sentencesOf(n).filter((s) => /may be stale/.test(s)), [STALE(r, said), someStale(r)], n);
+        assert.equal(lastOf(n), someStale(r));
+        // The stamp is still printed once, in its labelled sentence, and freshness relays it as before.
+        assert.deepEqual(sentencesOf(n).filter((s) => s.includes(stamp)), [`${r} last completed check: ${stamp} (${r}.last_run_at, a timestamp, not a count).`]);
+        assert.deepEqual(sc.freshness[r], { last_run_at: stamp });
+      });
+    }
+    // The no-fire polarity, at an age a guard that always fires, or one keyed to a single cycle,
+    // would flag: more than one cycle old, under the threshold.
+    for (const [r, ago, why] of [
+      ["exposed_databases", 23 * H, "23 hours: nearly two 12-hour cycles"],
+      ["kev_exposure", 23 * H, "23 hours: nearly two 12-hour cycles"],
+      ["leaked_credentials", 50 * M, "50 minutes: five 10-minute cycles"],
+    ]) {
+      it(`a fresh ${r} (${why}) is not said to be stale`, async () => {
+        const { n, sc } = await radarWith(withStamp(r, ago));
+        assert.deepEqual(staleSaid(n, r), [], n);
+        assert.doesNotMatch(n, /may be stale/, n);
+        assert.equal(lastOf(n), NONE_STALE);
+        assert.equal(typeof sc.freshness[r].last_run_at, "string");
+      });
+    }
+    it("shadow_ai and mcp_servers keep 2.7.1's sentences when their verdict says running, and no time overrides the verdict", async () => {
+      // Both stamps are weeks old by this clock; the API's own verdict decides.
+      const { n, sc } = await radarWith({ [SA_PATH]: { stats: PROD_SHADOW_STATS, poller: FLEET_RUNNING }, [MCP_PATH]: { ...MCP_STATS, enabled: true } });
+      assert.ok(sentencesOf(n).includes(SA_RUNNING(FLEET_RUNNING.last_run_at)), n);
+      assert.ok(sentencesOf(n).includes(MCP_ON), n);
+      assert.doesNotMatch(n, /may be stale|gives no running verdict|gives no usable/, n);
+      assert.equal(lastOf(n), NONE_STALE);
+      assert.deepEqual(sc.freshness.shadow_ai, { last_run_at: FLEET_RUNNING.last_run_at, running: true });
+      assert.deepEqual(sc.freshness.mcp_servers, { last_run_at: MCP_STATS.last_run_at, enabled: true });
+    });
+    it("shadow_ai and mcp_servers keep 2.7.1's sentences when their verdict says stopped, and are named last with the stale stats radars", async () => {
+      const { n, sc } = await radarWith({
+        ...withStamp("exposed_databases", 77 * H),
+        ...withStamp("leaked_credentials", 68 * H),
+        [SA_PATH]: { stats: PROD_SHADOW_STATS, poller: FLEET_STOPPED },
+        [MCP_PATH]: { ...MCP_STATS, enabled: false },
+      });
+      assert.ok(sentencesOf(n).includes(SA_STOPPED(FLEET_STOPPED.last_run_at)), n);
+      assert.ok(sentencesOf(n).includes(MCP_OFF), n);
+      assert.doesNotMatch(n, /gives no running verdict|gives no usable/, n);
+      assert.deepEqual(staleSaid(n, "exposed_databases"), [STALE("exposed_databases", "77 hours")]);
+      assert.deepEqual(staleSaid(n, "leaked_credentials"), [STALE("leaked_credentials", "68 hours")]);
+      assert.deepEqual(staleSaid(n, "kev_exposure"), []);
+      assert.equal(lastOf(n), someStale("exposed_databases", "leaked_credentials", "shadow_ai", "mcp_servers"));
+      assert.deepEqual(sc.freshness.shadow_ai, { last_run_at: FLEET_STOPPED.last_run_at, running: false });
+      assert.deepEqual(sc.freshness.mcp_servers, { last_run_at: MCP_STATS.last_run_at, enabled: false });
+    });
+    it("a shadow-AI block with a real last_run_at and no running verdict is judged by the API's 30 minutes, and its time is still not relayed", async () => {
+      const stale = await radarWith({ [SA_PATH]: { stats: PROD_SHADOW_STATS, poller: { interval_seconds: 60, last_run_at: agoStamp(2 * H) } } });
+      assert.ok(sentencesOf(stale.n).includes(SA_UNKNOWN), stale.n);
+      assert.ok(
+        sentencesOf(stale.n).includes("The shadow-AI poller block gives no running verdict, but its last_run_at is about 2 hours before this answer, more than the 30 minutes after which the API reports the radar not running, so the shadow-AI figures may be stale."),
+        stale.n,
+      );
+      assert.equal(lastOf(stale.n), someStale("shadow_ai"));
+      assert.equal(stale.relayed.shadow_ai.poller, undefined);
+      assert.deepEqual(stale.sc.freshness.shadow_ai, { last_run_at: null, running: null });
+      const fresh = await radarWith({ [SA_PATH]: { stats: PROD_SHADOW_STATS, poller: { interval_seconds: 60, last_run_at: agoStamp(10 * M) } } });
+      assert.ok(sentencesOf(fresh.n).includes(SA_UNKNOWN), fresh.n);
+      assert.doesNotMatch(fresh.n, /may be stale|gives no running verdict/, fresh.n);
+      assert.equal(lastOf(fresh.n), NONE_STALE);
+    });
+    it("an mcp_servers answer with no usable enabled is judged by the API's 45 minutes on its last_run_at", async () => {
+      const { enabled: _e, ...noVerdict } = MCP_STATS;
+      const stale = await radarWith({ [MCP_PATH]: { ...noVerdict, last_run_at: agoStamp(2 * H) } });
+      assert.match(stale.n, /Left out of mcp_servers because they were not in the expected shape: enabled\./, stale.n);
+      assert.ok(
+        sentencesOf(stale.n).includes("The answer gives no usable mcp_servers.enabled verdict, but mcp_servers.last_run_at is about 2 hours before this answer, more than the 45 minutes within which the API reports the AI-exposure radar running, so the mcp_servers numbers may be stale."),
+        stale.n,
+      );
+      assert.equal(lastOf(stale.n), someStale("mcp_servers"));
+      assert.equal(stale.sc.freshness.mcp_servers.enabled, null);
+      const fresh = await radarWith({ [MCP_PATH]: { ...noVerdict, last_run_at: agoStamp(10 * M) } });
+      assert.doesNotMatch(fresh.n, /may be stale|gives no usable/, fresh.n);
+      assert.equal(lastOf(fresh.n), NONE_STALE);
+    });
+    it("no exposure_radar answer the suite has seen says the radars refresh on their own schedule", () => {
+      // Every success so far, in every state the blocks above put the radars in; this block alone
+      // makes more than ten.
+      const seen = COLLECTED.filter(([name, , res]) => name === "exposure_radar" && res.structuredContent?.state === "not_assessed");
+      assert.ok(seen.length >= 10, `only ${seen.length} exposure_radar answers collected`);
+      for (const [, , res] of seen) {
+        const all = textBlocks(res).join("\n") + JSON.stringify(res.structuredContent);
+        assert.doesNotMatch(all, /refreshes on its own|refresh on their own|Each radar refreshes/, brief(res));
+      }
+    });
+  });
+
   // #2315: exposure_radar's fifth radar, mcp_servers: the adjudicated MCP-server counts of
   // GET /api/v1/public/ai-exposure/stats?service=mcp, inside the #2313 envelope. What the tool must
   // hold to, each from the ticket or the contract:
@@ -4288,10 +4447,13 @@ describe(`against a stub API [${ERA}]`, () => {
     // sentence and its JSON quoting); the note in content[1] is unchanged. At #2647 (2026-10-04)
     // cve_summary was re-measured on purpose, from 2,338 to 2,709: its note gained the sentence that
     // says the poller block is one API instance's since-restart counters, with the three a model
-    // would quote (371 characters); data and the envelope block (563) are unchanged. The other
-    // bounds are unchanged.
+    // would quote (371 characters); data and the envelope block (563) are unchanged. At #3010
+    // (2026-10-11) exposure_radar was re-measured on purpose, from 31,364 (31,370 at 2.7.1) to 31,698:
+    // the note's last sentence, "Each radar refreshes on its own schedule." (41 characters), became
+    // the one that names each radar's staleness threshold (369); on these fixtures no radar is past
+    // its threshold, so no stale sentence is added. The other bounds are unchanged.
     const CASES = [
-      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_364], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out
+      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_698], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out; #3010: the thresholds sentence
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_709],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
