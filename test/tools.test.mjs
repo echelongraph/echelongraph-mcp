@@ -29,9 +29,19 @@ import net from "node:net";
 import path from "node:path";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
-import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
+import { PKG, PKG_DIR, DOC_PAGES, readDocs, readPkgFile, serverCommand } from "./server-under-test.mjs";
+
+// #3012: npm keeps only the first 65,536 characters of a README, so the long reference moved out of
+// README.md to docs/*.md, which the package ships and the README links. A rule this file held over
+// the README holds over every page of that documentation (readDocs); a check that read a section
+// that moved reads it on its page: "How cve_exposure counts" on TOOLS_DOC, and exposure_radar's
+// field-by-field labels on RADAR_DOC, read beside the README (radarDocs), so a label in either is
+// found and a barred word in either is caught.
+const TOOLS_DOC = "docs/tools.md";
+const RADAR_DOC = "docs/exposure-radar.md";
+const radarDocs = () => ["README.md", RADAR_DOC].map(readPkgFile).join("\n\n");
 import { BATCH_PATH, CALL_ANSWER, CALL_ANSWER_EMPTY } from "./fixtures/match-batch.mjs";
-import { CEILING, LIVE_TOOLS, MARGIN, PROD_BASE, assertBoundUnderCeiling, keptAnswers, readLiveRecord, shareOfCeiling, textSize } from "./text-bound.mjs";
+import { CEILING, LIVE_TOOLS, MARGIN, PROD_BASE, STRUCTURED_BUDGET, assertBoundUnderCeiling, assertDataCutOf, keptAnswers, prefixFor, readLiveRecord, shareOfCeiling, structuredSize, textSize, unprefixed } from "./text-bound.mjs";
 import { REQUIRED, cutProblems } from "./client-cut.mjs";
 
 // The era this run of the suite opens its connections with.
@@ -597,11 +607,16 @@ async function startStub() {
   // overrides: request URL or pathname -> body, consulted before BODIES in the ok/empty modes.
   const state = { mode: "ok", seen: [], userAgents: [], overrides: {} };
   const pending = new Set();
+  // #3013: served under a path that makes the base as long as production's (text-bound.mjs
+  // prefixFor), so a structured result is cut here where production's is; each request is seen
+  // and answered by its URL less that path.
+  let prefix = "";
   const server = http.createServer((req, res) => {
-    state.seen.push(req.url);
+    const url = unprefixed(req.url, prefix);
+    state.seen.push(url);
     state.userAgents.push(req.headers["user-agent"]);
     (state.searchHeaders ??= []).push(req.headers["x-eg-search"]);
-    const { pathname } = new URL(req.url, "http://stub");
+    const { pathname } = new URL(url, "http://stub");
     switch (state.mode) {
       case "403":
         res.writeHead(403, { "content-type": "text/html" });
@@ -628,7 +643,7 @@ async function startStub() {
         req.on("close", () => pending.delete(res));
         return;
       default: {
-        const entry = state.overrides[req.url] ?? state.overrides[pathname] ?? BODIES[req.url]?.[state.mode] ?? BODIES[pathname]?.[state.mode];
+        const entry = state.overrides[url] ?? state.overrides[pathname] ?? BODIES[url]?.[state.mode] ?? BODIES[pathname]?.[state.mode];
         if (entry === undefined) {
           // What the Go router does for a path it does not know.
           res.writeHead(404, { "content-type": "text/plain" });
@@ -643,9 +658,11 @@ async function startStub() {
     }
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  prefix = prefixFor(origin);
   return {
     state,
-    base: `http://127.0.0.1:${server.address().port}`,
+    base: `${origin}${prefix}`,
     close: () => {
       for (const res of pending) res.destroy();
       server.closeAllConnections();
@@ -742,7 +759,10 @@ function assertEnvelopeInText(where, res) {
     assert.deepEqual(env[k], sc[k], `${where}: the text says ${k} ${JSON.stringify(env[k])}, structuredContent ${JSON.stringify(sc[k])}`);
   }
   assert.ok(!("data" in env), `${where}: the envelope block repeats data, which is the first block`);
-  if (!res.isError) assert.deepEqual(JSON.parse(blocks[0]), data, `${where}: the first text block is not data`);
+  // #3013: past the structured result's budget, data is the answer (the first text block, which is
+  // not cut in these cases) cut as truncated says; otherwise it is the first text block.
+  if (!res.isError && sc.data_truncated) assertDataCutOf(sc, JSON.parse(blocks[0]), where);
+  else if (!res.isError) assert.deepEqual(JSON.parse(blocks[0]), data, `${where}: the first text block is not data`);
   for (const [, key, value] of noteOf(res).matchAll(TAG)) {
     assert.equal(value, sc[key], `${where}: the text tags (${key}: ${value}) but structuredContent.${key} is ${JSON.stringify(sc[key])}`);
   }
@@ -1368,13 +1388,13 @@ describe(`against a stub API [${ERA}]`, () => {
     it("every count is worded as ip:port services, never as hosts", () => {
       for (const t of tools) assert.doesNotMatch(t.description, HOST_UNIT, `${t.name} description: ${t.description}`);
       for (const [where, note] of notes) assert.doesNotMatch(note, HOST_UNIT, `${where}: ${note}`);
-      assert.doesNotMatch(readPkgFile("README.md"), HOST_UNIT);
+      for (const [page, text] of readDocs()) assert.doesNotMatch(text, HOST_UNIT, page);
       assert.doesNotMatch(PKG.description, HOST_UNIT);
       assert.match(tools.find((t) => t.name === "cve_exposure").description, /distinct ip:port/);
       assert.match(tools.find((t) => t.name === "exposure_radar").description, /distinct ip:port/);
     });
     it("README, package.json description and server.json description make no removed claim", () => {
-      assert.doesNotMatch(readPkgFile("README.md"), REMOVED_CLAIMS);
+      for (const [page, text] of readDocs()) assert.doesNotMatch(text, REMOVED_CLAIMS, page);
       assert.doesNotMatch(PKG.description, REMOVED_CLAIMS);
       assert.doesNotMatch(JSON.parse(readPkgFile("server.json")).description, REMOVED_CLAIMS);
     });
@@ -1463,6 +1483,7 @@ describe(`against a stub API [${ERA}]`, () => {
       ...notes,
       ...envelopes,
       ["README.md", flat(readPkgFile("README.md"))],
+      ...DOC_PAGES.map((p) => [p, flat(readPkgFile(p))]),
       ["package.json description", PKG.description],
       ["server.json description", JSON.parse(readPkgFile("server.json")).description],
     ];
@@ -1498,10 +1519,10 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.ok(checked >= 6, `only ${checked} texts naming last_seen checked`);
       const rule = /`?last_seen`? is when EchelonGraph last wrote or refreshed a service's row, not when the service was observed/;
       assert.match(tools.find((t) => t.name === "cve_exposure").description, rule);
-      assert.match(flat(readPkgFile("README.md")), rule);
+      assert.match(flat(readPkgFile(TOOLS_DOC)), rule);
       assert.match(BACKEND_METHOD, rule, "the fixture no longer carries the backend's wording");
       // Still: the re-check reads the port, not the version.
-      for (const t of [tools.find((x) => x.name === "cve_exposure").description, flat(readPkgFile("README.md")), BACKEND_METHOD]) {
+      for (const t of [tools.find((x) => x.name === "cve_exposure").description, flat(readPkgFile(TOOLS_DOC)), BACKEND_METHOD]) {
         assert.match(t, /without re-reading the banner, so a patched service can stay counted while its port stays open/);
       }
     });
@@ -1521,9 +1542,9 @@ describe(`against a stub API [${ERA}]`, () => {
     // The backend omits `tracked` on purpose when it cannot decide (store.go trackedVerdict),
     // not only on an older API.
     it("the README's absent-tracked row does not blame an older API alone", () => {
-      const readme = flat(readPkgFile("README.md"));
-      assert.doesNotMatch(readme, /no `tracked` field \(older API\)/);
-      assert.match(readme, /no `tracked` field \| The API did not say whether the CVE is in the tracked set: an older API, or the radar cannot decide/);
+      // #3012: the row is in docs/tools.md's "How cve_exposure counts" now.
+      for (const [page, text] of readDocs()) assert.doesNotMatch(flat(text), /no `tracked` field \(older API\)/, page);
+      assert.match(flat(readPkgFile(TOOLS_DOC)), /no `tracked` field \| The API did not say whether the CVE is in the tracked set: an older API, or the radar cannot decide/);
     });
 
     // A count over at most 100 Shodan results per product query is not a census, so no text
@@ -1540,7 +1561,7 @@ describe(`against a stub API [${ERA}]`, () => {
     // The package names none today; the guard keeps a later edit from naming one bare.
     it("no shipped sentence names a re-probe interval without \"for hosts we do not own\"", () => {
       for (const [where, t] of shipped()) assertReprobeIntervalsQualified(where, sentencesOf(t));
-      assertReprobeIntervalsQualified("README.md", readmeUnits(readPkgFile("README.md")));
+      for (const [page, text] of readDocs()) assertReprobeIntervalsQualified(page, readmeUnits(text));
       // The guard can fail: a bare interval is caught, and the qualified one passes.
       assert.throws(() => assertReprobeIntervalsQualified("mutant", ["The radar re-probes every service every 24 h."]), /for hosts we do not own/);
       assert.equal(assertReprobeIntervalsQualified("control", ["The radar re-probes every 24 h for hosts we do not own."]), 1);
@@ -1782,7 +1803,7 @@ describe(`against a stub API [${ERA}]`, () => {
     });
     it("each labelled field is named in the note, the tool description and the README", () => {
       const d = toolText(tools.find((t) => t.name === "exposure_radar"));
-      const readme = readPkgFile("README.md");
+      const readme = radarDocs();
       for (const name of new Set(Object.values(SHADOW_AI_LABELLED))) {
         assert.ok(note.includes(name), `the note does not label ${name}: ${note}`);
         assert.ok(d.includes(name), `the description does not label ${name}: ${d}`);
@@ -1821,7 +1842,7 @@ describe(`against a stub API [${ERA}]`, () => {
       const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       const n = assertObservedFieldsNotCalledExposed("note", sentencesOf(note));
       const dn = assertObservedFieldsNotCalledExposed("description", sentencesOf(d));
-      const rn = assertObservedFieldsNotCalledExposed("README.md", readmeUnits(readPkgFile("README.md")));
+      const rn = readDocs().reduce((n, [page, text]) => n + assertObservedFieldsNotCalledExposed(page, readmeUnits(text)), 0);
       assert.ok(n >= 4 && dn >= 4 && rn >= 6, `too few sentences checked: note ${n}, description ${dn}, README ${rn}`);
     });
     it("no field name under shadow_ai says exposed, outside confirmed_exposed", () => {
@@ -2031,7 +2052,7 @@ describe(`against a stub API [${ERA}]`, () => {
       data = JSON.parse(res.content[0].text);
       note = noteOf(res);
       description = toolText(tools.find((t) => t.name === "exposure_radar"));
-      readme = readPkgFile("README.md");
+      readme = radarDocs();
     });
 
     // ── item 7: every numeric path labelled or dropped ──
@@ -2415,7 +2436,7 @@ describe(`against a stub API [${ERA}]`, () => {
     it("the description and the README label every window", async () => {
       const { tools } = await client.listTools();
       const d = toolText(tools.find((t) => t.name === "exposure_radar"));
-      const readme = readPkgFile("README.md");
+      const readme = radarDocs();
       for (const f of ["kev_exposure.window.from", "exposed_databases.window.from", "leaked_credentials.window.from", "confirmed_exposed.window.from"]) {
         assert.ok(d.includes(f), `the description does not label ${f}`);
         assert.ok(readme.includes(f), `the README does not label ${f}`);
@@ -2472,7 +2493,7 @@ describe(`against a stub API [${ERA}]`, () => {
       stub.state.mode = "ok";
       ({ tools } = await client.listTools());
       description = toolText(tools.find((t) => t.name === "exposure_radar"));
-      readme = readPkgFile("README.md");
+      readme = radarDocs();
       const res = await client.callTool({ name: "exposure_radar", arguments: {} });
       data = JSON.parse(res.content[0].text);
       note = noteOf(res);
@@ -2822,7 +2843,7 @@ describe(`against a stub API [${ERA}]`, () => {
       data = JSON.parse(res.content[0].text);
       note = noteOf(res);
       description = toolText(tools.find((t) => t.name === "exposure_radar"));
-      readme = readPkgFile("README.md");
+      readme = radarDocs();
     });
 
     it("the description names every RFC 9728 reason bucket, in the answer's order, as one constant sentence", () => {
@@ -3244,7 +3265,7 @@ describe(`against a stub API [${ERA}]`, () => {
     it("#1880: every field the README names is a field, or a value, of some tool's outputSchema", () => {
       // #2722: the README's Prompts table names the prompts, which prompts-resources.test.mjs holds.
       const names = new Set([...LISTED, ...PROMPT_NAMES, ...PROMPT_ARG_VALUES, ...tools.flatMap((t) => [...schemaNames(t.outputSchema)])]);
-      const readme = readPkgFile("README.md").replace(/\b[\w.-]+\.json\b/g, "");
+      const readme = readDocs().map(([, text]) => text).join("\n\n").replace(/\b[\w.-]+\.json\b/g, "");
       const unknown = [...new Set(readme.match(FIELD_TOKEN) ?? [])].filter((x) => !names.has(x));
       assert.deepEqual(unknown, [], "the README names fields no outputSchema holds");
     });
@@ -3873,6 +3894,35 @@ describe(`against a stub API [${ERA}]`, () => {
       }
     });
 
+    // #3076, #3070: CVE-2024-3400 as GET /cves/:id serves it once its CVE record is read: the CNA's
+    // solution sentence, its datePublic and its name, relayed whole and named as the CNA's in the note.
+    it("get_cve: cna_solution, date_public and cna are relayed as sent, and the note names them as the CNA's, not EchelonGraph's", async () => {
+      const id = "CVE-2024-3400";
+      const statement = "This issue is fixed in PAN-OS 10.2.9-h1, PAN-OS 11.0.4-h1, PAN-OS 11.1.2-h3, and in all later PAN-OS versions.";
+      const body = { ...WITH_EVIDENCE, cve_id: id, kev_listed: true, patch_evidence: ["cna_solution"], date_public: "2024-04-12T06:55:00Z", date_public_source: "cna", cna: { short_name: "palo_alto", name: "Palo Alto Networks, Inc." }, cna_solution: statement };
+      const res = await getCve(body);
+      assert.notEqual(res.isError, true, brief(res));
+      for (const rec of [res.structuredContent.data, JSON.parse(textBlocks(res)[0])]) {
+        assert.equal(rec.cna_solution, statement);
+        assert.equal(rec.date_public, "2024-04-12T06:55:00Z");
+        assert.equal(rec.date_public_source, "cna");
+        assert.deepEqual(rec.cna, { short_name: "palo_alto", name: "Palo Alto Networks, Inc." });
+        assert.deepEqual(rec.patch_evidence, ["cna_solution"]);
+      }
+      const t = textOf(res);
+      assert.ok(t.includes(`date_public is when ${id} was made public as its CNA, Palo Alto Networks, Inc., states it in the CVE record (datePublic), not the record's publication date.`), t);
+      assert.ok(t.includes("cna_solution is the CVE record's own fix statement, written by its CNA, Palo Alto Networks, Inc., and relayed verbatim: it names the fixed release, and is not EchelonGraph's advice."), t);
+      // Control: a record without them gets neither sentence.
+      const plain = await getCve(WITH_EVIDENCE);
+      assert.doesNotMatch(textOf(plain), /date_public|cna_solution/);
+      // The outputSchema says what each is.
+      const { tools } = await client.listTools();
+      const data = branchOf(tools.find((x) => x.name === "get_cve").outputSchema, "measured").properties.data;
+      assert.match(data.properties.date_public.description, /^When the vulnerability was made public, as the CVE record's CNA states it/);
+      assert.match(data.properties.cna_solution.description, /verbatim: what makes cna_solution patch evidence\. It is the CNA's text, not EchelonGraph's advice\./);
+      assert.match(data.properties.cna.description, /^The CNA that wrote the CVE record/);
+    });
+
     it("get_cve: a label the API adds later is relayed, never a failed call", async () => {
       const body = { ...WITH_EVIDENCE, patch_evidence: ["vendor_patch", "a_later_source"] };
       const res = await getCve(body);
@@ -3900,7 +3950,9 @@ describe(`against a stub API [${ERA}]`, () => {
         assert.ok(d.includes("patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names its sources, strongest first."), `${name}: ${d}`);
         const ev = branchOf(t.outputSchema, "measured").properties.data;
         const evRec = name === "get_cve" ? ev : ev.properties.cves.items;
-        assert.ok(evRec.properties.patch_evidence.description.includes("release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), nvd_patch_reference (an NVD reference tagged Patch) and cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record)"), name);
+        // #3076: rule 3's labels sit in strength order, vendor_advisory_fix after release_reference and
+        // the record's own statements (cna_solution, description_fix) last.
+        assert.ok(evRec.properties.patch_evidence.description.includes("release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions, written by its CNA, that names a fixed version; relayed as cna_solution) and description_fix (a sentence of the CVE description that names a fixed version)"), name);
         assert.ok(d.includes("patch_available false means no fix evidence is on record, which is not a finding that no fix exists."), `${name}: ${d}`);
         // #2842: and the API-older rule is patch_available's field description.
         assert.ok(toolText(t).includes("An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either."), `${name}`);
@@ -3910,7 +3962,7 @@ describe(`against a stub API [${ERA}]`, () => {
         assert.match(rec.properties.patch_evidence.description, /^The sources of the fix evidence EchelonGraph holds for the CVE, strongest first: vendor_patch .* Absent \(an API older than the field\): the answer does not name the evidence\.$/, name);
         assert.deepEqual(rec.properties.patch_available.type, ["boolean", "null"], name);
         const labels = JSON.stringify(rec.properties.patch_evidence);
-        for (const l of ["vendor_patch", "fixed_version", "release_reference", "nvd_patch_reference", "cna_patch_reference"]) assert.ok(labels.includes(`"${l}"`), `${name}: ${l} is not a value of patch_evidence`);
+        for (const l of ["vendor_patch", "fixed_version", "release_reference", "vendor_advisory_fix", "nvd_patch_reference", "cna_patch_reference", "cna_solution", "description_fix"]) assert.ok(labels.includes(`"${l}"`), `${name}: ${l} is not a value of patch_evidence`);
       }
     });
   });
@@ -4572,6 +4624,11 @@ describe(`against a stub API [${ERA}]`, () => {
         const { total } = textSize(res, stub.base);
         t.diagnostic(`${tool}: ${total} characters on production's answers of ${r.measured_at}; recorded ${r.total}`);
         assert.ok(Math.abs(total - r.total) <= MARGIN, `${tool}: ${total} characters on production's kept answers, recorded ${r.total} (${r.measured_at}): the text changed; re-run text-bound-live.mjs --record on purpose`);
+        // #3013: and its structured result, as compact JSON, under its budget and within MARGIN of the record.
+        const structured = structuredSize(res, stub.base);
+        t.diagnostic(`${tool}: structuredContent ${structured} characters; recorded ${r.structured}`);
+        assert.ok(structured <= STRUCTURED_BUDGET, `${tool}: ${structured} characters of structuredContent on production's kept answers, past the budget of ${STRUCTURED_BUDGET}`);
+        assert.ok(typeof r.structured === "number" && Math.abs(structured - r.structured) <= MARGIN, `${tool}: ${structured} characters of structuredContent on production's kept answers, recorded ${r.structured} (${r.measured_at}): re-run text-bound-live.mjs --record on purpose`);
       });
     }
   });
@@ -4905,7 +4962,7 @@ describe(`#2313: every structuredContent the suite received validates against it
       const texts = [...schemaDescriptions(schemas[name]), descriptions[name], instructions, ...textBlocks(res).slice(1), ...sc.notes, sc.method];
       sentences += assertNoFindingDenied(`${name}(${JSON.stringify(args)})`, texts.flatMap(sentencesOf));
     }
-    sentences += assertNoFindingDenied("README.md", readmeUnits(readPkgFile("README.md")));
+    for (const [page, text] of readDocs()) sentences += assertNoFindingDenied(page, readmeUnits(text));
     // Not vacuous: answers of every tool that relays counts, among them cve_exposure's exposed
     // answers under not_assessed, which are what #2465 is about, and exposure_radar's totals.
     assert.deepEqual(Object.keys(answers).sort(), [...TOOLS].sort(), JSON.stringify(answers));

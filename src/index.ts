@@ -16,8 +16,9 @@
 //     what it left out (readKEVExposure, readExposedDatabases, readLeakedCredentials,
 //     readShadowAI and readMCPServers; #2307, #2313, #2315). content[2] is the envelope below,
 //     as JSON, less what content[0] and the note already say. Past 30,000 characters of JSON,
-//     content[0] is that JSON cut to fit and the note ends by saying how (TEXT CUT); the
-//     envelope's data is always the answer whole (textBudget.ts, #2783).
+//     content[0] is that JSON cut to fit and the note ends by saying how (TEXT CUT, #2783); past
+//     30,000 characters of structured result, the envelope's data is cut too, unless the call
+//     says full: true, and the note says how (DATA CUT, #3013; both in textBudget.ts).
 //   - failure (isError: true): the lookup did not complete — unreachable host, non-2xx,
 //     timeout, or a 2xx whose body is not a JSON object — named by tool, cause and base URL,
 //     in content[0]; content[1] is the envelope below, as JSON, less the message's sentences.
@@ -27,18 +28,23 @@
 // Structured results (#2311, #2313). Every result, success or failure, also carries
 // structuredContent: one envelope that says how the answer was measured — state (measured,
 // not_assessed, failed, invalid_input), measured_at, method, coverage, freshness and notes —
-// with, on a success, `data`, the answer whole, and on a failure an `error`. content[0] carries
-// `data` as JSON up to 30,000 characters, and past them a cut of it that the note names (TEXT
-// CUT, #2783), so past them content[0] is not equal to `data` (#2802). Each tool advertises the
-// envelope as its outputSchema.
+// with, on a success, `data`, the answer, and on a failure an `error`. content[0] carries the
+// answer as JSON up to 30,000 characters, and past them a cut of it that the note names (TEXT
+// CUT, #2783), so past them content[0] is not equal to `data` (#2802). `data` is the answer whole
+// unless the whole structured result would pass 30,000 characters of JSON: then, unless the call
+// says full: true, its lists are cut in the order the tool names (DATA CUT, #3013), data_truncated
+// is true and truncated gives each list cut (data_truncated is false otherwise). Each tool
+// advertises the envelope as its outputSchema, which `data` validates against cut or whole.
 //
 // The envelope in the text (#2440, #2467). Many clients pass only `content` to the model, so the
 // last text block of every result is structuredContent serialized as JSON, less what an earlier
 // text block already carries: `data` (content[0] on a success, whole or cut as above), the note's
 // sentences (the block just before, which structuredContent's notes end with), and method where
 // that note quotes it. The rest — state, measured_at, coverage, freshness, the envelope's own notes
-// and, on a failure, error — is copied key for key, so the text blocks together are the whole of
-// structuredContent, but for what a TEXT CUT leaves out of `data`, and cannot disagree with it. The
+// and, on a failure, error; on a success data_truncated and truncated — is copied key for key, so
+// the text blocks together are the whole of structuredContent, but for what a TEXT CUT leaves out
+// of the answer, and cannot disagree with it. Beside a DATA CUT (#3013) content[0] is still cut from
+// the answer whole, not from the cut data, so it can hold entries data leaves out. The
 // MCP spec (2025-06-18, Tools, Structured Content) asks a tool that returns structured content to
 // return it serialized in a text block too; the JSON block stays first and the note second, as in
 // 1.x, so a client that parses content[0] still parses the answer's JSON, which past 30,000
@@ -59,12 +65,28 @@ import { registerCheckSbom } from "./tools/check_sbom.js";
 import { registerScanManifest } from "./tools/scan_manifest.js";
 import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerCveRemediation } from "./tools/cve_remediation.js";
+import { fixStatusSchema } from "./fixStatus.js";
 import { registerGetCwe } from "./tools/get_cwe.js";
 import { holdRequest, isHttpEntrypoint, requestSignal, upstreamHeaders, upstreamUserAgent } from "./runtime.js";
 import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
-import { dataText, GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type TextCut } from "./textBudget.js";
+import {
+  answering,
+  answeringNow,
+  cutData,
+  dataText,
+  FIRST_TEXT_BLOCK_BESIDE_A_CUT,
+  FULL_ARG,
+  GET_CVE_WHOLE,
+  NO_DATA_CUT,
+  STRUCTURED_BUDGET,
+  TEXT_BUDGET_DESCRIPTION,
+  wholePage,
+  type DataCut,
+  type TextCut,
+  type Truncated,
+} from "./textBudget.js";
 import { SHODAN_ATTRIBUTION, SHODAN_OWNERSHIP } from "./requiredText.js";
 
 // The package actually running, read from the package.json that ships beside dist/. The MCP
@@ -437,12 +459,34 @@ export const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolRes
 
 // A success: content[0] is the data (cut to DATA_TEXT_BUDGET when it is larger, #2783), content[1]
 // the note, content[2] the envelope less both; the envelope carries both, the note as sentences
-// after any the envelope adds about itself. structuredContent.data is the data whole.
+// after any the envelope adds about itself. structuredContent.data is the data whole, or (#3013),
+// when the structured result would pass STRUCTURED_BUDGET and the call (answering()) does not say
+// full: true, cut as the call's DataCut says, with data_truncated, truncated and the note's DATA CUT
+// sentences saying how. content[0] is cut from the data whole either way.
 export const succeeded = (data: object, note: string, env: Omit<Envelope, "notes"> & { notes?: string[] }, cut?: TextCut): ToolResult => {
   const own = env.notes ?? [];
+  const call = answeringNow();
   const shown = dataText(data, cut);
-  const said = shown.said ? `${note} ${shown.said}` : note;
-  const structuredContent = { ...env, notes: [...own, ...sentences(said)], data };
+  const structuredOf = (d: object | null, said: string, truncated?: Truncated): Record<string, unknown> => ({
+    ...env,
+    notes: [...own, ...sentences(said)],
+    data_truncated: truncated !== undefined,
+    ...(truncated === undefined ? {} : { truncated }),
+    data: d,
+  });
+  let said = shown.said ? `${note} ${shown.said}` : note;
+  let structuredContent = structuredOf(data, said);
+  const wholeChars = JSON.stringify(structuredContent).length;
+  if (call?.full !== true && wholeChars > STRUCTURED_BUDGET) {
+    // The same text, with the sentences a first text block beside a cut data says.
+    const beside = dataText(data, cut, FIRST_TEXT_BLOCK_BESIDE_A_CUT).said;
+    const head = beside ? `${note} ${beside}` : note;
+    const c = cutData(data, call?.cut ?? NO_DATA_CUT, wholeChars, (d, truncated, dataSaid) => structuredOf(d, `${head} ${dataSaid}`, truncated));
+    if (c) {
+      said = `${head} ${c.said}`;
+      structuredContent = c.structured as Record<string, unknown>;
+    }
+  }
   return { content: [text(shown.text), text(said), envelopeText(structuredContent, said, own)], structuredContent };
 };
 export const okHead = (tool: string, status?: number) =>
@@ -775,6 +819,34 @@ const SEARCH_CVES_TEXT: TextCut = {
   page: (shown, _rows, d) =>
     `To read the rows left out in the text, call search_cves again with the same arguments and offset ${(numAt(d, "offset") ?? 0) + shown}; a page of ${shown} rows or fewer like these fits the text without leaving rows out.`,
 };
+// #3013: the structured result's cut. A row of production's answer is about 4,200 characters of
+// compact JSON (score_factors, cpe_match and references, about 2,000 of them, are get_cve's), so the
+// default page of 20 was 85,383 characters of structured result. Before any row leaves, every row
+// is thinned: first to the first text cut level's fields, its description whole; then to the fields
+// the description names, without the description. Only then do rows leave data from the end, and
+// the note gives the offset to read them from, and the page size whose rows fit data whole. Through
+// #3013's review that size was the number of thinned rows data kept, so a page of it came back
+// thinned again (data_truncated true) while the note said it fit data whole: it is now counted on
+// the rows whole (PageAt.wholeFit), the same call's envelope and note beside them.
+const SEARCH_CVES_DATA: DataCut = {
+  steps: [
+    {
+      lists: ["cves"],
+      thin: [
+        [
+          "cve_id", "description", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "echelongraph_risk", "score_assessed", "score_unassessed_reason", "epss_score",
+          "kev_listed", "kev_ransomware", "published", "vuln_status", "patch_available", "patch_evidence", "exploit_poc_available",
+        ],
+        ["cve_id", "severity", "cvss_v3_score", "echelongraph_score", "score_assessed", "score_unassessed_reason", "epss_score", "kev_listed", "kev_ransomware", "published", "patch_available", "patch_evidence"],
+      ],
+    },
+  ],
+  page: (t, d, at) => {
+    const k = t.cves?.returned;
+    if (!k || !t.cves || k === t.cves.total) return "";
+    return `To read the rows past the first ${k} in data, call search_cves again with the same arguments and offset ${(numAt(d, "offset") ?? 0) + k}; ${wholePage(at.wholeFit("cves"))}`;
+  },
+};
 async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
   const tool = "search_cves";
   try {
@@ -863,11 +935,72 @@ function kevTextNote(rec: object): string {
   if (field(rec, "kev_listed") !== true) return "";
   const has = ["kev_required_action", "kev_short_description", "kev_notes_urls"].some((k) => field(rec, k) !== undefined && field(rec, k) !== null);
   return has
-    ? " kev_required_action, kev_short_description and kev_notes_urls are CISA's own text from its KEV catalog, relayed verbatim: CISA's required action is directed at US federal civilian agencies under Binding Operational Directive 22-01 and is not EchelonGraph's advice."
+    ? " kev_required_action, kev_short_description and kev_notes_urls are CISA's own text from its KEV catalog, relayed verbatim: CISA's required action is directed at US federal civilian agencies under Binding Operational Directive 26-04 (which replaced BOD 22-01 on 10 June 2026) and is not EchelonGraph's advice."
     : "";
 }
 
+// #2880: what the record's CISA BOD 26-04 timeline is, where the scorer wrote it
+// (core-backend/internal/cve/scoring/bod2604.go, algorithm v3.4+): given for both answers to "is
+// the system publicly exposed?", because that is the reader's own system's, each input with its
+// source. A record scored before v3.4, or a malformed block, gets no sentence: the JSON is relayed
+// whole either way. What the SSVC decision is (EchelonGraph's run of CISA's table, never a
+// decision CISA published, #3053) is in the outputSchema's echelongraph_ssvc_decision, not the
+// note: get_cve's text is measured to the character (test/text-bound.mjs).
+const BOD_TIMELINE: Record<string, string> = {
+  FSU: "Fix on system upgrade",
+  "60D": "60 days",
+  "14D": "14 days",
+  "3D": "3 days",
+  "3DF": "3 days & forensic triage",
+};
+const BOD_SOURCE: Record<string, string> = {
+  "cisa-adp": "CISA's Vulnrichment value",
+  cisa_kev: "CISA's KEV catalog",
+  cvss_v4_au: "the CVSS v4.0 Automatable metric",
+  cvss_v4_av_physical: "CVSS v4.0 attack vector Physical",
+  cvss_v4_vc_vi_high: "CVSS v4.0 confidentiality and integrity impact both High",
+  cvss_v4_vc_vi_not_high: "CVSS v4.0 confidentiality and integrity impact neither High",
+  cisa_bod_26_04_default: "CISA's BOD 26-04 default for a CVE not in KEV that nobody has assessed",
+  not_supplied: "not yet published by CISA, so every timeline it allows is listed",
+};
+function bodTimelines(v: unknown): string | null {
+  if (!Array.isArray(v) || v.length === 0 || !v.every((k) => typeof k === "string" && BOD_TIMELINE[k])) return null;
+  const w = (v as string[]).map((k) => BOD_TIMELINE[k]);
+  return w.length === 1 ? w[0] : `${w.slice(0, -1).join(", ")} or ${w[w.length - 1]}`;
+}
+function bodNote(cve: string, rec: object): string {
+  const b = field(rec, "score_factors", "bod_26_04");
+  const exposed = bodTimelines(field(b, "if_publicly_exposed"));
+  const internal = bodTimelines(field(b, "if_not_publicly_exposed"));
+  const kev = strAt(b, "kev", "value");
+  const input = (k: string, name: string) => {
+    const v = strAt(b, k, "value");
+    const src = strAt(b, k, "source");
+    return v && src ? `${name} ${v} (${BOD_SOURCE[src] ?? src})` : null;
+  };
+  const auto = input("automatable", "automatable");
+  const ti = input("technical_impact", "technical impact");
+  if (!(exposed && internal && (kev === "yes" || kev === "no") && auto && ti)) return "";
+  return ` score_factors.bod_26_04 is CISA BOD 26-04's remediation timeline for ${cve}: ${exposed} if the affected system is publicly exposed, ${internal} if it is not; whether a system is publicly exposed is its owner's to say. Its inputs: in CISA KEV ${kev}, ${auto}, ${ti}. BOD 26-04 binds US Federal Civilian Executive Branch agencies; for anyone else it is CISA's published timeline, not EchelonGraph's advice.`;
+}
+
 // #2841: one sentence on the record's remediation summary, where the API sends one.
+// #3070, #3076: the CNA's own date and fix sentence, named as the CNA's. Nothing when the record
+// carries neither; a value of another JSON type is not quoted (the outputSchema refuses it).
+function cnaRecordNote(cve: string, rec: object): string {
+  const cna = field(rec, "cna");
+  const nameOf = (k: string) => (cna && typeof cna === "object" && typeof field(cna, k) === "string" ? String(field(cna, k)).trim() : "");
+  const who = nameOf("name") || nameOf("short_name");
+  // An appositive name is closed by a comma: "its CNA, Palo Alto Networks, Inc., states".
+  const by = who ? `its CNA, ${who},` : "its CNA";
+  const date = strAt(rec, "date_public");
+  const fix = strAt(rec, "cna_solution");
+  const parts: string[] = [];
+  if (date) parts.push(` date_public is when ${cve} was made public as ${by} states it in the CVE record (datePublic), not the record's publication date.`);
+  if (fix) parts.push(` cna_solution is the CVE record's own fix statement, written by ${by} and relayed verbatim: it names the fixed release, and is not EchelonGraph's advice.`);
+  return parts.join("");
+}
+
 function remediationSummaryNote(cve: string, rec: object): string {
   const s = field(rec, "remediation");
   if (s === null || typeof s !== "object") return "";
@@ -876,9 +1009,22 @@ function remediationSummaryNote(cve: string, rec: object): string {
   const failed = field(s, "failed_sections");
   const notRead = Array.isArray(failed) && failed.length ? ` The summary could not read ${failed.join(", ")} (failed_sections), so a missing count there is not a finding of none.` : "";
   const byKind = counted.length ? ` Vendor advisories list ${counted.map(([k, n]) => `${k} (${n})`).join(", ")}, by the vendor's own category.` : "";
-  return ` remediation summarises how ${cve} is fixed, as its sources state it; cve_remediation returns each vendor's text, CISA's action and every fixed range.${byKind}${notRead}`;
+  // #2841: fix_status is the API's, relayed; a state is named only as the API sent it.
+  const fs = field(s, "fix_status");
+  const state = strAt(fs, "state");
+  const basis = strAt(fs, "basis");
+  const fix = state
+    ? ` remediation.fix_status is ${state}${basis ? ` (basis ${basis})` : ""}, the API's fix-status rule${state === "none_confirmed" ? ", which is not a finding that no fix exists" : ""}.`
+    : "";
+  return ` remediation summarises how ${cve} is fixed, as its sources state it; cve_remediation returns each vendor's text, CISA's action and every fixed range.${fix}${byKind}${notRead}`;
 }
 
+// #3013: the structured result's cut. CVE-2021-44228's record is 64,170 characters of structured
+// result, 41,091 of them cpe_match (396 entries) and 17,103 references (103): those two are cut
+// first, each to at most the same number of its first entries, then cpe_configurations, then any
+// other list at the top level of the record. The remediation summary (#2841), an object, is never
+// cut, so its fix_status is whole at every level.
+const GET_CVE_DATA: DataCut = { steps: [{ lists: ["cpe_match", "references"] }, { lists: ["cpe_configurations"] }] };
 async function getCVE(cve_id: string): Promise<ToolResult> {
   const tool = "get_cve";
   const id = cve_id.trim();
@@ -888,7 +1034,7 @@ async function getCVE(cve_id: string): Promise<ToolResult> {
     if (!r.ok) return failed(tool, r);
     const written = strAt(r.data, "updated_at");
     const cve = strAt(r.data, "cve_id") ?? id;
-    return succeeded(r.data, `${okHead(tool, r.status)} Returned the record for ${cve}.${cveScoreNote(cve, r.data)}${kevTextNote(r.data)}${remediationSummaryNote(cve, r.data)}`, {
+    return succeeded(r.data, `${okHead(tool, r.status)} Returned the record for ${cve}.${cveScoreNote(cve, r.data)}${bodNote(cve, r.data)}${kevTextNote(r.data)}${cnaRecordNote(cve, r.data)}${remediationSummaryNote(cve, r.data)}`, {
       state: "measured",
       measured_at: instantOrNull(written),
       method: CVE_FEED_METHOD,
@@ -2204,6 +2350,35 @@ const RADAR_FRESHNESS_NOTE =
 
 type RadarFailure = { radar: string; kind: Failure["kind"]; path: string; status: number | null; message: string };
 
+// #3013: the structured result's cut. Production's answers of 2026-10-05 (fixtures/prod-answers) are
+// 33,278 characters of structured result, past the budget by notes that label every number (about
+// 20,000 characters) beside 12,733 of data. The notes say what each list counts, from the answer
+// whole, so the lists are cut, never a note: first the two series (shadow_ai.observed.trend_30d,
+// kev_exposure.trend), then every ranking to at most the same number of its first rows, then
+// kev_exposure.newest_kev, whose CVEs and exposure states the note names one by one. #3013's
+// review: the series arrive oldest first (a day, a week a row), and a cut that kept their first
+// entries showed the oldest, lowest weeks as the trend and left out the latest; each now keeps its
+// newest entries (keepNewest), and the note says so.
+const EXPOSURE_RADAR_DATA: DataCut = {
+  steps: [
+    { lists: ["shadow_ai.observed.trend_30d", "kev_exposure.trend"], keepNewest: true },
+    {
+      lists: [
+        "kev_exposure.top_products",
+        "kev_exposure.top_countries",
+        "kev_exposure.top_cves",
+        "exposed_databases.top_engines",
+        "exposed_databases.top_countries",
+        "leaked_credentials.top_providers",
+        "leaked_credentials.top_types",
+        "shadow_ai.observed.top_products",
+        "shadow_ai.observed.top_countries",
+        "shadow_ai.observed.top_issuers",
+      ],
+    },
+    { lists: ["kev_exposure.newest_kev"] },
+  ],
+};
 async function exposureRadar(): Promise<ToolResult> {
   const tool = "exposure_radar";
   try {
@@ -2312,6 +2487,16 @@ export const NOTES = z.array(z.string()).describe("Caveats, one sentence each.")
 const SUCCESS_STATE =
   "measured: a measurement of what was asked; an exposure count is measured only with measured_at and method. not_assessed: the answer holds no dated measurement of what was asked, so no count in it is presented as one; it can still relay a count, as what the source holds on record, undated, and its notes (and exposure_state, where the result carries it) say what each count is.";
 
+// #3013: what a success says of its data's cut (textBudget.ts cutData), one constant string each.
+const DATA_TRUNCATED_FIELD =
+  "false: data is the answer whole. true: the structured result would pass 30,000 characters of JSON with data whole, so data is cut (DATA CUT): the entries of some of its lists keep only some of their fields, or the lists only some of their entries, truncated gives each, and no string is shortened. The same call with full: true returns data whole.";
+const TRUNCATED_FIELD =
+  "Present when data_truncated is true: each list of data that was cut, by its path in data (a dot between the names of an object and a list inside it), with total, its entries in the answer, returned, the entries data holds, and thinned, true when each of them keeps only some of its fields.";
+const TRUNCATED = z.record(
+  z.string(),
+  z.strictObject({ total: z.number().int().min(0), returned: z.number().int().min(0), thinned: z.literal(true).optional() }),
+);
+
 export function envelopeSchema(o: {
   data: z.ZodType;
   coverage: z.ZodType | null;
@@ -2329,6 +2514,8 @@ export function envelopeSchema(o: {
       freshness: (o.freshness ? o.freshness.nullable() : z.null()).describe("The producing radar's last completed check (last_run_at), where the API serves one."),
       notes: NOTES,
       ...(o.extra ?? {}),
+      data_truncated: z.boolean().describe(DATA_TRUNCATED_FIELD),
+      truncated: TRUNCATED.optional().describe(TRUNCATED_FIELD),
       data: o.data,
     }),
     z.strictObject({
@@ -2362,10 +2549,27 @@ const CPE_CONFIGURATIONS_DESCRIPTION =
 // the GitHub API, a published release holding the fix; its HTML heuristics, the CISA KEV inference
 // among them, are not evidence) and cna_patch_reference (the CNA's own CVE record tags a reference
 // "patch"; NVD's capitalised "Patch" stays nvd_patch_reference).
+// #3076 / #2518 (rule 3): vendor_advisory_fix (a vendor's own structured "vendor fix" for the CVE:
+// Red Hat CSAF, Microsoft CVRF), cna_solution and description_fix (a sentence of the CVE record's
+// solutions, or of its description, that states a released fix in core-backend's fix-statement
+// templates, internal/cve/fix_statement.go). The last two are the record's own words: get_cve
+// relays the solution's sentence as cna_solution, and the description is in the record.
 // One constant string each (the site's tool-claims check folds only constant strings).
-const PATCH_EVIDENCE_LABELS = ["vendor_patch", "fixed_version", "release_reference", "nvd_patch_reference", "cna_patch_reference"] as const;
+const PATCH_EVIDENCE_LABELS = ["vendor_patch", "fixed_version", "release_reference", "vendor_advisory_fix", "nvd_patch_reference", "cna_patch_reference", "cna_solution", "description_fix"] as const;
 const PATCH_EVIDENCE_SOURCES =
-  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range), release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), nvd_patch_reference (an NVD reference tagged Patch) and cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record)";
+  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range), release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions, written by its CNA, that names a fixed version; relayed as cna_solution) and description_fix (a sentence of the CVE description that names a fixed version)";
+// #3070, #3076: what the CVE record's CNA wrote, as GET /cves/:id serves it (core-backend
+// cna_record.go). One constant string each.
+const CVE_CNA_ABSENT =
+  "Absent where EchelonGraph has not read the CVE record's CNA container yet, where the record has none, for a REJECTED CVE, and from an API older than the field.";
+const DATE_PUBLIC_FIELD =
+  "When the vulnerability was made public, as the CVE record's CNA states it (the record's datePublic: \"if known, the date/time the vulnerability was disclosed publicly\"). It is the CNA's date, not the record's own publication date, which is published. " +
+  CVE_CNA_ABSENT;
+const DATE_PUBLIC_SOURCE_FIELD = "Whose date date_public is: cna, the CVE record's CNA. Absent whenever date_public is.";
+const CNA_FIELD = "The CNA that wrote the CVE record: short_name as the record gives it, and name, the CVE Program's name for that CNA (the short name where its list does not hold it). " + CVE_CNA_ABSENT;
+const CNA_SOLUTION_FIELD =
+  "The sentence of the CVE record's solutions, written by its CNA, that names a released fix, verbatim: what makes cna_solution patch evidence. It is the CNA's text, not EchelonGraph's advice. Absent where the record's solutions name no fixed version, as well as where the field itself is: " +
+  CVE_CNA_ABSENT;
 // #2842: what the descriptions say; the sources, and that patch_available once true is never set
 // back, are the outputSchema's (PATCH_AVAILABLE_FIELD, PATCH_EVIDENCE_FIELD).
 const PATCH_AVAILABLE_DESCRIPTION =
@@ -2382,7 +2586,7 @@ const PATCH_EVIDENCE_FIELD =
 const KEV_TEXT_ABSENT =
   "Absent where the CVE is not CISA-KEV-listed, where CISA's entry has none, or where EchelonGraph has not stored it yet (an API older than the field serves none).";
 const KEV_REQUIRED_ACTION_FIELD =
-  "CISA's requiredAction for the CVE, verbatim from its Known Exploited Vulnerabilities catalog: the action CISA requires of US federal civilian agencies under Binding Operational Directive 22-01, by kev_due_date. It is CISA's text, not EchelonGraph's advice. " +
+  "CISA's requiredAction for the CVE, verbatim from its Known Exploited Vulnerabilities catalog: the action CISA requires of US federal civilian agencies under Binding Operational Directive 26-04 (which replaced BOD 22-01 on 10 June 2026), by kev_due_date. It is CISA's text, not EchelonGraph's advice. " +
   KEV_TEXT_ABSENT;
 const KEV_SHORT_DESCRIPTION_FIELD = "CISA's shortDescription of the vulnerability, verbatim from its Known Exploited Vulnerabilities catalog. " + KEV_TEXT_ABSENT;
 const KEV_NOTES_URLS_FIELD =
@@ -2391,7 +2595,7 @@ const KEV_NOTES_URLS_FIELD =
 // #2841: what get_cve's remediation is. One constant string (the site's tool-claims check folds
 // only constant strings).
 const REMEDIATION_SUMMARY_FIELD =
-  "A capped summary (at most 1,500 characters of JSON) of how the CVE is fixed, as its sources state it: vendor_remediation_kinds (per kind, the vendor advisories listing one for this CVE, by the vendor's own category), vendor_advisories, vendors_not_parsed, kev_required_action (CISA's, verbatim), fixed_branches_count, fixed_versions (per package, fixed versions on record), fix_references (URLs tagged Patch or Mitigation), failed_sections, truncated, and see, the name of the tool that returns the whole, with each text. A kind missing from vendor_remediation_kinds is not a finding that no such remediation exists. Absent for a REJECTED CVE and from an API older than the field.";
+  "A capped summary (at most 1,500 characters of JSON) of how the CVE is fixed, as its sources state it: fix_status first (the API's fix-status rule: state, basis, described_by, solution_by, stated_in_record, listed_in_patch_table and unread_inputs), vendor_remediation_kinds (per kind, the vendor advisories listing one for this CVE, by the vendor's own category), vendor_advisories, vendors_not_parsed, kev_required_action (CISA's, verbatim), fixed_branches_count, fixed_versions (per package, fixed versions on record), fix_references (URLs tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA), failed_sections, truncated, and see, the name of the tool that returns the whole, with each text. A kind missing from vendor_remediation_kinds is not a finding that no such remediation exists. Absent for a REJECTED CVE and from an API older than the field.";
 const CVERecord = z.looseObject({
   cve_id: opt(z.string()),
   description: opt(z.string()),
@@ -2410,6 +2614,13 @@ const CVERecord = z.looseObject({
   score_unassessed_reason: opt(z.string()).describe(
     "Why score_assessed is false: no_signal, no source has yet published severity data EchelonGraph can score; or rejected, the record was withdrawn by its numbering authority and is never scored. Absent when the CVE is scored.",
   ),
+  // #2880: the SSVC decision, and CISA BOD 26-04's timeline (bodNote words it in the note).
+  echelongraph_ssvc_decision: opt(z.string()).describe(
+    "The SSVC decision (Act, Attend, Track* or Track) EchelonGraph computes with CISA's decision table at medium mission impact. CISA publishes the table and, for some CVEs, its inputs, not a decision for a CVE. score_factors.ssvc gives the decision at low, medium and high mission impact, with each input and its source.",
+  ),
+  score_factors: z.unknown().optional().describe(
+    "EchelonGraph's evidence for its score. ssvc: the SSVC decision at every mission impact level, each input with its source. bod_26_04 (scorer v3.4 and later): CISA BOD 26-04's remediation timeline, if_publicly_exposed and if_not_publicly_exposed, each a list of CERT/CC's keys (3DF, 3D, 14D, 60D, FSU) named in timelines, with kev, automatable and technical_impact, each with its source; source cisa_bod_26_04_default is CISA's own default for a CVE not in KEV that nobody has assessed.",
+  ),
   epss_score: opt(z.number()),
   epss_percentile: opt(z.number()),
   kev_listed: opt(z.boolean()),
@@ -2423,12 +2634,18 @@ const CVERecord = z.looseObject({
   // #2861: fix evidence. A label the API adds later is admitted, never a failed call.
   patch_available: opt(z.boolean()).describe(PATCH_AVAILABLE_FIELD),
   patch_evidence: opt(z.array(z.union([z.enum(PATCH_EVIDENCE_LABELS), z.string()]))).describe(PATCH_EVIDENCE_FIELD),
+  // #3070, #3076: what the CVE record's CNA wrote (see cnaRecordNote).
+  date_public: opt(z.string()).describe(DATE_PUBLIC_FIELD),
+  date_public_source: opt(z.string()).describe(DATE_PUBLIC_SOURCE_FIELD),
+  cna: opt(z.looseObject({ short_name: opt(z.string()), name: opt(z.string()) })).describe(CNA_FIELD),
+  cna_solution: opt(z.string()).describe(CNA_SOLUTION_FIELD),
   references: z.unknown().optional(),
   // #2720: NVD's configurations, losslessly, beside the flat list (see cpeConfigurationsNote).
   cpe_match: z.unknown().optional().describe(CPE_MATCH_DESCRIPTION),
   cpe_configurations: opt(z.array(z.unknown())).describe(CPE_CONFIGURATIONS_DESCRIPTION),
-  // #2841: a capped summary of how the CVE is fixed; cve_remediation returns the whole.
-  remediation: opt(z.looseObject({})).describe(REMEDIATION_SUMMARY_FIELD),
+  // #2841: a capped summary of how the CVE is fixed; cve_remediation returns the whole. Its first
+  // field, fix_status, is the API's fix-status rule, relayed (src/fixStatus.ts).
+  remediation: opt(z.looseObject({ fix_status: fixStatusSchema() })).describe(REMEDIATION_SUMMARY_FIELD),
   published: opt(z.string()),
   modified: opt(z.string()),
   updated_at: opt(z.string()),
@@ -2715,10 +2932,11 @@ export function createServer(): McpServer {
     {
       title: "CVE feed summary",
       description: `Summary of EchelonGraph's CVE Pulse feed: summary.total active CVEs, their counts by severity band (summary.critical, summary.high, summary.medium, summary.low), the count with no band (summary.none), and summary.last_updated, the newest modification time among those records. ${SUMMARY_NONE_DESCRIPTION} ${SUMMARY_NVD_DESCRIPTION} ${SUMMARY_REJECTED_DESCRIPTION} ${SUMMARY_POLLER_HEAD} The feed is polled from its sources on a schedule; this is the state as of that update. ${CVE_SUMMARY_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION}`,
+      inputSchema: z.object({ full: FULL_ARG }),
       outputSchema: CVE_SUMMARY_OUTPUT,
       annotations: ANNOTATIONS,
     },
-    async () => checked("cve_summary", CVE_SUMMARY_OUTPUT, await cveSummary()),
+    async (a) => checked("cve_summary", CVE_SUMMARY_OUTPUT, await answering(a.full, NO_DATA_CUT, () => cveSummary())),
   );
 
   server.registerTool(
@@ -2734,11 +2952,12 @@ export function createServer(): McpServer {
         limit: z.number().int().min(1).max(50).optional().describe("page size (default 20, max 50)"),
         // #2783: the next page, which the note names when the text leaves rows out.
         offset: z.number().int().min(0).max(10000).optional().describe("rows to skip (default 0)"),
+        full: FULL_ARG,
       }),
       outputSchema: SEARCH_CVES_OUTPUT,
       annotations: ANNOTATIONS,
     },
-    async (a) => checked("search_cves", SEARCH_CVES_OUTPUT, await searchCVEs(a)),
+    async (a) => checked("search_cves", SEARCH_CVES_OUTPUT, await answering(a.full, SEARCH_CVES_DATA, () => searchCVEs(a))),
   );
 
   server.registerTool(
@@ -2746,11 +2965,11 @@ export function createServer(): McpServer {
     {
       title: "CVE detail",
       description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity, echelongraph_score, echelongraph_severity and score_confidence, epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, kev_due_date, kev_ransomware) and, if KEV-listed, CISA's own text relayed verbatim (kev_required_action, not EchelonGraph's advice; kev_short_description; kev_notes_urls), ghsa_id, references, cpe_match (one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator; absent where none is stored, which is not a finding that no product is affected), remediation (a capped summary of its fix), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${PATCH_AVAILABLE_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
-      inputSchema: z.object({ cve_id: CVE_ID_ARG }),
+      inputSchema: z.object({ cve_id: CVE_ID_ARG, full: FULL_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,
     },
-    async ({ cve_id }) => checked("get_cve", GET_CVE_OUTPUT, await getCVE(cve_id)),
+    async ({ cve_id, full }) => checked("get_cve", GET_CVE_OUTPUT, await answering(full, GET_CVE_DATA, () => getCVE(cve_id))),
   );
 
   server.registerTool(
@@ -2758,11 +2977,11 @@ export function createServer(): McpServer {
     {
       title: "Internet exposure for one CVE",
       description: `${CVE_EXPOSURE_DESCRIPTION} Its structured result's state is not_assessed with measured_at null, since the answer dates no observation; the count is still relayed, labelled, as what the radar holds on record. exposure_state says what the count is: exposed, measured_zero, not_assessed or tracking_unknown; coverage.in_scope is the API's tracked verdict; freshness is null; data is the API's JSON. ${TEXT_BUDGET_DESCRIPTION}`,
-      inputSchema: z.object({ cve_id: CVE_ID_ARG }),
+      inputSchema: z.object({ cve_id: CVE_ID_ARG, full: FULL_ARG }),
       outputSchema: CVE_EXPOSURE_OUTPUT,
       annotations: ANNOTATIONS,
     },
-    async ({ cve_id }) => checked("cve_exposure", CVE_EXPOSURE_OUTPUT, await cveExposure(cve_id)),
+    async ({ cve_id, full }) => checked("cve_exposure", CVE_EXPOSURE_OUTPUT, await answering(full, NO_DATA_CUT, () => cveExposure(cve_id))),
   );
 
   server.registerTool(
@@ -2770,10 +2989,11 @@ export function createServer(): McpServer {
     {
       title: "Exposure radar totals",
       description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null, since no radar dates what it counts; each count is still relayed as what that radar holds on record. freshness gives each radar's last_run_at where the API serves one; coverage names the radars that answered. ${TEXT_BUDGET_DESCRIPTION}`,
+      inputSchema: z.object({ full: FULL_ARG }),
       outputSchema: EXPOSURE_RADAR_OUTPUT,
       annotations: ANNOTATIONS,
     },
-    async () => checked("exposure_radar", EXPOSURE_RADAR_OUTPUT, await exposureRadar()),
+    async (a) => checked("exposure_radar", EXPOSURE_RADAR_OUTPUT, await answering(a.full, EXPOSURE_RADAR_DATA, () => exposureRadar())),
   );
 
   registerKevRecent(server, { api, succeeded, failed, badInput, crashed, checked, envelopeSchema, okHead, annotations: ANNOTATIONS });
@@ -2800,7 +3020,8 @@ export function createServer(): McpServer {
   // #2722: prompts and resources, in prompts.ts and resources.ts. Both lists are fixed per
   // connection, so listChanged is false above.
   registerPrompts(server, { cveId: CVE_ID });
-  registerResources(server, { api, cveId: CVE_ID, shownBase: SHOWN_BASE, sentences, getCve: async (id) => checked("get_cve", GET_CVE_OUTPUT, await getCVE(id)) });
+  // #3013: cve:// cuts get_cve's data itself (DATA CUT, resources.ts), so it reads it whole.
+  registerResources(server, { api, cveId: CVE_ID, shownBase: SHOWN_BASE, sentences, getCve: async (id) => checked("get_cve", GET_CVE_OUTPUT, await answering(true, GET_CVE_DATA, () => getCVE(id))) });
 
   return server;
 }

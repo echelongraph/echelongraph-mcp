@@ -1,7 +1,8 @@
 // #2839: get_cve relays CISA's own KEV text — kev_required_action, kev_short_description and
 // kev_notes_urls — verbatim, as core-backend serves it on the record of a KEV-listed CVE, and labels
 // it as CISA's: the note says, in one sentence, that CISA's required action is directed at US federal
-// civilian agencies under BOD 22-01 and is not EchelonGraph's advice.
+// civilian agencies under BOD 26-04 (which replaced BOD 22-01 on 10 June 2026, #3084) and is not
+// EchelonGraph's advice.
 //
 // Both polarities: a KEV record carrying the text relays it and the sentence; a non-KEV record, and a
 // KEV record from an API older than the fields, carry neither. And at Log4Shell's cut level (its
@@ -19,7 +20,7 @@ import { LOG4SHELL_KEV_TEXT, SHAPED, shapedAnswers } from "./text-bound.mjs";
 const ERAS = [MODERN, "2025-06-18"];
 const KEV_FIELDS = ["kev_required_action", "kev_short_description", "kev_notes_urls"];
 const SENTENCE =
-  "kev_required_action, kev_short_description and kev_notes_urls are CISA's own text from its KEV catalog, relayed verbatim: CISA's required action is directed at US federal civilian agencies under Binding Operational Directive 22-01 and is not EchelonGraph's advice.";
+  "kev_required_action, kev_short_description and kev_notes_urls are CISA's own text from its KEV catalog, relayed verbatim: CISA's required action is directed at US federal civilian agencies under Binding Operational Directive 26-04 (which replaced BOD 22-01 on 10 June 2026) and is not EchelonGraph's advice.";
 
 const record = (id, extra = {}) => ({
   cve_id: id,
@@ -108,7 +109,7 @@ for (const era of ERAS) {
       assert.match(getCve.description, /CISA's own text relayed verbatim/);
       assert.match(getCve.description, /not EchelonGraph's advice/);
       assert.deepEqual(undescribedKEVFields(getCve.outputSchema), []);
-      assert.match(recordProps(getCve.outputSchema).kev_required_action.description, /Binding Operational Directive 22-01/);
+      assert.match(recordProps(getCve.outputSchema).kev_required_action.description, /Binding Operational Directive 26-04 \(which replaced BOD 22-01 on 10 June 2026\)/);
     });
 
     it("control: a CVERecord without the field is caught", () => {

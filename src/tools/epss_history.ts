@@ -34,7 +34,7 @@
 // passes its shared helpers in (ToolKit) and calls registerEPSSHistory once.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { TEXT_BUDGET_DESCRIPTION } from "../textBudget.js";
+import { answering, FULL_ARG, NO_DATA_CUT, TEXT_BUDGET_DESCRIPTION } from "../textBudget.js";
 
 type Text = { type: "text"; text: string };
 type Result = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
@@ -303,10 +303,12 @@ export function registerEPSSHistory<F extends { ok: false }>(server: McpServer, 
     {
       title: "EPSS change history for one CVE",
       description: EPSS_HISTORY_DESCRIPTION,
-      inputSchema: z.object({ cve_id: kit.cveIdArg }),
+      inputSchema: z.object({ cve_id: kit.cveIdArg, full: FULL_ARG }),
       outputSchema: output,
       annotations: kit.annotations,
     },
-    async ({ cve_id }) => kit.checked(TOOL, output, await epssHistory(kit, cve_id)),
+    // #3013: a few points a CVE, the API's own cap on them, 2,508 characters for CVE-2021-44228:
+    // no list is named, so only a list at the top level of data would be cut past the budget.
+    async ({ cve_id, full }) => kit.checked(TOOL, output, await answering(full, NO_DATA_CUT, () => epssHistory(kit, cve_id))),
   );
 }

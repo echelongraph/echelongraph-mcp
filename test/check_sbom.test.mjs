@@ -25,6 +25,7 @@ import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
+import { isThinOf } from "./text-bound.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => fs.readFileSync(path.join(HERE, "fixtures", name), "utf8");
@@ -151,7 +152,8 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.ok(tool, "check_sbom is not in tools/list");
       assert.ok(tool.title && tool.outputSchema && tool.inputSchema, JSON.stringify(tool).slice(0, 300));
       assert.equal(tool.annotations.readOnlyHint, true);
-      assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["purls", "sbom"]);
+      // #3013: full, which every tool takes, beside the two inputs.
+      assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["full", "purls", "sbom"]);
       assert.doesNotMatch(tool.description, REMOVED_CLAIMS);
       assert.doesNotMatch(tool.description, /\bhosts\b/i);
       assert.match(tool.description, /not_affected is the only clean verdict/);
@@ -299,9 +301,11 @@ for (const era of [MODERN, "2025-06-18"]) {
         return { ...all, summary: { ...all.summary, elapsed_ms: 412 * batches } };
       };
 
+      // #3013: these cases hold the merged answer whole, so they call with full: true; the one
+      // after the first holds what a default call's structured result keeps of it.
       it("sends 5 POSTs of at most 200, in order, and answers measured with the merged summary: components 840", async () => {
         fresh();
-        const res = await call({ sbom: CDX_840 });
+        const res = await call({ sbom: CDX_840, full: true });
         assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
         assert.deepEqual(sentPurls().map((b) => b.length), [200, 200, 200, 200, 40]);
         assert.deepEqual(sentPurls().flat(), PURLS_840);
@@ -336,10 +340,32 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.doesNotMatch(note, /NOT sent/);
       });
 
+      it("#3013: a default call's structured result is held to 30,000 characters: every row thinned first, then the clean and not-assessed rows leave data, the summary is whole, and the note says so", async () => {
+        fresh();
+        const res = await call({ sbom: CDX_840 });
+        assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+        const sc = res.structuredContent;
+        const whole = merged(PURLS_840, 5);
+        assert.ok(JSON.stringify(sc).length <= 30_000, `${JSON.stringify(sc).length} characters of structured result`);
+        assert.equal(sc.data_truncated, true);
+        assert.deepEqual(sc.truncated, { results: { total: 840, returned: sc.data.results.length, thinned: true } });
+        assert.deepEqual(sc.data.summary, whole.summary);
+        // The rows kept are the answer's, whole and in order; a clean or not-assessed row stays only
+        // once every other row has.
+        const others = whole.results.filter((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed");
+        const kept = sc.data.results;
+        for (const r of kept) assert.ok(isThinOf(r, whole.results[r.index]), `row ${r.index} is not the answer's row, thinned`);
+        assert.deepEqual(kept.map((r) => r.index), [...kept.map((r) => r.index)].sort((x, y) => x - y));
+        if (kept.length < others.length) assert.ok(kept.every((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed"), "a clean row stayed beside rows left out that are not");
+        assert.match(noteOf(res), /DATA CUT: with data whole, this structured result is \d+ characters of JSON, more than the 30000 it holds unless the call says full: true, so its data is cut: results keeps (?:all 840|\d+ of its 840) entries, each cut to index, purl, verdict, not_assessed_reason, cve_ids, matched_package, matched_via and matches/);
+        assert.match(noteOf(res), /The same call with full: true returns data whole\.$/);
+        assert.ok(validator.getValidator(tool.outputSchema)(sc).valid, "the cut structured result does not validate against the outputSchema");
+      });
+
       it("a 429 mid-way: waits the Retry-After it names, sends the same batch again, and finishes", async () => {
         fresh("ok", { 3: { ...RATE_LIMITED, headers: { "retry-after": "1" } } });
         const t0 = Date.now();
-        const res = await call({ sbom: CDX_840 });
+        const res = await call({ sbom: CDX_840, full: true });
         const took = Date.now() - t0;
         assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
         const sent = sentPurls();
@@ -358,7 +384,7 @@ for (const era of [MODERN, "2025-06-18"]) {
       it("a Retry-After past the 50 s budget: stops, answers measured but partial, and names what was not sent and why", async () => {
         fresh("ok", { 3: { ...RATE_LIMITED, headers: { "retry-after": "600" } } });
         const t0 = Date.now();
-        const res = await call({ sbom: CDX_840 });
+        const res = await call({ sbom: CDX_840, full: true });
         assert.ok(Date.now() - t0 < 10_000, "it waited instead of stopping");
         assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
         assert.equal(stub.state.requests.length, 3);
@@ -381,7 +407,7 @@ for (const era of [MODERN, "2025-06-18"]) {
         // can rebuild them from: the text keeps only the first 10 of data.not_sent_purls.
         assert.ok(
           note.includes(
-            "they are the input's distinct purls from position 401 on, counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place), and data.not_sent_purls lists them: call check_sbom again with purls set to them after a minute.",
+            "they are the input's distinct purls from position 401 on, counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place), and data.not_sent_purls lists them whole with full: true (past the structured result's budget, that list can be cut by default): call check_sbom again with purls set to them after a minute.",
           ),
           note,
         );
@@ -400,7 +426,7 @@ for (const era of [MODERN, "2025-06-18"]) {
 
       it("a batch after the first fails: partial, request_failed, quoting the failure", async () => {
         fresh("ok", { 4: { status: 503, body: { error: "advisory store unavailable" } } });
-        const res = await call({ purls: PURLS_840 });
+        const res = await call({ purls: PURLS_840, full: true });
         assert.notEqual(res.isError, true);
         assert.equal(stub.state.requests.length, 4);
         const sc = res.structuredContent;
@@ -507,7 +533,7 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.equal(got.matches[1].fixed_in, null);
       const note = noteOf(res);
       assert.match(note, /1 component was matched by the source package its purl's upstream qualifier names \(matched_via upstream, matched_package\)/);
-      assert.match(note, /Each match's fixed_in is the fixed bound of the advisory interval that holds the component's version/);
+      assert.match(note, /Each match's fixed_in is the first version above the component's that no affected interval of the advisory holds/);
       const v = validator.getValidator(tool.outputSchema)(res.structuredContent);
       assert.ok(v.valid, v.errorMessage);
       // Control: fixed_in typed as a number is refused, so the schema does describe it.

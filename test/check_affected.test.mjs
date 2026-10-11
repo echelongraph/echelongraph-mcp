@@ -127,7 +127,8 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
     assert.ok(tool.title);
     assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
     assert.equal(tool.inputSchema.type, "object");
-    assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["ecosystem", "package", "product", "version"]);
+    // #3013: full, which every tool takes, beside the two paths' arguments.
+    assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["ecosystem", "full", "package", "product", "version"]);
     assert.equal(schema.type, "object");
     // The description says what each path covers, and that undetermined is not safe.
     assert.match(tool.description, /The CPE path takes product/);
@@ -234,7 +235,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const m = res.structuredContent.data.matches;
       assert.equal(m[0].fixed_in, "2.15.0");
       assert.equal(m[1].fixed_in, null);
-      assert.match(noteOf(res), /fixed_in, the fixed bound of the advisory interval that holds this version: set on 1 of 2 matches; null on 1, where the advisory records no fix for this version \(fixed_in_reason says why\)\./);
+      assert.match(noteOf(res), /fixed_in, the first version above this one that no affected interval of the advisory holds: set on 1 of 2 matches; null on 1, where the advisory records no fix for this version \(fixed_in_reason says why\)\./);
       const v = validator.getValidator(schema)(res.structuredContent);
       assert.ok(v.valid, v.errorMessage);
       const broken = structuredClone(res.structuredContent);

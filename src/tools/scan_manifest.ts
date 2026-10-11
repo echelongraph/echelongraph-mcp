@@ -20,8 +20,8 @@
 // fixed_in_reason (#2834), relayed as sent.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
-import { sbomText, type CheckSbomDeps } from "./check_sbom.js";
+import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { sbomData, sbomText, type CheckSbomDeps } from "./check_sbom.js";
 import { FORMAT_NAMES, FORMATS, NOT_CHECKED_REASONS, detect, readFile, type Format, type NotChecked, type NotCheckedReason } from "./manifests/index.js";
 import {
   CLEAN_NOTE,
@@ -87,6 +87,10 @@ export function manifestText(sent: number): TextCut {
   };
 }
 
+// #3013: the structured result's cut, check_sbom's (sbomData: the lists beside the rows, then every
+// row thinned, then rows leaving, clean ones first) with not_checked beside not_sent_purls.
+const MANIFEST_DATA = sbomData(["not_sent_purls", "not_checked"], (k) => `To read every row in data, pass files that hold ${k} or fewer distinct purls per call.`);
+
 // ── Reading the files ──
 
 type FileIn = { filename?: unknown; content?: unknown; format?: unknown };
@@ -143,8 +147,11 @@ export function readFiles(a: { files?: unknown }): Read | string {
     out.skipped = r.skipped;
     out.notes = r.notes;
     out.replaced = r.replaced ?? [];
-    all.push(...r.pinned.map((x) => x.purl));
-    notChecked.push(...r.not_checked.map((x) => ({ file: f.filename, ...x })));
+    // One by one, never push(...list): a 5,000,000-character requirements.txt of unpinned lines
+    // is some 170,000 entries, and, spread into push() as that many arguments, they overflowed
+    // V8's stack ("Maximum call stack size exceeded", #3013's review): the call crashed.
+    for (const p of r.pinned) all.push(p.purl);
+    for (const n of r.not_checked) notChecked.push({ file: f.filename, ...n });
   }
   if (files.every((f) => !f.read)) return `no file could be read: ${files.map((f) => `${f.filename}: ${f.refused}`).join("; ")}`;
   const { purls, removed } = dedupe(all);
@@ -175,8 +182,12 @@ function noteFor(head: string, x: Read, d: object | null, g: Sending): { note: s
   const nc = x.not_checked.length;
   if (nc) {
     const parts = NOT_CHECKED_REASONS.filter((r) => by[r] > 0).map((r) => `${r} ${by[r]}`);
+    // #3013's review: the note is written before the structured result is cut, and a DATA CUT can
+    // cut data.not_checked (it goes before any row), so this says the list is whole with full:
+    // true, as the sentence on data.not_sent_purls does (match_batch.ts sendingSentences); the
+    // counts above are coverage.not_checked_by_reason's, which no cut touches.
     out.push(
-      `${plural(nc, "entry was", "entries were")} NOT checked and ${nc === 1 ? "is" : "are"} not clean (${parts.join(", ")}): data.not_checked lists each with its file, line and reason, and none was sent to the API.`,
+      `${plural(nc, "entry was", "entries were")} NOT checked and ${nc === 1 ? "is" : "are"} not clean (${parts.join(", ")}): data.not_checked lists each with its file, line and reason, whole with full: true (past the structured result's budget, that list can be cut by default), and none was sent to the API.`,
     );
   }
   out.push(...sendingSentences(g, x.purls.length, READ_ORDER, "check_sbom with purls set to"));
@@ -330,13 +341,15 @@ export function registerScanManifest<F extends FailureLike>(server: McpServer, d
           .describe(
             "1 to 20 files, up to 5,000,000 characters of content in all; read by this MCP server into purls, and only the purls are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the files are the request body",
           ),
+        full: FULL_ARG,
       }),
       outputSchema: output as z.ZodObject,
       annotations: deps.annotations,
     },
-    async (a: { files?: unknown }, ctx: { mcpReq: { signal: AbortSignal } }) => {
-      const run = scanManifest({ ...deps, signal: ctx.mcpReq.signal }, a);
-      return deps.checked(SCAN_MANIFEST, output, await (deps.hold ? deps.hold(run) : run)) as never;
-    },
+    async (a: { files?: unknown; full?: boolean }, ctx: { mcpReq: { signal: AbortSignal } }) =>
+      answering(a.full, MANIFEST_DATA, async () => {
+        const run = scanManifest({ ...deps, signal: ctx.mcpReq.signal }, a);
+        return deps.checked(SCAN_MANIFEST, output, await (deps.hold ? deps.hold(run) : run)) as never;
+      }),
   );
 }

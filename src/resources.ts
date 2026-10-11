@@ -38,7 +38,7 @@ export const METHODOLOGY = `# How EchelonGraph MCP results are measured
 
 Every tool result carries an evidence envelope in its structuredContent, and repeats it in its last text block (less what an earlier text block already carries verbatim), so a client that passes text blocks alone still sees it.
 
-A success's first text block is the API's JSON, cut to fit 30,000 characters when it is longer: the note then says what the cut leaves out and how to read it (TEXT CUT), and structuredContent's data holds the answer whole. The resource ${CVE_TEMPLATE} cuts its data the same way, and its notes say so (DATA CUT).
+A success's first text block is the API's JSON, cut to fit 30,000 characters when it is longer: the note then says what the cut leaves out and how to read it (TEXT CUT). structuredContent's data holds the answer whole unless the whole structured result would pass 30,000 characters of JSON: then, unless the call passes full: true, it is cut in an order the note states (the entries of its longest lists keep only some of their fields, then the lists only some of their entries), data_truncated is true, truncated gives each list cut, and a note starting DATA CUT says what was cut and how to read the rest. Claude Code hands the model structuredContent, not the text blocks, and sizes it against MAX_MCP_OUTPUT_TOKENS; full: true is for a program that reads data whole. The resource ${CVE_TEMPLATE} cuts its data as get_cve's first text block is cut, and then says data_truncated true, truncated naming each list it cut, and a note starting DATA CUT.
 
 ## Envelope fields
 
@@ -50,7 +50,9 @@ A success's first text block is the API's JSON, cut to fit 30,000 characters whe
 | coverage | What the answer covers, where the tool can say: for example in_scope for cve_exposure, the list's account of its own count for search_cves, assessed and not_assessed_reason first for check_affected. |
 | freshness | The producing radar's or fetcher's last completed check, where the API serves one; null where it serves none. |
 | notes | The caveats, one sentence each. |
-| data | On a success: the API's JSON (exposure_radar and cve_intel relay a labelled selection, and cve_summary leaves out a poller field of another JSON type, named in the note). |
+| data_truncated | On a success: true when data is cut to keep the structured result within 30,000 characters (DATA CUT); false when data is the answer whole. full: true returns it whole. |
+| truncated | When data_truncated is true: each list cut, by its path in data, with total, returned and, where its entries keep only some of their fields, thinned. |
+| data | On a success: the API's JSON (exposure_radar and cve_intel relay a labelled selection, and cve_summary leaves out a poller field of another JSON type, named in the note), its lists cut when data_truncated is true. |
 | error | On a failure: kind, path, status and message. |
 
 ## state
@@ -175,10 +177,21 @@ const json = (uri: string, v: unknown) => ({ contents: [{ uri, mimeType: "applic
 // pretty-printed as before; its notes leave out get_cve's sentences about its first text block and,
 // when data is cut, end with the resource's own, starting DATA CUT, which names get_cve's
 // structuredContent.data as the record whole. A record that fits is the structured result
-// pretty-printed, character for character as before.
+// pretty-printed, character for character as before. #3013: get_cve's structured data is cut too
+// past its budget unless the call says full: true, so the resource reads it with full: true
+// (index.ts) and cuts it here, as before, from the record whole.
+//
+// #3013's review: the envelope read with full: true says data_truncated false, and through the
+// review the resource copied it unchanged beside the data it had cut (cpe_match 64 of 396), so the
+// same JSON said its data was whole and cut. The envelope now says what this resource cut, as a
+// tool's DATA CUT does: data_truncated true and truncated, each list dataText cut to its first
+// entries by its path in data, with total and returned (Capped: [] marks a list inside each entry
+// of a list, whose total is the longest); a cut of strings alone names no list, so truncated is
+// then {}, and the note says how strings are cut. Where the resource cuts nothing, the envelope is
+// get_cve's: data_truncated false, no truncated.
 const CVE_RESOURCE_CUT: CutPlace = {
   opens: (chars) =>
-    `DATA CUT: the API's answer is ${chars} characters of JSON, more than the ${DATA_TEXT_BUDGET} this resource's data holds, so data here is cut, and get_cve's structuredContent.data carries the answer whole.`,
+    `DATA CUT: the API's answer is ${chars} characters of JSON, more than the ${DATA_TEXT_BUDGET} this resource's data holds, so data here is cut, and get_cve's structuredContent.data carries the answer whole with full: true.`,
 };
 export function cveResourceText(structured: Record<string, unknown>, sentences: (t: string) => string[]): string {
   const { data, ...envelope } = structured;
@@ -186,7 +199,17 @@ export function cveResourceText(structured: Record<string, unknown>, sentences: 
   const firstBlock = new Set(sentences(dataText(data).said));
   const own = dataText(data, undefined, CVE_RESOURCE_CUT);
   const notes = Array.isArray(envelope.notes) ? [...envelope.notes.filter((n) => !firstBlock.has(n)), ...sentences(own.said)] : envelope.notes;
-  const head = JSON.stringify({ ...envelope, ...(notes === undefined ? {} : { notes }) }, null, 2);
+  // own.said is empty exactly when the text is data whole (pretty, or one row a line).
+  const cut = own.said !== "";
+  // The envelope's keys in their order, notes and data_truncated replaced, truncated after it.
+  const env: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(envelope)) {
+    if (k === "truncated") continue;
+    env[k] = k === "notes" ? notes : k === "data_truncated" ? cut : v;
+    if (k === "data_truncated" && cut) env.truncated = own.capped ?? {};
+  }
+  if (cut && !Object.hasOwn(env, "data_truncated")) Object.assign(env, { data_truncated: true, truncated: own.capped ?? {} });
+  const head = JSON.stringify(env, null, 2);
   const body = own.text.replace(/\n/g, "\n  ");
   return head === "{}" ? `{\n  "data": ${body}\n}` : `${head.slice(0, -2)},\n  "data": ${body}\n}`;
 }
@@ -221,7 +244,7 @@ export function registerResources(server: McpServer, kit: ResourceKit): void {
     {
       title: "CVE record",
       description:
-        "One CVE's record as get_cve returns it, as JSON: the evidence envelope (state, measured_at, method, notes) with data, the API's record. Past 30,000 characters of JSON, data is cut as get_cve's first text block is, and a note starting DATA CUT says what the cut leaves out; get_cve's structured result holds the record whole. cve_id is a CVE ID such as CVE-2024-3400.",
+        "One CVE's record as get_cve returns it, as JSON: the evidence envelope (state, measured_at, method, notes) with data, the API's record. Past 30,000 characters of JSON, data is cut as get_cve's first text block is, data_truncated is true, truncated names each list cut, and a note starting DATA CUT says what the cut leaves out; get_cve's structured result holds the record whole with full: true. cve_id is a CVE ID such as CVE-2024-3400.",
       mimeType: "application/json",
     },
     async (uri, vars) => {

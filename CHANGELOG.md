@@ -6,6 +6,130 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.0.0 — 2026-10-11
+
+A major version (README, Versioning): the structured result is now held to 30,000 characters by
+default (the first entry below), so a program that read `structuredContent.data` whole gets it cut
+on a large answer unless it passes `full: true`. A client that hands the model the text or the
+structured result needs no change; it gets an answer where 2.7.x gave Claude Code a file path.
+
+- **`fixed_in` is never a version the same CVE still affects** (#3074). `fixed_in`, a match's in
+  check_sbom, scan_manifest and check_affected and cve_remediation's for an installed version, is
+  the first version above the installed one that no affected range of the advisory holds: the
+  fixed bound of the range holding it, moved past any overlapping range of the same record.
+  CVE-2026-4800 for lodash 4.17.15 answered `fixed_in` 4.17.21, the bound of `[0, 4.17.21)`, while
+  `[4.0.0, 4.18.0)` on the same row still holds 4.17.21; it now answers 4.18.0, and after the #3075
+  re-import the row holds only `[4.0.0, 4.18.0)`, CVE-2026-4800's own range. When the bound moved, the API's
+  `fixed_in_detail` names the ranges it moved past. The API applies the rule; the server relays
+  it. cve_intel carries no `fixed_in`: its description, its `fixed_branches` schema description
+  and its note now state the same walk for `fixed_branches` (an affected version's fix is the
+  first `fixed` above it that no range of its row holds, none past a range without one), where
+  its description had said the `fixed` of the range holding the version is its fix.
+- **A GitHub advisory's ranges go to the CVEs GitHub names for them** (#3075). Where GitHub's
+  attribution can be read (its own advisory record, then its one NVD advisory reference, then a
+  single CVE alias), a GHSA that OSV merged into a group of several CVEs no longer lends its ranges
+  to the others. A record none of these settles keeps its alias set, as before, so no CVE loses a
+  range it owns. Matches that came only from a range another CVE owned leave
+  check_sbom's, scan_manifest's and check_affected's answers.
+- `cve_remediation` carries `fix_status`, the API's fix-status rule that CVE Pulse pages show
+  (`available`, `fix_referenced`, `fix_merged`, `none_confirmed` or `unknown`, with its `basis`),
+  and get_cve's `remediation` summary carries it first. Both relay it; the server derives nothing
+  (#2841). The rule reads the CVE record's own fix statement (#3076): a fix the record's solutions
+  state is `available` with `basis` `cna_solution` and `solution_by` (the sentence, `statement`,
+  and the CNA that wrote it, `cna`); a fix `patch_evidence` counts from the record with no sentence
+  to quote is `available` with `basis` `patch_evidence_statement` and `stated_in_record`; and
+  `unread_inputs` can name `cna_record`.
+- `patch_evidence` has three more labels (#3076, #2518; core-backend): `vendor_advisory_fix` (a
+  vendor advisory listing a fix for the CVE under the vendor's own structured category: Red Hat's
+  CSAF `vendor_fix`, Microsoft's Vendor Fix), `cna_solution` (a sentence of the CVE record's
+  solutions that names a fixed version) and `description_fix` (a sentence of the CVE description
+  that does). get_cve's outputSchema names all eight.
+- get_cve relays what the CVE record's CNA wrote (#3070, #3076; core-backend): `cna_solution`, the
+  sentence of its solutions that names the fixed release, verbatim; `date_public`, when the
+  vulnerability was made public as the CNA states it (`date_public_source` `cna`), which is not the
+  record's own `published`; and `cna` (`short_name`, `name`). The note names each as the CNA's
+  where the record carries it.
+- get_cve's note gives `score_factors.bod_26_04` where the scorer wrote it (algorithm v3.4, #2880):
+  CISA BOD 26-04's remediation timeline for the CVE if the affected system is publicly exposed and
+  if it is not, with each input and its source. Its outputSchema describes
+  `echelongraph_ssvc_decision` and `score_factors`.
+- CISA's required action is attributed to BOD 26-04, which replaced BOD 22-01 on 10 June 2026
+  (#3084): get_cve's note and its `kev_required_action` description, and cve_remediation's note and
+  description.
+- `cve_remediation` takes the installed version: `ecosystem`, `package` and `version`, all three
+  or none, sent in the `X-EG-Ecosystem`, `X-EG-Package` and `X-EG-Version` request headers and
+  never in the URL. It then answers `installed` (that version's verdict against the CVE),
+  `fixed_in` and, when it is null, `fixed_in_reason`; that answer is private and `no-store`.
+  Fix tags on references match in either case (#2841, #3073).
+- The `sbom_review` prompt reads a fixed version from `fixed_in` alone, and names the source
+  package where a row matched upstream (`matched_via` upstream, `matched_package`) (#2834, #2836).
+- README, Claude Desktop: the "check that the file parses" step prints one command per OS with the
+  config path filled in (`"$HOME/Library/Application Support/…"` in Terminal,
+  `"$env:APPDATA\Claude\…"` in PowerShell). Through 2.7.2 it took a quoted `"<path to the file>"`,
+  and the macOS path pasted into it (`~/…`) is not expanded inside quotes, so a valid file answered
+  `ENOENT` (#3096).
+- README: fits npm's 64 KiB with its Privacy and License sections; the long reference moved to
+  `docs/tools.md`, `docs/exposure-radar.md`, `docs/structured-results.md` and
+  `docs/rate-limits.md`, linked from it. Every count it states is held by a test (#3012, #2922).
+
+- **Contract change: the structured result is held to 30,000 characters by default; pass
+  `full: true` for its data whole.** Claude Code hands the model `structuredContent`, not the text
+  blocks, and refuses one past `MAX_MCP_OUTPUT_TOKENS` (25,000 by default), saving it to a file:
+  `get_cve` for CVE-2021-44228 was 65,540 characters of `structuredContent` on production beside a
+  first text block of 23,759, so the model got a file path, not an answer. Through 2.7.x
+  `structuredContent.data` was always the answer whole. Now, when the whole structured result
+  (envelope, notes and data, as compact JSON) would pass 30,000 characters, its data is cut, in an
+  order each tool states. Where one row is large, every row is first thinned to some of its fields,
+  all rows kept, before any row leaves: check_sbom's and scan_manifest's rows to `index`, `purl`,
+  `verdict`, `not_assessed_reason`, `cve_ids`, `matched_package` and `matched_via`, each match to
+  `cve_id`, `kev_listed`, `ransomware`, `epss_score`, `effective_score`, `score_assessed`,
+  `fixed_in` and `fixed_in_reason`, every field the prompts read from a match (all 50 rows of the
+  Juice Shop 11.1.2 SBOM stay); check_affected's matches to their scores, flags, criteria and
+  `fixed_in`, then fewer; cve_remediation's advisories without each item's `product_ids`, then
+  without its text, the note then naming `get_vendor_advisory` as where each text is;
+  search_cves' rows to their description and scores, then the scores; the vendor-advisory tools' rows
+  without `affected_products`, then without `summary`. Then lists leave entries: get_cve's
+  `cpe_match` and `references` first; search_cves', kev_recent's, get_cwe's and the vendor-advisory
+  tools' rows from the end; check_affected's `excluded` and `undetermined` samples, then its
+  `matches`, `cve_ids` last; check_sbom's and scan_manifest's `not_sent_purls` and `not_checked`, then
+  their `results`, the `not_affected` rows leaving first, then the `not_assessed` ones, and only then
+  affected rows, from the end; cve_remediation's `vendor_remediations`, then `patches`;
+  exposure_radar's daily and weekly series, each keeping its newest entries, then its rankings,
+  then `kev_exposure.newest_kev`; then any other list at the top of data. The room left once a
+  list fits goes back to the lists emptied before it, as many of their entries as fit, their first
+  or a series' newest (scan_manifest's `not_checked` beside 64 thinned rows). No string is shortened and no value changes (a thinned row keeps
+  some of its fields, each optional in the outputSchema), so data still validates against the
+  outputSchema. Every success now carries `data_truncated` (false when data is whole), and, when it
+  is true, `truncated`: each list cut, by its path in data, with `total`, `returned` and, where its
+  entries are thinned, `thinned: true`; the note ends with sentences starting `DATA CUT` that say what
+  was cut and to which fields, how to read the rest (the offset, limit or page size, where the tool
+  pages; a page size said to fit data whole is counted on the rows whole) and that the same call
+  with `full: true` returns data whole. Every tool takes `full`
+  (boolean, optional). **A program that relied on data whole must pass `full: true`.** The first
+  text block is cut from the whole answer exactly as before (TEXT CUT); beside a cut data its TEXT CUT
+  sentence says the answer is whole in `structuredContent.data` with `full: true`, and so does each
+  sentence that points to another tool's data (#3013).
+- check_sbom's and scan_manifest's first text block keeps each match's `fixed_in_reason` beside
+  `fixed_in` at every cut level that keeps matches. Their note, and the `sbom_review` and
+  `workload_triage` prompts, say `data.not_sent_purls` lists the purls not sent whole with
+  `full: true`, since a DATA CUT can cut that list; the position the note gives still rebuilds it.
+  scan_manifest's note says the same of `data.not_checked` (#3013).
+- The `triage_cve` and `sbom_review` prompts read a vendor's workaround or mitigation step from
+  `get_vendor_advisory` where cve_remediation's note says its data or text leaves that item's text
+  out or shortens it (#3013).
+- scan_manifest answers a file of very many entries: it read each file's entries into its lists as
+  the arguments of one call, and a `requirements.txt` of some 170,000 unpinned lines (4.9 million
+  characters) failed with "Maximum call stack size exceeded" (#3013).
+- The `cve://` resource reads get_cve's record whole (`full: true`) and cuts it as before; its
+  DATA CUT note says get_cve's `structuredContent.data` is whole with `full: true`, and, where it
+  cuts, its envelope says `data_truncated: true` with `truncated` naming each list it cut (#3013).
+- README: Claude Code's setup names `MAX_MCP_OUTPUT_TOKENS`; "Long answers" says which part of a
+  result each kind of client reads and how each is cut; the Structured results table gains
+  `data_truncated` and `truncated` (#3013).
+- `test/text-bound.mjs` records each production-shaped case's structured size beside its text
+  size, `text-bound-live.mjs` measures and records it, and the suite fails when any default answer's
+  structured result is past the budget (#3013).
+
 ## 2.7.2 — 2026-10-11
 
 - exposure_radar flags every radar whose last completed check is past its threshold, not only the

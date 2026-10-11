@@ -103,7 +103,7 @@ export const REQUIRED_IN_HEAD: Readonly<Record<string, readonly string[]>> = {
   cve_remediation: [
     "Every text is relayed as stated by its source; EchelonGraph has not tested it.",
     "An empty list or a remediation_state of none_in_source or not_parsed is not a finding that no fix exists.",
-    "CISA's required_action is directed at US federal civilian agencies (BOD 22-01) and is not EchelonGraph's advice.",
+    "CISA's required_action is directed at US federal civilian agencies (under BOD 26-04, which replaced BOD 22-01 on 10 June 2026) and is not EchelonGraph's advice.",
   ],
   cve_intel: [
     "An empty exploits list is not evidence that no public exploit exists",

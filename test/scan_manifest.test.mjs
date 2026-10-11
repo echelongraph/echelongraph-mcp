@@ -153,6 +153,29 @@ describe("#2835 requirements.txt", () => {
   });
 });
 
+// #3013's review: readFiles spread each file's entries into push() as arguments, and a
+// 4.9-million-character requirements.txt of unpinned lines (some 173,000 entries) passed V8's stack:
+// "Maximum call stack size exceeded", and the call crashed. 200,000 entries, unpinned and pinned,
+// each through the same path at about a quarter of the size; on the code before the fix both throw.
+describe("#3013's review: readFiles takes 200,000 entries of one file without spreading them as arguments", () => {
+  const many = (line) => `${Array.from({ length: 200_000 }, (_, i) => line(i)).join("\n")}\n`;
+  it("200,000 unpinned lines: every one in not_checked, none thrown", () => {
+    const content = many((i) => `p${i}`);
+    assert.ok(content.length < SM.MAX_MANIFEST_CHARS);
+    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content }] });
+    assert.equal(typeof r, "object", r);
+    assert.equal(r.not_checked.length, 200_000);
+    assert.deepEqual(r.not_checked[199_999], { file: "requirements.txt", ...M.readFile("requirements.txt", "p199999\n").not_checked[0], line: 200_000 });
+    assert.deepEqual(r.purls, []);
+  });
+  it("200,000 pinned lines: every purl read, none thrown (the call then refuses more than 2,000, as it says)", () => {
+    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content: many((i) => `p${i}==1.0`) }] });
+    assert.equal(typeof r, "object", r);
+    assert.equal(r.purls.length, 200_000);
+    assert.equal(r.purls[199_999], "pkg:pypi/p199999@1.0");
+  });
+});
+
 describe("#2835 Cargo.lock", () => {
   const v3 = read("Cargo.lock", fixture("Cargo.v3.lock"));
   const v4 = read("Cargo.lock", fixture("Cargo.v4.lock"));
@@ -432,17 +455,39 @@ for (const era of [MODERN, "2025-06-18"]) {
       // 1,400 distinct purls: seven batches; the second is refused with a wait past the budget.
       fresh({ 2: { status: 429, headers: { "retry-after": "60" }, body: { error: "component budget exceeded" } } });
       const content = Array.from({ length: 1400 }, (_, i) => `pkg${i}==1.0.${i}`).join("\n");
-      const res = await call({ files: [{ filename: "requirements.txt", content }] });
+      // full: true (#3013): data.not_sent_purls whole; by default the structured result cuts it first.
+      const res = await call({ files: [{ filename: "requirements.txt", content }], full: true });
       const sc = res.structuredContent;
       assert.deepEqual([sc.coverage.sent, sc.coverage.not_sent, sc.coverage.not_sent_reason, sc.coverage.partial], [200, 1200, "time_budget", true]);
       assert.equal(sc.data.not_sent_purls[0], "pkg:pypi/pkg200@1.0.200");
-      assert.match(noteOf(res), /1200 purls were NOT sent .* from position 201 on, counted in the order this tool read them \(the files in the order given, each file's entries in the order the file lists them, each purl at its first place\), and data\.not_sent_purls lists them: call check_sbom with purls set to them after a minute\./);
+      assert.match(noteOf(res), /1200 purls were NOT sent .* from position 201 on, counted in the order this tool read them \(the files in the order given, each file's entries in the order the file lists them, each purl at its first place\), and data\.not_sent_purls lists them whole with full: true \(past the structured result's budget, that list can be cut by default\): call check_sbom with purls set to them after a minute\./);
+    });
+
+    // #3013's review: the note said "data.not_checked lists each with its file, line and reason"
+    // while a DATA CUT had cut that list. It now says the list is whole with full: true, and can be
+    // cut by default, which holds both ways: 2,000 ranged lines, past the structured result's budget.
+    it("#3013's review: the note's not_checked sentence holds whether or not a DATA CUT cuts data.not_checked", async () => {
+      const SAID = /2000 entries were NOT checked and are not clean \(version_unpinned 2000\): data\.not_checked lists each with its file, line and reason, whole with full: true \(past the structured result's budget, that list can be cut by default\), and none was sent to the API\./;
+      const files = [{ filename: "requirements.txt", content: Array.from({ length: 2000 }, (_, i) => `ranged-package-${i}>=1.0,<2.0`).join("\n") }];
+      fresh();
+      const cut = await call({ files });
+      fresh();
+      const whole = await call({ files, full: true });
+      for (const res of [cut, whole]) assert.match(noteOf(res), SAID);
+      // By default the list is cut, and the DATA CUT says so; with full: true it is whole.
+      assert.equal(cut.structuredContent.data_truncated, true);
+      assert.ok(cut.structuredContent.truncated.not_checked.returned < 2000, JSON.stringify(cut.structuredContent.truncated));
+      assert.match(noteOf(cut), /DATA CUT: .*not_checked keeps (?:none of its 2000 entries|its first \d+ of 2000 entries)/);
+      assert.equal(whole.structuredContent.data_truncated, false);
+      assert.equal(whole.structuredContent.data.not_checked.length, 2000);
+      assert.equal(cut.structuredContent.coverage.not_checked, 2000, "coverage counts every entry not checked whatever the cut");
     });
 
     it("a long answer's text keeps not_checked's first 20 and says where the rest are", async () => {
       fresh();
       const lines = [...Array.from({ length: 300 }, (_, i) => `pinned-${i}==1.0.0`), ...Array.from({ length: 60 }, (_, i) => `ranged-${i}>=1`)];
-      const res = await call({ files: [{ filename: "requirements.txt", content: lines.join("\n") }] });
+      // full: true (#3013): the text is the same either way, and data holds all 60 entries.
+      const res = await call({ files: [{ filename: "requirements.txt", content: lines.join("\n") }], full: true });
       const shown = JSON.parse(textBlocks(res)[0]);
       assert.equal(res.structuredContent.data.not_checked.length, 60);
       assert.equal(shown.not_checked.length, 20);

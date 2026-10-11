@@ -18,7 +18,7 @@
 // rpm purl without a distro release is not assessed.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type RowKeep, type TextCut } from "../textBudget.js";
 import {
   CLEAN_NOTE,
   DISTRO_NOTE,
@@ -93,7 +93,7 @@ export const CHECK_SBOM_ROUTING =
 export const CHECK_SBOM_DESCRIPTION =
   "Check a dependency list against EchelonGraph's advisory corpus, one verdict per component. " +
   CHECK_SBOM_ROUTING +
-  " Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX or SPDX JSON document, up to 5,000,000 characters). This server reads the purls from the document; only they are sent to the API, in POST bodies of at most 200, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. data.results holds one row per component sent, in order, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids, matched_package and matched_via (a deb or apk purl's upstream qualifier matches as its source package); each match carries fixed_in (its interval's fixed bound) or null with fixed_in_reason. data.summary counts the verdicts. not_affected is the only clean verdict: not_assessed (no verdict, as for a deb, apk or rpm purl without a distro qualifier naming its release, which EchelonGraph does not guess) and undetermined are not, and the note counts both. The API allows 1,200 components a minute per caller; on a 429 the tool waits out Retry-After, up to 50 seconds a call, then answers what it has, the rest in data.not_sent_purls, unchecked and not clean. Input with more than 2,000 distinct purls is refused, not truncated." +
+  " Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX or SPDX JSON document, up to 5,000,000 characters). This server reads the purls from the document; only they are sent to the API, in POST bodies of at most 200, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. data.results holds one row per component sent, in order, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids, matched_package and matched_via (a deb or apk purl's upstream qualifier matches as its source package); each match carries fixed_in (the next unaffected version) or null with fixed_in_reason. data.summary counts the verdicts. not_affected is the only clean verdict: not_assessed (no verdict, as for a deb, apk or rpm purl without a distro qualifier naming its release, which EchelonGraph does not guess) and undetermined are not, and the note counts both. The API allows 1,200 components a minute per caller; on a 429 the tool waits out Retry-After, up to 50 seconds a call, then answers what it has, the rest in data.not_sent_purls, unchecked and not clean. Input with more than 2,000 distinct purls is refused, not truncated." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
   " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least, each match its fixed_in while kept; not_affected rows leave the text first, then not_assessed ones; not_sent_purls keeps its first 10.";
@@ -103,7 +103,7 @@ export const CHECK_SBOM_DESCRIPTION =
 // text, and 2,000 purls about 1,200,000. Past DATA_TEXT_BUDGET each row in the first text block
 // keeps its verdict, counts, cve_ids, matched_package and matched_via (#2836), and each match its
 // scores, flags, fixed_in (#2834) and match_reason (the
-// advisory interval the version falls inside: "[A, B)" names the fixed version B, "[A, B]" the last
+// advisory interval the version falls inside: "[A, B)" names that interval's fixed bound B, "[A, B]" the last
 // affected one, #2830) without the
 // description; then the same without match_reason; then only index, purl, verdict,
 // not_assessed_reason and cve_ids. When rows must still go, the clean ones (not_affected) leave
@@ -118,7 +118,7 @@ export const CHECK_SBOM_DESCRIPTION =
 // reading the list. noteFor gives that order (READ_ORDER) beside the position, so this sentence
 // points to it.
 export function sbomText(sent: number): TextCut {
-  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed", "fixed_in"];
+  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed", "fixed_in", "fixed_in_reason"];
   const row = [
     "index", "purl", "ecosystem", "package", "version", "verdict", "assessed", "not_assessed_reason", "count", "not_affected_count", "undetermined_count", "cve_ids", "matched_package", "matched_via",
   ];
@@ -139,12 +139,51 @@ export function sbomText(sent: number): TextCut {
     ],
     leaveOutFirst: { field: "verdict", values: ["not_affected", "not_assessed"], why: "data.summary counts every verdict" },
     // check_affected cuts its text too past the budget (#2802): only its structuredContent.data is
-    // a component's matches whole.
+    // a component's matches whole, with full: true (#3013).
     whole:
-      "check_affected, given a row's ecosystem, package and version, returns that component's matches, whole in its structuredContent.data, and cve_intel a CVE's affected packages and fixed versions.",
+      "check_affected, given a row's ecosystem, package and version, returns that component's matches, whole in its structuredContent.data with full: true, and cve_intel a CVE's affected packages and fixed versions.",
     page: (shown) => `To read every row in the text, check ${shown} or fewer purls per call.`,
   };
 }
+
+// #3013: the structured result's cut. A production row is about 1,900 characters of compact JSON
+// (its matches, each a CVE with its description), so the 50-component Juice Shop document was 98,682
+// characters of structured result and 2,000 purls 3,790,686. The lists beside the rows go first
+// (not_sent_purls: the note says from which position of the input they run, and in what order; and,
+// for scan_manifest, not_checked, which coverage.not_checked_by_reason counts). Then, before any
+// row leaves, every row is thinned to SBOM_ROW_THIN: what a row says of the component and its
+// verdict, and per match what a triage reads (a match's description, about 535 characters, is
+// get_cve's); the first #3013 cut, before release, kept 3 of Juice Shop's 50 rows whole, all affected, and named the
+// other 7 affected components nowhere a client reading structuredContent sees. Only then do rows
+// leave, as in the text: the not_affected rows first, then the not_assessed ones (data.summary
+// counts every verdict), then the last of the rest, so the affected and undetermined rows are the
+// last to go.
+// #3013's review: a thinned match kept cve_id, kev_listed, epss_score, fixed_in and
+// fixed_in_reason, while the workload_triage prompt reads kev_listed, ransomware, epss_score,
+// effective_score, score_assessed and fixed_in from a row's matches (its step 5 and ordering keys),
+// so a client reading structuredContent lost ransomware and the score it ranks by. Each field a
+// prompt reads from check_sbom's or scan_manifest's matches is kept (test/prompt-fields.test.mjs
+// holds every prompt's to this list).
+export const SBOM_ROW_THIN: RowKeep = [
+  "index",
+  "purl",
+  "verdict",
+  "not_assessed_reason",
+  "cve_ids",
+  "matched_package",
+  "matched_via",
+  ["matches", ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason"]],
+];
+export function sbomData(sides: readonly string[], page: (kept: number) => string): DataCut {
+  return {
+    steps: [
+      { lists: sides },
+      { lists: ["results"], thin: [SBOM_ROW_THIN], leaveOutFirst: { field: "verdict", values: ["not_affected", "not_assessed"], why: "data.summary counts every verdict" } },
+    ],
+    page: (t) => (t.results && t.results.returned < t.results.total ? page(t.results.returned) : ""),
+  };
+}
+const SBOM_DATA = sbomData(["not_sent_purls"], (k) => `To read every row in data, check ${k} or fewer purls per call.`);
 
 // ── Reading the input ──
 
@@ -339,13 +378,15 @@ export function registerCheckSbom<F extends FailureLike>(server: McpServer, deps
           .describe(
             "a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read by this MCP server and only they are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the document is the request body",
           ),
+        full: FULL_ARG,
       }),
       outputSchema: output as z.ZodObject,
       annotations: deps.annotations,
     },
-    async (a: { purls?: string[]; sbom?: unknown }, ctx: { mcpReq: { signal: AbortSignal } }) => {
-      const run = checkSbom({ ...deps, signal: ctx.mcpReq.signal }, a);
-      return deps.checked(CHECK_SBOM, output, await (deps.hold ? deps.hold(run) : run)) as never;
-    },
+    async (a: { purls?: string[]; sbom?: unknown; full?: boolean }, ctx: { mcpReq: { signal: AbortSignal } }) =>
+      answering(a.full, SBOM_DATA, async () => {
+        const run = checkSbom({ ...deps, signal: ctx.mcpReq.signal }, a);
+        return deps.checked(CHECK_SBOM, output, await (deps.hold ? deps.hold(run) : run)) as never;
+      }),
   );
 }

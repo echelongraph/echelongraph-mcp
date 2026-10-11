@@ -17,9 +17,9 @@ it was measured (`state`, `measured_at`, `method`, `coverage`, `freshness`, `not
 cannot mistake an outage or an unassessed lookup for an all-clear.
 
 It also serves five prompts, ready-made workflows a client can show as slash commands
-(`triage_cve`, `kev_weekly_brief`, `am_i_affected`, `sbom_review`, `workload_triage`; see "Prompts"), and three
-resources (`echelongraph://methodology`, `echelongraph://sources` and `cve://{cve_id}`; see
-"Resources").
+(`triage_cve`, `kev_weekly_brief`, `am_i_affected`, `sbom_review`, `workload_triage`; see "Prompts"), two resources
+(`echelongraph://methodology` and `echelongraph://sources`) and one resource template
+(`cve://{cve_id}`; see "Resources").
 
 Free and keyless: no API key, no auth, read-only. The server makes no request other than the
 API call a tool needs to answer.
@@ -90,9 +90,20 @@ are claude.ai's (see "Remote (no install)" below).
    }
    ```
 
-   To check that the file parses, run
-   `node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "<path to the file>"`:
-   no output means valid JSON.
+   To check that the file parses, run this in Terminal (macOS):
+
+   ```sh
+   node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+   ```
+
+   or this in PowerShell (Windows):
+
+   ```powershell
+   node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$env:APPDATA\Claude\claude_desktop_config.json"
+   ```
+
+   No output means valid JSON. A `SyntaxError` means the file is broken (often curly quotes or a
+   missing comma); `ENOENT` means there is no file at that path yet.
 4. **Quit fully, then reopen.** Closing the window leaves the old config loaded. On macOS choose
    Claude → Quit Claude (⌘Q); on Windows right-click the Claude icon in the system tray and choose
    Quit. The first start can take longer while `npx` downloads the package.
@@ -136,7 +147,10 @@ claude mcp add --transport stdio echelongraph -- npx -y echelongraph-mcp
 ```
 
 Add `--scope user` before the `--` to make it available in every project, or `--scope project`
-to share it through the project's `.mcp.json`.
+to share it through the project's `.mcp.json`. Claude Code hands the model each result's
+`structuredContent`, which this server holds to 30,000 characters unless a call passes `full: true`
+(see "Long answers"); `MAX_MCP_OUTPUT_TOKENS` (25,000 tokens by default) is the cap Claude Code
+applies to a tool's output, and raising it lets a `full: true` answer through.
 
 ### Cursor
 
@@ -181,7 +195,8 @@ and most others) take the same block as Cursor above.
 
 ### Remote (no install)
 
-The same 16 tools, five prompts and three resources are served over Streamable HTTP at:
+The same 16 tools, five prompts, two resources and one resource template are served over
+Streamable HTTP at:
 
 ```text
 https://mcp.echelongraph.io/mcp
@@ -232,16 +247,16 @@ The example questions are ones a client can answer with that tool alone.
 |---|---|---|---|
 | `cve_summary` | CVE feed summary | Counts of active CVEs by severity band, the count with no severity band from any source (`summary.none`, sent again as `summary.unscored`: CVEs not yet scored, not a rating of None), the same CVEs counted by NVD's severity label, as provenance (`summary.nvd_critical` to `summary.nvd_none`), the rejected (withdrawn) records outside the total (`summary.rejected`), and when the feed was last updated. | *How many critical CVEs does the feed hold, and when was it last updated?* |
 | `search_cves` | Search CVEs | Search/filter CVEs (severity, min CVSS, text, sort) with EchelonGraph scores and `score_assessed`; page with `limit` and `offset`; the note names each row not yet scored. | *Find critical CVEs that mention Tomcat with a CVSS of 9 or more.* |
-| `get_cve` | CVE detail | One CVE's record: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use, the GitHub GHSA id, references, and its published, modified and `updated_at` times. | *What are CVE-2024-3094's CVSS, EPSS and CISA-KEV status?* |
+| `get_cve` | CVE detail | One CVE's record: CVSS v3 and (when scored) v4, the EchelonGraph score and its confidence, whether EchelonGraph has scored it (`score_assessed`), EPSS, CISA-KEV status and known ransomware use and, for a KEV-listed CVE, CISA's own text relayed verbatim (`kev_required_action`, the action CISA requires of US federal civilian agencies, not EchelonGraph's advice; `kev_short_description`; `kev_notes_urls`), the GitHub GHSA id, references, and its published, modified and `updated_at` times. | *What are CVE-2024-3094's CVSS, EPSS and CISA-KEV status?* |
 | `cve_exposure` | Internet exposure for one CVE | Internet-exposure footprint for a CVE: exposed service count (distinct ip:port, the `exposed_hosts` field) + country/product breakdown, from the KEV-exposure radar. | *How many exposed services does EchelonGraph's radar have on record for CVE-2023-44487?* |
 | `exposure_radar` | Exposure radar totals | Aggregate totals across the exposure radars: services running CISA-KEV CVEs; unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check, which is not a pure read (on Redis it names its client; on ClickHouse its query lands in the server's query log); leaked credentials; shadow AI; and MCP servers found in EchelonGraph's own Certificate Transparency feed, by RFC 9728 verdict, protocol era and transport. Every number is labelled by what it counts, and a field the tool cannot label is left out and named. | *How many unauthenticated data stores has EchelonGraph's radar confirmed?* |
 | `kev_recent` | Recent CISA KEV additions | The CVEs CISA has added to its Known Exploited Vulnerabilities catalog, newest first (`kev_added_date`), from EchelonGraph's copy of the catalog, polled from CISA every 5 minutes: due date, vendor, product, known ransomware use, EchelonGraph's severity, CVSS, EPSS and `eg_kev_tier`, and `our_first_seen_kev`. Filter by date range, ransomware and vendor; page with `limit` and `next_cursor`. Dated by `last_successful_fetch_at`, our last successful fetch of CISA's feed; the filters travel as request headers, never in the URL. | *Which CVEs has CISA added to KEV since 1 September, and which have known ransomware use?* |
 | `epss_history` | EPSS change history for one CVE | How one CVE's EPSS score has changed, as EchelonGraph recorded it: one point per recorded change (`series_kind` `change_only`), never a daily series, with the value now; `complete_since`, from when every change is a point (before it the record misses changes, so a missing point there does not mean unchanged, and the series is never called complete); `coverage`, which FIRST score dates the record holds and which it misses (`days_missing`, `days_partial`); and `series_starts_at`, when recording began; before it a missing point means not recorded, not unchanged. | *How has CVE-2023-44487's EPSS score changed, as EchelonGraph recorded it?* |
-| `check_affected` | Am I affected? (product or package at a version) | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed`, and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. | *Is openssl 3.0.0 affected by known CVEs? Is lodash 4.17.15 on npm?* |
-| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Pass up to 2,000 distinct purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it by the MCP server and only they are sent to the API, in POST bodies of at most 200 each, one after another; the document itself is not sent on. Run from npm, the server is on your machine; over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the document is the request body. When the API's per-component rate limit answers 429, the tool waits the `Retry-After` it names, within 50 seconds per call; past that it answers what it has, with the purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and the list in `data.not_sent_purls`, never dropped silently. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
+| `check_affected` | Am I affected? (product or package at a version) | Whether a product (its NVD CPE product token) or a registry package (`ecosystem` and `package`) at a given version is affected by known CVEs, from the matcher behind echelongraph.io/am-i-affected: `assessed` first (false: not evaluated, with `not_assessed_reason`, and a count of 0 then is not "not affected"), the matching CVEs with `kev_listed`, `ransomware`, `epss_score`, `effective_score` and `score_assessed` (a registry match also `fixed_in`, the lowest version above it that no affected interval of the record holds, with `fixed_in_detail` when it moved past an overlapping interval, or null with `fixed_in_reason`, which is not a finding that no fix exists), and advisories it cannot decide counted as `undetermined_count`, never as safe. What you look up travels in request headers, never in the URL. | *Is openssl 3.0.0 affected by known CVEs? Is lodash 4.17.15 on npm?* |
+| `check_sbom` | Check an SBOM against the advisory corpus | A dependency list checked against EchelonGraph's advisory corpus (OSV.dev records), one verdict per component: `affected`, `not_affected`, `undetermined` or `not_assessed`, each with its `not_assessed_reason`. Each row names the package its advisories were looked up by (`matched_package`) and how (`matched_via`: `upstream` where a deb, apk or alpine purl's upstream qualifier names the source package, which is how Debian and Alpine file advisories, else `purl_name`), and each match carries `fixed_in`, the lowest version above the component's that no affected interval of the record holds (`fixed_in_detail` names any overlapping interval it moved past), or null with `fixed_in_reason`. Pass up to 2,000 distinct purls, or a CycloneDX JSON or SPDX JSON document: the purls are read from it by the MCP server and only they are sent to the API, in POST bodies of at most 200 each, one after another; the document itself is not sent on. Run from npm, the server is on your machine; over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the document is the request body. When the API's per-component rate limit answers 429, the tool waits the `Retry-After` it names, within 50 seconds per call; past that it answers what it has, with the purls not sent counted in `coverage.not_sent`, the reason in `coverage.not_sent_reason`, and the list in `data.not_sent_purls` (whole with `full: true`; a `DATA CUT` can cut it), never dropped silently. A deb, apk or rpm purl without a `distro` qualifier naming its release is not assessed (`distro_release_unknown`): EchelonGraph does not guess a release. Only `not_affected` is clean. No ranking, no score. | *Check this CycloneDX SBOM against the advisory corpus.* |
 | `scan_manifest` | Check a lockfile against the advisory corpus | A project's lockfiles or pinned manifests checked against the same advisory corpus, one verdict per dependency, through the same batch route, batches, 50-second budget and `Retry-After` waits as `check_sbom`. Pass `files`, 1 to 20 of `filename` and `content` (the file's text), up to 5,000,000 characters in all; the format is read from the filename, or set by `format`. Read: `requirements.txt` (only `==` and `===` pins; extras and markers stripped), `go.mod` (`require`, single-line and block, `// indirect` included, with `replace` and `exclude` applied), `package-lock.json` and `npm-shrinkwrap.json` (lockfileVersion 1 to 3), `Cargo.lock`, `Gemfile.lock` (platform suffixes stripped), `composer.lock` (a leading `v` stripped), `poetry.lock` and `gradle.lockfile`. `package.json`, `pyproject.toml`, `Pipfile`, `Gemfile`, `Cargo.toml`, `composer.json` and `build.gradle` hold ranges and are refused, each naming the lockfile to pass; `go.sum` is refused, as it lists module versions the build does not select; `pom.xml`, `yarn.lock` and `pnpm-lock.yaml` are not read yet. The MCP server reads the files into purls and only the purls are sent to the API; filenames and file contents are not sent on. Run from npm, the server is on your machine; over the hosted endpoint (`mcp.echelongraph.io`) it is EchelonGraph's, and the files are the request body. `data.results` holds one row per distinct purl, as `check_sbom`'s do, each match with `kev_listed`, `epss_score` and `fixed_in`. Every entry not sent is in `data.not_checked`, with its file, line and `reason`: `version_unpinned` (a range, such as `django>=4`, whose bound is never sent as a version), `version_unresolved`, `local_path`, `vcs_source` or `unsupported_line`, counted in `coverage.not_checked_by_reason`; they are not clean. A file that holds no version this tool can check answers `not_assessed` without calling the API. Only `not_affected` is clean. No ranking, no score. | *Check this package-lock.json against the advisory corpus.* |
-| `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. Each `affected_packages` row carries `fixed_branches`, every affected range of the package with its fix (`introduced`, and `fixed` or, where no fix is on record, `last_affected`), each naming the OSV record that published it (`advisory_id`, `source`) and in that record's order: an installed version's fix is the `fixed` of the range that holds it, compared in the ecosystem's version order. `fixed_version` is one range's fix, kept for compatibility, not the fix for every range (CVE-2021-44228's log4j-core: 2.12.2, the fix for 2.4 to 2.12.1, while 2.14.1's range is fixed in 2.15.0); `fixed_branches` is null where a package's ranges were never loaded, and `[]` where no version range is on record, which is not a finding that no fix exists. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
-| `cve_remediation` | How one CVE is fixed | How one CVE is fixed, as its sources state it, in one answer; every text is relayed as its source states it, untested by EchelonGraph: `cisa` (for a KEV-listed CVE, CISA's `required_action`, `due_date`, `short_description` and `notes_urls`, verbatim; CISA directs the action at US federal civilian agencies, and it is not EchelonGraph's advice), `fixed_branches` (each affected package with every affected range and its fix), `vendor_remediations` (each vendor advisory naming the CVE, at most 20, with its `remediation_state` and the items it lists for the CVE, each with `kind`, the vendor's own category: `vendor_fix`, `workaround`, `mitigation`, `no_fix_planned`, `none_available` or `other`), `fix_references` (references NVD tagged Patch or Mitigation), `patches`, `coverage` and `failed_sections`. `remediation_state` `none_in_source` or `not_parsed`, and an empty list, are not a finding that no fix exists. A REJECTED CVE answers `not_assessed`. | *How is CVE-2021-44228 fixed, as its sources state it?* |
+| `cve_intel` | CVE weakness, exploits and packages | Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment: `cwes`, `exploits` (at most 10, verified first) with `exploits_total`, `exploits_capped`, `exploits_by_kind` and `exploits_by_status`, `affected_packages`, `fixed_versions` and `timeline`. Each `affected_packages` row carries `fixed_branches`, every affected range of the package with its fix (`introduced`, and `fixed` or, where no fix is on record, `last_affected`), each naming the OSV record that published it (`advisory_id`, `source`) and in that record's order: an installed version's fix is the first `fixed` above it that no range of its row holds (the `fixed` of the range that holds it, moved past any range that still holds that version; none past a range without `fixed`), compared in the ecosystem's version order. `fixed_version` is one range's fix, kept for compatibility, not the fix for every range (CVE-2021-44228's log4j-core: 2.12.2, the fix for 2.4 to 2.12.1, while 2.14.1's range is fixed in 2.15.0); `fixed_branches` is null where a package's ranges were never loaded, and `[]` where no version range is on record, which is not a finding that no fix exists. `verified_status` is the label stored with each reference, not a guarantee that the exploit works. An empty `exploits` list is not evidence that no public exploit exists; a section the API could not read is named in `coverage.sections_failed`, never relayed as an empty list. | *Is there public exploit code for CVE-2021-44228, and which versions fix it?* |
+| `cve_remediation` | How one CVE is fixed | How one CVE is fixed, as its sources state it, in one answer; every text is relayed as its source states it, untested by EchelonGraph: `cisa` (for a KEV-listed CVE, CISA's `required_action`, `due_date`, `short_description` and `notes_urls`, verbatim; CISA directs the action at US federal civilian agencies, and it is not EchelonGraph's advice), `fixed_branches` (each affected package with every affected range and its fix), `vendor_remediations` (each vendor advisory naming the CVE, at most 20, with its `remediation_state` and the items it lists for the CVE, each with `kind`, the vendor's own category: `vendor_fix`, `workaround`, `mitigation`, `no_fix_planned`, `none_available` or `other`), `fix_references` (references NVD or the CNA tagged Patch or Mitigation), `patches`, `coverage` and `failed_sections`, with `fix_status`, the API's fix-status rule that CVE Pulse pages show. Given the installed `ecosystem`, `package` and `version` (all three or none), it also answers `installed` (that version's verdict) and `fixed_in`: the first version above it that no affected range on record holds, or null with `fixed_in_reason`. `remediation_state` `none_in_source` or `not_parsed`, and an empty list, are not a finding that no fix exists. A REJECTED CVE answers `not_assessed`. | *How is CVE-2021-44228 fixed, as its sources state it?* |
 | `get_cwe` | CWE and its CVEs | One CWE (weakness class) and the CVEs classified under it: `name` and `description` from the MITRE CWE catalog EchelonGraph embeds, `total`, and one page of 50 `cves`, ordered as `order` states (CISA-KEV-listed first, then EchelonGraph score). A `total` of 0 says that no CVE in EchelonGraph's feed is classified under that CWE, not that none exists. | *Which CVEs are classified under CWE-79, CISA-KEV-listed first?* |
 | `vendor_advisories_for_cve` | Vendor advisories for one CVE | The vendor-published advisories (Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks, GitHub GHSA and the other feeds EchelonGraph polls) that name one CVE, newest first, at most 20, each with `remediation_kinds` and `remediation_state` (`not_parsed`: EchelonGraph does not read that vendor's remediation, which is not a finding of none). | *Which vendor advisories name CVE-2024-3400?* |
 | `get_vendor_advisory` | Vendor advisory detail | One vendor advisory in full: description, severity, `cve_ids` and the subset with a CVE record here (`known_cve_ids`), `affected_products`, `remediation` and `references`, and `remediations`, each remediation the vendor lists with its `kind` (the vendor's own category), verbatim text and URL, with `remediation_state`. | *Show one of those advisories in full: affected products, remediation and references.* |
@@ -268,318 +283,28 @@ sources on a schedule. Each radar has its own schedule and refreshes only while 
 `exposure_radar`'s `freshness` gives each radar's last completed check (`last_run_at`) where the
 API serves one.
 
-### How `cve_summary` reads its counts
+### How each tool reads its answer
 
-`summary.critical`, `summary.high`, `summary.medium` and `summary.low` count the active CVEs by
-severity band, and `summary.total` counts them all. `summary.none` counts the active CVEs with no
-severity band from any source: CVEs not yet scored, not CVEs rated None. The answer sends the same
-count again as `summary.unscored`.
+What each tool relays, field by field, and what each number counts, is in the pages below, which
+ship in the package's `docs/` folder:
 
-`summary.nvd_critical`, `summary.nvd_high`, `summary.nvd_medium`, `summary.nvd_low` and
-`summary.nvd_none` count the same active CVEs a second time, by NVD's CVSS severity label (v3.x,
-else v4.0). Before NVD's record arrives, or where it gives none, a pre-NVD label from the CVE.org
-record or a GitHub advisory can stand in. They are provenance, never EchelonGraph's severity band. `summary.nvd_none` counts the active CVEs with no
-Critical, High, Medium or Low label there, and many of those carry an NVD CVSS v2 score instead, so
-it is neither a count of CVEs rated None nor the count of CVEs with no severity, which is
-`summary.none`.
-
-`summary.rejected` counts the CVE records rejected (withdrawn) by their numbering authority.
-`summary.total` and the other counts leave them out, and they are withdrawn records, never
-vulnerabilities.
-
-`poller` holds the in-memory counters of the NVD poller of the one API instance that answered,
-counted since that instance last started and zeroed on every restart: they describe that instance,
-never the feed's size, intake, reliability or freshness, and the note says so whenever the answer
-carries `poller`. A `poller` field the answer sends in a JSON type other than the one the
-outputSchema describes is left out and named in the note, and a `poller` that is neither a JSON
-object nor null is left out whole; `summary` is relayed either way, so a change to that diagnostic
-block never withholds the counts.
-
-The tool relays the API's JSON as it was sent, less a `poller` field left out as above. When
-`summary.none`, `summary.nvd_none` or `summary.rejected` is above zero, the note says what it
-counts, with the number from the answer.
-The note says the five NVD counts add up to `summary.total` only when the answer's do, and says
-nothing about a field the answer does not carry.
-
-### How `get_cve` and `search_cves` read the EchelonGraph score
-
-`echelongraph_score` (0 to 10), its band `echelongraph_severity` and the risk priority
-`echelongraph_risk` (0 to 100) are EchelonGraph's score only when the record's
-`score_assessed` is `true`. A CVE EchelonGraph has not scored carries `score_assessed: false`,
-and it is **not yet scored**, not scored 0. The API leaves those three fields out on it, or (an
-API before that change) sends `0`, `NONE` and `0` as placeholders, which are not a rating and do
-not mean the CVE is harmless. Its `score_confidence` is `NONE`, and `score_unassessed_reason`
-says why: no source has yet published severity data EchelonGraph can score, or the record was
-rejected (withdrawn) by its numbering authority, and a rejected record is never scored.
-
-Both tools relay the API's JSON as it was sent, and the note says what the score is, for
-`get_cve` per CVE and for `search_cves` per row, naming each CVE it is about:
-
-| API answer | What the note says |
-|---|---|
-| `score_assessed: true` | Nothing more: the score is a score. |
-| `score_assessed: false` | **NOT YET SCORED**, tagged "(score_assessed: false)": report the CVE as not yet scored, never as a zero or low score. Each of `echelongraph_score`, `echelongraph_severity` and `echelongraph_risk` it carries is named as a placeholder. A rejected record is **NOT SCORED** instead. |
-| no `score_assessed` field | The answer does not say whether the CVE was scored (an API older than the field), and a zero `echelongraph_score` in it is not a rating. |
-
-### What `patch_available` says
-
-`patch_available` is `true` when EchelonGraph holds evidence of a fix for the CVE, and
-`patch_evidence` lists the sources of that evidence, strongest first: `vendor_patch` (a vendor
-patch on record, from Ubuntu or Red Hat), `fixed_version` (a fixed version recorded for an
-affected package, or the fixed bound of an affected version range), `release_reference` (a
-reference that EchelonGraph confirmed through the GitHub API is a published release containing
-the fix, or a pull request or commit that a published release contains), `nvd_patch_reference` (an
-NVD reference tagged Patch) and `cna_patch_reference` (a reference the CVE's CNA tagged `patch` in
-its CVE record). A reference page that only mentions a patch, and a CVE's presence in CISA's KEV
-catalog, are not evidence. `false` means no fix evidence is on record, which is **not** a
-finding that no fix exists. Once `true`, `patch_available` is not set back to `false`, so it can be
-`true` beside an empty `patch_evidence`. An answer with no `patch_evidence` (an API older than that
-field) does not name the evidence, and a `false` there is not a finding that no fix exists either.
-Both tools relay the two fields as the API sends them.
-
-### How `cve_exposure` counts
-
-Every 12 hours, when Shodan query credits allow, the KEV-exposure radar runs one Shodan query
-per tracked product, reads up to 100 ip:port services per query, and keeps a service when its
-banner version matches a CISA-KEV or high-EPSS (>= 0.5) CVE. A service whose row has not been
-written or refreshed for 21 days is dropped. A count is therefore a banner-version inference
-over a sample: not an exploit test, and not an internet-wide census.
-
-`last_seen` is when EchelonGraph last wrote or refreshed a service's row, not when the service
-was observed, and not when its vulnerable version was last confirmed. It is set to the time of
-the write when a search matches the banner, and again when a re-check finds the port still
-listed by Shodan InternetDB, without re-reading the banner, so a patched service can stay
-counted while its port stays open. Shodan's own time for the banner is not stored. So
-`last_seen` dates the write, never the sighting, and it is never `measured_at` (see
-"Structured results").
-
-The unit is a service, not a machine. Shodan returns one banner per port and the radar keys
-each observation on ip:port, so a machine answering on two ports counts twice. The API's field
-names are kept (`exposed_hosts` here; `distinct_hosts`, `ransomware_hosts` and each ranked
-row's count in `exposure_radar`), but every one of them counts ip:port services.
-
-The radar only looks for its **tracked** set of CVEs, so a zero means different things. The
-note tags each case with its `exposure_state`, as "(exposure_state: …)"; that tag says what the
-count is, and is not the result's `state`:
-
-| API answer | What the tool says |
-|---|---|
-| `tracked: true`, `exposed_hosts` above 0 | `exposure_state` `exposed`: the count of services the radar has on record for the CVE. |
-| `tracked: false` | `exposure_state` `not_assessed`, **NOT ASSESSED**: outside the radar's tracked set; 0 is not a measurement. |
-| `tracked: true`, `exposed_hosts: 0` | `exposure_state` `measured_zero`, a zero in the radar's sample: none of the up to 100 services it read per tracked-product query matched. Not an internet-wide zero, and undated: the answer does not say when the radar looked. The backend does not send this answer today. |
-| no `tracked` field | The API did not say whether the CVE is in the tracked set: an older API, or the radar cannot decide (for example a CISA-KEV or high-EPSS CVE in a tracked product with 0 services on record). 0 exposed services on record, with no claim either way (`exposure_state` `tracking_unknown`). |
-| HTTP 400, or an id that is not `CVE-YYYY-NNNN…` | An error result tagged `invalid_input`; nothing was looked up. |
-
-Whatever the `exposure_state`, the result's `state` is `not_assessed` with `measured_at` `null`:
-the answer does not say when any service it counts was observed (see "Structured results").
-
-### How `exposure_radar` counts
-
-`exposure_radar` relays each radar's answer cut to the fields it can label, and its note labels
-every number by what it counts. A field this version does not know is left out and the note
-names it, whether it is a total or a field inside a ranked row; so is a known field in an
-unexpected shape, and a list with one malformed row is left out whole, since a partial list
-reads as a complete one. `kev_exposure`, `exposed_databases` and `leaked_credentials` also
-carry `generated_at`, when the API computed their totals, and, when the API can tell,
-`last_run_at`: when that radar last completed a check (each table below says what a completed
-check is for that radar).
-
-`last_run_at` is a timestamp, not a count. It is recorded for the radar as a whole, not for
-the server instance that answered, in UTC to the second. It moves only at the end of a cycle
-whose reads succeeded, so a cycle that read nothing leaves it where it was. It is not the time
-of every record a radar's numbers count: those cover everything still on record, not only what
-the last check found. Nor is it `generated_at`, which is only when the API recomputed the
-totals. The API omits `last_run_at` when it has no completed check on record or cannot read
-it; the result then carries none, and the note says nothing about it. When it is there, the
-note gives it as, for example, "kev_exposure last completed check: 2026-09-27T03:12:44Z".
-
-#### `kev_exposure`
-
-Every count is over the services the KEV-exposure radar keeps: a Shodan banner whose version
-maps to a CISA-KEV-listed CVE (see "How `cve_exposure` counts").
-
-| Field | What it counts |
-|---|---|
-| `kev_exposure.distinct_hosts` | Distinct ip:port services, not machines, with at least one CISA-KEV-listed CVE on record. A machine answering on two ports counts twice. |
-| `kev_exposure.ransomware_hosts` | The services among them with at least one ransomware-linked KEV CVE (one whose KEV entry notes known use in ransomware campaigns). |
-| `kev_exposure.kev_cves_exposed` | Distinct CISA-KEV-listed CVEs with at least one service on record. |
-| `kev_exposure.ransomware_cves` | The ransomware-linked CVEs among them. |
-| `kev_exposure.correlations` | Service×CVE pairs, not services: a service with three KEV CVEs counts three times. |
-| `kev_exposure.top_products`, `kev_exposure.top_countries`, `kev_exposure.top_cves` | Up to 12 products, 10 countries and 12 CVEs, ranked by distinct ip:port services. |
-| `kev_exposure.top_cves[].cvss_v3_score`, `kev_exposure.top_cves[].epss_score` | Scores, not counts: the highest CVSS v3 base score and EPSS probability (0 to 1) recorded on that CVE's observations. |
-| `kev_exposure.trend` | Service×CVE pairs, not services, by the week (starting Monday) in which each pair was first recorded, over the last 12 weeks. Only pairs still on record are counted, so earlier weeks read low. |
-| `kev_exposure.newest_kev` | The 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed (by `added_date`), each with an `exposure_state` (below). |
-| `kev_exposure.newest_kev[].exposed_hosts` | Only on a row whose `exposure_state` is `exposed` (or `measured_zero`): distinct ip:port services on record with that CVE. |
-| `kev_exposure.newest_kev[].cvss_v3_score`, `kev_exposure.newest_kev[].epss_score` | Scores, not counts: the CVE record's CVSS v3 base score and EPSS probability (0 to 1), absent when the record has none. |
-| `kev_exposure.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle in which its Shodan search answered at least one query (others may have failed) and its list of services due for a re-check was read. A cycle that skipped the search for want of Shodan query credits, or whose reads failed, does not move it. |
-| `kev_exposure.window.from`, `kev_exposure.window.to` | Timestamps, not counts: when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, Shodan's own times, not when EchelonGraph stored or re-checked a pair; a span of observations made at different times. Relayed only when every counted pair has such a time; otherwise the note says how many do not. |
-
-A `newest_kev` row's `exposure_state` says whether its count is a measurement:
-
-| `exposure_state` | What it means |
-|---|---|
-| `exposed` | The radar has services on record with this CVE, and `exposed_hosts` counts them. |
-| `not_assessed` | **NOT ASSESSED**: the answer holds no measurement for this CVE, so no count is relayed. The API answers 0 for every CVE the radar holds no service for, whether or not the radar looks for that CVE at all, and it never marks a CVE as tracked with 0 services, so that 0 is not a measurement. `cve_exposure` says per CVE whether it is in the radar's tracked set. |
-| `measured_zero` | Only if the API ever marks a row `tracked: true` with 0 services: a zero in the radar's sample, not an internet-wide zero. If it marks a row `tracked: false`, that row is `not_assessed` whatever its count. |
-
-#### `exposed_databases`
-
-| Field | What it counts |
-|---|---|
-| `exposed_databases.distinct_hosts` | Distinct ip:port services, not machines, that EchelonGraph's check confirmed answering without authentication: data stores and observability UIs alike. |
-| `exposed_databases.engines` | Distinct engine types among them (for example `redis` or `grafana`). |
-| `exposed_databases.top_engines`, `exposed_databases.top_countries` | Up to 15 engines and 10 countries, ranked by those services. |
-| `exposed_databases.pii_likely`, `exposed_databases.pci_likely` | Services whose schema names pass a high-confidence gate for personal data, or for payment-card data. The names are index, database, table or field names in the Shodan or LeakIX banner or in the check's response, never record values; the gate passes one unambiguous term (such as `ssn` or `cardholder`) or two distinct indicators. It is a precision-first schema gate, not a census: a service whose names do not pass it is not counted, whatever it holds, so the other services are not shown to hold no such data. |
-| `exposed_databases.window.from`, `exposed_databases.window.to` | Timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication, a span of checks made at different times. Relayed only when every counted service has such a time; otherwise the note says how many do not. |
-| `exposed_databases.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle in which its Shodan search, or the LeakIX fallback, answered at least one query (others may have failed), its list of services due for a re-check was read, and the scan opt-out register could be consulted. A cycle that searched nothing, or whose reads failed, does not move it. |
-
-#### `leaked_credentials`
-
-| Field | What it counts |
-|---|---|
-| `leaked_credentials.total` | (repository, secret) pairs, not distinct secrets: a secret committed to three repositories counts three times. |
-| `leaked_credentials.distinct_secrets` | Each secret once. |
-| `leaked_credentials.distinct_repos` | Public GitHub repositories with at least one. |
-| `leaked_credentials.top_providers`, `leaked_credentials.top_types` | Up to 15 providers and secret types, ranked by (repository, secret) pairs. |
-| `leaked_credentials.window.from`, `leaked_credentials.window.to` | Timestamps, not counts: when EchelonGraph's detector last found the oldest and the newest of the (repository, secret) pairs counted in a public commit. |
-| `leaked_credentials.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle that read the public GitHub event stream (fetches of some of the commits it lists may have failed). A cycle whose read of that stream failed does not move it. |
-
-None of them is validated. Each is a credential-shaped string in a public commit that passed
-EchelonGraph's filters, at most structurally checked (a checksum or format decode), and never
-tested against its provider, so none of these is a count of working credentials.
-
-#### `shadow_ai`
-
-The shadow-AI radar's answer mixes numbers that count exposed services with numbers that count
-every observation. So `exposure_radar` regroups it by what each number counts, and its note
-labels each one. Only `shadow_ai.confirmed_exposed` counts exposed services.
-
-| Field | What it counts |
-|---|---|
-| `confirmed_exposed.total` | Confirmed exposed: services EchelonGraph's probes found answering without an authentication gate (liveness `active`, or `rechecking` during a re-check). It is the sum of `confirmed_exposed.by_category`. |
-| `confirmed_exposed.by_category` | The same services, by category. |
-| `confirmed_exposed.last_24h` | Confirmed-exposed services first recorded in the last 24 hours. |
-| `confirmed_exposed.window.from`, `confirmed_exposed.window.to` | Timestamps, not counts: when EchelonGraph's verifier ran the probe that last decided the oldest and the newest of the confirmed-exposed services, a span of probes made at different times. Relayed only when every one has such a time. |
-| `observed.total` | Every Certificate Transparency or Shodan observation on record, whatever its verification state: observed, not exposed. |
-| `observed.by_category` | The same observations, by category. |
-| `observed.last_24h` | Observations first recorded in the last 24 hours. |
-| `observed.trend_30d` | Observations per UTC day over the last 30 days. |
-| `observed.top_products`, `observed.top_countries`, `observed.top_issuers` | Up to ten products, countries and issuers, ranked by observations, not by exposed services. An issuer is the certificate's CA for a Certificate Transparency observation, and the hosting operator Shodan reports for a Shodan one. |
-| `observed.last_observation` | When the latest observation was recorded. |
-| `authentication.observed` | Observations where a probe observed an authentication gate: a 401/403, a login page or an auth marker. |
-| `authentication.not_determined` | Observations whose service answered, but where no probe could tell whether it enforces authentication. |
-
-Neither authentication count is part of `confirmed_exposed`, and `observed.total` minus
-`confirmed_exposed.total` is not a count of secured services: it also holds observations not
-yet verified, whose hostname no longer resolves, or whose service no longer answers openly.
-
-The tool relays no number it cannot label. A stats field this version does not know is left
-out, and the note names it; so is a count in an unexpected shape. A ranked row carries only
-its name and its count, and a field added to one is named too. The `poller` block's keys are
-checked the same way: a key this version does not know is left out and named, while the
-instance fields it knows are left out as described below.
-
-#### `mcp_servers`
-
-The AI-exposure radar's MCP-server verdicts, from `GET /api/v1/public/ai-exposure/stats?service=mcp`.
-Every hostname was named like an MCP server in EchelonGraph's own Certificate Transparency
-feed, matched by hostname pattern; no Shodan data is used. Each is checked by EchelonGraph's
-identified MCP probe: a `server/discover` request, and `initialize` only if that is refused. It
-never sends `tools/call`. The answer is counts and timestamps only, with no hostname, version or
-server name, and the tool repeats no string it carries but its timestamps. Each hostname is
-counted once, by its latest verdict on record. EchelonGraph's own control servers are left
-out, and so is every hostname whose owner opted out of scanning, since it is not checked again
-while the opt-out stands and its last verdict cannot be re-checked. The unit is a hostname, not an ip:port service.
-
-| Field | What it counts |
-|---|---|
-| `mcp_servers.total` | Hostnames the radar has checked for an MCP server, each once, by its latest verdict on record. Not every one is an MCP server: see `mcp_servers.not_assessed_by_reason`. It is `mcp_servers.protected` + `mcp_servers.pending_readjudication` + `mcp_servers.not_assessed`. |
-| `mcp_servers.protected` | Hostnames whose `/mcp` endpoint asked for credentials (a 401 or 403) and whose OAuth protected-resource metadata validated under RFC 9728: a 200 JSON document whose resource is identical to the server's identifier and that names at least one authorization server. |
-| `mcp_servers.prm_via.header`, `mcp_servers.prm_via.wellknown_path`, `mcp_servers.prm_via.wellknown_root` | The protected ones, by where that document was found: the same-origin URL the credential challenge named; `/.well-known/oauth-protected-resource` followed by the endpoint's path; or `/.well-known/oauth-protected-resource` itself. They add up to `mcp_servers.protected`. |
-| `mcp_servers.pending_readjudication` | Verdicts decided by a rule EchelonGraph has since replaced and not yet re-checked under the current rules. They are in neither `mcp_servers.protected` nor `mcp_servers.not_assessed`. |
-| `mcp_servers.not_assessed` | The rest, whose protection the radar could not assess. Not assessed does not mean unprotected. `mcp_servers.not_assessed_by_reason` puts each of them in exactly one bucket (below). |
-| `mcp_servers.own_controls_excluded` | EchelonGraph's own control servers, left out of every other `mcp_servers` number. |
-| `mcp_servers.withheld_opted_out` | Hostnames whose owner opted out of scanning, left out of every other `mcp_servers` number. Such a hostname is not checked again while the opt-out stands, so its last verdict cannot be re-checked; the API's unparameterised answer withholds the same hostnames under the same name. An answer that does not carry this field (an API that predates it) counted them, and the note says so. |
-| `mcp_servers.window.from`, `mcp_servers.window.to` | Timestamps, not counts: when the oldest and the newest of the verdicts counted were last checked. The counts are each hostname's latest verdict, not one sweep at one time. With no verdict counted there is no window. |
-| `mcp_servers.last_run_at` | A timestamp, not a count: when the AI-exposure radar, which checks other AI services as well as MCP servers, last completed a check (a cycle whose reads succeeded and whose scan opt-out register answered). It is not the time of every verdict counted. |
-| `mcp_servers.enabled` | Whether the API reports the radar running: true when a check completed within 45 minutes of its answer. |
-| `mcp_servers.counted_at` | A timestamp, not a count: when the API read these counts. |
-
-`mcp_servers.not_assessed_by_reason` divides `mcp_servers.not_assessed`:
-
-| Bucket | What it holds |
-|---|---|
-| `mcp_servers.not_assessed_by_reason.identified_no_challenge` | Servers that identified themselves as MCP servers (a DiscoverResult, an InitializeResult, or the endpoint event of the deprecated HTTP+SSE transport) and did not ask for credentials at the handshake. That is normal in MCP: authorization is optional in the spec, and a server can enforce it at `tools/call` instead, which EchelonGraph never sends. So this bucket is not a finding of exposure. |
-| `mcp_servers.not_assessed_by_reason.resource_mismatch` | An endpoint that asked for credentials, whose metadata document's resource is absent or not identical to the server's identifier. |
-| `mcp_servers.not_assessed_by_reason.cross_origin_pointer` | An endpoint that asked for credentials, whose challenge named a metadata URL on another origin, which EchelonGraph records and does not request. |
-| `mcp_servers.not_assessed_by_reason.bare_challenge_no_prm` | An endpoint that asked for credentials, whose challenge named no metadata URL, and neither well-known URI answered 2xx. |
-| `mcp_servers.not_assessed_by_reason.pointer_unreachable` | An endpoint that asked for credentials, whose same-origin metadata URL did not answer 2xx in full. |
-| `mcp_servers.not_assessed_by_reason.pointer_invalid` | An endpoint that asked for credentials, whose challenge's metadata pointer is not a URL EchelonGraph will request. |
-| `mcp_servers.not_assessed_by_reason.no_authorization_servers` | An endpoint that asked for credentials, whose metadata document names no authorization server. |
-| `mcp_servers.not_assessed_by_reason.wellknown_unreachable` | An endpoint that asked for credentials, where a well-known metadata request got no complete HTTP answer. |
-| `mcp_servers.not_assessed_by_reason.metadata_invalid` | An endpoint that asked for credentials, whose metadata answer is not a 200 with a JSON object within the size cap. |
-| `mcp_servers.not_assessed_by_reason.challenge_unadjudicated` | An endpoint that asked for credentials before EchelonGraph read RFC 9728 metadata, not re-checked since. |
-| `mcp_servers.not_assessed_by_reason.no_http_answer` | Hostnames that gave no HTTP answer: DNS, TCP or TLS failed, or the request timed out. Not a count of MCP servers. |
-| `mcp_servers.not_assessed_by_reason.not_identified_as_mcp` | Hostnames that answered HTTP with nothing that identified an MCP server: a login or error page, a body that is not JSON-RPC, a 4xx or 5xx. Not a count of MCP servers. |
-
-The eight credential-challenge buckets hold endpoints that asked for credentials: only their
-metadata did not validate, so none of them is shown to lack protection.
-
-`mcp_servers.era` and `mcp_servers.transport` each divide every counted hostname, so each adds
-up to `mcp_servers.total`:
-
-| Bucket | What it holds |
-|---|---|
-| `mcp_servers.era.legacy` | An initialize-era server: an InitializeResult, or the endpoint event of the deprecated HTTP+SSE transport. |
-| `mcp_servers.era.dual` | A server that answered `server/discover` and itself named an initialize-era version too. A lower bound: a server built on the reference SDK names only modern versions there, and is counted modern. |
-| `mcp_servers.era.modern` | A server that answered `server/discover` and named no initialize-era version. Not proven modern-only: EchelonGraph does not send it `initialize` to tell. |
-| `mcp_servers.era.unknown` | Nothing identified an era; every credential challenge is here. |
-| `mcp_servers.era.not_measured` | A verdict recorded before EchelonGraph's probe began recording the era, not re-checked since. |
-| `mcp_servers.transport.streamable_http` | Identified by a POST to `/mcp`. |
-| `mcp_servers.transport.legacy_sse` | Identified by the endpoint event of `GET /sse`, the deprecated HTTP+SSE transport. |
-| `mcp_servers.transport.unknown` | Nothing identified a transport. |
-| `mcp_servers.transport.not_measured` | Recorded before the era probe, not re-checked since. |
-
-The tool refuses the answer, as a failure of that radar and never as zeros, when it does not say
-`service` `mcp` (an API older than `?service=mcp` ignores the parameter and answers its counts
-over every AI service it checks), when `mcp_servers.total`, `mcp_servers.protected`,
-`mcp_servers.pending_readjudication` or `mcp_servers.not_assessed` is missing or not a whole
-number, or when they contradict each other. A partition whose buckets are not exactly those
-above, each a whole number adding up to the count it divides, is left out whole and named. A
-field this version does not know is left out, and named only when its name is shaped like a
-field name.
-
-### How `check_affected` decides
-
-`check_affected` asks the matcher behind
-[echelongraph.io/am-i-affected](https://echelongraph.io/am-i-affected) whether a version is
-affected, by one of two lookup paths:
-
-- **CPE path** — `product` and `version`. `product` is the NVD CPE product token (`openssl`,
-  `nginx`), which can differ from a package name. It returns the CVEs whose NVD CPE match
-  criteria name that product with a version range that includes the version. It matches the
-  token across vendors, so each match carries `cpe_vendor` and `vendor_unknown`: a match with
-  `vendor_unknown` true is real, but its vendor is not verified to be yours.
-- **Registry path** — `ecosystem` (`npm`, `PyPI`, `Maven`, …), `package` and `version`. Each OSV
-  advisory record EchelonGraph holds for the package is decided against the version as
-  affected (a match), not affected (`not_affected_count`) or undetermined.
-
-Read `assessed` before `count`. `assessed` false means the lookup did not evaluate the
-component, and `not_assessed_reason` says why: `product_not_in_cpe_corpus`,
-`package_not_cpe_nameable`, `candidate_load_pending` (with `degraded` true),
-`candidate_window_truncated`, `package_not_in_advisory_corpus` or `no_decidable_advisory`. The
-result's `state` is then `not_assessed`, and its `count` of 0 never means "not affected". An
-advisory whose version range cannot be decided at this version is counted in
-`undetermined_count` (up to 50 listed in `undetermined`) and is never reported as safe. `capped`
-says the match list stopped at its cap, and `candidates_capped` that not every candidate CVE was
-loaded. A failed advisory lookup (`advisory_lookup_failed`) comes back as a failure. Each match
-keeps `kev_listed`, `ransomware`, `epss_score`, `effective_score`, `effective_severity` and
-`score_assessed` as the API sent them.
-
-`product`, `version`, `ecosystem` and `package` travel in the `X-EG-Product`, `X-EG-Version`,
-`X-EG-Ecosystem` and `X-EG-Package` request headers, never in the URL, so request logs and
-trace spans that record URLs do not hold what was looked up. The endpoint reads a CPE vendor
-from the URL only, so this tool takes none.
+- [How `cve_summary` reads its counts](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/tools.md#how-cve_summary-reads-its-counts):
+  `summary.none` counts CVEs not yet scored, not CVEs rated None, and `summary.nvd_critical` to
+  `summary.nvd_none` count by NVD's severity label (or a pre-NVD label standing in), as provenance.
+- [How `get_cve` and `search_cves` read the EchelonGraph score](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/tools.md#how-get_cve-and-search_cves-read-the-echelongraph-score):
+  `score_assessed: false` is **not yet scored**, never a score of 0.
+- [What `patch_available` says](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/tools.md#what-patch_available-says),
+  and the evidence `patch_evidence` names, the CVE record's own fix statement among it
+  (`cna_solution`, `description_fix`): `false` means no fix evidence is on record, not that no fix
+  exists.
+- [How `cve_exposure` counts](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/tools.md#how-cve_exposure-counts):
+  a count of ip:port services, not machines, inferred from banner versions in a sample of Shodan
+  data, and for a CVE outside the radar's tracked set **NOT ASSESSED**: its 0 is not a measurement.
+- [How `exposure_radar` counts](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/exposure-radar.md):
+  every number of its five radars, each labelled by what it counts.
+- [How `check_affected` decides](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/tools.md#how-check_affected-decides):
+  read `assessed` before `count`; a registry match's `fixed_in` is the lowest version above it that
+  no affected interval of the record holds, or null with `fixed_in_reason`.
 
 ## Prompts
 
@@ -593,16 +318,19 @@ never "not affected", and each figure cites its `measured_at`. A prompt makes no
 | `triage_cve` | `cve_id` | `get_cve` (with CISA's due date, `kev_due_date`, when the CVE is KEV-listed), `cve_intel`, `vendor_advisories_for_cve`, `epss_history` and `cve_exposure`, then a decision template: exploited, likelihood, reachable, patch, deadline, decision. The patch line gives each affected range with its fix from `cve_intel`'s `fixed_branches`; where a package has none, it gives `fixed_version` as what `cve_intel` records for the package, one per package (the advisory's last range's as a rule), never as the fix for every affected branch, and points to `get_cve`'s references tagged Vendor Advisory or Patch for a branch's fix. |
 | `kev_weekly_brief` | `days` (1 to 365, default 7) | Work out the start date from `days`, page through `kev_recent` from it 50 rows a page, and write a brief grouped by vendor with ransomware flags and due dates. |
 | `am_i_affected` | `product`, or `ecosystem` and `package`; `version` | `check_affected`, read `assessed` before `count`, with the not-assessed wording. |
-| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom` (and, once more, the purls a rate limit or the time budget left unsent: `data.not_sent_purls`, or, where the text cuts that list, the document's purls from the position and in the order its note gives), read each component's ecosystem, package and version from its purl, as `check_sbom` maps them (every purl type it maps, and `deb`, `apk`, `alpine` and `rpm` by a `distro` qualifier naming a Debian, Ubuntu or Alpine release; any other is unknown, and given no fixed version), look up each affected CVE with `get_cve` and `cve_intel`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. A fixed version is given where it is above the component's installed version: the advisory interval in `check_sbom`'s `match_reason` first (B of `[A, B)`, a fixed bound; the B of `[A, B]`, read by its closing bracket alone, is the last affected version, still affected, and neither it nor any version at or below it is given; an interval clipped before its closing bracket gives none), else the `fixed` of the `cve_intel` `fixed_branches` range that holds the installed version, else, for a package without `fixed_branches`, `cve_intel`'s `fixed_version`, which is one per package (the advisory's last range's) and need not be the fix on the component's branch; otherwise the line says the results give no fixed version for that branch and points to the CVE's advisory. |
+| `sbom_review` | `sbom` (CycloneDX or SPDX JSON text, up to 5,000,000 characters) | Pass the document to `check_sbom` (and, once more, the purls a rate limit or the time budget left unsent: `data.not_sent_purls`, or, where the text or a `DATA CUT` cuts that list, the document's purls from the position and in the order its note gives), read each component's ecosystem, package and version from its purl, as `check_sbom` maps them (every purl type it maps, and `deb`, `apk`, `alpine` and `rpm` by a `distro` qualifier naming a Debian, Ubuntu or Alpine release; any other is unknown, and given no fixed version; a `deb`, `apk` or `alpine` purl with an `upstream` qualifier as the source package that qualifier names, the row's `matched_package` when its `matched_via` is `upstream`, which the fix list names beside the purl), look up each affected CVE with `get_cve` and `cve_intel`, and write a fix list ordered by CISA-KEV listing, then EPSS, then score, each key stated. Where the text keeps a match, its fixed version is the match's `fixed_in` alone, the lowest version above the installed one that no affected interval of the record holds, and a null `fixed_in` is written "no fix on record", which is not a finding that no fix exists; no fixed version is read from `match_reason`. Where the text keeps no match for the component, or a match has no `fixed_in`, a fixed version is given only above the installed version: the first `fixed` above it that no range of the `cve_intel` row's `fixed_branches` holds, else, for a package without `fixed_branches`, `cve_intel`'s `fixed_version`, which is one per package (the advisory's last range's) and need not be the fix on the component's branch; otherwise the line says the results give no fixed version for that branch and points to the CVE's advisory. |
 | `workload_triage` | `source` (optional: `kubernetes`, `github_actions` or `images`; default: all three are described) | Rank your own pods, CI job containers or images: list the workloads and decide their exposure with your own tools, make an SBOM of each image digest, and pass `check_sbom` the purls alone (no workload, namespace, image, registry name, credential or exposure label is sent; the image's own `pkg:oci`/`pkg:docker` purl is left out). Rows are ordered by CISA-KEV listing, then caller-asserted exposure (unknown is never sorted with not exposed), then EPSS, then score, each key stated; past 30 CVEs it stops calling `get_cve`. `not_assessed` rows are counted and never reported as clean. The prompt takes no workload data. |
 
 ## Resources
+
+Two resources, which `resources/list` lists, and one resource template, which
+`resources/templates/list` lists (a client reads `cve://CVE-2024-3400`, for example):
 
 | Resource | What it holds |
 |---|---|
 | `echelongraph://methodology` | What each envelope field and `state` value means, and how each tool measures (Markdown). |
 | `echelongraph://sources` | What the API reports about its feeds when the resource is read: the NVD poller's `interval`, `last_poll_at`, `poll_count` and `poll_errors`, all of the one instance that answered (from `/api/v1/public/cves/summary`; the two counts are that instance's since it last started, zeroed on every restart, never the feed's reliability), and the CISA KEV catalog's last successful fetch and method (from `/api/v1/public/kev/recent`). It names the feeds no endpoint reports a schedule for, and states none for them (JSON). |
-| `cve://{cve_id}` | One CVE as `get_cve` returns it: the structured result, envelope and record, as JSON. Past 30,000 characters of JSON, `data` is cut as `get_cve`'s first text block is, and a note starting `DATA CUT` says what the cut leaves out; `get_cve`'s `structuredContent.data` holds the record whole. An ID that is not a CVE ID is refused before any request; a CVE the API has no record of is not found. |
+| `cve://{cve_id}` | One CVE as `get_cve` returns it: the structured result, envelope and record, as JSON. Past 30,000 characters of JSON, `data` is cut as `get_cve`'s first text block is, `data_truncated` is `true`, `truncated` names each list cut, and a note starting `DATA CUT` says what the cut leaves out; `get_cve`'s `structuredContent.data` holds the record whole with `full: true`. An ID that is not a CVE ID is refused before any request; a CVE the API has no record of is not found. |
 
 ## What a result means
 
@@ -617,10 +345,11 @@ outage for an all-clear:
   found nothing … not a lookup failure"), because a measured zero is a measurement. The
   exceptions to verbatim are `cve_summary`, which leaves out a `poller` field the answer sends
   in a JSON type other than its outputSchema's (or a `poller` that is neither a JSON object nor
-  null) and names it in the note, and `exposure_radar`: each radar is cut to the fields listed
-  above, and each `kev_exposure.newest_kev` row gains an `exposure_state`. Its `shadow_ai` counts are
-  regrouped as above, and its `poller` block carries only `running` and `last_run_at`, or is dropped when it
-  carries no real completion time. The block's other fields describe the server instance that
+  null) and names it in the note, and `exposure_radar`: each radar is cut to the fields
+  [docs/exposure-radar.md](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/exposure-radar.md)
+  lists, and each `kev_exposure.newest_kev` row gains an `exposure_state`. Its `shadow_ai` counts
+  are regrouped as that page says, and its `poller` block carries only `running` and
+  `last_run_at`, or is dropped when it carries no real completion time. The block's other fields describe the server instance that
   answered, not the radar. Its `last_run_at` is when the radar's leader last
   completed a Certificate Transparency (crt.sh) cycle, and its `running` is true only when
   that was within 30 minutes of the answer. When `running` is true, the note says the
@@ -645,16 +374,58 @@ note after it are where 1.x put them.
 
 ### Long answers
 
-A model pays for every character of text it reads, and some clients cap what they pass on:
-Claude Code warns past 10,000 tokens of tool output and, past 25,000, saves the result to a
-file and hands the model its path instead. Through 2.6.2 the first text block was the API's JSON
-whatever its size: on production's answers of 2026-10-04 a default `search_cves` page for
-"openssl" was 133,300 characters of text, `get_cve` for CVE-2021-44228 80,897, `check_affected`
-for the Linux kernel at 5.10.0 364,408, `kev_recent` at its largest page 105,925 and
-`search_vendor_advisories` at its largest page 103,147.
+A model pays for every character it reads, and clients differ in which part of a result they hand
+it, so each part is held to the same budget, 30,000 characters, and each is cut on its own terms:
 
-So when the API's JSON is longer than 30,000 characters, the first text block holds it cut to
-fit, and `structuredContent`'s `data` still holds it whole. First the same JSON is laid out with
+- **Claude Code** hands the model `structuredContent`, not the text blocks, and sizes it against
+  `MAX_MCP_OUTPUT_TOKENS` (25,000 tokens by default): it warns past 10,000 tokens and, past the cap,
+  saves the result to a file and hands the model its path instead. Through 2.7.x
+  `structuredContent.data` was always the answer whole: `get_cve` for CVE-2021-44228 was 65,540
+  characters of `structuredContent` on production's answer of 2026-10-11, beside a first text block
+  of 23,759, and Claude Code saved it to a file. Since 3.0.0 the structured result is cut to fit
+  (below). `MAX_MCP_OUTPUT_TOKENS`, set in the environment Claude Code starts in, raises its cap.
+- **A client that passes only the text blocks** (`content`) reads the first text block, cut to fit
+  as described after the next item.
+- **A program** that reads `structuredContent.data` and needs the answer whole, however long,
+  passes `full: true`: every tool takes it. A client that sizes structured results, as Claude Code
+  does, can refuse such an answer past its cap.
+
+The structured result. When the whole of it (the envelope, its notes and `data`, as compact JSON)
+would pass 30,000 characters and the call does not say `full: true`, `data` is cut, in an order each
+tool states. Where one row is large, every row is first thinned, all rows kept: `check_sbom` and
+`scan_manifest` keep each row's `index`, `purl`, `verdict`, `not_assessed_reason`, `cve_ids`,
+`matched_package` and `matched_via`, and per match `cve_id`, `kev_listed`, `ransomware`, `epss_score`,
+`effective_score`, `score_assessed`, `fixed_in` and `fixed_in_reason`, every field a prompt reads from
+a match (all 50 rows of the Juice Shop 11.1.2 SBOM stay); `check_affected` keeps each
+match's scores, flags, criteria and `fixed_in`, then fewer; `cve_remediation` drops each item's
+`product_ids`, then its text, keeping every advisory with its state, kinds, URLs and fixed builds,
+and the note then says `get_vendor_advisory` returns each text; `search_cves` keeps each row's
+description and scores, then the scores alone; the vendor-advisory
+tools drop `affected_products`, then `summary`. Only then do rows leave: `check_sbom` and
+`scan_manifest` cut `not_sent_purls` (and `not_checked`) first, then drop the `not_affected` rows,
+then the `not_assessed` ones (`data.summary` counts every verdict), and only then affected rows,
+from the end; `check_affected` drops its `excluded` and `undetermined` samples first and its
+`cve_ids`, which names every match, last; the other row tools drop rows from the end, and those that
+page say the `offset` or `limit` to read them from (`search_cves` and `search_vendor_advisories`
+also the page size whose rows fit `data` whole, counted on the rows whole). `get_cve` cuts
+`cpe_match` and `references`, each to at most the same number of entries, then
+`cpe_configurations`; `exposure_radar` cuts its daily and weekly series, each keeping its newest
+entries, then every ranking, then `kev_exposure.newest_kev`; then any other list at the top of
+`data` is cut the same way. The room left once a list fits goes back to the lists emptied before
+it, as many of their entries as fit (their first, a series its newest). No string is shortened and no value changes (a thinned row
+keeps some of its fields, each optional in the outputSchema, so `data` still validates). The result
+then says `data_truncated: true` (`false` on every other success), `truncated` gives each list cut,
+by its path in `data`, with its `total`, the number `returned` and, where its entries are thinned,
+`thinned: true`, and the note ends with sentences starting `DATA CUT` that say what was cut, how to
+read the rest and that the same call with `full: true` returns `data` whole.
+
+The first text block. Through 2.6.2 it was the API's JSON whatever its size: on production's
+answers of 2026-10-04 a default `search_cves` page for "openssl" was 133,300 characters of text,
+`get_cve` for CVE-2021-44228 80,897, `check_affected` for the Linux kernel at 5.10.0 364,408,
+`kev_recent` at its largest page 105,925 and `search_vendor_advisories` at its largest page
+103,147. So when the API's JSON is longer than 30,000 characters, the first text block holds it
+cut to fit, cut from the answer whole (not from the cut `data`), the same way with or without
+`full: true`. First the same JSON is laid out with
 each row on a line of its own, which drops no character of the answer but the indentation. If
 that is still too long, a tool that returns a list of rows cuts each row to the fields it names,
 most kept first (`search_cves` keeps `cve_id`, `severity`, `cvss_v3_score`, `echelongraph_score`,
@@ -675,13 +446,15 @@ note says how to read them: the `offset` to call next, or a smaller `limit`. Any
 keeps the first entries of each of its lists (`get_cve`'s `cpe_match` and `references`). The note
 then ends with one sentence starting `TEXT CUT` that says what the first text block leaves out
 and which tool returns a row (`get_cve`, `get_vendor_advisory`, `check_affected`, and
-`cve_intel` a CVE's fixed versions): whole in that tool's `structuredContent.data`, since its own
-first text block is cut past 30,000 characters too. An answer that fits is sent as before,
-pretty-printed and whole. The same answer is always cut the same way. The `cve://{cve_id}`
-resource cuts its `data` as `get_cve`'s first text block is cut, and says so in a note starting
-`DATA CUT`. The prompts ask only for what the text keeps: `kev_weekly_brief` reads `kev_recent`
-50 rows a page, which the text holds whole; `triage_cve` reads CISA's due date from `get_cve`;
-and `sbom_review` reads fixed versions from `cve_intel`, the fix of each affected range in `fixed_branches`.
+`cve_intel` a CVE's fixed versions): whole in that tool's `structuredContent.data` with
+`full: true`, since its own first text block is cut past 30,000 characters too. An answer that
+fits is sent as before, pretty-printed and whole. The same answer is always cut the same way. The
+`cve://{cve_id}` resource reads `get_cve`'s record whole and cuts its `data` as `get_cve`'s first
+text block is cut, and says so: `data_truncated: true`, `truncated` naming each list it cut, and a
+note starting `DATA CUT`. The prompts ask only for what the
+text keeps: `kev_weekly_brief` reads `kev_recent` 50 rows a page, which the text holds whole;
+`triage_cve` reads CISA's due date from `get_cve`; and `sbom_review` reads each match's `fixed_in`,
+and `cve_intel`'s `fixed_branches` where the text keeps no match for a component.
 
 ## Structured results
 
@@ -698,19 +471,21 @@ declares its shape as an `outputSchema` in `tools/list`, with a title and the an
 | `coverage` | What the answer covers, where the tool can say: `in_scope` for `cve_exposure`, the list's own account of its count for `search_cves`, the radars that answered for `exposure_radar`, and `assessed`, `not_assessed_reason`, the lookup path and the match counts for `check_affected`. |
 | `freshness` | The producing radar's last completed check (`last_run_at`), where the API serves one; `null` where it serves none. |
 | `notes` | The caveats, one sentence each: what the envelope itself needs saying, then the note from the text block. |
-| `data` | On a success only: the API's JSON, whole: the first text block carries the same JSON, or, past 30,000 characters, a cut of it that the note names (`TEXT CUT`). |
+| `data_truncated` | On a success only: `true` when `data` is cut (`DATA CUT`, see "Long answers"), `false` when it is the answer whole. |
+| `truncated` | When `data_truncated` is true: each list cut, by its path in `data`, with `total`, `returned` and, where its entries keep only some of their fields, `thinned: true`. |
+| `data` | On a success only: the API's JSON, whole with `full: true`, and by default cut when the structured result would pass 30,000 characters (`DATA CUT`): the first text block carries the same JSON, or, past 30,000 characters, a cut of the whole answer that the note names (`TEXT CUT`). |
 | `error` | On a failure only: `kind`, `path`, `status` and `message`. |
 
 The last text block of every result is this structured result serialized as JSON, less what
 an earlier text block already says verbatim, since a client may pass only `content` to the
-model. It carries the same `state`, `measured_at`, `coverage` and `freshness` (and on a failure
-`error`), key for key. It leaves out `data`, which is a success's first text block, and the
+model. It carries the same `state`, `measured_at`, `coverage` and `freshness` (on a success
+`data_truncated` and `truncated`, and on a failure `error`), key for key. It leaves out `data`, which is a success's first text block, and the
 note's sentences, which are the text block just before it (on a failure, the message) and
 with which `notes` ends: its `notes` holds only the sentences the envelope adds about itself,
 and is left out when there are none. It leaves out `method` too where that note quotes it verbatim, as
-`cve_exposure`'s does ("Method: …"). So the text blocks together carry the whole structured
-result, but for what a `TEXT CUT` leaves out of `data` (see "Long answers"), and cannot disagree
-with it. Before 2.2.0 this block repeated the whole note, so every note was sent twice.
+`cve_exposure`'s does ("Method: …"). So the text blocks together carry the structured result, but
+for what a `TEXT CUT` leaves out of the answer (see "Long answers"), and cannot disagree with it;
+beside a `DATA CUT`, the first text block is cut from the answer whole, not from the cut `data`. Before 2.2.0 this block repeated the whole note, so every note was sent twice.
 
 | `state` | What it means |
 |---|---|
@@ -719,41 +494,10 @@ with it. Before 2.2.0 this block repeated the whole note, so every note was sent
 | `failed` | The lookup did not complete. Not a finding. |
 | `invalid_input` | The input was refused, by this server or by the API, so nothing was looked up. Not a finding. |
 
-Every field comes from what the API sends; where the API does not say, the field is `null` and
-a note says so. Per tool:
-
-- `cve_summary` is `measured`, and its `measured_at` is `summary.last_updated`, the newest
-  modification time among the active CVE records it counts.
-- `search_cves` is `measured`, with `measured_at` `null`: each record carries its own times. Its
-  `coverage` repeats the list's `total`, `total_counted`, `total_is_lower_bound`,
-  `search_relaxed`, `limit` and `offset`, and adds `returned`, the rows in the page. When
-  `total_counted` is false the total is not a count, and the note does not call it one.
-- `get_cve` is `measured`, and its `measured_at` is the record's `updated_at`, when EchelonGraph
-  last wrote it.
-- `cve_exposure` is `not_assessed` with `measured_at` `null`, every answer: the per-CVE answer
-  carries no time at which the services it counts were observed. Its `last_seen` is when
-  EchelonGraph last wrote or refreshed one of their rows, not when any of them was observed,
-  so it is never `measured_at`, and a note says so. A tracked zero is `not_assessed` too, since
-  a zero has no observation to date it. The count is still relayed, labelled: `exposure_state`
-  is `exposed`, `measured_zero`, `not_assessed` or `tracking_unknown`, the cases of "How
-  `cve_exposure` counts", and `coverage.in_scope` is the API's `tracked`. It becomes `measured`
-  only when the API serves a time at which the counted services were observed.
-- `exposure_radar` is `not_assessed` with `measured_at` `null`: every radar answered, but no
-  answer gives one time at which what it counts was observed, so no count is presented as a
-  dated measurement. `mcp_servers` dates its verdicts only by a window, `mcp_servers.window.from`
-  to `mcp_servers.window.to`, over checks made at different times, which is not one observation
-  time; so, since #2438, do `exposed_databases.window`, `leaked_credentials.window` and
-  `shadow_ai.confirmed_exposed.window`, and `kev_exposure.window`, from Shodan's banner
-  timestamps, where the API serves it. Its numbers keep the labels above. `freshness` holds each radar's `last_run_at` where the
-  API serves one, for `shadow_ai` also `running`, and for `mcp_servers` also `enabled`.
-- `check_affected` is `measured` only when the answer says `assessed` true, and `not_assessed`
-  when it says false or does not say. Its `measured_at` and `freshness` are `null`: a match answer
-  carries no observation time. Its `coverage` gives `assessed` and `not_assessed_reason` first,
-  then `lookup` (`cpe` or `registry`), `match_layer`, `count`, `capped`, `candidates_capped`,
-  `excluded_count`, `undetermined_count`, `not_affected_count` and `degraded`.
-
-The CVE feed tools' `freshness` is `null`: the feed's answers carry no time at which its
-pollers last completed a poll for the feed as a whole.
+What each tool's `state`, `measured_at`, `coverage` and `freshness` hold, tool by tool, is in
+[docs/structured-results.md](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/structured-results.md).
+Every field comes from what the API sends; where the API does not say, the field is `null` and a
+note says so.
 
 A success whose fields do not fit the tool's `outputSchema` (a field of a type the schema does
 not allow) is returned as a failure with `error.kind` `unexpected_shape`, never relayed, with one
@@ -808,6 +552,7 @@ Where each tool's input travels:
 | `search_cves`: `search` | The `X-EG-Search` request header, never the URL. Its severity, minimum CVSS, sort, limit and offset go in the query string. |
 | `search_vendor_advisories`: `query` | The `X-EG-Advisory-Search` request header, never the URL. Its vendor, severity, CVE filter, limit and offset go in the query string. |
 | `check_affected`: `product`, `version`, `ecosystem`, `package` | The `X-EG-Product`, `X-EG-Version`, `X-EG-Ecosystem` and `X-EG-Package` request headers, never the URL. |
+| `cve_remediation`: `ecosystem`, `package`, `version` | The `X-EG-Ecosystem`, `X-EG-Package` and `X-EG-Version` request headers, never the URL. The CVE ID goes in the URL path. |
 | `kev_recent`: `since`, `until`, `ransomware`, `vendor`, `limit`, `cursor` | The `X-EG-Since`, `X-EG-Until`, `X-EG-Ransomware`, `X-EG-Vendor`, `X-EG-Limit` and `X-EG-Cursor` request headers, never the URL. |
 | `check_sbom`: `purls`, or an `sbom` document | The purls, in POST bodies of at most 200 each. A CycloneDX or SPDX document is read on your machine and only the purls in it are sent; the document is not. (Over the hosted endpoint the document goes to EchelonGraph's server instead: see below.) |
 | `scan_manifest`: `files` | The purls read from the files, in POST bodies of at most 200 each; the filenames, the files' text and the entries not checked are not sent on to the API. Run from npm, the server that reads them is on your machine; over the hosted endpoint it is EchelonGraph's, and the files are the request body (see below). |
@@ -840,49 +585,18 @@ EchelonGraph's privacy policy: <https://echelongraph.io/privacy>.
 
 ## Rate limits
 
-No API key, so the API limits each caller, one IPv4 address or one IPv6 /64 network as its
-platform records it. Its WAF counts all your requests together in a 60-second window and
-refuses one once the count passes the ceiling for its path:
-
-| Path | Ceiling per minute | Tools |
-|---|---|---|
-| `/api/v1/public/cves` and every path under it | 12,000 | `cve_summary`, `search_cves`, `get_cve`, `epss_history`, `cve_intel`, `cve_remediation`, `check_affected`, `check_sbom`, `scan_manifest` |
-| `/api/v1/public/cwes`, `/api/v1/public/vendor-advisories`, `/api/v1/public/kev/recent`, `/api/v1/public/shadow-ai-radar` | 6,000 | `get_cwe`, the three vendor-advisory tools, `kev_recent`, and one of `exposure_radar`'s five calls |
-| any other `/api/v1/public` path | 600 | `cve_exposure`, and the rest of `exposure_radar`'s calls |
-
-Because the count is shared, heavy use of one path also uses up the lower ceilings. On top of
-that, 500 requests per second per caller is a burst cap on each serving instance, and
-`check_sbom`'s and `scan_manifest`'s batch route is charged per component: 1,200 components a minute per caller.
-Over a limit the API answers 429 with `Retry-After`, and the tool returns a failure
-(`state` `failed`, `error.status` 429), never empty data. `check_sbom` and `scan_manifest` are the exception: each
-sends a long list as batches of 200, waits out a 429's `Retry-After` and sends the batch again,
-within 50 seconds per call (MCP clients time a call out at about 60 s). From a fresh budget a
-list of up to 1,200 distinct purls finishes in one call; a longer one (the cap is 2,000) is
-checked in two calls a minute apart. When a wait would pass the 50 seconds, it
-answers the batches it has as `measured` with `coverage.partial` true and the rest counted in
-`coverage.not_sent` (`not_sent_reason` `time_budget`); only a 429 on the first batch is a failure. The API's own documentation of these
-limits: <https://echelongraph.io/pulse/api>.
-
-The hosted endpoint adds its own limit before the API's: 120 MCP requests a minute per client
-address, counted by each server instance, answered over it with HTTP 429, `Retry-After` and a
-JSON-RPC error (code `-32029`) that names the limit and the seconds to wait. A request body over
-64 KiB is refused (HTTP 413, code `-32600`), except a `tools/call` of `check_sbom` or
-`scan_manifest`, or a `prompts/get` of `sbom_review`, which may be up to 6 MiB: enough for a
-CycloneDX or SPDX document, or a call's lockfiles, at the tools' 5,000,000-character cap. Each server instance reads at most two such large bodies at
-once; a third is answered HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`). Each
-instance serves at most 64 requests at once; the next waits up to 10 seconds for one to finish,
-and is then answered the same way. A `subscriptions/listen` stream, which stays open until its
-client leaves, is not one of the 64.
-
-A call whose client goes away (its own timeout, a closed tab) is stopped only once the server
-learns of it. Its API calls are then cancelled, `check_sbom` and `scan_manifest` send no further batch, and its
-large-body slot is freed. Over HTTP/1.1, Cloud Run does not pass a client's disconnect on to the
-server at all (<https://docs.cloud.google.com/run/docs/troubleshooting>). The hosted endpoint
-speaks HTTP/2 to Cloud Run, where the same page says a disconnect is passed on. Measured on
-2026-10-05, Cloud Run reset the stream of a client that stopped reading its answer 15 s in, and the
-call was logged as a client that closed. Whether a client that aborts mid-call is passed on at once
-has not been observed yet. Until it is, an abandoned `check_sbom` or `scan_manifest` call may run for up to its
-50-second budget and hold its slot that long.
+No API key, so the API limits each caller, one IPv4 address or one IPv6 /64 network, counting
+all its requests together in a 60-second window: 12,000 a minute to `/api/v1/public/cves` and the
+paths under it, 6,000 to the CWE, vendor-advisory, KEV and shadow-AI paths, and 600 to any other
+public path; `check_sbom`'s and `scan_manifest`'s batch route is charged per component, 1,200
+components a minute. Over a limit the tool returns a failure (`state` `failed`, `error.status`
+429), never empty data; `check_sbom` and `scan_manifest` wait out a 429's `Retry-After` within
+50 seconds a call, and answer what they have, the rest counted in `coverage.not_sent`. The hosted
+endpoint adds 120 MCP requests a minute per client address, and refuses a request body over 64 KiB
+(6 MiB for a `check_sbom` or `scan_manifest` call, or an `sbom_review` prompt). Every limit, path
+by path, with what a tool answers past each:
+[docs/rate-limits.md](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/rate-limits.md).
+The API's own documentation of these limits: <https://echelongraph.io/pulse/api>.
 
 ## Configuration
 

@@ -9,7 +9,10 @@
 //     from (REMOVED_CLAIMS, read from tools.test.mjs so the two cannot drift), calls a service
 //     count "hosts", or says "only" (read-only aside), and the public repository's GitHub topics
 //     claim nothing comparative either (#2780, as package.json's keywords);
-//   * the manifest names exactly the tools the server lists, with their titles, in both eras;
+//   * the manifest names exactly the tools the server lists, with their titles, and declares
+//     exactly the prompts it lists, with their descriptions and argument names, in both eras (#2922);
+//   * every count of tools or prompts a listing surface states is tools/list's or prompts/list's,
+//     and a surface that lists the tools lists them all (#2845);
 //   * none of these files is published to npm.
 //
 // These are repo files: npm does not pack listings/, Dockerfile or glama.json, so a run inside an
@@ -184,23 +187,56 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
   });
 
   it("npm does not publish the listing files", () => {
-    for (const f of pkg.files) assert.ok(["dist", "README.md", "CHANGELOG.md", "server.json"].includes(f), `package.json files gained ${f}: check it publishes no listing file`);
+    // #3012: docs/ holds the README's reference pages, which npm must ship: the README links them.
+    for (const f of pkg.files) assert.ok(["dist", "docs", "README.md", "CHANGELOG.md", "server.json"].includes(f), `package.json files gained ${f}: check it publishes no listing file`);
     const [packed] = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: REPO_PKG, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
-    const leaked = packed.files.map((f) => f.path).filter((p) => /^(listings\/|Dockerfile(\.http)?$|\.dockerignore$|glama\.json$)/.test(p));
+    const paths = packed.files.map((f) => f.path);
+    const leaked = paths.filter((p) => /^(listings\/|Dockerfile(\.http)?$|\.dockerignore$|glama\.json$)/.test(p));
     assert.deepEqual(leaked, []);
+    // docs/ ships Markdown pages and nothing else, so it cannot carry a listing file in.
+    const docs = paths.filter((p) => p.startsWith("docs/"));
+    assert.ok(docs.length >= 4, `npm packs ${docs.length} docs/ pages`);
+    assert.deepEqual(docs.filter((p) => !/^docs\/[a-z0-9-]+\.md$/.test(p)), []);
   });
 
   for (const era of [MODERN, "2025-06-18"]) {
     describe(`the manifest's tools are the server's tools [${era}]`, () => {
-      let client, tools;
+      let client, tools, prompts;
       before(async () => {
         client = new StdioMcpClient({ ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
         await client.open(era);
         ({ tools } = await client.listTools());
+        ({ prompts } = await client.listPrompts());
       });
       after(() => client?.close());
       it("same names, in order, each described by the tool's title", () => {
         assert.deepEqual(manifest.tools, tools.map((t) => ({ name: t.name, description: t.title })));
+      });
+      // #2922's last review: the manifest listed 0 prompts. MCPB v0.3 (the $schema it names, which
+      // build.sh's pinned CLI validates) declares each prompt as name, description, arguments (their
+      // names) and text, the prompt text with ${arguments.<name>} placeholders. The server's
+      // prompts/get answers with the full text (test/prompts-resources.test.mjs snapshots it); the
+      // manifest's text is the short form the schema requires.
+      it("#2922: the manifest declares the server's prompts: same names, in order, each with its description and argument names", () => {
+        assert.ok(prompts.length > 0, "prompts/list is empty: re-aim this check");
+        assert.deepEqual(
+          (manifest.prompts ?? []).map(({ name, description, arguments: args }) => ({ name, description, arguments: args })),
+          prompts.map((p) => ({ name: p.name, description: p.description, arguments: (p.arguments ?? []).map((a) => a.name) })),
+        );
+      });
+      it("#2922: each manifest prompt's text has a placeholder for each of its arguments and no other, names only the server's tools, and carries our wording", () => {
+        const toolNames = new Set(tools.map((t) => t.name));
+        for (const p of manifest.prompts) {
+          assert.deepEqual(Object.keys(p).sort(), ["arguments", "description", "name", "text"], `${p.name}: a key MCPB v0.3's prompts schema does not define`);
+          const placeholders = [...new Set([...p.text.matchAll(/\$\{([^}]*)\}/g)].map((m) => m[1]))].sort();
+          assert.deepEqual(placeholders, p.arguments.map((a) => `arguments.${a}`).sort(), `${p.name}: its text's placeholders are not its arguments`);
+          // A word shaped like one of the server's tool names (get_, search_, check_, scan_, cve_,
+          // kev_, epss_, exposure_, vendor_) is one of them.
+          const named = [...new Set(p.text.replace(/\$\{[^}]*\}/g, " ").match(/\b(?:get|search|check|scan|cve|kev|epss|exposure|vendor)(?:_[a-z]+)+\b/g) ?? [])];
+          assert.ok(named.length > 0, `${p.name}: its text names no tool`);
+          for (const w of named) assert.ok(toolNames.has(w), `${p.name}: its text names ${w}, which is not a tool the server lists`);
+          assert.deepEqual(wordingProblems(`manifest.json prompt ${p.name}`, `${p.description} ${p.text}`), []);
+        }
       });
       it("every tool has the title and readOnlyHint the Anthropic directory requires", () => {
         for (const t of tools) {
@@ -210,6 +246,83 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
       });
     });
   }
+});
+
+// #2845: every count of tools or prompts that a listing surface states, the paste blocks of
+// listings/README.md (what the founder pastes into a directory's form), the public repo's About
+// description (github-repo-settings.json), the MCPB manifest's descriptions and the Docker drafts,
+// is tools/list's or prompts/list's length; and a surface that lists the tools by name (three or
+// more of them) lists every one. The 2026-10-11 review found that 14 in github-repo-settings.json
+// passed every test here. The listing README's dated records ("Smithery's scan read 2.6.4 with 14
+// tools") are not paste blocks and say when they were read.
+const COUNT_NUMBER = "\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty";
+const COUNT_WORDS = Object.fromEntries(COUNT_NUMBER.split("|").slice(1).map((w, i) => [w, i + 1]));
+const TOOL_COUNTS = [new RegExp(`\\b(${COUNT_NUMBER}) (?:(?:read-only|new|MCP|more|keyless)\\s+)*tools\\b`, "gi"), /\bTools \((\d+)\b/g];
+const PROMPT_COUNTS = [new RegExp(`\\b(${COUNT_NUMBER}) (?:(?:new|MCP|more)\\s+)*prompts\\b`, "gi")];
+function countProblems(where, text, toolNames, promptCount) {
+  const flat = text.replace(/\s+/g, " ");
+  const n = (w) => (/^\d+$/.test(w) ? Number(w) : COUNT_WORDS[w.toLowerCase()]);
+  const out = [];
+  let stated = 0;
+  for (const [res, want, what] of [[TOOL_COUNTS, toolNames.length, "tools/list"], [PROMPT_COUNTS, promptCount, "prompts/list"]]) {
+    for (const re of res) {
+      for (const m of flat.matchAll(re)) {
+        stated++;
+        if (n(m[1]) !== want) out.push(`${where}: "${m[0]}", and ${what} lists ${want}`);
+      }
+    }
+  }
+  const named = toolNames.filter((t) => new RegExp(`\\b${t}\\b`).test(flat));
+  if (named.length >= 3 && named.length < toolNames.length) out.push(`${where}: lists ${named.length} of the ${toolNames.length} tools, without ${toolNames.filter((t) => !named.includes(t)).join(", ")}`);
+  return { out, stated };
+}
+describe("listing counts equal tools/list and prompts/list (#2845)", { skip: SKIP }, () => {
+  let client, toolNames, promptCount;
+  before(async () => {
+    client = new StdioMcpClient({ ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    await client.open(MODERN);
+    toolNames = (await client.listTools()).tools.map((t) => t.name);
+    promptCount = (await client.listPrompts()).prompts.length;
+  });
+  after(() => client?.close());
+  // Every surface a count can sit on, as [where, text].
+  const surfaces = () => {
+    const manifest = JSON.parse(read("listings/mcpb/manifest.json"));
+    return [
+      ...pasteBlocks().map((b, i) => [`listings/README.md paste block ${i + 1}`, b]),
+      ["github-repo-settings.json description", JSON.parse(read("listings/github-repo-settings.json")).description],
+      ["manifest.json description", manifest.description],
+      ["manifest.json long_description", manifest.long_description],
+      ["docker/server.yaml description", yamlScalar(read("listings/docker/server.yaml"), "description")],
+      ["docker/remote/server.yaml description", yamlScalar(read("listings/docker/remote/server.yaml"), "description")],
+      ["docker/remote/readme.md", read("listings/docker/remote/readme.md")],
+    ];
+  };
+  const problems = (list) => {
+    const all = list.map(([where, text]) => countProblems(where, text, toolNames, promptCount));
+    return { out: all.flatMap((r) => r.out), stated: all.reduce((s, r) => s + r.stated, 0) };
+  };
+  it("every count of tools or prompts a listing surface states is the server's, and a surface that lists tools lists them all", () => {
+    const { out, stated } = problems(surfaces());
+    assert.deepEqual(out, []);
+    // Not vacuous: the long description, the mcp.so issue, both Docker PR bodies and the About box
+    // each state the count.
+    assert.ok(stated >= 6, `only ${stated} counts found on the listing surfaces: re-aim this check`);
+  });
+  it("control: 14 in github-repo-settings.json (the review's mutant), a stale paste block count, a list missing a tool, and four prompts each fail, naming the surface", () => {
+    const list = surfaces();
+    const at = (where) => list.findIndex(([w]) => w === where);
+    const mutate = (where, f) => list.map(([w, t]) => [w, w === where ? f(t) : t]);
+    const about = "github-repo-settings.json description";
+    assert.ok(at(about) >= 0 && list[at(about)][1].includes(`${toolNames.length} read-only tools`), "the About description no longer states the count this control changes: re-aim it");
+    assert.ok(problems(mutate(about, (t) => t.replace(`${toolNames.length} read-only tools`, "14 read-only tools"))).out.some((p) => p.startsWith(`${about}: "14 read-only tools"`)));
+    const long = list.find(([, t]) => t.startsWith("CVE and internet-exposure data") && t.includes("read-only tools:"));
+    assert.ok(long, "the long description paste block is gone: re-aim this control");
+    assert.ok(problems(mutate(long[0], (t) => t.replace(`${toolNames.length} read-only tools`, "15 read-only tools"))).out.some((p) => p.startsWith(`${long[0]}: "15 read-only tools"`)));
+    assert.ok(problems(mutate(long[0], (t) => t.replace(/ cve_remediation \([^)]*\),/, ""))).out.some((p) => p.includes("without cve_remediation")));
+    assert.ok(problems([["c", "It serves 16 tools and four prompts."]]).out.some((p) => p.includes('"four prompts"')));
+    assert.ok(problems([["c", "Tools (14, all read-only): a, b."]]).out.some((p) => p.includes('"Tools (14"')));
+  });
 });
 
 // Smithery's "Link to Smithery" verification check scans this README (served from the public repo) for a

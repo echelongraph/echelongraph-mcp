@@ -17,7 +17,7 @@
 // content[1] the note, content[2] the envelope.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { answering, FULL_ARG, GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type DataCut, type TextCut } from "../textBudget.js";
 
 type Text = { type: "text"; text: string };
 type ToolResult = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
@@ -209,6 +209,21 @@ function kevText(a: KevRecentArgs): TextCut {
   };
 }
 
+// #3013: the structured result's cut. A production row is about 400 characters of compact JSON, so
+// the default page of 50 fits (23,234 characters of structured result) and the largest, 200, was
+// 84,380: rows leave data from the end, and, as for the text, the note says how to read them
+// without skipping one, since next_cursor continues after the page, not after data's last row.
+function kevData(a: KevRecentArgs): DataCut {
+  return {
+    steps: [{ lists: ["kev"] }],
+    page: (t) => {
+      const k = t.kev?.returned;
+      if (!k) return "";
+      return `next_cursor continues after the last row of this page, not after the last row in data: to read the rows data leaves out, call kev_recent again with the same filters${a.cursor?.trim() ? " and cursor" : ""} and a limit of ${k}, whose rows are the ones in data, then with that page's next_cursor and a limit of ${k} or fewer.`;
+    },
+  };
+}
+
 async function kevRecent(d: KevRecentDeps, a: KevRecentArgs): Promise<ToolResult> {
   try {
     const h = headersFor(a);
@@ -287,10 +302,11 @@ export function registerKevRecent(server: McpServer, d: KevRecentDeps): void {
         vendor: z.string().optional().describe("CISA vendorProject, an exact case-insensitive match, e.g. 'Microsoft'"),
         limit: z.number().int().min(1).max(KEV_RECENT_MAX_LIMIT).optional().describe("page size (default 50, max 200)"),
         cursor: z.string().optional().describe("next_cursor from the previous page"),
+        full: FULL_ARG,
       }),
       outputSchema: output,
       annotations: d.annotations,
     },
-    async (a) => d.checked(TOOL, output, await kevRecent(d, a)),
+    async (a) => d.checked(TOOL, output, await answering(a.full, kevData(a), () => kevRecent(d, a))),
   );
 }

@@ -234,7 +234,7 @@ for (const era of ERAS) {
       ["kev_weekly_brief_30", { days: "30" }, ["kev_recent"]],
       ["am_i_affected_product", { product: "openssl", version: "3.0.0" }, ["check_affected"]],
       ["am_i_affected_registry", { ecosystem: "npm", package: "lodash", version: "4.17.20" }, ["check_affected"]],
-      ["sbom_review", { sbom: SBOM }, ["check_sbom", "get_cve", "cve_intel", "cve_remediation"]],
+      ["sbom_review", { sbom: SBOM }, ["check_sbom", "get_cve", "cve_intel", "cve_remediation", "get_vendor_advisory"]],
       ["workload_triage", undefined, ["check_sbom", "get_cve"]],
       ["workload_triage_kubernetes", { source: "kubernetes" }, ["check_sbom", "get_cve"]],
       ["workload_triage_github_actions", { source: "github_actions" }, ["check_sbom", "get_cve"]],
@@ -282,18 +282,37 @@ for (const era of ERAS) {
 
     it("#2834: am_i_affected's registry text reads each match's fixed_in, and its product text, whose CPE matches carry none, names none", async () => {
       const reg = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" } }));
-      assert.match(reg, /For each match, give its fixed_in where it is a version: the fixed bound of the advisory interval that holds this version\. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists\./);
+      assert.match(reg, /For each match, give its fixed_in where it is a version: the first version above this one that no affected interval of the advisory holds\. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists\./);
       const cpe = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { product: "openssl", version: "3.0.0" } }));
       assert.doesNotMatch(cpe, /fixed_in/);
     });
-    it("#2834: sbom_review reads fixed_in first, null as no fix on that branch, and the match_reason and cve_intel rule where a match carries none", async () => {
+    // #2834's last review (2026-10-11): the rule still fell back to the advisory interval in the
+    // match's match_reason, prose read by its brackets. It reads fixed_in alone wherever the text
+    // keeps the match, and cve_intel only where it keeps none or the match has no fixed_in.
+    it("#2834: sbom_review reads fixed_in alone where the text keeps the match, null as no fix on record, and cve_intel only where it keeps none", async () => {
       const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
       const rule = own.split("\n").find((l) => l.startsWith("For each line give the component"));
       const at = (re) => rule.search(re);
-      assert.ok(at(/First, where the text keeps the component's match for the CVE and the match carries fixed_in: a version there is the fixed bound of the advisory interval that holds the installed version, so give it as the fixed version; null says the advisory records no fixed version for the installed version's range, so give none for that CVE on that component/) >= 0, rule);
-      assert.ok(at(/Where the match has no fixed_in field, or the text keeps no match for the component, the rest of this rule applies\./) >= 0, rule);
-      // fixed_in comes before the match_reason prose and cve_intel's values.
-      assert.ok(at(/carries fixed_in/) < at(/Prefer the match's match_reason/) && at(/carries fixed_in/) < at(/fixed_branches/), rule);
+      // #3074: fixed_in is the first version above the installed one that no affected interval holds.
+      assert.ok(at(/Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component and write "no fix on record", which is not a finding that no fix exists\./) >= 0, rule);
+      assert.ok(at(/Where the text keeps no match for the component \(a cut text can keep its cve_ids alone\), or the match has no fixed_in field, the rest of this rule applies\./) >= 0, rule);
+      // fixed_in comes before cve_intel's values, and nothing reads match_reason.
+      assert.ok(at(/carries fixed_in/) >= 0 && at(/carries fixed_in/) < at(/fixed_branches/), rule);
+      assert.doesNotMatch(own, /match_reason|advisory interval \[A, B/, "sbom_review still reads a fixed version from match_reason's prose");
+    });
+    it("#2834 control: the rule as it read through 2.7.2, with its match_reason fallback, fails the check above", () => {
+      const OLD = "Prefer the match's match_reason where the text keeps it: \"falls inside the advisory interval [A, B)\", closed by a parenthesis, says B is the advisory's fixed version for the range that holds the installed version, so give B as the fixed version, quoting it";
+      assert.match(OLD, /match_reason|advisory interval \[A, B/);
+    });
+    // #2836: an upstream row is matched by the source package its purl's upstream qualifier names;
+    // the fix list names matched_package beside the purl, and step 2 reads package and version so.
+    it("#2836: sbom_review names matched_package where matched_via is upstream, and step 2 reads an upstream purl as its source package", async () => {
+      const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      const rule = own.split("\n").find((l) => l.startsWith("For each line give the component"));
+      assert.match(rule, /^For each line give the component \(its purl, and, where its row's matched_via is upstream, its matched_package: the source package its CVEs were matched by\)/);
+      const step2 = own.split("\n").find((l) => l.startsWith("2. Read each component's ecosystem"));
+      assert.match(step2, /A deb, apk or alpine purl with an upstream qualifier \(upstream=name, or upstream=name@version\) is checked as the source package it names, which is how Debian and Alpine file advisories: its package is that name, and its version is the qualifier's where it gives one, else the purl's, and its row says matched_via upstream, with that name as matched_package/);
+      assert.match(step2, /pkg:apk\/alpine\/libcrypto3@3\.3\.6-r0\?distro=alpine-3\.20&upstream=openssl is openssl in Alpine:v3\.20, at 3\.3\.6-r0/);
     });
     it("#2841: triage_cve and sbom_review read cve_remediation's vendor remediation as the vendor's, untested, and not_parsed and none_in_source as no finding of no fix", async () => {
       const triage = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: CVE } }));
@@ -305,6 +324,18 @@ for (const era of ERAS) {
       }
       assert.match(triage, /^3\. cve_remediation: how it is fixed, as its sources state it/m);
       assert.match(review, /Then, for the first 5 CVEs of the list \(fewer if it has fewer\), call cve_remediation with the CVE's cve_id/);
+    });
+    // #3013's review: cve_remediation's cut can leave each item's text, the vendor's own wording of a
+    // workaround or mitigation, out of data (and shorten or drop it in the text); no string is
+    // shortened in data, so both prompts that have the model state that step say where to read it.
+    it("#3013's review: triage_cve and sbom_review read a vendor's step from get_vendor_advisory where cve_remediation's cut leaves its text out", async () => {
+      const triage = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: CVE } }));
+      const patch = triage.split("\n").find((l) => l.startsWith("- Patch:"));
+      const review = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      const remediationLine = review.split("\n").find((l) => l.startsWith("Then, for the first 5 CVEs"));
+      const STEP = /a workaround or mitigation as the step that vendor states, .*Where cve_remediation's note says its data or its text leaves out or shortens an item's text \(DATA CUT, TEXT CUT\), read that step in full from get_vendor_advisory for that advisory \(its vendor and vendor_advisory_id\)\./;
+      for (const [where, t] of [["triage_cve's Patch line", patch], ["sbom_review's remediation line", remediationLine]]) assert.match(t ?? "", STEP, where);
+      assert.ok(tools.has("get_vendor_advisory"));
     });
     it("#2846: workload_triage says each thing it must, in every source's text, and names no EchelonGraph exposure tool", async () => {
       for (const args of [undefined, {}, { source: "kubernetes" }, { source: "github_actions" }, { source: "images" }]) {
@@ -381,7 +412,7 @@ for (const era of ERAS) {
       assert.equal(r.contents[0].uri, "echelongraph://methodology");
       assert.equal(r.contents[0].mimeType, "text/markdown");
       const t = r.contents[0].text;
-      for (const f of ["state", "measured_at", "method", "coverage", "freshness", "notes", "data", "error"]) assert.ok(t.includes(`| ${f} |`), f);
+      for (const f of ["state", "measured_at", "method", "coverage", "freshness", "notes", "data_truncated", "truncated", "data", "error"]) assert.ok(t.includes(`| ${f} |`), f);
       for (const s of ["measured", "not_assessed", "failed", "invalid_input"]) assert.ok(t.includes(`| ${s} |`), s);
       for (const tool of tools) assert.match(t, new RegExp(`\\b${tool}\\b`), `methodology does not say how ${tool} measures`);
       noClaims("methodology", t);
@@ -390,7 +421,7 @@ for (const era of ERAS) {
       const dataRow = t.split("\n").find((l) => l.startsWith("| data |"));
       assert.equal(
         dataRow,
-        "| data | On a success: the API's JSON (exposure_radar and cve_intel relay a labelled selection, and cve_summary leaves out a poller field of another JSON type, named in the note). |",
+        "| data | On a success: the API's JSON (exposure_radar and cve_intel relay a labelled selection, and cve_summary leaves out a poller field of another JSON type, named in the note), its lists cut when data_truncated is true. |",
       );
     });
 
@@ -493,6 +524,10 @@ for (const era of ERAS) {
       // #2801: a record that fits is the structured result pretty-printed, character for character
       // as through 2.6.3; past 30,000 characters data is cut (text-bound.test.mjs).
       assert.equal(r.contents[0].text, JSON.stringify(call.structuredContent, null, 2));
+      // #3013's review: the resource cut nothing, so its envelope says so (text-bound.test.mjs holds
+      // the other polarity, data_truncated true with truncated, on CVE-2021-44228's record).
+      assert.equal(s.data_truncated, false);
+      assert.ok(!Object.hasOwn(s, "truncated"));
     });
     // #2736: get_cve's kev_added_date, fed to kev_recent, as triage_cve's step 6 did through 2.6.3.
     // get_cve gives it as RFC 3339, and kev_recent reads it, or its date part, as the same date.

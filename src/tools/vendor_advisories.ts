@@ -60,7 +60,7 @@
 // a VendorAdvisoryKit so this file cannot drift from them.
 import * as z from "zod";
 import type { McpServer, StandardSchemaWithJSON } from "@modelcontextprotocol/server";
-import { TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { answering, FULL_ARG, NO_DATA_CUT, TEXT_BUDGET_DESCRIPTION, wholePage, type DataCut, type RowKeep, type TextCut } from "../textBudget.js";
 
 // The shapes index.ts's helpers take and return, structurally.
 type FailureKind = "network" | "timeout" | "http" | "not_json" | "not_object" | "unexpected_shape";
@@ -397,9 +397,9 @@ const ROW_CUT_LEVELS: TextCut["levels"] = [
   { keep: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"], clip: 100, cap: 10 },
 ];
 // get_vendor_advisory's own first text block is cut too past the budget (#2802): only its
-// structuredContent.data is one advisory whole.
+// structuredContent.data is one advisory whole, with full: true (#3013).
 const WHOLE =
-  "get_vendor_advisory returns any one of these advisories by its vendor and vendor_advisory_id, whole in its structuredContent.data, and in its first text block with every field (past 30,000 characters, each list cut to its first entries).";
+  "get_vendor_advisory returns any one of these advisories by its vendor and vendor_advisory_id, whole in its structuredContent.data with full: true, and in its first text block with every field (past 30,000 characters, each list cut to its first entries).";
 const FOR_CVE_TEXT: TextCut = { rows: "advisories", levels: ROW_CUT_LEVELS, whole: WHOLE };
 const searchText = (a: { offset?: number }): TextCut => ({
   rows: "advisories",
@@ -408,6 +408,30 @@ const searchText = (a: { offset?: number }): TextCut => ({
   page: (shown, _rows, d) =>
     `To read the rows left out in the text, call search_vendor_advisories again with the same arguments and offset ${(num(d, "offset") ?? a.offset ?? 0) + shown}; a page of ${shown} rows or fewer like these fits the text without leaving rows out.`,
 });
+// #3013: the structured result's cut. A production row is up to about 1,700 characters of compact
+// JSON, 782 of them its affected_products, so search_vendor_advisories "log4j" at its default page
+// was 38,733 characters of structured result. Before any row leaves, every row is thinned: first
+// without affected_products, then without summary too (get_vendor_advisory returns one whole);
+// only then do rows leave data from the end, and the note gives the offset to read them from. The
+// by-CVE answer (at most 20 advisories, 12,652 characters for CVE-2021-44228) is cut the same way.
+const ADVISORY_ROW_THIN: readonly RowKeep[] = [
+  [
+    "vendor", "vendor_display_name", "vendor_advisory_id", "advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "vendor_published_at", "our_first_seen_at", "withdrawn",
+    "rejected_cve_ids", "remediation_kinds", "remediation_state",
+  ],
+  ["vendor", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"],
+];
+const FOR_CVE_DATA: DataCut = { steps: [{ lists: ["advisories"], thin: ADVISORY_ROW_THIN }] };
+// The page size the note says fits data whole is counted on the rows whole (#3013's review: it was
+// the number of thinned rows kept, and a page of that many came back thinned again).
+const SEARCH_DATA: DataCut = {
+  steps: [{ lists: ["advisories"], thin: ADVISORY_ROW_THIN }],
+  page: (t, d, at) => {
+    const k = t.advisories?.returned;
+    if (!k || !t.advisories || k === t.advisories.total) return "";
+    return `To read the rows past the first ${k} in data, call search_vendor_advisories again with the same arguments and offset ${(num(d, "offset") ?? 0) + k}; ${wholePage(at.wholeFit("advisories"))}`;
+  },
+};
 const ROW_CUT_DESCRIPTION = " Cut, each row keeps vendor, vendor_advisory_id, title, severity and cve_ids at least, its strings and lists shortened";
 
 export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdvisoryKit): void {
@@ -716,11 +740,11 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     {
       title: "Vendor advisories for one CVE",
       description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_display_name, vendor_advisory_id, title, severity and cvss_v3_score where the vendor gives them. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means none of the advisories EchelonGraph holds names the CVE, not that no vendor published one. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} The answer's cve_rejected is true when the CVE record of the CVE asked for was rejected. Each row has remediation_kinds and remediation_state (not_parsed is not none). coverage gives returned, cap, at_cap (true: there may be more) and cve_year; vendor_windows, each vendor's held window: ${WINDOW_HEAD}; and vendors_not_fully_held, the vendors absent from the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known, or whose history is still being read, which the note names. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
-      inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2024-21412") }),
+      inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2024-21412"), full: FULL_ARG }),
       outputSchema: FOR_CVE_OUTPUT,
       annotations: kit.annotations,
     },
-    async ({ cve_id }) => kit.checked("vendor_advisories_for_cve", FOR_CVE_OUTPUT, await forCVE(cve_id)),
+    async ({ cve_id, full }) => kit.checked("vendor_advisories_for_cve", FOR_CVE_OUTPUT, await answering(full, FOR_CVE_DATA, () => forCVE(cve_id))),
   );
 
   server.registerTool(
@@ -731,11 +755,12 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
       inputSchema: z.object({
         vendor: z.string().describe("the vendor slug, e.g. microsoft, redhat, github"),
         advisory_id: z.string().describe("the vendor's advisory ID, e.g. RHSA-2024:1234 or GHSA-xxxx-xxxx-xxxx"),
+        full: FULL_ARG,
       }),
       outputSchema: DETAIL_OUTPUT,
       annotations: kit.annotations,
     },
-    async ({ vendor, advisory_id }) => kit.checked("get_vendor_advisory", DETAIL_OUTPUT, await detail(vendor, advisory_id)),
+    async ({ vendor, advisory_id, full }) => kit.checked("get_vendor_advisory", DETAIL_OUTPUT, await answering(full, NO_DATA_CUT, () => detail(vendor, advisory_id))),
   );
 
   server.registerTool(
@@ -750,10 +775,11 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
         has_cve: z.boolean().optional().describe("true: only advisories naming a CVE; false: only those naming none"),
         limit: z.number().int().min(1).max(50).optional().describe("page size (default 20, max 50)"),
         offset: z.number().int().min(0).max(10000).optional().describe("rows to skip (default 0)"),
+        full: FULL_ARG,
       }),
       outputSchema: SEARCH_OUTPUT,
       annotations: kit.annotations,
     },
-    async (a) => kit.checked("search_vendor_advisories", SEARCH_OUTPUT, await search(a)),
+    async (a) => kit.checked("search_vendor_advisories", SEARCH_OUTPUT, await answering(a.full, SEARCH_DATA, () => search(a))),
   );
 }

@@ -31,7 +31,7 @@ import {
   succeeded,
   type ToolResult,
 } from "../index.js";
-import { GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
+import { answering, FULL_ARG, GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type DataCut, type TextCut } from "../textBudget.js";
 
 const TOOL = "get_cwe";
 const CWE_ARG = /^(?:CWE-)?0*(\d{1,6})$/i;
@@ -50,6 +50,11 @@ const GET_CWE_TEXT: TextCut = {
   levels: [{ keep: ["cve_id", "severity", "cvss_v3_score", "echelongraph_score", "echelongraph_severity", "score_assessed", "score_unassessed_reason", "kev_listed", "published", "description"], clip: 120 }],
   whole: `${GET_CVE_WHOLE}.`,
 };
+
+// #3013: the structured result's cut. CWE-79's page of 50 is 24,276 characters of structured result,
+// within the budget; rows a few times longer leave data from the end. A page is always 50 rows, so
+// full: true is the only way to read the rest of one.
+const GET_CWE_DATA: DataCut = { steps: [{ lists: ["cves"] }] };
 
 function schemas() {
   const row = z.looseObject({
@@ -180,10 +185,11 @@ export function registerGetCwe(server: McpServer): void {
       inputSchema: z.object({
         cwe_id: z.string().describe("a CWE ID, e.g. CWE-79 (or 79)"),
         page: z.number().int().min(1).max(MAX_PAGE).optional().describe(`page of 50 CVEs (default 1, max ${MAX_PAGE})`),
+        full: FULL_ARG,
       }),
       outputSchema: output,
       annotations: ANNOTATIONS,
     },
-    async ({ cwe_id, page }) => checked(TOOL, output, await getCwe(cwe_id, page)),
+    async ({ cwe_id, page, full }) => checked(TOOL, output, await answering(full, GET_CWE_DATA, () => getCwe(cwe_id, page))),
   );
 }

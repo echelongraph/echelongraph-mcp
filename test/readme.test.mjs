@@ -15,7 +15,12 @@
 //     server as the request body, and no string of check_sbom's tools/list entry, nor that row, nor
 //     the privacy section denies it in any wording of document-denials.mjs, the list /pulse/mcp's
 //     check_sbom row is held to (#2796);
-//   * the Resources table names what echelongraph://sources relays for the NVD poller (#2770);
+//   * the Resources table names what echelongraph://sources relays for the NVD poller (#2770), and
+//     lists resources/list then resources/templates/list, whose lengths every prose count of
+//     resources and of resource templates is (#2922);
+//   * README.md fits under a ceiling below the 65,536 characters npm keeps of it, with its Privacy
+//     and License sections, and the reference it moved to docs/ ships in the package, linked by
+//     absolute GitHub URL, every link to a page and heading that exist (#3012);
 //   * CHANGELOG.md has an entry for package.json's version, and its preamble says the issue
 //     numbers are an internal tracker's (#2740), in the words listings/README.md gives for
 //     Release bodies.
@@ -27,7 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { StdioMcpClient, MODERN } from "./mcp-stdio-client.mjs";
-import { PKG, PKG_DIR, serverCommand, readPkgFile } from "./server-under-test.mjs";
+import { PKG, PKG_DIR, serverCommand, readPkgFile, DOC_PAGES, readDocs } from "./server-under-test.mjs";
 import { DENIAL_VARIANTS, documentDenials } from "./document-denials.mjs";
 
 const README = readPkgFile("README.md");
@@ -63,7 +68,8 @@ for (const era of [MODERN, "2025-06-18"]) {
       );
     });
     it("the prose counts the tools the server lists", () => {
-      for (const m of README.matchAll(/\b(\d+) (?:read-only )?tools\b/g)) assert.equal(Number(m[1]), tools.length, `"${m[0]}"`);
+      // #3012: and so does every page of docs/, the reference the README links.
+      for (const [page, text] of readDocs()) for (const m of text.matchAll(/\b(\d+) (?:read-only )?tools\b/g)) assert.equal(Number(m[1]), tools.length, `${page}: "${m[0]}"`);
       assert.ok(README.includes(`${tools.length} tools`), "the README no longer says how many tools there are");
     });
   });
@@ -394,10 +400,18 @@ describe("hosted-endpoint disclosure of the check_sbom document (#2796)", () => 
 // null poller "not a JSON object", which is kept as sent.
 describe("README on cve_summary's left-out poller fields (#2771)", () => {
   const flat = README.replace(/\s+/g, " ");
+  // #3012: "How cve_summary reads its counts" moved to docs/tools.md, which the README links.
+  const cveSummarySection = () => {
+    const page = readPkgFile("docs/tools.md");
+    const sec = page.split(/^## How `cve_summary` reads its counts$/m)[1]?.split(/^## /m)[0];
+    assert.ok(sec, "docs/tools.md lost its \"How `cve_summary` reads its counts\" section: re-aim this check");
+    return sec.replace(/\s+/g, " ");
+  };
   it("the cve_summary section says a poller of another type is left out whole, a null one aside", () => {
-    assert.ok(flat.includes("a `poller` that is neither a JSON object nor null is left out whole; `summary` is relayed either way"), "the cve_summary section's left-out sentence changed");
-    assert.ok(!flat.includes("a `poller` that is not a JSON object is left out whole"), "the cve_summary section calls a null poller not a JSON object");
-    assert.ok(flat.includes("The tool relays the API's JSON as it was sent, less a `poller` field left out as above."));
+    const sec = cveSummarySection();
+    assert.ok(sec.includes("a `poller` that is neither a JSON object nor null is left out whole; `summary` is relayed either way"), "the cve_summary section's left-out sentence changed");
+    for (const [page, text] of readDocs()) assert.ok(!text.replace(/\s+/g, " ").includes("a `poller` that is not a JSON object is left out whole"), `${page} calls a null poller not a JSON object`);
+    assert.ok(sec.includes("The tool relays the API's JSON as it was sent, less a `poller` field left out as above."));
   });
   it("the success shape names cve_summary among the exceptions to verbatim", () => {
     assert.ok(
@@ -443,9 +457,12 @@ describe("README prompts equal prompts/list", () => {
   it("every prose count of prompts equals prompts/list, and the intro names each one", () => {
     const counts = [...README.matchAll(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten) prompts\b/gi)];
     assert.ok(counts.length > 0, "the README no longer says how many prompts there are");
-    for (const m of counts) {
-      const n = /^\d+$/.test(m[1]) ? Number(m[1]) : NUMBER_WORDS[m[1].toLowerCase()];
-      assert.equal(n, prompts.length, `"${m[0]}"`);
+    // #3012: the docs/ pages the README links are held to the same count.
+    for (const [page, text] of readDocs()) {
+      for (const m of text.matchAll(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten) prompts\b/gi)) {
+        const n = /^\d+$/.test(m[1]) ? Number(m[1]) : NUMBER_WORDS[m[1].toLowerCase()];
+        assert.equal(n, prompts.length, `${page}: "${m[0]}"`);
+      }
     }
     const intro = README.split("\n## ")[0];
     for (const p of prompts) assert.ok(intro.includes(`\`${p.name}\``), `the README's opening does not name the ${p.name} prompt`);
@@ -459,6 +476,113 @@ describe("README Resources table (#2770)", () => {
     for (const f of ["interval", "last_poll_at", "poll_count", "poll_errors"]) assert.ok(row.includes(`\`${f}\``), `the row does not name ${f}: ${row}`);
     assert.match(row, /all of the one instance that answered/);
     assert.match(row, /the two counts are that instance's since it last started, zeroed on every restart, never the feed's reliability/);
+  });
+});
+
+// #2922's last review (2026-10-11): the README said "three resources", counting the cve://{cve_id}
+// template, which resources/list does not list; nothing held the count. A count of resources is
+// held to resources/list and a count of resource templates to resources/templates/list, on every
+// page of the package's documentation, and the Resources table lists both, in list order.
+const countOf = (w) => (/^\d+$/.test(w) ? Number(w) : NUMBER_WORDS[w.toLowerCase()]);
+const RESOURCE_COUNT = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten) resources?\b(?! templates?\b)/gi;
+const TEMPLATE_COUNT = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten) resource templates?\b/gi;
+function resourceCountProblems(pages, resources, templates) {
+  const out = [];
+  for (const [page, text] of pages) {
+    const flat = text.replace(/\s+/g, " ");
+    for (const m of flat.matchAll(RESOURCE_COUNT)) if (countOf(m[1]) !== resources) out.push(`${page}: "${m[0]}", and resources/list lists ${resources}`);
+    for (const m of flat.matchAll(TEMPLATE_COUNT)) if (countOf(m[1]) !== templates) out.push(`${page}: "${m[0]}", and resources/templates/list lists ${templates}`);
+  }
+  return out;
+}
+describe("README resources and resource templates equal resources/list and resources/templates/list (#2922)", () => {
+  let client, resources, templates;
+  before(async () => {
+    client = new StdioMcpClient({ ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    await client.open(MODERN);
+    ({ resources } = await client.listResources());
+    ({ resourceTemplates: templates } = await client.listResourceTemplates());
+  });
+  after(() => client?.close());
+  it("every prose count of resources and of resource templates is the server's, and the README states both", () => {
+    assert.ok(resources.length > 0 && templates.length > 0, `resources/list ${resources.length}, resources/templates/list ${templates.length}: re-aim this check`);
+    assert.deepEqual(resourceCountProblems(readDocs(), resources.length, templates.length), []);
+    const flat = README.replace(/\s+/g, " ");
+    assert.ok([...flat.matchAll(RESOURCE_COUNT)].length > 0, "the README no longer says how many resources there are");
+    assert.ok([...flat.matchAll(TEMPLATE_COUNT)].length > 0, "the README no longer says how many resource templates there are");
+  });
+  it("control: \"three resources\", the count through 2.7.2, fails, and so does a template counted as a resource", () => {
+    assert.notDeepEqual(resourceCountProblems([["c", "It also serves five prompts, and three resources (`echelongraph://methodology`, `echelongraph://sources` and `cve://{cve_id}`)."]], resources.length, templates.length), []);
+    assert.notDeepEqual(resourceCountProblems([["c", "two resources and two resource templates"]], resources.length, templates.length), []);
+    assert.deepEqual(resourceCountProblems([["c", "two resources (a and b) and one resource template (c)"]], 2, 1), []);
+  });
+  it("the Resources table lists the resources, then the resource templates, in list order", () => {
+    const section = README.split(/^## Resources$/m)[1]?.split(/^## /m)[0] ?? "";
+    assert.match(section, /^\| Resource \| What it holds \|$/m, "the Resources table lost its header: re-aim this check");
+    const rows = [...section.matchAll(/^\| `([^`]+)` \| /gm)].map((m) => m[1]);
+    assert.deepEqual(rows, [...resources.map((r) => r.uri), ...templates.map((t) => t.uriTemplate)]);
+  });
+});
+
+// #3012: npm keeps the first 65,536 characters of a package's README (the 2.7.1 packument's readme
+// was 65,536 characters, cut mid-sentence, with neither "## Privacy: what is sent where" nor
+// "## License"; mcp-server/README.md was 85,417 then). The long reference moved to docs/*.md, which
+// the package ships, and the README stays under a ceiling with room below npm's cut, keeping both
+// headings. The ceiling counts characters and the cap is checked in UTF-8 bytes too, in case npm
+// counts those.
+const NPM_README_CAP = 65_536;
+const README_CEILING = 62_000;
+function npmReadmeProblems(text) {
+  const out = [];
+  if (text.length >= README_CEILING) out.push(`README.md is ${text.length} characters, at or past the ${README_CEILING} ceiling below npm's ${NPM_README_CAP}: move reference to docs/`);
+  if (Buffer.byteLength(text) >= NPM_README_CAP) out.push(`README.md is ${Buffer.byteLength(text)} bytes, at or past npm's ${NPM_README_CAP}`);
+  for (const h of ["## Privacy: what is sent where", "## License"]) {
+    const at = text.search(new RegExp(`^${h.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+    if (at < 0) out.push(`README.md has no "${h}" heading`);
+    else if (at >= Math.min(README_CEILING, NPM_README_CAP)) out.push(`README.md's "${h}" starts at character ${at}, past what npm keeps`);
+  }
+  return out;
+}
+const DOCS_URL = "https://github.com/echelongraph/echelongraph-mcp/blob/main/";
+// GitHub's heading anchor: lower case, punctuation but - and _ dropped, each space a hyphen.
+const slug = (heading) => heading.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
+const anchorsOf = (md) => new Set([...md.matchAll(/^#{1,6} (.+)$/gm)].map((m) => slug(m[1])));
+describe("README fits what npm keeps, and the reference it moved ships in docs/ (#3012)", () => {
+  it("README.md is under the ceiling, in characters and bytes, and keeps its Privacy and License sections", () => {
+    assert.deepEqual(npmReadmeProblems(README), []);
+  });
+  it("control: a README at npm's cap, or without the Privacy or the License heading, fails", () => {
+    assert.ok(npmReadmeProblems(README + "x".repeat(Math.max(0, README_CEILING - README.length))).some((p) => p.includes("ceiling")));
+    assert.ok(npmReadmeProblems("é".repeat(NPM_README_CAP / 2 + 1)).some((p) => p.includes("bytes")));
+    assert.ok(npmReadmeProblems(README.replace(/^## License$/m, "## Licence")).some((p) => p.includes('"## License"')));
+    assert.ok(npmReadmeProblems(README.replace(/^## Privacy: what is sent where$/m, "## Privacy")).some((p) => p.includes("Privacy")));
+  });
+  it("package.json ships docs/, which holds the pages the README moved there", () => {
+    assert.ok(PKG.files.includes("docs"), "package.json files does not ship docs/, so the pages the README links are not in the package");
+    assert.deepEqual(DOC_PAGES, ["docs/exposure-radar.md", "docs/rate-limits.md", "docs/structured-results.md", "docs/tools.md"]);
+  });
+  it("every docs/ link in the README is absolute, names a page that ships and a heading on it, and every page is linked", () => {
+    assert.doesNotMatch(README, /\]\((?:\.\/)?docs\//, "a relative docs/ link: npm renders relative links poorly, so the README links docs/ by absolute URL");
+    const links = [...README.matchAll(/https:\/\/github\.com\/echelongraph\/echelongraph-mcp\/blob\/main\/(docs\/[\w.-]+\.md)(?:#([\w-]+))?/g)];
+    assert.ok(links.length >= DOC_PAGES.length, `${links.length} docs/ links`);
+    for (const [url, page, anchor] of links) {
+      assert.ok(url.startsWith(DOCS_URL));
+      assert.ok(DOC_PAGES.includes(page), `${url}: ${page} is not a page the package ships`);
+      if (anchor) assert.ok(anchorsOf(readPkgFile(page)).has(anchor), `${url}: ${page} has no heading #${anchor}`);
+    }
+    for (const p of DOC_PAGES) assert.ok(links.some(([, page]) => page === p), `${p} is not linked from the README`);
+  });
+  it("every relative link on a docs/ page names a file the package ships and a heading on it", () => {
+    let n = 0;
+    for (const page of DOC_PAGES) {
+      for (const [, target, anchor] of readPkgFile(page).matchAll(/\]\(([^)#:\s]+)(?:#([\w-]+))?\)/g)) {
+        n++;
+        const file = path.posix.normalize(path.posix.join(path.posix.dirname(page), target));
+        assert.ok(fs.existsSync(path.join(PKG_DIR, file)), `${page}: ${target} is not in the package`);
+        if (anchor) assert.ok(anchorsOf(readPkgFile(file)).has(anchor), `${page}: ${file} has no heading #${anchor}`);
+      }
+    }
+    assert.ok(n >= DOC_PAGES.length, `only ${n} relative links on the docs/ pages`);
   });
 });
 

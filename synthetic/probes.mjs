@@ -53,15 +53,31 @@ export function advisoryFrom(sc) {
 // check_sbom's input (#2757): 201 distinct purls, one more than the API takes per request
 // (cveBatchMaxComponents, 200), so every probe sends two batches and the multi-batch path runs
 // against production on every run; EXPECT below fails the probe when it did not. The first two are
-// the known-vulnerable pair the probe always sent; the other 199 are versions of one package
-// (lodash 4.17.22 through 4.17.220, version numbers made up for the probe), so the batches read one
-// package's advisories. The budget it costs: 201 components of the API's 1,200 a minute per caller
-// (waf CVEMatchBatchComponentsPerWindow), 2 requests, on each of the run's four legs (two eras, over
-// stdio and over the hosted endpoint): 804 components and 8 requests every 15 minutes.
+// the known-vulnerable pair the probe always sent; the third is an Alpine binary package that only
+// its upstream qualifier names the source of (#2836, below); the other 198 are versions of one
+// package (lodash 4.17.22 through 4.17.219, version numbers made up for the probe), so the batches
+// read one package's advisories. The budget it costs: 201 components of the API's 1,200 a minute per
+// caller (waf CVEMatchBatchComponentsPerWindow), 2 requests, on each of the run's four legs (two eras,
+// over stdio and over the hosted endpoint): 804 components and 8 requests every 15 minutes.
+//   LOG4J_CORE_PURL (#2834)  log4j-core 2.14.1: its CVE-2021-44228 match must carry fixed_in
+//                       "2.15.0", the fixed bound of [2.13.0, 2.15.0), the GHSA-jfh8-c2jp-5v3q
+//                       interval that holds 2.14.1. The same answer under #3074's rule (the lowest
+//                       version inside none of the advisory's affected ranges: [2.0-beta9, 2.3.1),
+//                       [2.4, 2.12.2), [2.13.0, 2.15.0) leave 2.15.0 first above 2.14.1), so the
+//                       EXPECT holds across that change. Live 2026-10-11 (hosted check_sbom): fixed_in
+//                       "2.15.0", interval {introduced 2.13.0, fixed 2.15.0}.
+//   UPSTREAM_PURL (#2836)  Alpine 3.20's libcrypto3 3.3.6-r0 is filed under its source package,
+//                       openssl, which only the upstream qualifier names: the row must be affected,
+//                       matched_via upstream, matched_package openssl (#63's pair: 3.3.7-r0 is not
+//                       affected). Live 2026-10-11 (hosted check_sbom): affected, 6 CVEs, openssl,
+//                       upstream.
+export const LOG4J_CORE_PURL = "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1";
+export const UPSTREAM_PURL = "pkg:apk/alpine/libcrypto3@3.3.6-r0?distro=alpine-3.20&upstream=openssl";
 export const SBOM_PROBE_PURLS = [
   "pkg:npm/lodash@4.17.20",
-  "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
-  ...Array.from({ length: 199 }, (_, i) => `pkg:npm/lodash@4.17.${22 + i}`),
+  LOG4J_CORE_PURL,
+  UPSTREAM_PURL,
+  ...Array.from({ length: 198 }, (_, i) => `pkg:npm/lodash@4.17.${22 + i}`),
 ];
 
 // scan_manifest's input (#2835): one package-lock.json (lockfileVersion 3), as npm writes it, past
@@ -136,7 +152,21 @@ export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
 //                       not sent, and detail quotes not_sent_reason. A lowered batch cap is NOT
 //                       this: the first batch of 200 is refused (400 TOO_MANY_COMPONENTS), nothing
 //                       is answered, and the probe fails as state_invalid_input (a 400 is the API
-//                       refusing the input, index.ts failed()).
+//                       refusing the input, index.ts failed()). Then, from the first batch's rows
+//                       (both purls are in it, so a partial answer still holds them):
+//                       LOG4J_CORE_PURL's CVE-2021-44228 match carries fixed_in "2.15.0" (#2834;
+//                       unmet: core-backend without #2834 (fixed_in absent), the interval lookup
+//                       skipped on the exact-list path (null, with fixed_in_reason), or the bound
+//                       read from the stored fixed_version ("2.3.1"), and detail says which); and
+//                       UPSTREAM_PURL's row is affected, matched_via upstream, matched_package
+//                       openssl (#2836; unmet: the upstream qualifier ignored (not_assessed,
+//                       package_not_in_advisory_corpus, matched_via purl_name), or Alpine 3.20's
+//                       openssl advisories gone from the corpus (not_affected)).
+//   get_cve (#2839)     for CVE-2021-44228, data.kev_listed is true and data.kev_required_action
+//                       is CISA's text. Unmet means the record serves no KEV text: core-backend
+//                       without #2839, the KEV text columns not written (the KEV monitoring's
+//                       "KEV rows missing required action" alert says so too), or a package
+//                       release that drops the field from its CVERecord.
 //   cve_intel (#2817)   for CVE-2021-44228, the org.apache.logging.log4j:log4j-core row of
 //                       data.affected_packages carries fixed_branches with at least 3 ranges, one
 //                       of them fixed in 2.15.0 (GHSA-jfh8-c2jp-5v3q lists [2.13.0, 2.15.0),
@@ -164,11 +194,39 @@ export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
 //                       production no longer finds lodash 4.17.15 affected (the corpus lost its
 //                       lodash advisories, or the matcher regressed).
 export const LOG4J_CORE = "org.apache.logging.log4j:log4j-core";
+// The fixed_in the log4j-core 2.14.1 probe row must carry for CVE-2021-44228 (#2834).
+export const LOG4J_FIXED_IN = "2.15.0";
+const rowFor = (rows, purl) => rows.find((r) => r?.purl === purl);
 export const EXPECT = {
   check_sbom: (sc) => {
     const sent = sc?.coverage?.batches_sent;
-    if (typeof sent === "number" && sent >= 2) return undefined;
-    return `coverage.batches_sent ${JSON.stringify(sent ?? null)}, want at least 2 (not_sent_reason ${JSON.stringify(sc?.coverage?.not_sent_reason ?? null)})`;
+    if (typeof sent !== "number" || sent < 2) {
+      return `coverage.batches_sent ${JSON.stringify(sent ?? null)}, want at least 2 (not_sent_reason ${JSON.stringify(sc?.coverage?.not_sent_reason ?? null)})`;
+    }
+    const rows = sc?.data?.results;
+    if (!Array.isArray(rows)) return `data.results ${rows === undefined ? "absent" : "not a list"}; want a row per purl sent`;
+    // #2834: fixed_in on the registry path's exact-list match.
+    const log4j = rowFor(rows, LOG4J_CORE_PURL);
+    if (!log4j) return `no row for ${LOG4J_CORE_PURL} among ${rows.length} results`;
+    const m = Array.isArray(log4j.matches) ? log4j.matches.find((x) => x?.cve_id === CVE) : undefined;
+    if (!m) return `${LOG4J_CORE_PURL}: verdict ${JSON.stringify(log4j.verdict ?? null)}, no ${CVE} match (cve_ids ${JSON.stringify((log4j.cve_ids ?? []).slice(0, 8))})`;
+    if (m.fixed_in !== LOG4J_FIXED_IN) {
+      return `${LOG4J_CORE_PURL} ${CVE} fixed_in ${m.fixed_in === undefined ? "absent" : JSON.stringify(m.fixed_in)} (fixed_in_reason ${JSON.stringify(m.fixed_in_reason ?? null)}, interval ${JSON.stringify(m.interval ?? null)}); want "${LOG4J_FIXED_IN}"`;
+    }
+    // #2836: the upstream qualifier names the package the advisories are filed under.
+    const up = rowFor(rows, UPSTREAM_PURL);
+    if (!up) return `no row for ${UPSTREAM_PURL} among ${rows.length} results`;
+    if (up.verdict !== "affected" || up.matched_via !== "upstream" || up.matched_package !== "openssl") {
+      return `${UPSTREAM_PURL}: verdict ${JSON.stringify(up.verdict ?? null)}, matched_via ${JSON.stringify(up.matched_via ?? null)}, matched_package ${JSON.stringify(up.matched_package ?? null)} (not_assessed_reason ${JSON.stringify(up.not_assessed_reason || null)}); want affected, upstream, openssl`;
+    }
+    return undefined;
+  },
+  get_cve: (sc) => {
+    const d = sc?.data;
+    if (d?.kev_listed !== true) return `data.kev_listed ${JSON.stringify(d?.kev_listed ?? null)}; want true for ${CVE}`;
+    const action = d.kev_required_action;
+    if (typeof action !== "string" || !action.trim()) return `data.kev_required_action ${action === undefined ? "absent" : JSON.stringify(action)}; want CISA's text for ${CVE}`;
+    return undefined;
   },
   cve_intel: (sc) => {
     const rows = sc?.data?.affected_packages;
@@ -203,16 +261,17 @@ export const EXPECT = {
   },
 };
 
-// #2774: the hosted endpoint takes a request body over 64 KiB for check_sbom alone (#2747), and a
+// #2774: the hosted endpoint takes a request body over 64 KiB for check_sbom and scan_manifest alone (#2747, #2835), and a
 // 2-purl list never tested that: a return of the 413 would have left every probe green. So the
 // hosted leg sends check_sbom the SAME 201 purls as a CycloneDX 1.5 document, pretty-printed as an
 // SBOM tool writes it, each component with its name, version, purl, licence and a SHA-512 (the
-// purl's own, so the document is fixed): 124,877 characters, a ~138,000-byte request body, twice
+// purl's own, so the document is fixed): 125,011 characters, a ~138,000-byte request body, twice
 // the 64 KiB cap. Same purls, so the same API budget as before (201 components, two batches per
 // era); the components' other fields never leave the endpoint.
 function cyclonedxOf(purls) {
   const components = purls.map((purl) => {
-    const [, type, rest] = /^pkg:([^/]+)\/(.+)$/.exec(purl);
+    // The qualifiers (?distro=…&upstream=…) stay on the purl only, as syft writes an apk component.
+    const [, type, rest] = /^pkg:([^/]+)\/([^?]+)/.exec(purl);
     const at = rest.lastIndexOf("@");
     const path = rest.slice(0, at).split("/");
     const name = path.pop();
@@ -223,7 +282,7 @@ function cyclonedxOf(purls) {
       name,
       version: rest.slice(at + 1),
       description: `${name}: a component of the EchelonGraph MCP synthetic's probe document (issue 2774).`,
-      licenses: [{ license: { id: type === "maven" ? "Apache-2.0" : "MIT" } }],
+      licenses: [{ license: { id: type === "npm" ? "MIT" : "Apache-2.0" } }],
       hashes: [{ alg: "SHA-512", content: createHash("sha512").update(purl).digest("hex") }],
       purl,
     };
@@ -261,11 +320,19 @@ export const HTTP_EXPECT = {
   },
 };
 
-// The hosted leg's prompt and resource probes (#2737), one each per era, after the tools. `label`
-// is the line's `tool` (the metric label): a fixed string, so it stays bounded. A prompt or
-// resource the endpoint does not list is not_published, as a planned tool is.
-//   triage_cve           prompts/get with a CVE: the answer must be messages whose text names that
-//                        CVE, which proves the argument reached the prompt.
+// The hosted leg's prompt and resource probes (#2737), one line each per era, after the tools, the
+// prompts in this order. `label` is the line's `tool` (the metric label): a fixed string, so it
+// stays bounded, and never renamed, so its series continues. A prompt or resource the endpoint
+// does not list is not_published, as a planned tool is. A prompt's answer must be messages with a
+// non-blank text (else prompt_empty) that names `expect`; one that does not is reason `unmet`.
+//   triage_cve           prompts/get with a CVE: the text must name that CVE, which proves the
+//                        argument reached the prompt (prompt_argument_not_applied).
+//   workload_triage      prompts/get with source kubernetes, one of its three values (#2846): the
+//                        text must name check_sbom, the one tool it routes the agent's purls to
+//                        (prompt_tool_not_named).
 //   echelongraph://methodology  resources/read: the answer must carry that URI with a non-empty text.
-export const PROMPT_PROBE = { label: "prompt:triage_cve", name: "triage_cve", arguments: { cve_id: CVE }, expect: CVE };
+export const PROMPT_PROBES = [
+  { label: "prompt:triage_cve", name: "triage_cve", arguments: { cve_id: CVE }, expect: CVE, unmet: "prompt_argument_not_applied" },
+  { label: "prompt:workload_triage", name: "workload_triage", arguments: { source: "kubernetes" }, expect: "check_sbom", unmet: "prompt_tool_not_named" },
+];
 export const RESOURCE_PROBE = { label: "resource:methodology", uri: "echelongraph://methodology" };

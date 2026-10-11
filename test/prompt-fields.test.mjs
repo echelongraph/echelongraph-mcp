@@ -38,11 +38,22 @@
 // at 2,000 purls) leaves out of every row: it now reads them, and the version, from the purl, which
 // that cut keeps, and the check below holds each row the text keeps to giving them so (DERIVED).
 //
+// #2834's last review (2026-10-11): sbom_review still fell back to the advisory interval in a
+// match's match_reason, prose read by its brackets. It reads each match's fixed_in alone where the
+// text keeps the match, and cve_intel only where it keeps none (or the match has no fixed_in), so
+// fixRule below reads no match_reason. #2836: a deb, apk or alpine purl with an upstream qualifier
+// is matched by the source package it names; step 2 reads package, version, matched_package and
+// matched_via so, and DERIVED holds the rows the text keeps (an upstream row among them) to that.
+// #3074: core-backend's fixed_in moves past overlapping intervals, and where fixRule reads
+// cve_intel's fixed_branches it walks past them too (fixedBranchesWalk).
+//
 // Runs against dist/index.js, so build first; `npm test` does.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
-import { serverCommand } from "./server-under-test.mjs";
+import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 import { SHAPED, argsOf, cutPairs, readShaped, shapedAnswers, startStub } from "./text-bound.mjs";
 
 const blocksOf = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
@@ -61,8 +72,10 @@ const PLAIN = {
   triage_cve: ["severity", "cwes", "exploits", "references"],
   workload_triage: ["verdict", "purl", "ransomware"],
 };
-// Snake_case words a prompt uses as values, not fields.
-const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source"]);
+// Snake_case words a prompt uses as values, not fields. purl_name is matched_via's value for a purl
+// matched by its own name (sbom_review's step 2); an upstream row also carries a purl_name field,
+// which heldTo still holds to the text wherever the answer has it.
+const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source", "purl_name"]);
 
 // sbom_review's step 2: a component's ecosystem, package and version read from its purl, as the
 // prompt says (and as core-backend's matcher maps a purl: cve/matchbatch.go purlNameVersion,
@@ -87,6 +100,10 @@ function distroEcosystem(distro) {
   if (name === "alpine") return major && minor ? `Alpine:v${major}.${minor}` : undefined;
   return undefined;
 }
+// #2836: core-backend cve/matchbatch.go purlUpstream reads the upstream qualifier of these types
+// alone (upstreamPurlTypes), as name or name@version, and matches by that name, at that version
+// where it gives one; every other purl it checks is matched by its own name (matched_via purl_name).
+const UPSTREAM_TYPES = ["deb", "apk", "alpine"];
 function fromPurl(purl) {
   let s = purl.trim().replace(/^pkg:/, "");
   const query = s.includes("?") ? s.slice(s.indexOf("?") + 1).split("#")[0] : "";
@@ -98,9 +115,14 @@ function fromPurl(purl) {
   const t = type.toLowerCase();
   const name = parts.at(-1);
   const ns = parts.slice(0, -1).join("/");
-  const pkg = !ns ? name : t === "maven" ? `${ns}:${name}` : NAMESPACED.includes(t) ? `${ns}/${name}` : name;
+  let pkg = !ns ? name : t === "maven" ? `${ns}:${name}` : NAMESPACED.includes(t) ? `${ns}/${name}` : name;
   const ecosystem = PURL_ECOSYSTEM[t] ?? (DISTRO_TYPES.includes(t) ? distroEcosystem(new URLSearchParams(query).get("distro")) : undefined);
-  return { ecosystem, package: pkg, version };
+  const upstream = UPSTREAM_TYPES.includes(t) ? (new URLSearchParams(query).get("upstream") ?? "").trim() : "";
+  if (!upstream) return { ecosystem, package: pkg, version, matched_package: pkg, matched_via: "purl_name" };
+  const [source, sourceVersion] = upstream.split("@").map((x) => x.trim());
+  pkg = source;
+  if (sourceVersion) version = sourceVersion;
+  return { ecosystem, package: pkg, version, matched_package: pkg, matched_via: "upstream" };
 }
 
 // The lines (steps, template lines, paragraphs) of a prompt's own text, before "SBOM:", that
@@ -114,9 +136,19 @@ const fixedVersionLines = (prompt) =>
     .filter((l) => /fixed[_ ]versions?/i.test(l));
 // The fields a prompt reads from another field the text keeps, where its text says so, on the
 // objects it reads them on (sbom_review: the affected components, whose CVEs it looks up).
+// #2836: step 2's upstream sentence, which says how matched_package and matched_via are read from
+// the purl where the leanest cut leaves them out of a row.
+const UPSTREAM_STEP = /A deb, apk or alpine purl with an upstream qualifier \(upstream=name, or upstream=name@version\) is checked as the source package it names[^\n]*For any other purl check_sbom checks, matched_via is purl_name and matched_package is the package read as above\./;
 const DERIVED = {
   sbom_review: (prompt) =>
-    DERIVE_STEP.test(prompt) ? { from: "purl", fields: ["ecosystem", "package", "version"], derive: fromPurl, where: (row) => row.verdict === "affected" } : undefined,
+    DERIVE_STEP.test(prompt)
+      ? {
+          from: "purl",
+          fields: ["ecosystem", "package", "version", ...(UPSTREAM_STEP.test(prompt) ? ["matched_package", "matched_via"] : [])],
+          derive: fromPurl,
+          where: (row) => row.verdict === "affected",
+        }
+      : undefined,
 };
 
 // Production's check_sbom answer for log4j-core 2.14.1, read through the hosted endpoint
@@ -153,6 +185,58 @@ const withFixedIn = (answers, fixes = LOG4J_FIXED_IN) =>
     ]),
   );
 const LOG4J_2834 = { ...LOG4J, label: "check_sbom, log4j-core 2.14.1, with fixed_in (#2834)" };
+// #2836: core-backend names on every row its lookup ran for the package it was matched by
+// (matched_package, the lookup's package, which the row's package field carries too) and how
+// (matched_via): purl_name for a purl matched by its own name (cve/matchbatch.go). The shaped
+// answers predate the fields, so they are set here from each row's own package, as core-backend
+// sets them.
+const withMatched = (answers) =>
+  Object.fromEntries(
+    Object.entries(answers).map(([p, body]) => [
+      p,
+      {
+        ...body,
+        results: body.results.map((r) => (typeof r.package === "string" ? { ...r, matched_package: r.package, matched_via: "purl_name" } : r)),
+      },
+    ]),
+  );
+// #2836: an upstream row, shaped as core-backend answered one on 2026-10-11 (#2836's verification:
+// libcrypto3 3.3.6-r0 with upstream=openssl on Alpine 3.20, affected, matched_package openssl,
+// matched_via upstream): the lookup's package and version are the source package's, and the row
+// keeps the purl's own name as purl_name. One match of LOG4J's answer stands in for its CVEs, with
+// fixed_in set as core-backend sets it since #2834.
+const UPSTREAM_PURL = "pkg:apk/alpine/libcrypto3@3.3.6-r0?distro=alpine-3.20&upstream=openssl";
+const upstreamAnswers = (answers) =>
+  Object.fromEntries(
+    Object.entries(answers).map(([p, body]) => {
+      const [row] = body.results;
+      const [m] = row.matches;
+      return [
+        p,
+        {
+          ...body,
+          results: [
+            {
+              ...row,
+              index: 0,
+              purl: UPSTREAM_PURL,
+              ecosystem: "Alpine:v3.20",
+              package: "openssl",
+              version: "3.3.6-r0",
+              matched_package: "openssl",
+              matched_via: "upstream",
+              purl_name: "libcrypto3",
+              matched_version_from: "purl",
+              matches: [{ ...m, match_reason: `${m.match_reason ?? ""} [matched by the purl's upstream qualifier: source package openssl, purl name libcrypto3]`, fixed_in: "3.3.7-r0", interval: { introduced: "3.3.0-r0", fixed: "3.3.7-r0" } }],
+              cve_ids: [m.cve_id],
+              count: 1,
+            },
+          ],
+        },
+      ];
+    }),
+  );
+const UPSTREAM = { label: "check_sbom, an upstream row: libcrypto3 3.3.6-r0, upstream=openssl (#2836)", args: { purls: [UPSTREAM_PURL] } };
 
 // a < b, a = b or a > b (-1, 0, 1) for release versions of dot-separated numbers; undefined for
 // any other (a pre-release, a qualifier, a revision), which the prompt says not to give.
@@ -165,14 +249,40 @@ function releaseOrder(a, b) {
 }
 
 // sbom_review's fix rule, as its text states it, on what the model is shown for one CVE on one
-// component: the fixed end B of a "[A, B)" advisory interval in the CVE's match_reason, else the
-// fixed of the cve_intel fixed_branches range that holds the installed version (#2817), else, for a
-// package without fixed_branches, cve_intel's fixed_version for the component's ecosystem and
-// package (or the recorded fix a match_reason names); offered, the ones strictly greater than the
-// installed version and than the B of any "[A, B]" interval (#2830: a last_affected bound, still
-// affected, never a fix).
-const HALF_OPEN_END = /falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\)/;
-const LAST_AFFECTED = /falls inside the advisory interval \[[^,\]]*, ([^)\]]+)\]/;
+// component: a match's fixed_in where the text keeps the match and it carries one (#2834), else the
+// fixed of the cve_intel fixed_branches range that holds the installed version (#2817), moved on
+// while another range holds it (#3074, fixedBranchesWalk), else, for a package without
+// fixed_branches, cve_intel's fixed_version for the component's ecosystem and package; offered, the
+// ones strictly greater than the installed version. No match_reason is read (#2834's last review):
+// through 2.7.2 the rule first read the advisory interval in it, "[A, B)" a fix and "[A, B]" a last
+// affected version (#2830), and fixed_in now says the same where it decides (and, since #3074, past
+// any overlapping interval, which a "[A, B)" of one interval does not show).
+// A fixed_branches range holds v: at or above its introduced ("0" is the first version) and below
+// its fixed, or at or below its last_affected, or with no end.
+function branchHolds(b, v) {
+  const from = b.introduced === "0" ? -1 : releaseOrder(b.introduced, v);
+  if (from === undefined || from > 0) return false;
+  if (b.fixed) return releaseOrder(v, b.fixed) === -1;
+  if (b.last_affected) return [-1, 0].includes(releaseOrder(v, b.last_affected));
+  return true;
+}
+// #3074, the rule's walk over one row's ranges: from the ranges holding the installed version, move
+// to the highest fixed while another range still holds it; a range on the way with no fixed (its
+// last_affected at or past every fixed, or no end) ends it with none. undefined: no fix given.
+function fixedBranchesWalk(branches, installed) {
+  let point = installed;
+  for (let step = 0; step <= branches.length; step++) {
+    const holders = branches.filter((b) => branchHolds(b, point));
+    if (holders.length === 0) return point === installed ? undefined : point;
+    if (holders.some((b) => !b.fixed && !b.last_affected)) return undefined;
+    const max = (xs) => xs.reduce((a, x) => (a === undefined || releaseOrder(x, a) === 1 ? x : a), undefined);
+    const top = max(holders.filter((b) => b.fixed).map((b) => b.fixed));
+    const last = max(holders.filter((b) => !b.fixed).map((b) => b.last_affected));
+    if (top === undefined || (last !== undefined && releaseOrder(last, top) !== -1)) return undefined;
+    point = top;
+  }
+  return undefined;
+}
 function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
   const above = (v, floor) => releaseOrder(v, floor) === 1;
   // #2834: a match that has a fixed_in field decides: a version is the fix, null is none, and the
@@ -183,35 +293,20 @@ function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
     return { candidates: fromFixedIn, offered: fromFixedIn.filter((c) => above(c.version, installed)) };
   }
   const candidates = [];
-  const lastAffected = [];
-  for (const m of (row.matches ?? []).filter((x) => x.cve_id === cve)) {
-    const end = m.match_reason?.match(HALF_OPEN_END)?.[1];
-    if (end && end !== "∞") candidates.push({ from: "match_reason", version: end });
-    const last = m.match_reason?.match(LAST_AFFECTED)?.[1];
-    if (last) lastAffected.push(last);
+  // #2817: the fixed of the cve_intel range (fixed_branches) that holds the installed version,
+  // walked past any range that still holds it (#3074); a range closed by last_affected has no fix
+  // on record.
+  const branchRows = (intel.affected_packages ?? []).filter((r) => r.ecosystem === ecosystem && r.package_name === pkg && Array.isArray(r.fixed_branches));
+  for (const r of branchRows) {
+    const fix = fixedBranchesWalk(r.fixed_branches, installed);
+    if (fix !== undefined) candidates.push({ from: "fixed_branches", version: fix });
   }
-  // #2817: then the fixed of the cve_intel range (fixed_branches) that holds the installed version;
-  // a range closed by last_affected has no fix on record.
-  if (candidates.length === 0) {
-    for (const r of intel.affected_packages ?? []) {
-      if (r.ecosystem !== ecosystem || r.package_name !== pkg || !Array.isArray(r.fixed_branches)) continue;
-      for (const b of r.fixed_branches) {
-        const from = b.introduced === "0" ? -1 : releaseOrder(b.introduced, installed);
-        const below = b.fixed ? releaseOrder(installed, b.fixed) === -1 : b.last_affected ? releaseOrder(installed, b.last_affected) !== 1 : true;
-        if (from !== undefined && from <= 0 && below && b.fixed) candidates.push({ from: "fixed_branches", version: b.fixed });
-      }
-    }
-  }
-  if (candidates.length === 0 && !(intel.affected_packages ?? []).some((r) => r.ecosystem === ecosystem && r.package_name === pkg && Array.isArray(r.fixed_branches))) {
-    for (const m of (row.matches ?? []).filter((x) => x.cve_id === cve)) {
-      const fix = m.match_reason?.match(/is below the recorded fix (\S+?)(?: |$)/)?.[1];
-      if (fix) candidates.push({ from: "match_reason", version: fix });
-    }
+  if (candidates.length === 0 && branchRows.length === 0) {
     for (const r of [...(intel.affected_packages ?? []), ...(intel.fixed_versions ?? [])]) {
       if (r.ecosystem === ecosystem && r.package_name === pkg && r.fixed_version) candidates.push({ from: "cve_intel", version: r.fixed_version });
     }
   }
-  return { candidates, offered: candidates.filter((c) => above(c.version, installed) && lastAffected.every((l) => above(c.version, l))) };
+  return { candidates, offered: candidates.filter((c) => above(c.version, installed)) };
 }
 
 /** The fields prompt `name` names: its snake_case words and PLAIN words, less ENVELOPE_RULES' line and the embedded SBOM. */
@@ -224,6 +319,33 @@ function namedFields(name, prompt) {
   const plain = PLAIN[name].filter((w) => new RegExp(`\\b${w}\\b`).test(own));
   assert.deepEqual(plain, PLAIN[name], `${name} no longer uses ${PLAIN[name].filter((w) => !plain.includes(w)).join(", ")} as a field name`);
   return [...new Set([...(own.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) ?? []), ...plain])];
+}
+
+// #3013's review: the fields prompt `name` reads from a check_sbom or scan_manifest match: the
+// snake_case and PLAIN field words of each sentence of its own text (less ENVELOPE_RULES' line and
+// the embedded SBOM) that reads from a match ("its matches", "the match's", "the match carries")
+// and calls no tool but those two (workload_triage's step 5 sends a row without matches to get_cve
+// for the same fields), that are fields of some match (`matchKeys`).
+const MATCH_WORD = /\bmatch(?:es|'s)?\b/;
+function matchFieldsRead(name, prompt, toolNames, matchKeys) {
+  const own = prompt
+    .split("\nSBOM:\n")[0]
+    .split("\n")
+    .filter((l) => !l.startsWith("Before you use any figure"))
+    .join("\n");
+  const out = [];
+  for (const sentence of own.split(/(?<=[.!?])\s+/)) {
+    if (!MATCH_WORD.test(sentence)) continue;
+    const words = [...(sentence.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) ?? []), ...PLAIN[name].filter((w) => new RegExp(`\\b${w}\\b`).test(sentence))];
+    if (words.some((w) => toolNames.has(w) && w !== "check_sbom" && w !== "scan_manifest")) continue;
+    for (const w of words) if (matchKeys.has(w) && !out.includes(w)) out.push(w);
+  }
+  return out;
+}
+// The fields of `fields` a thinned row's matches leave out, given a thinning level (SBOM_ROW_THIN).
+function thinProblems(fields, rowThin) {
+  const kept = rowThin.find((k) => Array.isArray(k) && k[0] === "matches")?.[1] ?? [];
+  return fields.filter((f) => !kept.includes(f));
 }
 
 /**
@@ -271,12 +393,14 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     await stub?.close();
   });
 
-  // One call on `answers` (stub overrides), as `limited` says.
+  // One call on `answers` (stub overrides), as `limited` says. With full: true (#3013): the text,
+  // which is what this file holds, is the same either way, and structuredContent.data is then the
+  // answer whole that the text is a cut of.
   const call = async (name, args, answers, limited = undefined) => {
     stub.state.answers = answers;
     stub.state.limited = limited;
     stub.state.requests = 0;
-    return client.callTool({ name, arguments: args });
+    return client.callTool({ name, arguments: { ...args, full: true } });
   };
   // Every named field is carried by some call, a tool's name, or a value; and every tool the prompt
   // names is one this test called.
@@ -373,10 +497,12 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify(doc);
     const prompt = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } }));
     const named = namedFields("sbom_review", prompt);
-    for (const f of ["verdict", "purl", "cve_ids", "not_assessed_reason", "summary", "not_sent", "not_sent_reason", "not_sent_purls", "fixed_in", "fixed_version", "match_reason", "ecosystem", "package", "version", "vendor_remediations", "remediation_kinds"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
+    for (const f of ["verdict", "purl", "cve_ids", "not_assessed_reason", "summary", "not_sent", "not_sent_reason", "not_sent_purls", "fixed_in", "fixed_version", "ecosystem", "package", "version", "vendor_remediations", "remediation_kinds", "matched_package", "matched_via"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
+    // #2834's last review: no fixed version is read from match_reason's prose.
+    assert.ok(!named.includes("match_reason"), "sbom_review names match_reason again");
     // The prompt passes the document as given.
     assert.ok(prompt.includes(`\`\`\`json\n${sbom}\n\`\`\``));
-    assert.match(prompt, /data\.not_sent_purls lists them; where the note says the first text block cuts not_sent_purls to its first entries, rebuild the list from the document instead, as the note says: the document's distinct purls from the position the note gives on, counted in the order it gives\./);
+    assert.match(prompt, /data\.not_sent_purls lists them whole with full: true; where the note says the first text block cuts not_sent_purls to its first entries, or a DATA CUT cuts that list in data, rebuild the list from the document instead, as the note says: the document's distinct purls from the position the note gives on, counted in the order it gives\./);
     assert.match(prompt, /Where the note says that rows of data\.results are left out of the first text block/);
     // A component's ecosystem, package and version, which the leanest cut leaves out of each row,
     // are read from its purl, which it keeps.
@@ -384,13 +510,17 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const derived = DERIVED.sbom_review(prompt);
     const carried = new Set();
     for (const c of [full, limited]) {
-      const res = await call("check_sbom", { sbom }, shapedAnswers(c), c.limited);
+      // #2836: each row as core-backend answers since #2836, with matched_package and matched_via.
+      const res = await call("check_sbom", { sbom }, withMatched(shapedAnswers(c)), c.limited);
       const [first, note] = blocksOf(res);
       const shown = JSON.parse(first);
       const data = res.structuredContent.data;
       t.diagnostic(`${c.label}: first text block ${first.length} characters, ${shown.results.length} of ${data.results.length} rows, each with ${Object.keys(shown.results[0]).join(", ")}`);
       // This input reaches the cut that leaves the row's own ecosystem, package and version out.
       assert.ok(shown.results.every((r) => typeof r.purl === "string" && !Object.hasOwn(r, "ecosystem") && !Object.hasOwn(r, "package") && !Object.hasOwn(r, "version")), `${c.label}: the text keeps a row's ecosystem, package or version, so this case does not test reading them from the purl`);
+      // ... and matched_package and matched_via, which the answer's affected rows carry.
+      assert.ok(data.results.some((r) => r.verdict === "affected" && r.matched_via === "purl_name"), `${c.label}: no affected row carries matched_via, so this case does not test reading it from the purl`);
+      assert.ok(shown.results.every((r) => !Object.hasOwn(r, "matched_package") && !Object.hasOwn(r, "matched_via")), `${c.label}: the text keeps matched_package or matched_via, so this case does not test reading them from the purl`);
       for (const f of heldTo(c.label, res, named, derived)) carried.add(f);
       // Rows the text leaves out: the note says how many, as the prompt's last instruction reads it.
       if (shown.results.length < data.results.length) assert.match(note, new RegExp(`Only ${shown.results.length} of the ${data.results.length} rows of results are in it`));
@@ -417,19 +547,29 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
       const flat = [...new Set([...components.map((x) => x.purl), ...read])].slice(Number(m[1]) - 1);
       assert.notDeepEqual(flat, data.not_sent_purls, "this document's nesting does not test the order");
     }
-    // A small SBOM, whose text keeps each row whole, match_reason with it: production's answer for
-    // log4j-core 2.14.1 (LOG4J).
+    // A small SBOM, whose text keeps each row whole: production's answer for log4j-core 2.14.1
+    // (LOG4J).
     const small = await call("check_sbom", LOG4J.args, shapedAnswers(LOG4J));
     for (const f of heldTo(LOG4J.label, small, named, derived)) carried.add(f);
-    // #2834: the same, as core-backend answers since #2834, each match with fixed_in.
-    const small2834 = await call("check_sbom", LOG4J.args, withFixedIn(shapedAnswers(LOG4J)));
+    // #2834, #2836: the same, as core-backend answers since both, each match with fixed_in and the
+    // row with matched_package and matched_via.
+    const small2834 = await call("check_sbom", LOG4J.args, withMatched(withFixedIn(shapedAnswers(LOG4J))));
     for (const f of heldTo(LOG4J_2834.label, small2834, named, derived)) carried.add(f);
-    // #2841: cve_remediation for the first CVEs of the list, on its longest production-shaped answer.
-    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817, "cve_remediation, CVE-2021-44228"]) {
+    // #2836: an upstream row, whole in the text: step 2's reading of its purl (openssl at 3.3.6-r0,
+    // matched_via upstream) is held to the row's own package, version, matched_package and
+    // matched_via (heldTo reads every derived field the text keeps on an affected row).
+    const upstream = await call("check_sbom", UPSTREAM.args, upstreamAnswers(shapedAnswers(LOG4J)));
+    const [upRow] = JSON.parse(blocksOf(upstream)[0]).results;
+    assert.deepEqual([upRow.purl, upRow.verdict, upRow.package, upRow.matched_package, upRow.matched_via], [UPSTREAM_PURL, "affected", "openssl", "openssl", "upstream"], "the upstream case is not shown as core-backend answers it");
+    for (const f of heldTo(UPSTREAM.label, upstream, named, derived)) carried.add(f);
+    // #2841: cve_remediation for the first CVEs of the list, on its longest production-shaped answer;
+    // and (#3013's review) get_vendor_advisory, which the list reads a vendor's step from where
+    // cve_remediation's data or text leaves out that item's text.
+    for (const label of ["get_cve, CVE-2021-44228", "cve_intel, CVE-2021-44228", INTEL_2817, "cve_remediation, CVE-2021-44228", "get_vendor_advisory, aws 2026-098-AWS"]) {
       const c = caseOf(label);
       for (const f of heldTo(label, await call(c.tool, argsOf(c), shapedAnswers(c)), named, derived)) carried.add(f);
     }
-    allCarried(t, "sbom_review", named, carried, ["check_sbom", "get_cve", "cve_intel", "cve_remediation"]);
+    allCarried(t, "sbom_review", named, carried, ["check_sbom", "get_cve", "cve_intel", "cve_remediation", "get_vendor_advisory"]);
   });
 
   // #2817: production's cve_intel for CVE-2021-44228 (prod-shaped/cve_intel.json, read again on the
@@ -445,17 +585,19 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
     const prompt = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } }));
     const own = prompt.split("\nSBOM:\n")[0];
-    // The rule, word for word: strictly greater than the installed version, in the ecosystem's
-    // order, not as text; the advisory interval first; cve_intel's one value per package named as
-    // such; and otherwise no fixed version for the branch, pointing to the advisory.
-    assert.ok(own.includes("Never give a fixed version that is not strictly greater than the component's installed version (the version in its purl), compared in the ecosystem's version order: release numbers part by part, as numbers, not as text (2.9.1 is below 2.12.2, and 2.12.2 is below 2.14.1); where you are not sure of the order (pre-releases, qualifiers and distro revisions have their own rules), say so and do not give it."), own);
-    assert.ok(own.includes("Prefer the match's match_reason where the text keeps it: \"falls inside the advisory interval [A, B)\", closed by a parenthesis, says B is the advisory's fixed version for the range that holds the installed version, so give B as the fixed version, quoting it"), own);
-    assert.ok(own.includes("\"falls inside the advisory interval [A, B]\", closed by a square bracket, says B is the range's last affected version, still affected, and the range records no fix (core-backend adds \"(B is the last affected version, not a fix)\", which a cut text can clip, so the bracket alone decides): never give B, or any version at or below it, as a fixed version."), own);
-    // #2830: through 2.6.5 the text hedged B, which core-backend rendered alike for a fixed and a
-    // last_affected bound; core-backend now tells them apart, and so does the prompt.
+    // The rule, word for word: fixed_in alone where the text keeps the match; otherwise strictly
+    // greater than the installed version, in the ecosystem's order, not as text; cve_intel's one value
+    // per package named as such; and otherwise no fixed version for the branch, pointing to the
+    // advisory.
+    assert.ok(own.includes("Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone"), own);
+    assert.ok(own.includes("Never give a fixed version that is not strictly greater than the component's installed version (its version, as step 2 reads it from the purl), compared in the ecosystem's version order: release numbers part by part, as numbers, not as text (2.9.1 is below 2.12.2, and 2.12.2 is below 2.14.1); where you are not sure of the order (pre-releases, qualifiers and distro revisions have their own rules), say so and do not give it."), own);
+    // #2834's last review: no fixed version is read from match_reason's advisory interval, the
+    // prose fixed_in replaced (through 2.7.2 the rule read "[A, B)" as a fix and "[A, B]" as a last
+    // affected version, #2830); nor is its bound hedged, as through 2.6.5.
+    assert.doesNotMatch(own, /match_reason|advisory interval \[A, B/, "sbom_review still reads a fixed version from match_reason");
     assert.doesNotMatch(own, /does not say is a fixed version rather than|give B as the end of that interval/, "sbom_review still hedges the [A, B) bound");
     assert.match(own, /cve_intel keeps one fixed_version per package, its advisory's last range's, which need not be the fix on the component's branch/);
-    assert.match(own, /Where no version meets the rule \("listed verbatim in the advisory's affected versions" names none\), write that the results give no fixed version for the component's branch, which is not a finding that no fix exists, and point to the CVE's advisory for it: get_cve's references tagged Vendor Advisory or Patch/);
+    assert.match(own, /Where no version meets the rule, write that the results give no fixed version for the component's branch, which is not a finding that no fix exists, and point to the CVE's advisory for it: get_cve's references tagged Vendor Advisory or Patch/);
     assert.doesNotMatch(own, /each fixed_version cve_intel gives/, "the prompt still asks for every fixed_version cve_intel gives, whatever the installed version");
     // A fixed version is spoken of in step 3 (where fixed_version is read) and the rule's
     // paragraph, nowhere else: a line elsewhere telling the model to give fixed versions would
@@ -482,10 +624,16 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     assert.equal(distroEcosystem("alpine-3"), undefined);
     assert.match(step2, /alpine-3 names none/);
     assert.match(step2, /For any other type, and a deb, apk, alpine or rpm purl without such a qualifier, the ecosystem is unknown: check_sbom does not check the component \(not_assessed, never clean\), and the fix list gives no version for it\./);
-    assert.deepEqual(fromPurl("pkg:deb/debian/openssl@3.0.15-1~deb12u1?distro=debian-12"), { ecosystem: "Debian:12", package: "openssl", version: "3.0.15-1~deb12u1" });
+    assert.deepEqual(fromPurl("pkg:deb/debian/openssl@3.0.15-1~deb12u1?distro=debian-12"), { ecosystem: "Debian:12", package: "openssl", version: "3.0.15-1~deb12u1", matched_package: "openssl", matched_via: "purl_name" });
     assert.ok(step2.includes("pkg:deb/debian/openssl@3.0.15-1~deb12u1?distro=debian-12 is openssl in Debian:12"));
-    assert.deepEqual(fromPurl("pkg:githubact/actions/checkout@v4"), { ecosystem: "GitHub Actions", package: "actions/checkout", version: "v4" });
-    assert.deepEqual(fromPurl("pkg:rpm/redhat/openssl@3.0.7?distro=rhel-9"), { ecosystem: undefined, package: "openssl", version: "3.0.7" });
+    assert.deepEqual(fromPurl("pkg:githubact/actions/checkout@v4"), { ecosystem: "GitHub Actions", package: "actions/checkout", version: "v4", matched_package: "actions/checkout", matched_via: "purl_name" });
+    assert.deepEqual(fromPurl("pkg:rpm/redhat/openssl@3.0.7?distro=rhel-9"), { ecosystem: undefined, package: "openssl", version: "3.0.7", matched_package: "openssl", matched_via: "purl_name" });
+    // #2836: an upstream qualifier on a deb, apk or alpine purl names the package, and its version
+    // where it gives one; on any other type it is ignored, as core-backend ignores it.
+    assert.deepEqual(fromPurl(UPSTREAM_PURL), { ecosystem: "Alpine:v3.20", package: "openssl", version: "3.3.6-r0", matched_package: "openssl", matched_via: "upstream" });
+    assert.deepEqual(fromPurl("pkg:deb/debian/libssl3@3.0.11-1~deb12u2?distro=debian-12&upstream=openssl%403.0.11-1~deb12u2"), { ecosystem: "Debian:12", package: "openssl", version: "3.0.11-1~deb12u2", matched_package: "openssl", matched_via: "upstream" });
+    assert.deepEqual(fromPurl("pkg:npm/lodash@4.17.19?upstream=other"), { ecosystem: "npm", package: "lodash", version: "4.17.19", matched_package: "lodash", matched_via: "purl_name" });
+    assert.match(step2, /pkg:apk\/alpine\/libcrypto3@3\.3\.6-r0\?distro=alpine-3\.20&upstream=openssl is openssl in Alpine:v3\.20, at 3\.3\.6-r0/);
 
     // What the model is shown: check_sbom's and cve_intel's first text blocks.
     const sbomRes = await call("check_sbom", { sbom }, shapedAnswers(LOG4J));
@@ -518,22 +666,28 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     assert.deepEqual(offered, [], "the rule offers a fixed version that is not above the installed 2.14.1");
 
     // The other polarity, on production's Juice Shop answer: lodash 4.17.19 falls inside
-    // [0, 4.17.21) for CVE-2021-23337, so the rule gives 4.17.21.
+    // [0, 4.17.21) for CVE-2021-23337, and as core-backend answers since #2834 the match carries that
+    // interval's fixed bound as fixed_in, which the rule gives.
     const lodash = readShaped("check_sbom").answers.batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
+    assert.ok(lodash.matches.some((m) => m.cve_id === "CVE-2021-23337" && m.match_reason.endsWith("falls inside the advisory interval [0, 4.17.21)")), "the Juice Shop row no longer falls inside [0, 4.17.21): re-aim this polarity");
     const l = fromPurl(lodash.purl);
-    assert.deepEqual(fixRule(lodash, "CVE-2021-23337", { affected_packages: [], fixed_versions: [] }, { ecosystem: l.ecosystem, pkg: l.package, installed: l.version }).offered, [{ from: "match_reason", version: "4.17.21" }]);
+    const lodash2834 = { ...lodash, matches: lodash.matches.map((m) => (m.cve_id === "CVE-2021-23337" ? { ...m, fixed_in: "4.17.21", interval: { introduced: "0", fixed: "4.17.21" } } : m)) };
+    assert.deepEqual(fixRule(lodash2834, "CVE-2021-23337", { affected_packages: [], fixed_versions: [] }, { ecosystem: l.ecosystem, pkg: l.package, installed: l.version }).offered, [{ from: "fixed_in", version: "4.17.21" }]);
   });
 
   // #2830: core-backend's match_reason rendered an OSV last_affected bound L as "[A, L)", the same
-  // as a fixed bound, so a reader took L, a version still affected, as the fix. It now renders it
-  // "[A, L] (L is the last affected version, not a fix)" (core-backend cve/pkgmatch.go
+  // as a fixed bound, so a reader took L, a version still affected, as the fix. It renders it
+  // "[A, L] (L is the last affected version, not a fix)" since (core-backend cve/pkgmatch.go
   // renderInterval; LAST_AFFECTED_REASON below is the string its
-  // TestEvaluateRegistryRow_IntervalBoundRendering pins), and sbom_review gives a "[A, B)" B as the
-  // fix without a hedge and never gives a "[A, B]" B, or any version at or below it. Here the
-  // production Juice Shop row for lodash 4.17.19 is shown to the model with CVE-2021-23337's
-  // interval as each kind of bound, through check_sbom's text.
+  // TestEvaluateRegistryRow_IntervalBoundRendering pins), and through 2.7.2 sbom_review read that
+  // bracket. Since #2834 each registry match also carries fixed_in, the interval's fixed bound, or
+  // null for a last_affected interval, and the rule reads fixed_in alone (#2834's last review): a
+  // last_affected interval gives no fix, and no cve_intel value is offered beside it. Here the
+  // production Juice Shop row for lodash 4.17.19 is shown to the model with CVE-2021-23337's interval
+  // as each kind of bound, as core-backend answers since #2834, through check_sbom's text.
   const LAST_AFFECTED_REASON = "registry package (confidence 0.95): npm/lodash — version 4.17.19 falls inside the advisory interval [0, 4.17.20] (4.17.20 is the last affected version, not a fix)";
-  it("sbom_review's fix rule on check_sbom's text (#2830): a [A, B) interval's B is the fix; a [A, B] interval's B is still affected and never given, nor a cve_intel version at or below it", async () => {
+  const LAST_AFFECTED_FIXED_IN = { fixed_in: null, fixed_in_reason: "the interval that holds this version ends at last_affected; no fixed version is recorded" };
+  it("sbom_review's fix rule on check_sbom's text (#2830, #2834): a fixed bound's fixed_in is the fix; a last_affected interval's null gives none, nor any cve_intel version; match_reason is not read", async () => {
     const batch = readShaped("check_sbom").answers.batch;
     const lodash = batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
     const cve = "CVE-2021-23337";
@@ -547,97 +701,86 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const target = { ecosystem: "npm", pkg: "lodash", installed: "4.17.19" };
     const noIntel = { affected_packages: [], fixed_versions: [] };
     const intelAt = (v) => ({ affected_packages: [{ ecosystem: "npm", package_name: "lodash", fixed_version: v }], fixed_versions: [] });
+    const withCve = (extra) => ({ ...lodash, matches: lodash.matches.map((m) => (m.cve_id === cve ? { ...m, ...extra } : m)) });
 
-    // A fixed bound: "[0, 4.17.21)", as production renders it, gives 4.17.21.
-    const fixedRow = await shown(lodash);
-    assert.ok(fixedRow.matches.some((m) => m.cve_id === cve && m.match_reason.endsWith("falls inside the advisory interval [0, 4.17.21)")));
-    assert.deepEqual(fixRule(fixedRow, cve, noIntel, target).offered, [{ from: "match_reason", version: "4.17.21" }]);
+    // A fixed bound: "[0, 4.17.21)", as production renders it, with fixed_in 4.17.21: the text keeps
+    // both, and the rule gives fixed_in.
+    const fixedRow = await shown(withCve({ fixed_in: "4.17.21", interval: { introduced: "0", fixed: "4.17.21" } }));
+    assert.ok(fixedRow.matches.some((m) => m.cve_id === cve && m.match_reason.endsWith("falls inside the advisory interval [0, 4.17.21)") && m.fixed_in === "4.17.21"));
+    assert.deepEqual(fixRule(fixedRow, cve, noIntel, target).offered, [{ from: "fixed_in", version: "4.17.21" }]);
 
-    // A last_affected bound: the text keeps the closed bracket and its words, and nothing is given
-    // from it: cve_intel's value is offered only above both the installed version and 4.17.20.
-    const lastRow = await shown({ ...lodash, matches: lodash.matches.map((m) => (m.cve_id === cve ? { ...m, match_reason: LAST_AFFECTED_REASON } : m)) });
-    const reasons = lastRow.matches.filter((m) => m.cve_id === cve).map((m) => m.match_reason);
-    assert.deepEqual(reasons, [LAST_AFFECTED_REASON], "check_sbom's text does not keep the last_affected interval as core-backend renders it");
-    assert.deepEqual(fixRule(lastRow, cve, noIntel, target), { candidates: [], offered: [] }, "the rule takes a last_affected bound as a fix");
+    // A last_affected bound: the text keeps the closed bracket and its words, and fixed_in null;
+    // nothing is given, and cve_intel's value is never offered, at the last affected version or above.
+    const lastRow = await shown(withCve({ match_reason: LAST_AFFECTED_REASON, ...LAST_AFFECTED_FIXED_IN }));
+    const kept = lastRow.matches.filter((m) => m.cve_id === cve);
+    assert.deepEqual(kept.map((m) => [m.match_reason, m.fixed_in]), [[LAST_AFFECTED_REASON, null]], "check_sbom's text does not keep the last_affected match as core-backend answers it");
+    assert.deepEqual(fixRule(lastRow, cve, noIntel, target), { candidates: [], offered: [] }, "the rule takes a last_affected interval as a fix");
     assert.deepEqual(fixRule(lastRow, cve, intelAt("4.17.20"), target).offered, [], "the rule offers cve_intel's version at the last affected one");
-    assert.deepEqual(fixRule(lastRow, cve, intelAt("4.17.21"), target).offered, [{ from: "cve_intel", version: "4.17.21" }]);
+    assert.deepEqual(fixRule(lastRow, cve, intelAt("4.17.21"), target).offered, [], "the rule reads cve_intel where fixed_in is null");
 
-    // And the prompt states both readings, unhedged.
-    const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "lodash", version: "4.17.19", purl: lodash.purl }] });
-    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
-    assert.match(own, /"falls inside the advisory interval \[A, B\)", closed by a parenthesis, says B is the advisory's fixed version[^.]*, so give B as the fixed version/);
-    assert.match(own, /"falls inside the advisory interval \[A, B\]", closed by a square bracket, says B is the range's last affected version, still affected, and the range records no fix \(core-backend adds "\(B is the last affected version, not a fix\)", which a cut text can clip, so the bracket alone decides\): never give B, or any version at or below it, as a fixed version\./);
+    // match_reason is not read: a "[0, 4.17.21)" interval with no fixed_in field gives nothing from
+    // it; only cve_intel's rule applies to that match.
+    const proseOnly = await shown(lodash);
+    assert.ok(proseOnly.matches.some((m) => m.cve_id === cve && m.match_reason.endsWith("[0, 4.17.21)") && !Object.hasOwn(m, "fixed_in")));
+    assert.deepEqual(fixRule(proseOnly, cve, noIntel, target), { candidates: [], offered: [] }, "the rule reads a fixed version from match_reason");
   });
 
-  // #2830 review: check_sbom's first cut level clips every string to 200 characters, and a
-  // last_affected match_reason for a long Maven name runs past it, so the words core-backend adds
-  // after the bracket are cut. The closing "]" stays, and the rule reads the bracket alone.
-  it("sbom_review's fix rule on a cut check_sbom text (#2830): a long last_affected match_reason clipped at 200 characters keeps its closing bracket, and nothing is given from it", async () => {
-    const batch = readShaped("check_sbom").answers.batch;
-    const lodash = batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
-    const cve = "CVE-2021-23337";
-    const purl = "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.10";
-    const reason = "registry package (confidence 0.95): Maven/com.fasterxml.jackson.core:jackson-databind — version 2.9.10 falls inside the advisory interval [2.0.0, 2.9.10.7] (2.9.10.7 is the last affected version, not a fix)";
-    assert.ok(reason.length > 200, `the reason is ${reason.length} characters, so the cut does not clip it`);
-    const row = {
-      ...lodash,
-      index: 0,
-      purl,
-      matches: lodash.matches.filter((m) => m.cve_id === cve).map((m) => ({ ...m, match_reason: reason, description: "x".repeat(40_000) })),
-      cve_ids: [cve],
-    };
-    const res = await call("check_sbom", { purls: [purl] }, { [batch.path]: { ...batch.body, results: [row] } });
-    assert.notEqual(res.isError, true, blocksOf(res)[0]);
-    assert.match(blocksOf(res)[1], /TEXT CUT/, "the answer is not cut, so the test does not reach the clip");
-    const [r] = JSON.parse(blocksOf(res)[0]).results;
-    const [shownReason] = r.matches.filter((m) => m.cve_id === cve).map((m) => m.match_reason);
-    assert.equal(shownReason, `${reason.slice(0, 200)}…`, "check_sbom's first cut level no longer clips match_reason at 200 characters");
-    assert.ok(shownReason.includes("[2.0.0, 2.9.10.7]") && !shownReason.includes("not a fix)"), shownReason);
-    const target = { ecosystem: "Maven", pkg: "com.fasterxml.jackson.core:jackson-databind", installed: "2.9.10" };
-    const intelAt = (v) => ({ affected_packages: [{ ecosystem: "Maven", package_name: target.pkg, fixed_version: v }], fixed_versions: [] });
-    assert.deepEqual(fixRule(r, cve, { affected_packages: [], fixed_versions: [] }, target), { candidates: [], offered: [] }, "the rule takes a clipped last_affected bound as a fix");
-    assert.deepEqual(fixRule(r, cve, intelAt("2.9.10.7"), target).offered, [], "the rule offers cve_intel's version at the clipped last affected one");
-    assert.deepEqual(fixRule(r, cve, intelAt("2.9.10.8"), target).offered, [{ from: "cve_intel", version: "2.9.10.8" }]);
-  });
-
-  // #2830 third review: a match_reason long enough is clipped at 200 characters before the
-  // interval's closing bracket, "[A, B…", which says neither ")" nor "]". The prompt gives no fixed
-  // version from it, and the rule falls back to cve_intel's value.
-  it("sbom_review's fix rule on a cut check_sbom text (#2830): a match_reason clipped before the interval's closing bracket gives no fixed version", async () => {
+  // #2830 reviews: check_sbom's first cut level clips every string to 200 characters, so a long
+  // last_affected match_reason loses the words core-backend adds after the bracket, or the bracket
+  // itself ("[A, B…"). Through 2.7.2 the rule read the bracket alone, and gave nothing from a
+  // clipped one. Since #2834's last review it reads no match_reason: the cut keeps each kept match's
+  // fixed_in (null for a last_affected interval), and nothing is given, however the prose is cut.
+  it("sbom_review's fix rule on a cut check_sbom text (#2830, #2834): a long last_affected match is clipped, keeps fixed_in null, and gives no fixed version", async () => {
     const batch = readShaped("check_sbom").answers.batch;
     const lodash = batch.body.results.find((r) => r.purl === "pkg:npm/lodash@4.17.19");
     const cve = "CVE-2021-23337";
     const group = "org.apache.logging.log4j.extended.components";
     const artifact = "log4j-core-extended-artifact";
-    const installed = "2.14.1";
-    const purl = `pkg:maven/${group}/${artifact}@${installed}`;
-    const reason = `registry package (confidence 0.95): Maven/${group}:${artifact} — version ${installed} falls inside the advisory interval [2.0.0.20180101.release, 2.15.0.20211212.release] (2.15.0.20211212.release is the last affected version, not a fix)`;
-    const open = reason.indexOf("advisory interval [") + "advisory interval [".length;
-    assert.ok(open < 200 && reason.indexOf("]", open) >= 200, `the interval opens at ${open} and closes at ${reason.indexOf("]", open)}, so the clip does not fall inside it`);
-    const row = {
-      ...lodash,
-      index: 0,
-      purl,
-      matches: lodash.matches.filter((m) => m.cve_id === cve).map((m) => ({ ...m, match_reason: reason, description: "x".repeat(40_000) })),
-      cve_ids: [cve],
-    };
-    const res = await call("check_sbom", { purls: [purl] }, { [batch.path]: { ...batch.body, results: [row] } });
-    assert.notEqual(res.isError, true, blocksOf(res)[0]);
-    assert.match(blocksOf(res)[1], /TEXT CUT/, "the answer is not cut, so the test does not reach the clip");
-    const [r] = JSON.parse(blocksOf(res)[0]).results;
-    const [shownReason] = r.matches.filter((m) => m.cve_id === cve).map((m) => m.match_reason);
-    assert.equal(shownReason, `${reason.slice(0, 200)}…`, "check_sbom's first cut level no longer clips match_reason at 200 characters");
-    const tail = shownReason.slice(shownReason.indexOf("advisory interval ["));
-    assert.ok(!tail.includes(")") && !tail.includes("]"), shownReason);
-    const target = { ecosystem: "Maven", pkg: `${group}:${artifact}`, installed };
-    const intelAt = (v) => ({ affected_packages: [{ ecosystem: "Maven", package_name: target.pkg, fixed_version: v }], fixed_versions: [] });
-    assert.deepEqual(fixRule(r, cve, { affected_packages: [], fixed_versions: [] }, target), { candidates: [], offered: [] }, "the rule takes an interval clipped before its bracket as a fix");
-    assert.deepEqual(fixRule(r, cve, intelAt("2.16.0"), target).offered, [{ from: "cve_intel", version: "2.16.0" }]);
-
-    // And the prompt says so.
-    const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: artifact, version: installed, purl }] });
-    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
-    assert.ok(own.includes("Where the text is cut before the interval's closing bracket (\"[A, B…\", neither \")\" nor \"]\"), it does not say which bound B is: give no fixed version from that match_reason."), own);
+    const cases = [
+      {
+        what: "the bracket kept, its words cut",
+        purl: "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.10",
+        pkg: "com.fasterxml.jackson.core:jackson-databind",
+        installed: "2.9.10",
+        reason: "registry package (confidence 0.95): Maven/com.fasterxml.jackson.core:jackson-databind — version 2.9.10 falls inside the advisory interval [2.0.0, 2.9.10.7] (2.9.10.7 is the last affected version, not a fix)",
+        lastAffected: "2.9.10.7",
+        clip: (s) => s.includes("[2.0.0, 2.9.10.7]") && !s.includes("not a fix)"),
+      },
+      {
+        what: "cut before the bracket",
+        purl: `pkg:maven/${group}/${artifact}@2.14.1`,
+        pkg: `${group}:${artifact}`,
+        installed: "2.14.1",
+        reason: `registry package (confidence 0.95): Maven/${group}:${artifact} — version 2.14.1 falls inside the advisory interval [2.0.0.20180101.release, 2.15.0.20211212.release] (2.15.0.20211212.release is the last affected version, not a fix)`,
+        lastAffected: "2.15.0.20211212.release",
+        clip: (s) => {
+          const tail = s.slice(s.indexOf("advisory interval ["));
+          return !tail.includes(")") && !tail.includes("]");
+        },
+      },
+    ];
+    for (const c of cases) {
+      assert.ok(c.reason.length > 200, `${c.what}: the reason is ${c.reason.length} characters, so the cut does not clip it`);
+      const row = {
+        ...lodash,
+        index: 0,
+        purl: c.purl,
+        matches: lodash.matches.filter((m) => m.cve_id === cve).map((m) => ({ ...m, match_reason: c.reason, description: "x".repeat(40_000), ...LAST_AFFECTED_FIXED_IN })),
+        cve_ids: [cve],
+      };
+      const res = await call("check_sbom", { purls: [c.purl] }, { [batch.path]: { ...batch.body, results: [row] } });
+      assert.notEqual(res.isError, true, blocksOf(res)[0]);
+      assert.match(blocksOf(res)[1], /TEXT CUT/, `${c.what}: the answer is not cut, so the test does not reach the clip`);
+      const [r] = JSON.parse(blocksOf(res)[0]).results;
+      const [m] = r.matches.filter((x) => x.cve_id === cve);
+      assert.equal(m.match_reason, `${c.reason.slice(0, 200)}…`, `${c.what}: check_sbom's first cut level no longer clips match_reason at 200 characters`);
+      assert.ok(c.clip(m.match_reason), `${c.what}: ${m.match_reason}`);
+      assert.ok(Object.hasOwn(m, "fixed_in") && m.fixed_in === null, `${c.what}: the cut text does not keep fixed_in null: ${JSON.stringify(m)}`);
+      const target = { ecosystem: "Maven", pkg: c.pkg, installed: c.installed };
+      const intelAt = (v) => ({ affected_packages: [{ ecosystem: "Maven", package_name: c.pkg, fixed_version: v }], fixed_versions: [] });
+      assert.deepEqual(fixRule(r, cve, { affected_packages: [], fixed_versions: [] }, target), { candidates: [], offered: [] }, `${c.what}: the rule takes a clipped last_affected interval as a fix`);
+      assert.deepEqual(fixRule(r, cve, intelAt(c.lastAffected), target).offered, [], `${c.what}: the rule offers cve_intel's version at the last affected one`);
+    }
   });
 
   // #2817, the fix itself: with fixed_branches (core-backend since #2817), what the model is shown
@@ -648,7 +791,8 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
     const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
     assert.match(own, /cve_intel, to read fixed_branches and fixed_version from its affected_packages rows, and fixed_version from its fixed_versions rows/);
-    assert.match(own, /Otherwise, where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches, give the fixed of the range that holds the installed version: at or above its introduced \("0" is the first version\) and below its fixed, or at or below its last_affected, in the same version order; a range with last_affected and no fixed has no fix on record, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used\./);
+    // #3074: the range's fixed, walked past any other range of the row that still holds it.
+    assert.match(own, /Where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches, give the fixed of the range that holds the installed version: at or above its introduced \("0" is the first version\) and below its fixed, or at or below its last_affected, in the same version order; while another range of the row holds that fixed version, it is still affected, so move to that range's fixed; a range on the way with last_affected and no fixed, or with no end, has no fix on record, so give none, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used\./);
     const [row] = JSON.parse(blocksOf(await call("check_sbom", { sbom }, shapedAnswers(LOG4J)))[0]).results;
     const { ecosystem, package: pkg, version: installed } = fromPurl(row.purl);
     const c = caseOf(INTEL_2817);
@@ -664,16 +808,45 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed: "2.15.0" }).offered, [], "2.15.0 is in no range, and is given no fixed version");
   });
 
-  // #2834: sbom_review reads each match's fixed_in first. On LOG4J as core-backend answers since
-  // #2834, CVE-2021-44228's match carries fixed_in 2.15.0, the fix of the interval holding 2.14.1,
-  // and the rule gives it; a match whose fixed_in is null gives no fixed version, whatever cve_intel
-  // holds, where the rule without fixed_in (an API before #2834) would give cve_intel's value.
+  // #3074: a range's fixed can lie inside another range of the same row. Production's CVE-2026-4800
+  // npm/lodash row (2026-10-11) held [0, 4.17.21) and [4.0.0, 4.18.0): for 4.17.15 the fix is
+  // 4.18.0, and 4.17.21, the first range's fixed, is still affected. Where the text keeps no match,
+  // or a match without fixed_in, the rule walks fixed_branches past it; a match_reason
+  // "[0, 4.17.21)" on such a match is not read (#2834's last review), so it gives 4.17.21 neither;
+  // a last_affected range on the way gives none.
+  it("sbom_review's fix rule walks past an overlapping range (#3074): lodash 4.17.15 under CVE-2026-4800 is given 4.18.0, never the still-affected 4.17.21", async () => {
+    const cve = "CVE-2026-4800";
+    const target = { ecosystem: "npm", pkg: "lodash", installed: "4.17.15" };
+    const branches = [{ introduced: "0", fixed: "4.17.21" }, { introduced: "4.0.0", fixed: "4.18.0" }];
+    const intel = { affected_packages: [{ ecosystem: "npm", package_name: "lodash", fixed_version: "4.17.21", fixed_branches: branches }], fixed_versions: [] };
+    const noMatch = { matches: [] };
+    const reasonRow = { matches: [{ cve_id: cve, match_reason: "registry package (confidence 0.95): npm/lodash — version 4.17.15 falls inside the advisory interval [0, 4.17.21)" }] };
+    assert.deepEqual(fixRule(noMatch, cve, intel, target).offered, [{ from: "fixed_branches", version: "4.18.0" }]);
+    assert.deepEqual(fixRule(reasonRow, cve, intel, target).offered, [{ from: "fixed_branches", version: "4.18.0" }]);
+    // Control: the first range's own fixed, the pre-#3074 reading, is held by the second range.
+    assert.ok(branchHolds(branches[1], "4.17.21"), "4.17.21 is not inside [4.0.0, 4.18.0), so the case does not test the walk");
+    // Adjacent ranges, chained ranges, and a last_affected range on the way.
+    assert.equal(fixedBranchesWalk([{ introduced: "1.0.0", fixed: "2.0.0" }, { introduced: "2.0.0", fixed: "3.0.0" }], "1.5.0"), "3.0.0");
+    assert.equal(fixedBranchesWalk([{ introduced: "0", fixed: "2.0.0" }, { introduced: "1.5.0", fixed: "3.0.0" }, { introduced: "2.5.0", fixed: "4.0.0" }], "1.0.0"), "4.0.0");
+    const blocked = { ...intel, affected_packages: [{ ...intel.affected_packages[0], fixed_branches: [{ introduced: "0", fixed: "4.17.21" }, { introduced: "4.0.0", last_affected: "4.17.23" }] }] };
+    assert.deepEqual(fixRule(noMatch, cve, blocked, target).offered, [], "a last_affected range on the way gives no fixed version");
+    // fixed_in, where the match carries it, decides as before.
+    const withFixedIn = { matches: [{ cve_id: cve, fixed_in: "4.18.0", fixed_in_detail: "fixed_in moved past the overlapping interval [4.0.0, 4.18.0) of the same record" }] };
+    assert.deepEqual(fixRule(withFixedIn, cve, intel, target).offered, [{ from: "fixed_in", version: "4.18.0" }]);
+  });
+
+  // #2834: sbom_review reads each match's fixed_in alone where the text keeps the match. On LOG4J
+  // as core-backend answers since #2834, CVE-2021-44228's match carries fixed_in 2.15.0, the fix of
+  // the interval holding 2.14.1, and the rule gives it; a match whose fixed_in is null gives no fixed
+  // version ("no fix on record"), whatever cve_intel holds, where the rule without fixed_in (an API
+  // before #2834) would give cve_intel's value.
   it("sbom_review's fix rule with fixed_in (#2834): a version is given, null gives none and stops the rule there", async (t) => {
     const [purl] = LOG4J.args.purls;
     const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
     const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
-    assert.match(own, /First, where the text keeps the component's match for the CVE and the match carries fixed_in: a version there is the fixed bound of the advisory interval that holds the installed version, so give it as the fixed version; null says the advisory records no fixed version for the installed version's range, so give none for that CVE on that component/);
-    assert.match(own, /Where the match has no fixed_in field, or the text keeps no match for the component, the rest of this rule applies\./);
+    // #3074: fixed_in is the first version above the installed one that no affected interval holds.
+    assert.match(own, /Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component and write "no fix on record", which is not a finding that no fix exists\./);
+    assert.match(own, /Where the text keeps no match for the component \(a cut text can keep its cve_ids alone\), or the match has no fixed_in field, the rest of this rule applies\./);
     const shown = async (answers) => JSON.parse(blocksOf(await call("check_sbom", LOG4J.args, answers))[0]).results[0];
     const row = await shown(withFixedIn(shapedAnswers(LOG4J)));
     const { ecosystem, package: pkg, version: installed } = fromPurl(row.purl);
@@ -716,6 +889,78 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const g = caseOf("get_cve, CVE-2021-44228");
     for (const f of heldTo(g.label, await call(g.tool, argsOf(g), shapedAnswers(g)), named)) carried.add(f);
     allCarried(t, "workload_triage", named, carried, ["check_sbom", "get_cve"]);
+  });
+
+  // #3013's review: past the budget, check_sbom's and scan_manifest's structured result thins each
+  // row's matches to SBOM_ROW_THIN before any row leaves (a client that reads structuredContent,
+  // Claude Code among them, reads those), and through the review a thinned match kept cve_id,
+  // kev_listed, epss_score, fixed_in and fixed_in_reason, while workload_triage reads ransomware,
+  // effective_score and score_assessed from a row's matches too (step 5, and its ordering keys).
+  // This file held each prompt's fields to the first text block alone. Here, for every prompt that
+  // calls check_sbom or scan_manifest, each field it names in a sentence that reads from a match
+  // (matchFieldsRead) is in SBOM_ROW_THIN's matches, and in every thinned match of a default call
+  // (Juice Shop's 50 components, every row thinned, and scan_manifest's package-lock of 64).
+  // Control: the review's thinned match fails, naming the three fields.
+  it("#3013's review: every match field a prompt reads from check_sbom's or scan_manifest's matches survives SBOM_ROW_THIN, in the list and in a default call's thinned data", async (t) => {
+    const { SBOM_ROW_THIN } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
+    const juice = caseOf("check_sbom, Juice Shop 11.1.2 (50 components)");
+    const lockCase = caseOf("scan_manifest, package-lock.json (64 packages)");
+    // Every field a check_sbom match carries in the answers this file serves, fixed_in among them.
+    const matchKeys = new Set(
+      [shapedAnswers(juice), withFixedIn(shapedAnswers(LOG4J))].flatMap((answers) => Object.values(answers).flatMap((b) => b.results.flatMap((r) => (r.matches ?? []).flatMap((m) => Object.keys(m))))),
+    );
+    const args = {
+      triage_cve: [{ cve_id: "CVE-2021-44228" }],
+      kev_weekly_brief: [{}],
+      am_i_affected: [{ product: "openssl", version: "3.0.0" }, { ecosystem: "npm", package: "lodash", version: "4.17.15" }],
+      sbom_review: [{ sbom: JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [] }) }],
+      workload_triage: [{}, ...["kubernetes", "github_actions", "images"].map((source) => ({ source }))],
+    };
+    const listed = (await client.listPrompts()).prompts.map((x) => x.name).sort();
+    assert.deepEqual(Object.keys(args).sort(), listed, "prompts/list lists another prompt: give it arguments here, so what it reads from a match is held");
+    const read = {};
+    for (const [name, list] of Object.entries(args)) {
+      for (const a of list) {
+        const prompt = textOf(await client.getPrompt({ name, arguments: a }));
+        if (!/\b(check_sbom|scan_manifest)\b/.test(prompt.split("\nSBOM:\n")[0])) continue;
+        read[name] = [...new Set([...(read[name] ?? []), ...matchFieldsRead(name, prompt, toolNames, matchKeys)])];
+      }
+    }
+    t.diagnostic(`match fields read: ${JSON.stringify(read)}`);
+    assert.deepEqual(Object.keys(read).sort(), ["sbom_review", "workload_triage"], "the prompts that call check_sbom or scan_manifest changed: check what each reads from a match");
+    // Not vacuous: what each prompt's text says it reads from a match is found.
+    for (const f of ["kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in"]) assert.ok(read.workload_triage.includes(f), `workload_triage: ${f} is not found as read from a match`);
+    assert.ok(read.sbom_review.includes("fixed_in"), "sbom_review: fixed_in is not found as read from a match");
+    for (const [name, fields] of Object.entries(read)) assert.deepEqual(thinProblems(fields, SBOM_ROW_THIN), [], `${name} reads from a match fields SBOM_ROW_THIN leaves out`);
+    // Control: the review's thinned match leaves out three of workload_triage's.
+    const REVIEWED = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids", "matched_package", "matched_via", ["matches", ["cve_id", "kev_listed", "epss_score", "fixed_in", "fixed_in_reason"]]];
+    assert.deepEqual(thinProblems(read.workload_triage, REVIEWED).sort(), ["effective_score", "ransomware", "score_assessed"]);
+    // And in data: a default call (no full), every row thinned, each match keeping each field read
+    // wherever the answer's match has it.
+    const all = [...new Set(Object.values(read).flat())];
+    for (const [c, tool, a] of [[juice, "check_sbom", argsOf(juice)], [lockCase, "scan_manifest", argsOf(lockCase)]]) {
+      stub.state.answers = shapedAnswers(c);
+      stub.state.limited = undefined;
+      stub.state.requests = 0;
+      const res = await client.callTool({ name: tool, arguments: a });
+      const sc = res.structuredContent;
+      assert.equal(sc.truncated?.results?.thinned, true, `${c.label}: rows are not thinned by default, so this case holds nothing`);
+      stub.state.requests = 0;
+      const whole = (await client.callTool({ name: tool, arguments: { ...a, full: true } })).structuredContent.data.results;
+      const byIndex = new Map(whole.map((r) => [r.index, r]));
+      let held = 0;
+      for (const r of sc.data.results) {
+        for (const [i, m] of (r.matches ?? []).entries()) {
+          for (const f of all) {
+            if (!Object.hasOwn(byIndex.get(r.index).matches[i], f)) continue;
+            assert.ok(Object.hasOwn(m, f), `${c.label}: row ${r.index}, match ${i}: a prompt reads ${f} from it, and the thinned match leaves it out`);
+            held++;
+          }
+        }
+      }
+      assert.ok(held > 0, `${c.label}: no thinned match carries a field read`);
+      t.diagnostic(`${c.label}: ${held} match fields held in ${sc.data.results.length} thinned rows`);
+    }
   });
 
   it("triage_cve: each tool it calls keeps, in its text, every field the prompt reads from it", async (t) => {

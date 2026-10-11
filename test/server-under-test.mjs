@@ -20,3 +20,11 @@ export const DIST = path.join(PKG_DIR, "dist", "index.js");
 export const serverCommand = () => (BIN ? { command: BIN, args: [] } : { command: process.execPath, args: [DIST] });
 export const readPkgFile = (name) => fs.readFileSync(path.join(PKG_DIR, name), "utf8");
 export const PKG = JSON.parse(readPkgFile("package.json"));
+// #3012: npm keeps only the first 65,536 characters of a README, so the long reference moved to
+// docs/*.md, which the package ships (package.json files). The package's documentation is
+// README.md and these pages: [path, text] pairs, README first. A check that held "the README" to
+// a rule, or read a section that moved, reads them here.
+export const DOC_PAGES = fs.existsSync(path.join(PKG_DIR, "docs"))
+  ? fs.readdirSync(path.join(PKG_DIR, "docs")).filter((f) => f.endsWith(".md")).sort().map((f) => `docs/${f}`)
+  : [];
+export const readDocs = () => [["README.md", readPkgFile("README.md")], ...DOC_PAGES.map((p) => [p, readPkgFile(p)])];

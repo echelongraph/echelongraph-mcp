@@ -18,15 +18,17 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect, MODERN } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, modern } from "../test/mcp-http-client.mjs";
-import { chooseInput, COMPLETE_MESSAGE, HTTP, judge, judgePrompt, judgeResource, LEGACY, probeOrder, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, UA_TOKEN } from "./run.mjs";
+import { chooseInput, COMPLETE_MESSAGE, DEFAULT_CLIENT_CUT, HTTP, judge, judgePrompt, judgeResource, judgeTextCut, LEGACY, loadRequiredText, probeOrder, probeSession, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, TEXT_CUT_MESSAGE, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
-import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, LOG4J_CORE, PROBES, PROMPT_PROBE, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS } from "./probes.mjs";
-import { BATCH_PATH, CALL_ANSWER } from "../test/fixtures/match-batch.mjs";
+import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, LOG4J_CORE, LOG4J_CORE_PURL, LOG4J_FIXED_IN, PROBES, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS, UPSTREAM_PURL } from "./probes.mjs";
+import * as probeTable from "./probes.mjs";
+import { BATCH_PATH, batchAnswer, CALL_ANSWER, ROWS } from "../test/fixtures/match-batch.mjs";
 
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
 // Every tool this package's dist lists, in createServer()'s registration order.
@@ -51,7 +53,13 @@ const BODIES = {
     summary: { critical: 1, high: 1, medium: 1, low: 1, none: 0, unscored: 0, total: 4, nvd_critical: 1, nvd_high: 1, nvd_medium: 1, nvd_low: 1, nvd_none: 0, rejected: 0, last_updated: AT },
   },
   "/api/v1/public/cves": { cves: [{ cve_id: CVE, severity: "CRITICAL", cvss_v3_score: 10, echelongraph_score: 10, score_assessed: true, kev_listed: true }], limit: 2, offset: 0, total: 1 },
-  [`/api/v1/public/cves/${CVE}`]: { cve_id: CVE, severity: "CRITICAL", cvss_v3_score: 10, echelongraph_score: 10, score_confidence: "HIGH", score_assessed: true, epss_score: 0.97, kev_listed: true, kev_ransomware: true },
+  // #2839: with CISA's text, as production serves Log4Shell (EXPECT.get_cve holds kev_required_action).
+  [`/api/v1/public/cves/${CVE}`]: {
+    cve_id: CVE, severity: "CRITICAL", cvss_v3_score: 10, echelongraph_score: 10, score_confidence: "HIGH", score_assessed: true, epss_score: 0.97, kev_listed: true, kev_ransomware: true,
+    kev_required_action: "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks.",
+    kev_short_description: "Apache Log4j2 contains a vulnerability where JNDI features do not protect against attacker-controlled JNDI-related endpoints, allowing for remote code execution.",
+    kev_notes_urls: ["https://nvd.nist.gov/vuln/detail/CVE-2021-44228"],
+  },
   [`/api/v1/public/kev-exposure/cve/${EXPOSURE_CVE}`]: { cve_id: EXPOSURE_CVE, exposed_hosts: 12, countries: 3, kev_listed: true, kev_seen_in_observations: true, kev_catalog_listed: true, tracked: true, method: METHOD, ransomware: false, top_countries: [{ country: "Germany", hosts: 5 }], top_products: [{ product: "http_server", hosts: 12 }], last_seen: AT, generated_at: AT },
   "/api/v1/public/kev-exposure/stats": { distinct_hosts: 0, kev_cves_exposed: 0, correlations: 0, ransomware_cves: 0, ransomware_hosts: 0, top_products: [], top_cves: [], top_countries: [], newest_kev: [], trend: [], generated_at: AT },
   "/api/v1/public/exposed-databases/stats": { distinct_hosts: 0, engines: 0, pii_likely: 0, pci_likely: 0, top_engines: [], top_countries: [], generated_at: AT },
@@ -79,6 +87,42 @@ BODIES["/api/v1/public/cves/match"] = {
   product: "", product_named_count: 0, undecidable_excluded_count: 0, undecided_candidate_count: 0, vendor: "", vendor_advisory_count: 0, version: "4.17.20", matches: [],
 };
 BODIES[BATCH_PATH] = CALL_ANSWER;
+// #2834, #2836: the rows production served for check_sbom's two probe purls on 2026-10-11, trimmed to
+// what EXPECT.check_sbom reads. A batch carrying either gets its row after CALL_ANSWER's two, so
+// the stub answers the probe the way production does. The stub's `regressed` set answers a row as a
+// regression would: fixed_in (the bound read from the stored fixed_version), fixed_in_null (no
+// interval found on the exact-list path), upstream (the qualifier ignored).
+const LOG4J_MATCH = {
+  cve_id: CVE, severity: "CRITICAL", cvss_v3_score: 10, kev_listed: true, ransomware: true, epss_score: 0.99999, score_assessed: true,
+  match_reason: "registry package (confidence 0.95): Maven/org.apache.logging.log4j:log4j-core — version 2.14.1 is listed verbatim in the advisory's affected versions",
+  version_evidence: "exact_version_list", interval: { introduced: "2.13.0", fixed: "2.15.0" }, fixed_in: "2.15.0",
+};
+const PROBE_ROWS = {
+  [LOG4J_CORE_PURL]: (i, regressed) => {
+    const m = { ...LOG4J_MATCH };
+    if (regressed.has("fixed_in")) m.fixed_in = "2.3.1";
+    if (regressed.has("fixed_in_null")) Object.assign(m, { fixed_in: null, fixed_in_reason: "the version is listed verbatim in the advisory's affected versions, and no advisory interval holding it records a fixed version" });
+    return { ...ROWS.affected(i, LOG4J_CORE_PURL, LOG4J_CORE, "2.14.1", [CVE]), ecosystem: "Maven", matched_package: LOG4J_CORE, matched_via: "purl_name", matches: [m] };
+  },
+  [UPSTREAM_PURL]: (i, regressed) =>
+    regressed.has("upstream")
+      ? { ...ROWS.unknown(i, UPSTREAM_PURL, "libcrypto3", "3.3.6-r0"), ecosystem: "Alpine:v3.20", ecosystem_recognised: false, matched_package: "libcrypto3", matched_via: "purl_name" }
+      : {
+          ...ROWS.affected(i, UPSTREAM_PURL, "openssl", "3.3.6-r0", ["CVE-2026-31789", "CVE-2026-28387"]),
+          ecosystem: "Alpine:v3.20", ecosystem_recognised: false, matched_package: "openssl", matched_via: "upstream", matched_version_from: "purl", purl_name: "libcrypto3",
+        },
+};
+function batchBodyFor(components, regressed) {
+  const base = CALL_ANSWER.results;
+  const extra = components.map((c) => c?.purl).filter((p) => PROBE_ROWS[p]);
+  return batchAnswer([...base, ...extra.map((p, k) => PROBE_ROWS[p](base.length + k, regressed))]);
+}
+// A check_sbom structuredContent whose data is the stub's answer to the probe's first batch (both
+// probe rows in it, as production serves them, or as `regressed` says), under `over`.
+function sbomSc(over = {}, regressed = new Set()) {
+  const data = batchBodyFor(SBOM_PROBE_PURLS.slice(0, 200).map((purl) => ({ purl })), regressed);
+  return { state: "measured", data, coverage: { batches_sent: 2, not_sent_reason: null }, ...over };
+}
 // #2841: GET /cves/:id/remediation as core-backend's cve/remediation.go serves Log4Shell.
 BODIES[`/api/v1/public/cves/${CVE}/remediation`] = {
   cve_id: CVE, state: "assessed", not_assessed_reason: null,
@@ -145,7 +189,7 @@ async function startStub() {
   // every second one is answered 429 without Retry-After, as a spent per-minute budget would be, so
   // check_sbom answers partial with one batch sent. batchCap: a batch of more components is refused
   // 400 TOO_MANY_COMPONENTS, as the route answers one over cveBatchMaxComponents (a lowered cap).
-  const state = { mode: "ok", userAgents: [], seen: [], batches: [], refuseSecondBatch: false, batchCap: null };
+  const state = { mode: "ok", userAgents: [], seen: [], batches: [], refuseSecondBatch: false, batchCap: null, regressed: new Set() };
   const server = http.createServer((req, res) => {
     state.userAgents.push(req.headers["user-agent"]);
     state.seen.push({ method: req.method, url: req.url, headers: req.headers });
@@ -167,7 +211,8 @@ async function startStub() {
       const chunks = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        const n = JSON.parse(Buffer.concat(chunks).toString()).components.length;
+        const components = JSON.parse(Buffer.concat(chunks).toString()).components;
+        const n = components.length;
         state.batches.push(n);
         if (state.batchCap !== null && n > state.batchCap) {
           res.writeHead(400, { "content-type": "application/json" });
@@ -176,7 +221,7 @@ async function startStub() {
         }
         const refused = state.refuseSecondBatch && state.batches.length % 2 === 0;
         res.writeHead(refused ? 429 : 200, { "content-type": "application/json" });
-        res.end(JSON.stringify(refused ? { error: "component budget exceeded", code: "RATE_LIMIT_EXCEEDED" } : BODIES[BATCH_PATH]));
+        res.end(JSON.stringify(refused ? { error: "component budget exceeded", code: "RATE_LIMIT_EXCEEDED" } : batchBodyFor(components, state.regressed)));
       });
       return;
     }
@@ -277,6 +322,31 @@ describe("the synthetic against the stub API", () => {
       const { PKG } = await import("../test/server-under-test.mjs");
       for (const l of r.lines) assert.equal(l.package_version, PKG.version);
     });
+    it("#2842: one client-cut line per era, judged by the package's own registry: instructions within 2,048 characters and every head holding its sentences", async () => {
+      const { PKG } = await import("../test/server-under-test.mjs");
+      const cut = r.lines.filter((l) => l.message === TEXT_CUT_MESSAGE);
+      assert.deepEqual(cut.map((l) => l.era), [MODERN, LEGACY]);
+      for (const l of cut) {
+        assert.equal(l.severity, "INFO");
+        assert.equal(l.transport, STDIO);
+        assert.equal(l.run_id, r.complete[0].run_id);
+        assert.ok(Number.isInteger(l.instructions_chars) && l.instructions_chars > 0 && l.instructions_chars <= 2048, `instructions_chars ${l.instructions_chars}`);
+        assert.deepEqual(
+          [l.outcome, l.cut, l.instructions_head_ok, l.description_heads_ok, l.description_heads_missing, l.tools_without_required_entry, l.tools_listed, l.descriptions_over_cut, l.description_heads_basis, l.required_version],
+          ["success", 2048, true, true, 0, 0, PUBLISHED.length, 0, "judged", PKG.version],
+          JSON.stringify(l),
+        );
+        assert.equal(l.detail, undefined);
+      }
+      // Both eras serve the same instructions.
+      assert.equal(cut[0].instructions_chars, cut[1].instructions_chars);
+      assert.deepEqual([r.complete[0].text_cut_lines, r.complete[0].text_cut_failures], [2, 0]);
+    });
+    it("#2834, #2836, #2839: check_sbom's and get_cve's probes met their EXPECTs on both eras", () => {
+      for (const era of [MODERN, LEGACY]) {
+        for (const tool of ["check_sbom", "get_cve"]) assert.deepEqual([r.of(tool, era).outcome, r.of(tool, era).reason], ["success", undefined], tool);
+      }
+    });
     it("every API request carries the synthetic's family, and this package names it itself", () => {
       assert.ok(stub.state.userAgents.length >= PUBLISHED.length * 2);
       for (const ua of stub.state.userAgents) {
@@ -367,6 +437,82 @@ describe("the synthetic against the stub API", () => {
     assert.equal(r.exitCode, 2);
   });
 
+  // #2834, #2836: production answering a probe row as a regression would fails check_sbom's
+  // probe, expectation_unmet with what it saw, and nothing else.
+  for (const [regression, want] of [
+    ["fixed_in", /CVE-2021-44228 fixed_in "2\.3\.1" .*; want "2\.15\.0"$/],
+    ["fixed_in_null", /CVE-2021-44228 fixed_in null \(fixed_in_reason "the version is listed verbatim/],
+    ["upstream", /: verdict "not_assessed", matched_via "purl_name", matched_package "libcrypto3" \(not_assessed_reason "package_not_in_advisory_corpus"\); want affected, upstream, openssl$/],
+  ]) {
+    it(`#2834/#2836: a probe row answered regressed (${regression}) fails check_sbom's probe, expectation_unmet, and only it`, async () => {
+      stub.state.mode = "ok";
+      stub.state.regressed = new Set([regression]);
+      let r;
+      try {
+        r = await run(stub, { eras: [LEGACY] });
+      } finally {
+        stub.state.regressed = new Set();
+      }
+      const l = r.of("check_sbom", LEGACY);
+      assert.deepEqual([l.outcome, l.reason, l.state], ["failure", "expectation_unmet", "measured"], JSON.stringify(l));
+      assert.match(l.detail, want);
+      for (const tool of PUBLISHED.filter((t) => t !== "check_sbom")) assert.equal(r.of(tool, LEGACY).outcome, "success", tool);
+      assert.equal(r.exitCode, 2);
+    });
+  }
+
+  it("#2839: a Log4Shell record served without CISA's text fails get_cve's probe, expectation_unmet, and only it", async () => {
+    stub.state.mode = "ok";
+    const key = `/api/v1/public/cves/${CVE}`;
+    const kept = BODIES[key];
+    const { kev_required_action, ...without } = kept;
+    assert.equal(typeof kev_required_action, "string", "control: the healthy body carries the text");
+    BODIES[key] = without;
+    let r;
+    try {
+      r = await run(stub, { eras: [LEGACY] });
+    } finally {
+      BODIES[key] = kept;
+    }
+    const l = r.of("get_cve", LEGACY);
+    assert.deepEqual([l.outcome, l.reason, l.detail], ["failure", "expectation_unmet", `data.kev_required_action absent; want CISA's text for ${CVE}`], JSON.stringify(l));
+    for (const tool of PUBLISHED.filter((t) => t !== "get_cve")) assert.equal(r.of(tool, LEGACY).outcome, "success", tool);
+    assert.equal(r.exitCode, 2);
+  });
+
+  // #2842: a server whose description head lacks a sentence its own registry requires. The server
+  // is this package's dist, run through a symlink from a directory whose requiredText.js asks one
+  // more get_cve sentence than any description holds: loadRequiredText reads the registry beside
+  // the server .js it is given, as it reads an installed package's.
+  it("#2842: a description head that lacks a required sentence makes the client-cut line a failure, naming it, and the run exit 2", async () => {
+    stub.state.mode = "ok";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eg-synthetic-2842-"));
+    try {
+      fs.symlinkSync(DIST, path.join(dir, "index.js"));
+      const real = pathToFileURL(path.join(path.dirname(DIST), "requiredText.js")).href;
+      fs.writeFileSync(
+        path.join(dir, "requiredText.js"),
+        `import * as real from ${JSON.stringify(real)};
+export const CLIENT_DESCRIPTION_CUT = real.CLIENT_DESCRIPTION_CUT;
+export const SHODAN_OWNERSHIP = real.SHODAN_OWNERSHIP;
+export const REQUIRED_IN_INSTRUCTIONS = real.REQUIRED_IN_INSTRUCTIONS;
+export const REQUIRED_IN_HEAD = { ...real.REQUIRED_IN_HEAD, get_cve: [...real.REQUIRED_IN_HEAD.get_cve, "a sentence no get_cve description holds"] };
+`,
+      );
+      const r = await run(stub, { serverJs: path.join(dir, "index.js") });
+      const cut = r.lines.filter((l) => l.message === TEXT_CUT_MESSAGE);
+      assert.equal(cut.length, 2, JSON.stringify(cut));
+      for (const l of cut) {
+        assert.deepEqual([l.outcome, l.description_heads_ok, l.description_heads_missing, l.instructions_head_ok, l.description_heads_basis], ["failure", false, 1, true, "judged"], JSON.stringify(l));
+        assert.equal(l.detail, "get_cve: a sentence no get_cve description holds");
+      }
+      for (const era of [MODERN, LEGACY]) for (const tool of PUBLISHED) assert.equal(r.of(tool, era).outcome, "success", `${tool} [${era}]`);
+      assert.deepEqual([r.complete[0].text_cut_lines, r.complete[0].text_cut_failures, r.exitCode], [2, 2, 2]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("the deliberate-failure canary: a forced tool name no version lists is a failure on both eras", async () => {
     const r = await run(stub, { force: ["canary_deliberate_failure"] });
     for (const era of [MODERN, LEGACY]) {
@@ -408,7 +554,7 @@ describe("#2757: what check_sbom's probe must show", () => {
     assert.equal(new Set(purls).size, 201, "a duplicate is sent once, and would leave one batch");
   });
   it("EXPECT holds batches_sent at least 2, and says what it saw otherwise", () => {
-    const sc = (batches_sent, not_sent_reason = null) => ({ coverage: { batches_sent, not_sent_reason } });
+    const sc = (batches_sent, not_sent_reason = null) => sbomSc({ coverage: { batches_sent, not_sent_reason } });
     assert.equal(EXPECT.check_sbom(sc(2)), undefined);
     assert.equal(EXPECT.check_sbom(sc(1, "rate_limited")), 'coverage.batches_sent 1, want at least 2 (not_sent_reason "rate_limited")');
     assert.equal(EXPECT.check_sbom({}), "coverage.batches_sent null, want at least 2 (not_sent_reason null)");
@@ -419,6 +565,154 @@ describe("#2757: what check_sbom's probe must show", () => {
     assert.deepEqual(judge({ structuredContent: { state: "measured", ok: true } }, tool, expect), { outcome: "success", state: "measured" });
     assert.deepEqual(judge({ structuredContent: { state: "measured" } }, tool, expect), { outcome: "failure", reason: "expectation_unmet", state: "measured", detail: "saw not ok" });
     assert.equal(judge({ isError: true, structuredContent: { state: "failed" } }, tool, expect).reason, "state_failed");
+  });
+});
+
+// #2834, #2836: the two probe rows EXPECT.check_sbom reads, both polarities, each failure named.
+describe("#2834, #2836: what check_sbom's probe rows must show", () => {
+  // The same answer with one probe row changed by f (a copy).
+  const withRow = (purl, f) => {
+    const sc = sbomSc();
+    sc.data.results = sc.data.results.map((r) => (r.purl === purl ? f(structuredClone(r)) : r));
+    return sc;
+  };
+  const withMatch = (f) => withRow(LOG4J_CORE_PURL, (r) => ({ ...r, matches: r.matches.map(f) }));
+  it("both probe purls are in the first batch of 200, so an answer missing the second batch still holds them", () => {
+    for (const p of [LOG4J_CORE_PURL, UPSTREAM_PURL]) {
+      const i = SBOM_PROBE_PURLS.indexOf(p);
+      assert.ok(i >= 0 && i < 200, `${p} at ${i}`);
+    }
+    assert.equal(LOG4J_FIXED_IN, "2.15.0");
+  });
+  it("met: log4j-core 2.14.1's CVE-2021-44228 match carries fixed_in 2.15.0, and libcrypto3 is affected as openssl, by its upstream qualifier", () => {
+    assert.equal(EXPECT.check_sbom(sbomSc()), undefined);
+  });
+  it("#2834 unmet, each named: fixed_in absent (core-backend without #2834), null (no interval on the exact-list path), the stored fixed_version's 2.3.1, no CVE-2021-44228 match, no row", () => {
+    assert.equal(
+      EXPECT.check_sbom(withMatch(({ fixed_in, ...m }) => m)),
+      `${LOG4J_CORE_PURL} ${CVE} fixed_in absent (fixed_in_reason null, interval {"introduced":"2.13.0","fixed":"2.15.0"}); want "2.15.0"`,
+    );
+    assert.match(EXPECT.check_sbom(withMatch((m) => ({ ...m, fixed_in: null, fixed_in_reason: "no advisory interval holding it records a fixed version" }))), /fixed_in null \(fixed_in_reason "no advisory interval holding it records a fixed version", .*\); want "2\.15\.0"$/);
+    assert.match(EXPECT.check_sbom(withMatch((m) => ({ ...m, fixed_in: "2.3.1" }))), /CVE-2021-44228 fixed_in "2\.3\.1" .*; want "2\.15\.0"$/);
+    assert.equal(
+      EXPECT.check_sbom(withRow(LOG4J_CORE_PURL, (r) => ({ ...r, verdict: "not_affected", matches: [], cve_ids: [] }))),
+      `${LOG4J_CORE_PURL}: verdict "not_affected", no ${CVE} match (cve_ids [])`,
+    );
+    const gone = sbomSc();
+    gone.data.results = gone.data.results.filter((r) => r.purl !== LOG4J_CORE_PURL);
+    assert.equal(EXPECT.check_sbom(gone), `no row for ${LOG4J_CORE_PURL} among ${gone.data.results.length} results`);
+    assert.equal(EXPECT.check_sbom({ coverage: { batches_sent: 2 }, data: {} }), "data.results absent; want a row per purl sent");
+  });
+  it("#2836 unmet, each named: the upstream qualifier ignored, matched under another name, or no longer affected", () => {
+    assert.equal(
+      EXPECT.check_sbom(sbomSc({}, new Set(["upstream"]))),
+      `${UPSTREAM_PURL}: verdict "not_assessed", matched_via "purl_name", matched_package "libcrypto3" (not_assessed_reason "package_not_in_advisory_corpus"); want affected, upstream, openssl`,
+    );
+    assert.match(EXPECT.check_sbom(withRow(UPSTREAM_PURL, (r) => ({ ...r, matched_package: "libcrypto3" }))), /matched_package "libcrypto3" .*want affected, upstream, openssl$/);
+    assert.match(EXPECT.check_sbom(withRow(UPSTREAM_PURL, (r) => ({ ...r, verdict: "not_affected", count: 0, matches: [] }))), /verdict "not_affected", matched_via "upstream", matched_package "openssl"/);
+    const gone = sbomSc();
+    gone.data.results = gone.data.results.filter((r) => r.purl !== UPSTREAM_PURL);
+    assert.equal(EXPECT.check_sbom(gone), `no row for ${UPSTREAM_PURL} among ${gone.data.results.length} results`);
+  });
+  it("the batches are held first: a second batch unanswered is said as before, whatever the rows hold", () => {
+    assert.equal(EXPECT.check_sbom(sbomSc({ coverage: { batches_sent: 1, not_sent_reason: "time_budget" } }, new Set(["upstream", "fixed_in"]))), 'coverage.batches_sent 1, want at least 2 (not_sent_reason "time_budget")');
+  });
+});
+
+// #2839: EXPECT.get_cve, both polarities.
+describe("#2839: what get_cve's probe must show", () => {
+  it("the probe asks for CVE-2021-44228", () => assert.deepEqual(PROBES.get_cve, [{ cve_id: CVE }]));
+  it("met: KEV-listed, with CISA's required action", () => {
+    assert.equal(EXPECT.get_cve({ state: "measured", data: { kev_listed: true, kev_required_action: "Apply updates per vendor instructions." } }), undefined);
+  });
+  it("unmet, each named: no text, an empty text, a null, not KEV-listed", () => {
+    assert.equal(EXPECT.get_cve({ data: { kev_listed: true } }), `data.kev_required_action absent; want CISA's text for ${CVE}`);
+    assert.equal(EXPECT.get_cve({ data: { kev_listed: true, kev_required_action: "  " } }), `data.kev_required_action "  "; want CISA's text for ${CVE}`);
+    assert.equal(EXPECT.get_cve({ data: { kev_listed: true, kev_required_action: null } }), `data.kev_required_action null; want CISA's text for ${CVE}`);
+    assert.equal(EXPECT.get_cve({ data: { kev_listed: false, kev_required_action: "x" } }), `data.kev_listed false; want true for ${CVE}`);
+    assert.equal(EXPECT.get_cve({}), `data.kev_listed null; want true for ${CVE}`);
+  });
+});
+
+// #2842: judgeTextCut and loadRequiredText, both polarities, against what this package's dist
+// serves and the registry it ships.
+describe("#2842: what a client that cuts at 2,048 characters is handed", () => {
+  let required, served;
+  before(async () => {
+    required = await loadRequiredText(DIST);
+    const c = await connect({ era: LEGACY, command: process.execPath, args: [DIST], env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    try {
+      served = { instructions: c.opening.instructions, tools: (await c.listTools()).tools };
+    } finally {
+      await c.close();
+    }
+  });
+  const withDescription = (name, f) => ({ ...served, tools: served.tools.map((t) => (t.name === name ? { ...t, description: f(t.description) } : t)) });
+  const pastCut = (text, sentence) => {
+    assert.ok(text.includes(sentence), `re-aim this control: the text no longer holds ${sentence}`);
+    return `${text.replace(sentence, "")} ${"x".repeat(2048)} ${sentence}`;
+  };
+  const KEV = "CISA's own text relayed verbatim (kev_required_action, not EchelonGraph's advice";
+
+  it("loadRequiredText reads the package's registry from beside its server .js, and nothing where there is none, it is malformed or it does not load", async () => {
+    assert.equal(required.CLIENT_DESCRIPTION_CUT, DEFAULT_CLIENT_CUT);
+    assert.ok(required.REQUIRED_IN_HEAD.get_cve.includes(KEV));
+    assert.ok(required.REQUIRED_IN_INSTRUCTIONS.length > 0);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eg-synthetic-required-"));
+    try {
+      const js = path.join(dir, "index.js");
+      assert.equal(await loadRequiredText(js), undefined, "a release before #2842 ships no requiredText.js");
+      fs.writeFileSync(path.join(dir, "requiredText.js"), "export const CLIENT_DESCRIPTION_CUT = '2048';\n");
+      assert.equal(await loadRequiredText(js), undefined, "not the registry's shape");
+      fs.writeFileSync(path.join(dir, "requiredText.js"), "throw new Error('does not load');\n");
+      assert.equal(await loadRequiredText(js), undefined, "does not load");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("met: this package's instructions and descriptions", () => {
+    const j = judgeTextCut(served, required);
+    assert.deepEqual(
+      [j.outcome, j.instructions_chars, j.instructions_head_ok, j.description_heads_ok, j.description_heads_missing, j.tools_without_required_entry, j.descriptions_over_cut],
+      ["success", served.instructions.length, true, true, 0, 0, 0],
+    );
+    assert.ok(j.instructions_chars <= 2048, `${j.instructions_chars}`);
+    assert.equal(j.detail, undefined);
+  });
+  it("unmet: instructions one character past the cut (2,048 exactly is within it)", () => {
+    const grown = (n) => ({ ...served, instructions: served.instructions + "y".repeat(n - served.instructions.length) });
+    const j = judgeTextCut(grown(2049), required);
+    assert.deepEqual([j.outcome, j.instructions_chars, j.instructions_head_ok, j.description_heads_ok], ["failure", 2049, true, true]);
+    assert.equal(judgeTextCut(grown(2048), required).outcome, "success");
+  });
+  it("unmet: a required sentence moved past the cut, named in detail", () => {
+    const j = judgeTextCut(withDescription("get_cve", (d) => pastCut(d, KEV)), required);
+    assert.deepEqual([j.outcome, j.description_heads_ok, j.description_heads_missing, j.descriptions_over_cut, j.detail], ["failure", false, 1, 1, `get_cve: ${KEV}`]);
+  });
+  it("unmet: a head that names Shodan without its ownership sentence", () => {
+    const j = judgeTextCut(withDescription("get_cwe", (d) => `Shodan aside: ${d}`), required);
+    assert.deepEqual([j.outcome, j.description_heads_ok, j.detail], ["failure", false, "get_cwe: names Shodan without its ownership sentence"]);
+  });
+  it("unmet: the instructions' head without a REQUIRED_IN_INSTRUCTIONS sentence, or no instructions at all", () => {
+    const s = required.REQUIRED_IN_INSTRUCTIONS.at(-1);
+    const j = judgeTextCut({ ...served, instructions: served.instructions.replace(s, "") }, required);
+    assert.deepEqual([j.outcome, j.instructions_head_ok, j.description_heads_ok, j.detail], ["failure", false, true, `instructions: ${s}`]);
+    const none = judgeTextCut({ ...served, instructions: undefined }, required);
+    assert.deepEqual([none.outcome, none.instructions_chars, none.instructions_head_ok, none.detail], ["failure", null, false, "instructions: none served"]);
+  });
+  it("a listed tool with no registry entry is counted, not failed: a hosted release may list a tool the npm one does not", () => {
+    const j = judgeTextCut({ ...served, tools: [...served.tools, { name: "brand_new_tool", description: "New." }] }, required);
+    assert.deepEqual([j.outcome, j.tools_without_required_entry, j.tools_listed], ["success", 1, served.tools.length + 1]);
+  });
+  it("without a registry only the lengths are measured: the head checks are null, and instructions past the cut still fail", () => {
+    const j = judgeTextCut(withDescription("get_cve", (d) => pastCut(d, KEV)), undefined);
+    assert.deepEqual([j.outcome, j.cut, j.instructions_head_ok, j.description_heads_ok, j.description_heads_missing, j.descriptions_over_cut], ["success", 2048, null, null, null, 1]);
+    assert.equal(judgeTextCut({ ...served, instructions: "y".repeat(2049) }, undefined).outcome, "failure");
+  });
+  it("neutralisation: with a cut of 1e9 the moved sentence and long instructions pass, so the cut is what fails them", () => {
+    const open = { ...required, CLIENT_DESCRIPTION_CUT: 1e9 };
+    assert.equal(judgeTextCut(withDescription("get_cve", (d) => pastCut(d, KEV)), open).outcome, "success");
+    assert.equal(judgeTextCut({ ...served, instructions: served.instructions + "y".repeat(3000) }, open).outcome, "success");
   });
 });
 
@@ -498,7 +792,7 @@ describe("#2774: what the hosted leg's check_sbom probe sends, and must show", (
     }
   });
   it("HTTP_EXPECT holds measured, read from the document (cyclonedx, 201 components), and then EXPECT's two batches", () => {
-    const sc = (state, input, components_in_document, batches_sent) => ({ state, coverage: { input, components_in_document, batches_sent, not_sent_reason: null } });
+    const sc = (state, input, components_in_document, batches_sent) => sbomSc({ state, coverage: { input, components_in_document, batches_sent, not_sent_reason: null } });
     assert.equal(HTTP_EXPECT.check_sbom(sc("measured", "cyclonedx", 201, 2)), undefined);
     assert.equal(HTTP_EXPECT.check_sbom(sc("measured", "purls", null, 2)), 'state "measured", coverage.input "purls", components_in_document null; want measured, cyclonedx, 201');
     assert.equal(HTTP_EXPECT.check_sbom(sc("not_assessed", "cyclonedx", 201, 2)), 'state "not_assessed", coverage.input "cyclonedx", components_in_document 201; want measured, cyclonedx, 201');
@@ -617,7 +911,8 @@ describe("the forwarder", () => {
 // The endpoint is started the way test/http.test.mjs starts it (an ephemeral port, the stub API
 // behind it, a forward token for the stub's host) and the synthetic is pointed at it with
 // remoteUrl. What must hold: both eras, every tool judged against the outputSchema the ENDPOINT
-// advertises, one prompts/get and one resources/read, every line labelled transport "http", the
+// advertises, a prompts/get per prompt probe (triage_cve and, #2846, workload_triage) and one
+// resources/read, every line labelled transport "http", the
 // endpoint's API calls filed under the synthetic's family, and a broken endpoint or API read as
 // failure, never as silence or success.
 const HTTP_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "http.js");
@@ -676,7 +971,14 @@ async function startHttpEntry(apiBase, extraEnv = {}) {
   };
 }
 
-const EXTRAS = [PROMPT_PROBE.label, RESOURCE_PROBE.label];
+// The prompt probes' labels, pinned here, not read from probes.mjs: each is a metric label
+// (mcp_tool_probe_total{tool}), so one renamed ends its series and one dropped is no longer
+// measured (#2846: workload_triage beside triage_cve). PROMPT_PROBES is read off the module rather
+// than imported by name, so a probes.mjs without it fails the tests that read it, each by name,
+// instead of failing this whole file at import.
+const PROMPT_LABELS = ["prompt:triage_cve", "prompt:workload_triage"];
+const PROMPT_PROBES = probeTable.PROMPT_PROBES;
+const EXTRAS = [...PROMPT_LABELS, RESOURCE_PROBE.label];
 
 describe("#2737: the hosted leg over Streamable HTTP", () => {
   let stub, srv;
@@ -698,7 +1000,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       stub.state.seen.length = 0;
       r = await run(stub, { remoteUrl: srv.url });
     });
-    it("every published tool, the prompt and the resource succeed on both eras over http", () => {
+    it("every published tool, both prompts and the resource succeed on both eras over http", () => {
       for (const era of [MODERN, LEGACY]) {
         for (const tool of [...PUBLISHED, ...EXTRAS]) {
           const l = r.probes.find((p) => p.transport === HTTP && p.tool === tool && p.era === era);
@@ -723,6 +1025,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       assert.equal(stdio.length, 2 * PUBLISHED.length);
       assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the prompt and resource probes are the hosted leg's");
       const http = r.probes.filter((l) => l.transport === HTTP);
+      for (const x of EXTRAS) assert.equal(http.filter((l) => l.tool === x).length, 2, `${x}: want one http line per era`);
       assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length));
       const c = r.complete[0];
       assert.deepEqual(c.transports, [STDIO, HTTP]);
@@ -732,6 +1035,17 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       const { PKG } = await import("../test/server-under-test.mjs");
       for (const l of r.probes.filter((p) => p.transport === HTTP)) assert.equal(l.package_version, PKG.version);
       assert.equal(r.complete[0].remote_version, PKG.version);
+    });
+    it("#2842: a client-cut line per era on each transport; the endpoint, on the npm package's version, is judged by its registry", async () => {
+      const { PKG } = await import("../test/server-under-test.mjs");
+      const cut = r.lines.filter((l) => l.message === TEXT_CUT_MESSAGE);
+      assert.deepEqual(cut.map((l) => `${l.transport} ${l.era}`), [`${STDIO} ${MODERN}`, `${STDIO} ${LEGACY}`, `${HTTP} ${MODERN}`, `${HTTP} ${LEGACY}`]);
+      for (const l of cut) {
+        assert.deepEqual([l.outcome, l.description_heads_ok, l.instructions_head_ok, l.description_heads_basis, l.required_version, l.package_version], ["success", true, true, "judged", PKG.version, PKG.version], JSON.stringify(l));
+        assert.ok(l.instructions_chars > 0 && l.instructions_chars <= 2048);
+      }
+      assert.equal(new Set(cut.map((l) => l.instructions_chars)).size, 1, "the same instructions on both transports and eras");
+      assert.deepEqual([r.complete[0].text_cut_lines, r.complete[0].text_cut_failures], [4, 0]);
     });
     it("the endpoint's API calls for the synthetic carry the synthetic's family, never plain echelongraph-mcp", () => {
       assert.ok(stub.state.userAgents.length >= 4 * PUBLISHED.length, "control: both legs reached the API");
@@ -786,7 +1100,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
           assert.equal(l.transport, HTTP);
           assert.deepEqual([l.outcome, l.reason, l.rpc_code], ["failure", "rpc_error", -32600], `${tool}: ${JSON.stringify(l)}`);
         }
-        for (const tool of [...PUBLISHED.filter((t) => !LARGE.includes(t)), ...EXTRAS]) assert.equal(r.of(tool, era).outcome, "success", tool);
+        for (const tool of [...PUBLISHED.filter((t) => !LARGE.includes(t)), ...EXTRAS]) assert.equal(r.of(tool, era)?.outcome, "success", `${tool} [${era}]: ${JSON.stringify(r.of(tool, era) ?? "no line")}`);
       }
       assert.equal(r.exitCode, 2);
       const refused = canary.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.status === 413);
@@ -795,6 +1109,23 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
     } finally {
       await canary.stop();
     }
+  });
+
+  // #2842: an endpoint on another version than the npm package is not held to the npm release's
+  // sentences (a wording change between them would read as a failure); its lengths still are.
+  it("#2842: an endpoint on another version than the npm package: heads not judged (version_mismatch), instructions measured; hosted only: no registry", async () => {
+    stub.state.mode = "ok";
+    const r = await run(stub, { remoteUrl: srv.url, version: "0.0.0-mismatch" });
+    const cut = r.lines.filter((l) => l.message === TEXT_CUT_MESSAGE);
+    for (const l of cut.filter((x) => x.transport === STDIO)) assert.deepEqual([l.description_heads_basis, l.description_heads_ok, l.required_version], ["judged", true, "0.0.0-mismatch"]);
+    const http = cut.filter((x) => x.transport === HTTP);
+    assert.equal(http.length, 2);
+    for (const l of http) {
+      assert.deepEqual([l.outcome, l.description_heads_basis, l.description_heads_ok, l.instructions_head_ok, l.required_version], ["success", "version_mismatch", null, null, "0.0.0-mismatch"], JSON.stringify(l));
+      assert.ok(l.instructions_chars > 0 && l.instructions_chars <= 2048);
+    }
+    const alone = (await runHttp({ eras: [LEGACY] })).lines.filter((l) => l.message === TEXT_CUT_MESSAGE);
+    assert.deepEqual(alone.map((l) => [l.transport, l.description_heads_basis, l.description_heads_ok, l.required_version]), [[HTTP, "no_required_text", null, null]]);
   });
 
   it("the hosted leg alone: every API call the endpoint made for it leads with the synthetic's fixed token", async () => {
@@ -823,7 +1154,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
     assert.ok(!sent.includes("injected") && !sent.includes("9.9"), sent);
   });
 
-  it("an API answering 500 fails every published tool over http with state_failed; the prompt and resource make no API call and still pass", async () => {
+  it("an API answering 500 fails every published tool over http with state_failed; the prompts and the resource make no API call and still pass", async () => {
     stub.state.mode = "500";
     const r = await runHttp();
     stub.state.mode = "ok";
@@ -834,7 +1165,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         assert.equal(l.outcome, "failure", `${tool} [${era}]`);
         assert.equal(l.reason, AFTER[tool] ? "no_valid_probe_input" : "state_failed", `${tool} [${era}]: ${JSON.stringify(l)}`);
       }
-      for (const x of EXTRAS) assert.equal(r.of(x, era).outcome, "success");
+      for (const x of EXTRAS) assert.equal(r.of(x, era)?.outcome, "success", `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
     }
     assert.equal(r.exitCode, 2);
     assert.deepEqual(r.complete[0].transports, [HTTP]);
@@ -907,12 +1238,136 @@ describe("#2737: judging a prompt and a resource", () => {
     assert.equal(judgePrompt({}, "CVE-2021-44228").reason, "prompt_no_messages");
     assert.equal(judgePrompt({ messages: [{ role: "system", content: { type: "text", text: "CVE-2021-44228" } }] }, "CVE-2021-44228").reason, "prompt_invalid_message");
   });
+  it("#2846: workload_triage's answer must name check_sbom: a text that does not is prompt_tool_not_named, a blank one prompt_empty", () => {
+    const wt = PROMPT_PROBES?.find?.((p) => p.name === "workload_triage");
+    assert.ok(wt, "probes.mjs PROMPT_PROBES has no workload_triage entry");
+    assert.deepEqual(judgePrompt({ messages: [text("4. Call check_sbom with purls set to one image's purls")] }, wt.expect, wt.unmet), { outcome: "success" });
+    // In any message, by either role.
+    assert.deepEqual(judgePrompt({ messages: [text("Triage your workloads."), text("Then call check_sbom.", "assistant")] }, wt.expect, wt.unmet), { outcome: "success" });
+    const miss = judgePrompt({ messages: [text("Rank your workloads by CISA-KEV listing, then exposure.")] }, wt.expect, wt.unmet);
+    assert.deepEqual([miss.outcome, miss.reason], ["failure", "prompt_tool_not_named"], JSON.stringify(miss));
+    assert.match(miss.detail, /check_sbom/);
+    for (const blank of ["", "  \n "]) assert.equal(judgePrompt({ messages: [text(blank)] }, wt.expect, wt.unmet).reason, "prompt_empty", JSON.stringify(blank));
+    // A message with no text block at all is empty too, not "names no check_sbom".
+    assert.equal(judgePrompt({ messages: [{ role: "user", content: { type: "image", data: "", mimeType: "image/png" } }] }, wt.expect, wt.unmet).reason, "prompt_empty");
+    // triage_cve keeps its own reason, and a blank answer is prompt_empty for it as well.
+    assert.equal(judgePrompt({ messages: [text("")] }, CVE).reason, "prompt_empty");
+    // An empty expect would match any text ("".includes("")): refused, never a success.
+    assert.equal(judgePrompt({ messages: [text("anything")] }, "", wt.unmet).reason, "prompt_probe_without_expect");
+  });
   it("a resource must answer an entry for the URI read, with a non-empty text", () => {
     const uri = RESOURCE_PROBE.uri;
     assert.deepEqual(judgeResource({ contents: [{ uri, mimeType: "text/markdown", text: "# How" }] }, uri), { outcome: "success" });
     assert.equal(judgeResource({ contents: [{ uri: "echelongraph://other", text: "x" }] }, uri).reason, "resource_uri_missing");
     assert.equal(judgeResource({ contents: [{ uri, text: "  " }] }, uri).reason, "resource_empty");
     assert.equal(judgeResource({ contents: [] }, uri).reason, "resource_no_contents");
+  });
+});
+
+// ── #2846: the prompt probes are a list, each its own line per era ───────────────────────────
+// probeSession run against a session object that lists no tools (every PROBES tool reads
+// not_published) and the prompts a case gives, so what an endpoint answers for each prompt is the
+// case's own: the real endpoint's answers are held in the hosted-leg tests above. Only the
+// prompt:* and resource:* lines are read.
+describe("#2846: every prompt probe is its own line per era", () => {
+  const TRIAGE = "prompt:triage_cve";
+  const WORKLOAD = "prompt:workload_triage";
+  // What each prompt says by default: text naming what its probe expects.
+  const SAYS = {
+    triage_cve: (args) => `Triage ${args?.cve_id}: call get_cve, cve_intel and cve_remediation.`,
+    workload_triage: (args) => `List the workloads (${args?.source}), make an SBOM of each digest, then call check_sbom with its purls.`,
+  };
+  function session({ prompts = ["triage_cve", "workload_triage"], says = SAYS, listFails = false } = {}) {
+    const calls = { list: 0, get: [] };
+    const client = {
+      getServerVersion: () => ({ name: "echelongraph-mcp", version: "0.0.0-test" }),
+      listTools: async () => ({ tools: [] }),
+      listPrompts: async () => {
+        calls.list += 1;
+        if (listFails) throw new Error("no answer within 10 ms");
+        return { prompts: prompts.map((name) => ({ name })) };
+      },
+      getPrompt: async ({ name, arguments: args }) => {
+        calls.get.push({ name, args });
+        return { messages: [{ role: "user", content: { type: "text", text: says[name](args) } }] };
+      },
+      listResources: async () => ({ resources: [{ uri: RESOURCE_PROBE.uri }] }),
+      readResource: async ({ uri }) => ({ contents: [{ uri, mimeType: "text/markdown", text: "# How EchelonGraph measures" }] }),
+      close: async () => {},
+    };
+    return { client, calls };
+  }
+  async function probe(s) {
+    const lines = [];
+    await probeSession({ era: MODERN, open: async () => s.client, force: [], emit: (l) => lines.push(l), extras: true });
+    const extras = lines.filter((l) => l.tool.startsWith("prompt:") || l.tool.startsWith("resource:"));
+    const one = (label) => {
+      const of = extras.filter((l) => l.tool === label);
+      assert.equal(of.length, 1, `${label}: ${of.length} lines, want 1: ${JSON.stringify(extras)}`);
+      return of[0];
+    };
+    return { extras, one };
+  }
+
+  it("PROMPT_PROBES is a list: triage_cve exactly as it was, then workload_triage with source kubernetes, expecting check_sbom", () => {
+    assert.ok(Array.isArray(PROMPT_PROBES), `probes.mjs exports no PROMPT_PROBES list (it is ${typeof PROMPT_PROBES})`);
+    assert.deepEqual(PROMPT_PROBES.map((p) => p.label), PROMPT_LABELS);
+    assert.deepEqual(PROMPT_PROBES[0], { label: TRIAGE, name: "triage_cve", arguments: { cve_id: CVE }, expect: CVE, unmet: "prompt_argument_not_applied" });
+    assert.deepEqual(PROMPT_PROBES[1], { label: WORKLOAD, name: "workload_triage", arguments: { source: "kubernetes" }, expect: "check_sbom", unmet: "prompt_tool_not_named" });
+    for (const p of PROMPT_PROBES) {
+      assert.equal(p.label, `prompt:${p.name}`, "a label is a fixed string naming its prompt");
+      assert.ok(typeof p.expect === "string" && p.expect.trim() !== "", `${p.label}: an empty expect would pass any text`);
+      assert.match(p.unmet, /^prompt_[a-z_]+$/, `${p.label}: its unmet reason`);
+    }
+  });
+
+  it("both prompts listed and answering their text: one success line each, in the table's order, each sent the table's own arguments, from one prompts/list", async () => {
+    const s = session();
+    const { extras, one } = await probe(s);
+    for (const label of PROMPT_LABELS) {
+      const l = one(label);
+      assert.deepEqual([l.outcome, l.era], ["success", MODERN], `${label}: ${JSON.stringify(l)}`);
+      assert.ok(Number.isInteger(l.latency_ms) && l.latency_ms >= 0, `${label}: no latency`);
+    }
+    assert.deepEqual(extras.map((l) => l.tool), [...PROMPT_LABELS, RESOURCE_PROBE.label]);
+    assert.deepEqual(s.calls.get, [{ name: "triage_cve", args: { cve_id: CVE } }, { name: "workload_triage", args: { source: "kubernetes" } }]);
+    assert.equal(s.calls.list, 1, "prompts/list once per era, read by every prompt probe");
+  });
+
+  it("workload_triage answering a text that names no check_sbom is a failure, prompt_tool_not_named; triage_cve's line is unaffected", async () => {
+    const s = session({ says: { ...SAYS, workload_triage: () => "Rank your workloads by CISA-KEV listing, then exposure, then EPSS." } });
+    const { one } = await probe(s);
+    const l = one(WORKLOAD);
+    assert.deepEqual([l.outcome, l.reason], ["failure", "prompt_tool_not_named"], JSON.stringify(l));
+    assert.match(l.detail, /check_sbom/);
+    assert.equal(one(TRIAGE).outcome, "success");
+  });
+
+  it("an endpoint that does not list workload_triage: not_published, never called, never a failure", async () => {
+    const s = session({ prompts: ["triage_cve"] });
+    const { extras, one } = await probe(s);
+    const l = one(WORKLOAD);
+    assert.equal(l.outcome, "not_published", JSON.stringify(l));
+    assert.equal(l.latency_ms, undefined, "a prompt that was not called carries no latency");
+    assert.ok(!s.calls.get.some((c) => c.name === "workload_triage"), "an unlisted prompt was called");
+    assert.equal(one(TRIAGE).outcome, "success");
+    assert.ok(!extras.some((x) => x.outcome === "failure"), JSON.stringify(extras));
+  });
+
+  it("a blank answer is prompt_empty, for each prompt", async () => {
+    const { one } = await probe(session({ says: { triage_cve: () => " ", workload_triage: () => "" } }));
+    for (const label of PROMPT_LABELS) assert.deepEqual([one(label).outcome, one(label).reason], ["failure", "prompt_empty"], label);
+  });
+
+  it("a prompts/list that fails is one failure line per prompt label, step list; the resource is still probed", async () => {
+    const s = session({ listFails: true });
+    const { one } = await probe(s);
+    for (const label of PROMPT_LABELS) {
+      const l = one(label);
+      assert.deepEqual([l.outcome, l.step, l.reason], ["failure", "list", "timeout"], `${label}: ${JSON.stringify(l)}`);
+    }
+    assert.equal(s.calls.get.length, 0);
+    assert.equal(one(RESOURCE_PROBE.label).outcome, "success");
   });
 });
 
@@ -930,6 +1385,8 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
   // A row for get_vendor_advisory's candidate, which reads vendor_advisories_for_cve's answer.
   const SEEN = { vendor_advisories_for_cve: { state: "measured", data: { advisories: [{ vendor: "redhat", vendor_advisory_id: ADVISORY }] } } };
   const listed = {};
+  // #2846: what the hosted endpoint answers to prompts/list, per era (only the hosted leg probes prompts).
+  const listedPrompts = {};
   let stub, srv;
   before(async () => {
     stub = await startStub();
@@ -944,6 +1401,7 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
       const h = await connectHttp({ era, url: srv.url, userAgent: UA_TOKEN, clientInfo: { name: "coverage-test", version: "1.0.0" } });
       try {
         listed[`http ${era}`] = (await h.listTools()).tools;
+        listedPrompts[`http ${era}`] = (await h.listPrompts()).prompts;
       } finally {
         await h.close();
       }
@@ -994,5 +1452,22 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
       for (const k of Object.keys(table)) assert.ok(names.has(k), `${label} names ${k}, which tools/list does not answer`);
     }
     for (const deps of Object.values(AFTER)) for (const d of deps) assert.ok(names.has(d), `AFTER waits on ${d}, which tools/list does not answer`);
+  });
+  it("#2846: every PROMPT_PROBES prompt is listed by the hosted endpoint on both eras, sent only the arguments it declares and every one it requires", async () => {
+    assert.ok(Array.isArray(PROMPT_PROBES), "probes.mjs exports no PROMPT_PROBES list");
+    assert.deepEqual(Object.keys(listedPrompts).sort(), [`http ${LEGACY}`, `http ${MODERN}`], "control: prompts/list answered on both eras");
+    for (const [where, prompts] of Object.entries(listedPrompts)) {
+      for (const p of PROMPT_PROBES) {
+        const decl = prompts.find((x) => x.name === p.name);
+        assert.ok(decl, `${p.name} (${where}) is not listed: its probe would read not_published on every run`);
+        const declared = (decl.arguments ?? []).map((a) => a.name);
+        for (const k of Object.keys(p.arguments)) assert.ok(declared.includes(k), `${p.name} (${where}) is sent ${k}, which it does not declare (${declared.join(", ")})`);
+        for (const a of decl.arguments ?? []) if (a.required) assert.ok(Object.hasOwn(p.arguments, a.name), `${p.name} (${where}) requires ${a.name}, which its probe does not send`);
+      }
+    }
+    // workload_triage's source is an enum prompts/list does not show: held against the server's own.
+    const { WORKLOAD_SOURCES } = await import("../dist/prompts.js");
+    const wt = PROMPT_PROBES.find((p) => p.name === "workload_triage");
+    assert.ok(WORKLOAD_SOURCES.includes(wt?.arguments?.source), `workload_triage's probe sends source ${JSON.stringify(wt?.arguments?.source)}, not one of ${WORKLOAD_SOURCES.join(", ")}`);
   });
 });

@@ -13,7 +13,7 @@ about:
   icon: https://echelongraph.io/logo-mark.png
 source:
   project: https://github.com/echelongraph/echelongraph-mcp
-  commit: 7ca1bfaf05370893ea20fafcc2acea2b908e70b8
+  commit: 1a0965ea94ee4020e60c3b5218d1199ca5ccee10
 run:
   allowHosts:
     - app.echelongraph.io:443

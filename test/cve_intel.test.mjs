@@ -367,7 +367,7 @@ for (const era of ERAS) {
       // The first text block (what a client without structuredContent shows) carries them whole.
       assert.deepEqual(JSON.parse(textBlocks(res)[0]).affected_packages[0].fixed_branches, LOG4J_CORE_BRANCHES);
       const n = noteOf(res);
-      assert.ok(n.includes("1 affected_packages row lists more than one affected range in fixed_branches (org.apache.logging.log4j:log4j-core (Maven)): there, fixed_version is one range's fix, and an installed version's fix is the fixed of the range that holds it."), n);
+      assert.ok(n.includes("1 affected_packages row lists more than one affected range in fixed_branches (org.apache.logging.log4j:log4j-core (Maven)): there, fixed_version is one range's fix, and an installed version's fix is the first fixed above it that no range of the row holds: the fixed of the range that holds it, or, while another range still holds that version, that range's fixed (none where a range on the way has no fixed)."), n);
       assert.ok(n.includes("1 affected_packages row carries fixed_branches null (apache-log4j2 (Debian:12)): its ranges are not on record, so fixed_version, one range's fix, is all the answer holds"), n);
       // [] is "no version range on record", not "no fix": the row's fixed_version is named as such.
       assert.ok(n.includes("1 affected_packages row carries fixed_branches [] and a fixed_version (example.test/commit-ranges-only (Go)): no version range is on record there, which is not a finding that no fix exists"), n);
@@ -381,11 +381,17 @@ for (const era of ERAS) {
       // description's head, which keeps the rule within the client cut.
       const intel = tools.find((t) => t.name === "cve_intel");
       const d = [intel.description, ...schemaDescriptions(intel.outputSchema)].join(" ");
-      assert.match(intel.description, /a version is in a range when it is at or above introduced \("0" is the first version\) and below fixed, or at or below last_affected; that range's fixed is the fix for it/);
+      // #3013's review: the description's head states #3074's walk, as the schema description and
+      // the note do: the fix is the first fixed above the version that no range of its row holds,
+      // never simply the fixed of the range that holds it (lodash 4.17.15, CVE-2026-4800: ranges
+      // [0, 4.17.21) and [4.0.0, 4.18.0), fixed in 4.18.0, not 4.17.21). Control: the rule it said
+      // through the review, "that range's fixed is the fix for it", is gone from every description.
+      assert.match(intel.description, /fixed_branches lists each affected range on record \(from introduced \("0" is the first version\) to below fixed, or through last_affected, with advisory_id \(its OSV record\) and source\); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds \(none past a range with no fixed\)\./);
+      assert.doesNotMatch(d, /that range's fixed is the fix for it/);
       assert.match(intel.description, /fixed_version is one range's fix, kept for compatibility, not the fix for every affected range/);
       assert.match(d, /affected_packages \(ecosystem, package_name, version_range, fixed_version, fixed_branches\)/);
       assert.match(d, /To pick the range for an installed version, compare in the ecosystem's version order/);
-      assert.match(d, /at or above introduced \("0" is the first version\) and below fixed, or at or below last_affected; that range's fixed is the fix for it/);
+      assert.match(d, /at or above introduced \("0" is the first version\) and below fixed, or at or below last_affected; its fix is that range's fixed, or, while another range still holds that, the other range's fixed \(none past a range without one\)/);
       assert.match(d, /fixed_version is one range's fix, kept for compatibility/);
       assert.match(d, /with advisory_id \(the OSV record that published the range\) and source/);
       assert.match(d, /Ranges with an advisory_id are in the order their record lists them/);

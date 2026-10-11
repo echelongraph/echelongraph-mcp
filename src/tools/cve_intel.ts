@@ -62,7 +62,7 @@ import {
   succeeded,
   type ToolResult,
 } from "../index.js";
-import { TEXT_BUDGET_DESCRIPTION } from "../textBudget.js";
+import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut } from "../textBudget.js";
 
 const TOOL = "cve_intel";
 
@@ -105,12 +105,17 @@ const VERIFIED_STATUS_DESCRIPTION =
   "verified_status is the label stored with each reference: verified for a Metasploit module, for an Exploit-DB entry Exploit-DB marks verified, and for curated seed rows marked so; reported for a public artefact nothing has confirmed works (nuclei templates, GitHub proofs of concept, unverified Exploit-DB entries); unconfirmed where a curated row says so. It is a label from the source, not a guarantee that the exploit works against a given system.";
 
 const FIXED_BRANCHES_DESCRIPTION =
-  'fixed_branches lists each affected range of the package on record: introduced, and fixed (the range\'s fix) or last_affected (its last affected version, where no fix is on record), each null when absent, with advisory_id (the OSV record that published the range) and source (the loader\'s label for that record), both null on a row loaded before they were stored. Ranges with an advisory_id are in the order their record lists them (records in id order); ranges without one are oldest first. To pick the range for an installed version, compare in the ecosystem\'s version order (release numbers part by part, as numbers: 2.4 is below 2.13.0): the version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; that range\'s fixed is the fix for it, and a version in no range is outside every range on record. fixed_branches is null where the package\'s ranges were never loaded, and [] where no version range is on record (the advisory gives none, only commit ranges, or more than are stored), which is not a finding that no fix exists: fixed_version can still name one. fixed_version is one range\'s fix, kept for compatibility (one per package: the range the loader kept, the advisory\'s last as a rule), not the fix for every affected range: for CVE-2021-44228, its advisory gives log4j-core three ranges, and fixed_version 2.12.2 is the fix for the one from 2.4, while the range holding 2.14.1 (from 2.13.0) is fixed in 2.15.0.';
+  'fixed_branches lists each affected range of the package on record: introduced, and fixed (the range\'s fix) or last_affected (its last affected version, where no fix is on record), each null when absent, with advisory_id (the OSV record that published the range) and source (the loader\'s label for that record), both null on a row loaded before they were stored. Ranges with an advisory_id are in the order their record lists them (records in id order); ranges without one are oldest first. To pick the range for an installed version, compare in the ecosystem\'s version order (release numbers part by part, as numbers: 2.4 is below 2.13.0): the version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; its fix is that range\'s fixed, or, while another range still holds that, the other range\'s fixed (none past a range without one); a version in no range is outside every range on record. fixed_branches is null where the package\'s ranges were never loaded, and [] where no version range is on record (the advisory gives none, only commit ranges, or more than are stored), which is not a finding that no fix exists: fixed_version can still name one. fixed_version is one range\'s fix, kept for compatibility (one per package: the range the loader kept, the advisory\'s last as a rule), not the fix for every affected range: for CVE-2021-44228, its advisory gives log4j-core three ranges, and fixed_version 2.12.2 is the fix for the one from 2.4, while the range holding 2.14.1 (from 2.13.0) is fixed in 2.15.0.';
 
 // #2876: the exploit dates are named for what they are. Within the 100 characters of headroom
 // under the 2048-character client cut (prompts-resources.test.mjs), the room came from tighter
 // glosses and from the input hint, which inputSchema's cve_id description carries.
-export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (the newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (introduced, and fixed or last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, a version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; that range's fixed is the fix for it. fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
+// #3013's review: in #3074's first cut the fixed_branches sentence still said a range's fixed is
+// the fix for a version it holds, the rule that gave lodash 4.17.15 under CVE-2026-4800 the
+// still-affected 4.17.21 (ranges [0, 4.17.21) and [4.0.0, 4.18.0); the fix is 4.18.0). It now
+// states the walk FIXED_BRANCHES_DESCRIPTION and branchSentences state, in fewer characters than
+// the old rule (a range's bounds folded into the list of its fields), so the headroom holds.
+export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (the newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
 
 // ── outputSchema ──
 const Rows = (shape: Record<string, z.ZodType>) => z.array(z.looseObject(shape));
@@ -276,7 +281,7 @@ function branchSentences(rows: unknown[]): string[] {
   const few = (xs: string[]) => (xs.length <= 3 ? listed(xs) : `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more`);
   if (multi.length) {
     out.push(
-      `${multi.length} affected_packages row${multi.length === 1 ? " lists" : "s list"} more than one affected range in fixed_branches (${few(multi)}): there, fixed_version is one range's fix, and an installed version's fix is the fixed of the range that holds it.`,
+      `${multi.length} affected_packages row${multi.length === 1 ? " lists" : "s list"} more than one affected range in fixed_branches (${few(multi)}): there, fixed_version is one range's fix, and an installed version's fix is the first fixed above it that no range of the row holds: the fixed of the range that holds it, or, while another range still holds that version, that range's fixed (none where a range on the way has no fixed).`,
     );
   }
   if (unknown.length) {
@@ -385,6 +390,11 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
   }
 }
 
+// #3013: the structured result's cut. CVE-2021-44228's is 12,877 characters, within the budget; past
+// it the newest enrichment-history rows go first, then the affected packages and fixed versions,
+// each to at most the same number of its first entries, then any other list at the top of data.
+const CVE_INTEL_DATA: DataCut = { steps: [{ lists: ["timeline"] }, { lists: ["affected_packages", "fixed_versions"] }] };
+
 export function registerCveIntel(server: McpServer): void {
   const { output } = schemasOnce();
   server.registerTool(
@@ -392,10 +402,10 @@ export function registerCveIntel(server: McpServer): void {
     {
       title: "CVE weakness, exploits and packages",
       description: CVE_INTEL_DESCRIPTION,
-      inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2021-44228") }),
+      inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2021-44228"), full: FULL_ARG }),
       outputSchema: output,
       annotations: ANNOTATIONS,
     },
-    async ({ cve_id }) => checked(TOOL, output, await cveIntel(cve_id)),
+    async ({ cve_id, full }) => checked(TOOL, output, await answering(full, CVE_INTEL_DATA, () => cveIntel(cve_id))),
   );
 }

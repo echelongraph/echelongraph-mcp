@@ -28,13 +28,29 @@
 // The session itself can fail (install, spawn, handshake, tools/list): that is a probe line
 // with tool "(install)" or "(session)" and outcome failure, so the same alert sees it.
 //
+// THE CLIENT CUT (#2842). Once per era and transport, after tools/list, one more line, message
+// "mcp text cut": what a client that cuts MCP text at 2,048 characters (Claude Code; the package's
+// src/requiredText.ts cites where) hands the model of that session's server instructions and tool
+// descriptions. instructions_chars is the opening exchange's instructions length (initialize, or
+// server/discover on the modern era); description_heads_ok says whether every sentence the
+// package's REQUIRED_IN_HEAD names for a tool sits in that tool's first 2,048 characters, and no
+// head names Shodan without its ownership sentence; instructions_head_ok the same of
+// REQUIRED_IN_INSTRUCTIONS in the instructions. The sentences are the package's own: its
+// dist/requiredText.js, beside the server the stdio leg runs, so a release is held to what it
+// ships. The hosted leg is judged by them only when the endpoint reports the same version (else
+// description_heads_ok is null, basis version_mismatch); a package without the file (before
+// #2842) gives null, basis no_required_text. instructions_chars is measured either way. outcome is
+// failure when instructions_chars is past the cut or either head check is false;
+// create-mcp-synthetic-monitoring.sh alerts on those fields.
+//
 // THE HOSTED LEG (#2737). With MCP_SYNTHETIC_REMOTE_URL set (deploy.sh sets
 // https://mcp.echelongraph.io/mcp; unset, there is no hosted leg), the same run then speaks
 // Streamable HTTP to that endpoint (test/mcp-http-client.mjs's HttpMcpClient, the wire the
 // endpoint's own tests use) on both eras: lists the tools, calls every one with the same probe
-// table, judged the same way against the outputSchema the ENDPOINT advertises, then one
-// prompts/get (triage_cve with a CVE) and one resources/read (echelongraph://methodology), tools
-// "prompt:triage_cve" and "resource:methodology" (probes.mjs). check_sbom is sent its 201 purls as
+// table, judged the same way against the outputSchema the ENDPOINT advertises, then a prompts/get
+// per probes.mjs PROMPT_PROBES entry (triage_cve with a CVE; workload_triage with source
+// kubernetes, #2846) and one resources/read (echelongraph://methodology), tools "prompt:triage_cve",
+// "prompt:workload_triage" and "resource:methodology". check_sbom is sent its 201 purls as
 // a CycloneDX document, a request body twice the endpoint's 64 KiB general cap, and must answer
 // measured from the document (probes.mjs HTTP_PROBES and HTTP_EXPECT, #2774): the large-body path
 // #2747 opened is probed every run, and a return of its 413 fails the probe (rpc_error, rpc_code
@@ -58,8 +74,9 @@
 // No value is logged that a person typed: the inputs are this file's own public constants, and
 // a line names the candidate it sent by index.
 //
-// Exit status: 0 when every probe line is success or not_published, 2 when any is a failure,
-// 1 when the runner itself broke. The metric, not the exit status, is what alerts.
+// Exit status: 0 when every probe line is success or not_published and no client-cut line is a
+// failure, 2 when any is, 1 when the runner itself broke. The metric, not the exit status, is
+// what alerts.
 //
 // Configuration (flags for a local run, environment for the job):
 //   --package  / MCP_SYNTHETIC_PACKAGE   npm spec to install (echelongraph-mcp@latest), or a pin
@@ -84,7 +101,7 @@ import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
-import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBE, RESOURCE_PROBE } from "./probes.mjs";
+import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
@@ -94,6 +111,10 @@ export const DEFAULT_ERAS = [MODERN, LEGACY];
 export const UA_TOKEN = "echelongraph-mcp-synthetic/1.0";
 export const PROBE_MESSAGE = "mcp tool probe";
 export const COMPLETE_MESSAGE = "mcp synthetic run complete";
+export const TEXT_CUT_MESSAGE = "mcp text cut";
+// The cut when the package under test ships no requiredText.js: Claude Code's default, the value
+// src/requiredText.ts CLIENT_DESCRIPTION_CUT holds.
+export const DEFAULT_CLIENT_CUT = 2048;
 export const DEFAULT_PACKAGE = "echelongraph-mcp@latest";
 export const DEFAULT_API_BASE = "https://app.echelongraph.io";
 const SUCCESS_STATES = new Set(["measured", "not_assessed"]);
@@ -180,8 +201,12 @@ export function judge(res, tool, expect) {
 }
 
 // How a prompts/get answer is judged (#2737): at least one message, every one a user or
-// assistant message with a content block, and a text block naming the CVE that was sent.
-export function judgePrompt(res, expect) {
+// assistant message with a content block, a text block that is not blank, and a text block naming
+// `expect`, the probe's own text (probes.mjs PROMPT_PROBES: the CVE triage_cve was sent, the tool
+// workload_triage must route to, #2846). An answer without it is reason `unmet`, the probe's own.
+// An empty `expect` is refused, never matched: "".includes("") would pass any text.
+export function judgePrompt(res, expect, unmet = "prompt_argument_not_applied") {
+  if (typeof expect !== "string" || expect === "") return { outcome: "failure", reason: "prompt_probe_without_expect" };
   const msgs = res?.messages;
   if (!Array.isArray(msgs) || msgs.length === 0) return { outcome: "failure", reason: "prompt_no_messages" };
   for (const m of msgs) {
@@ -189,8 +214,10 @@ export function judgePrompt(res, expect) {
       return { outcome: "failure", reason: "prompt_invalid_message" };
     }
   }
-  const named = msgs.some((m) => m.content.type === "text" && typeof m.content.text === "string" && m.content.text.includes(expect));
-  return named ? { outcome: "success" } : { outcome: "failure", reason: "prompt_argument_not_applied" };
+  const texts = msgs.filter((m) => m.content.type === "text" && typeof m.content.text === "string").map((m) => m.content.text);
+  if (!texts.some((t) => t.trim() !== "")) return { outcome: "failure", reason: "prompt_empty" };
+  if (texts.some((t) => t.includes(expect))) return { outcome: "success" };
+  return { outcome: "failure", reason: unmet, detail: `no text block names ${JSON.stringify(expect)}` };
 }
 
 // How a resources/read answer is judged (#2737): an entry for the URI that was read, with a
@@ -202,6 +229,82 @@ export function judgeResource(res, uri) {
   if (!hit) return { outcome: "failure", reason: "resource_uri_missing" };
   if (typeof hit.text !== "string" || hit.text.trim() === "") return { outcome: "failure", reason: "resource_empty" };
   return { outcome: "success" };
+}
+
+// #2842: the package's own registry of what must sit inside the client cut (src/requiredText.ts),
+// from the dist beside the server .js the stdio leg runs. It is read in a child node with only
+// PATH, as the server itself is run, never imported into the runner: it is the published package's
+// code. undefined when the package ships none (a release before #2842), or it does not load or
+// does not have the registry's shape: then nothing is judged against it.
+const READ_REQUIRED = `const m = await import(process.argv[1]);
+process.stdout.write(JSON.stringify({ CLIENT_DESCRIPTION_CUT: m.CLIENT_DESCRIPTION_CUT, SHODAN_OWNERSHIP: m.SHODAN_OWNERSHIP, REQUIRED_IN_INSTRUCTIONS: m.REQUIRED_IN_INSTRUCTIONS, REQUIRED_IN_HEAD: m.REQUIRED_IN_HEAD }));`;
+const strings = (a) => Array.isArray(a) && a.every((s) => typeof s === "string");
+export async function loadRequiredText(serverJs) {
+  const file = path.join(path.dirname(serverJs), "requiredText.js");
+  if (!fs.existsSync(file)) return undefined;
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", READ_REQUIRED, pathToFileURL(file).href], {
+      env: { PATH: process.env.PATH ?? "" },
+      timeout: 15_000,
+      maxBuffer: 1 << 20,
+    });
+    const m = JSON.parse(stdout);
+    const heads = m?.REQUIRED_IN_HEAD;
+    if (Number.isInteger(m?.CLIENT_DESCRIPTION_CUT) && m.CLIENT_DESCRIPTION_CUT > 0 && typeof m.SHODAN_OWNERSHIP === "string" && strings(m.REQUIRED_IN_INSTRUCTIONS) && heads && typeof heads === "object" && Object.values(heads).every(strings)) return m;
+  } catch {
+    // it does not load: not judged
+  }
+  return undefined;
+}
+
+// #2842: what a client that cuts at the cut hands the model of one session, from its opening
+// exchange's instructions and its tools/list. `required` (loadRequiredText) supplies the sentences;
+// without it only the lengths are measured and the two head checks are null. Each missing sentence
+// is named in detail (a fixed string of the package's, never an input).
+export function judgeTextCut({ instructions, tools }, required) {
+  const cut = required?.CLIENT_DESCRIPTION_CUT ?? DEFAULT_CLIENT_CUT;
+  const list = Array.isArray(tools) ? tools : [];
+  const descs = list.map((t) => (typeof t?.description === "string" ? t.description : ""));
+  const out = {
+    cut,
+    instructions_chars: typeof instructions === "string" ? instructions.length : null,
+    tools_listed: list.length,
+    description_max_chars: descs.reduce((m, d) => Math.max(m, d.length), 0),
+    descriptions_over_cut: descs.filter((d) => d.length > cut).length,
+    instructions_head_ok: null,
+    description_heads_ok: null,
+    description_heads_missing: null,
+    tools_without_required_entry: null,
+  };
+  if (required) {
+    const own = required.SHODAN_OWNERSHIP;
+    const ownershipMissing = (head) => /Shodan/.test(head) && !head.includes(own);
+    const lacks = [];
+    if (typeof instructions !== "string") lacks.push("instructions: none served");
+    else {
+      const head = instructions.slice(0, cut);
+      for (const s of required.REQUIRED_IN_INSTRUCTIONS ?? []) if (!head.includes(s)) lacks.push(`instructions: ${s}`);
+      if (ownershipMissing(head)) lacks.push("instructions: names Shodan without its ownership sentence");
+    }
+    const missing = [];
+    let without = 0;
+    list.forEach((t, i) => {
+      const head = descs[i].slice(0, cut);
+      const want = required.REQUIRED_IN_HEAD[t?.name];
+      if (!Array.isArray(want)) without++;
+      for (const s of want ?? []) if (!head.includes(s)) missing.push(`${t.name}: ${s}`);
+      if (ownershipMissing(head)) missing.push(`${t?.name}: names Shodan without its ownership sentence`);
+    });
+    Object.assign(out, {
+      instructions_head_ok: lacks.length === 0,
+      description_heads_ok: missing.length === 0,
+      description_heads_missing: missing.length,
+      tools_without_required_entry: without,
+    });
+    if (lacks.length || missing.length) out.detail = [...lacks, ...missing].join(" | ").slice(0, 300);
+  }
+  const past = (out.instructions_chars ?? 0) > cut || out.instructions_head_ok === false || out.description_heads_ok === false;
+  return { outcome: past ? "failure" : "success", ...out };
 }
 
 function errorReason(e) {
@@ -216,18 +319,18 @@ function errorReason(e) {
 const CLIENT_INFO = { name: "echelongraph-mcp-synthetic", version: "1.0.0" };
 
 // Probe one era of the npm package over stdio: one line per tool.
-export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {} }) {
+export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {} }) {
   const open = () =>
     connect({ era, command: process.execPath, args: [serverJs], env, stderr: "ignore", clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
-  return probeSession({ era, open, force, emit, onServerInfo });
+  return probeSession({ era, open, force, emit, onServerInfo, onListed });
 }
 
-// Probe one era of the hosted endpoint over Streamable HTTP (#2737): one line per tool, then the
-// prompt and the resource. Its own inputs and expectations where probes.mjs has them (#2774:
-// check_sbom is sent a document past the endpoint's 64 KiB general body cap).
-export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {} }) {
+// Probe one era of the hosted endpoint over Streamable HTTP (#2737): one line per tool, then one
+// per prompt probe and one for the resource. Its own inputs and expectations where probes.mjs has
+// them (#2774: check_sbom is sent a document past the endpoint's 64 KiB general body cap).
+export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {} }) {
   const open = () => connectHttp({ era, url, userAgent: UA_TOKEN, clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
-  return probeSession({ era, open, force, emit, onServerInfo, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
+  return probeSession({ era, open, force, emit, onServerInfo, onListed, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
 }
 
 // One prompt or resource probe: listed? then called and judged.
@@ -255,8 +358,9 @@ async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
 }
 
 // Probe one era of one session, however it is opened: one line per tool (and, with extras, one
-// for the prompt and one for the resource), with the leg's probe table and expectations.
-export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, extras = false, probes = PROBES, expect = EXPECT }) {
+// per PROMPT_PROBES entry and one for the resource), with the leg's probe table and expectations.
+// onListed gets the opening exchange's instructions and the tools/list answer (#2842).
+export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, onListed = () => {}, extras = false, probes = PROBES, expect = EXPECT }) {
   let client;
   try {
     client = await open();
@@ -273,6 +377,7 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
       emit({ tool: "(session)", era, outcome: "failure", step: "tools/list", ...errorReason(e) });
       return;
     }
+    onListed({ instructions: client.opening?.instructions, tools });
     const byName = new Map(tools.map((t) => [t.name, t]));
     const seen = {};
     for (const name of probeOrder(tools.map((t) => t.name), force)) {
@@ -301,15 +406,21 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
       emit({ tool: name, era, latency_ms: latency, input: choice.index, ...verdict });
     }
     if (extras) {
-      await probeExtra({
-        era,
-        emit,
-        label: PROMPT_PROBE.label,
-        list: async () => (await client.listPrompts()).prompts,
-        listed: (p) => p?.name === PROMPT_PROBE.name,
-        call: () => client.getPrompt({ name: PROMPT_PROBE.name, arguments: PROMPT_PROBE.arguments }),
-        judgeIt: (res) => judgePrompt(res, PROMPT_PROBE.expect),
-      });
+      // One prompts/list per era, read by every prompt probe: a list that fails is a failure line
+      // for each prompt's label, as one that answers is read for each.
+      let prompts;
+      const listPrompts = async () => (await (prompts ??= client.listPrompts())).prompts;
+      for (const probe of PROMPT_PROBES) {
+        await probeExtra({
+          era,
+          emit,
+          label: probe.label,
+          list: listPrompts,
+          listed: (p) => p?.name === probe.name,
+          call: () => client.getPrompt({ name: probe.name, arguments: probe.arguments }),
+          judgeIt: (res) => judgePrompt(res, probe.expect, probe.unmet),
+        });
+      }
       await probeExtra({
         era,
         emit,
@@ -362,6 +473,18 @@ export async function runSynthetic(opts = {}) {
     const v = transport === HTTP ? remoteVersion : version;
     write({ severity: "INFO", message: PROBE_MESSAGE, run_id: runId, package_version: v, transport, ...fields });
   };
+  // #2842: one client-cut line per era and transport. The sentences are the stdio package's
+  // (loadRequiredText); the hosted endpoint is held to them only when it reports that version.
+  let required;
+  const textCut = { lines: 0, failures: 0 };
+  const textCutLine = (transport, era) => (served) => {
+    const v = transport === HTTP ? remoteVersion : version;
+    const basis = !required ? "no_required_text" : transport === HTTP && remoteVersion !== version ? "version_mismatch" : "judged";
+    const fields = judgeTextCut(served, basis === "judged" ? required : undefined);
+    textCut.lines++;
+    if (fields.outcome === "failure") textCut.failures++;
+    write({ severity: "INFO", message: TEXT_CUT_MESSAGE, run_id: runId, package_version: v, transport, era, ...fields, description_heads_basis: basis, required_version: required ? version : null });
+  };
 
   let tmp;
   let forwarder;
@@ -373,7 +496,7 @@ export async function runSynthetic(opts = {}) {
       const onServerInfo = (info) => {
         if (remoteVersion === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) remoteVersion = info.version;
       };
-      for (const era of eras) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo });
+      for (const era of eras) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(HTTP, era) });
     }
     return finish();
   } finally {
@@ -397,6 +520,7 @@ export async function runSynthetic(opts = {}) {
         return;
       }
     }
+    required = await loadRequiredText(serverJs);
     const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
     if (!opts.direct) forwarder = await startForwarder({ upstream: apiBase, token: UA_TOKEN });
     const env = {
@@ -410,7 +534,7 @@ export async function runSynthetic(opts = {}) {
     const onServerInfo = (info) => {
       if (version === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) version = info.version;
     };
-    for (const era of eras) await probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo });
+    for (const era of eras) await probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(STDIO, era) });
   }
 
   function finish() {
@@ -423,6 +547,9 @@ export async function runSynthetic(opts = {}) {
       transports,
       ...(remoteUrl ? { remote_version: remoteVersion } : {}),
       ...counts,
+      // #2842: the client-cut lines this run wrote, and how many of them were failures.
+      text_cut_lines: textCut.lines,
+      text_cut_failures: textCut.failures,
       duration_ms: Date.now() - started,
       // Which mechanism identified the requests: requests that already led with the token
       // (the package honoured ECHELONGRAPH_MCP_UA) and requests the forwarder prefixed.
@@ -430,7 +557,7 @@ export async function runSynthetic(opts = {}) {
       ...(opts.direct ? { forwarder: "off" } : {}),
     };
     write(summary);
-    return { summary, exitCode: counts.failure > 0 ? 2 : 0 };
+    return { summary, exitCode: counts.failure > 0 || textCut.failures > 0 ? 2 : 0 };
   }
 }
 

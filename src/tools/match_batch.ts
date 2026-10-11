@@ -297,8 +297,11 @@ export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>
 // sent are always the input's distinct purls from position sent + 1 on
 // (purls.slice(answers.length * MAX_COMPONENTS)), which it can rebuild from its own input, given
 // the order they are counted in (`readOrder`), which the sentence says whenever it gives the
-// position, not only when the text cuts the list. `retry` is the tool and argument to send them
-// to ("check_sbom again with purls set to").
+// position, not only when the text cuts the list. #3013: the structured result's cut empties
+// data.not_sent_purls before any row leaves (it is rebuilt from the position), and gives it back
+// only the first entries the room the rows leave holds, so the sentence says it lists them whole
+// with full: true. `retry` is the tool and argument to send them to ("check_sbom
+// again with purls set to").
 export function sendingSentences(g: Sending, distinct: number, readOrder: string, retry: string): string[] {
   const out: string[] = [];
   if (g.batches > 1) {
@@ -316,7 +319,7 @@ export function sendingSentences(g: Sending, distinct: number, readOrder: string
     const one = notSent === 1;
     const where = one ? `it is the input's distinct purl at position ${g.sent + 1}` : `they are the input's distinct purls from position ${g.sent + 1} on`;
     out.push(
-      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${one ? "it is" : "they are"} not checked and not clean; ${where}, ${readOrder}, and data.not_sent_purls lists ${one ? "it" : "them"}: call ${retry} ${one ? "it" : "them"}${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
+      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${one ? "it is" : "they are"} not checked and not clean; ${where}, ${readOrder}, and data.not_sent_purls lists ${one ? "it" : "them"} whole with full: true (past the structured result's budget, that list can be cut by default): call ${retry} ${one ? "it" : "them"}${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
     );
   }
   return out;
@@ -361,7 +364,7 @@ export function verdictSentences(d: object, g: Sending): { sentences: string[]; 
       out.push(`Affected: ${named.join("; ")}${hits.length > NOTE_AFFECTED_MAX ? `; and ${hits.length - NOTE_AFFECTED_MAX} more affected components in data.results` : ""}.`);
       // Said only when the answer carries fixed_in (an API before #2834 sends none).
       if (hits.some((r) => (Array.isArray(field(r, "matches")) ? (field(r, "matches") as unknown[]) : []).some((m) => isObj(m) && "fixed_in" in m))) {
-        out.push("Each match's fixed_in is the fixed bound of the advisory interval that holds the component's version; null, with fixed_in_reason, where the advisory records no fix for that version.");
+        out.push("Each match's fixed_in is the first version above the component's that no affected interval of the advisory holds; null, with fixed_in_reason, where the advisory records no fix for that version.");
       }
     }
     // #2836: rows matched by the source package their purl's upstream qualifier names.
@@ -428,15 +431,18 @@ export const Row = z.looseObject({
         kev_listed: opt(z.boolean()).describe("Whether the CVE is in CISA's Known Exploited Vulnerabilities catalog, as EchelonGraph's record holds it."),
         epss_score: opt(z.number()).describe("The CVE's EPSS score (FIRST), as EchelonGraph's record holds it; null when it has none."),
         match_reason: opt(z.string()).describe(
-          "Why the advisory applies, with the advisory interval the version falls inside: \"[A, B)\" names the fixed version B, \"[A, B]\" the last affected version B. On an upstream row it ends by naming the source package and the purl name.",
+          "Why the advisory applies, with the advisory interval the version falls inside: \"[A, B)\" names that interval's fixed bound B (another interval of the advisory can still hold B; fixed_in is the version past them all), \"[A, B]\" the last affected version B. On an upstream row it ends by naming the source package and the purl name.",
         ),
         interval: opt(z.looseObject({ introduced: opt(z.string()), fixed: opt(z.string()), last_affected: opt(z.string()) })).describe(
           "The advisory interval that holds this component's version (fixed is exclusive, last_affected inclusive); absent when no interval holds it.",
         ),
         fixed_in: opt(z.string()).describe(
-          "The fixed bound of the advisory interval that holds this component's version, always above it. null when that interval records no fix (it ends at last_affected, or has no end) or no interval holds the version, with fixed_in_reason saying which.",
+          "The lowest version above this component's that no affected interval of the CVE's record for the package holds, always above it: the fixed bound of the interval that holds the component's version, moved past any overlapping interval that still holds that bound (fixed_in_detail then names it). null when no such version is on record (an interval on the way records no fix: it ends at last_affected, or has no end) or no interval holds the version, with fixed_in_reason saying which.",
         ),
         fixed_in_reason: opt(z.string()).describe("Why fixed_in is null; absent when fixed_in is a version."),
+        fixed_in_detail: opt(z.string()).describe(
+          "Set when fixed_in is not the fixed bound of the interval that holds the component's version: the overlapping intervals of the same record it moved past, which still hold that bound.",
+        ),
       }),
     ),
   ),

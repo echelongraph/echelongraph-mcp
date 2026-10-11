@@ -22,6 +22,7 @@ import http from "node:http";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
+import { isThinOf } from "./text-bound.mjs";
 
 const ERAS = [MODERN, "2025-06-18"];
 const LOG4SHELL = "CVE-2021-44228";
@@ -62,10 +63,13 @@ const adv = (vendor, id, state, items, extra = {}) => ({
 });
 const COVERAGE = (notParsed) => ({ parsed_vendors: ["redhat", "microsoft", "paloalto"], vendors_not_parsed: notParsed, vendor_advisories_listed: 3, vendor_advisory_limit: 20, item_text_cap: 2000, items_per_advisory_cap: 16 });
 const BRANCH = (introduced, fixed, last_affected = null) => ({ introduced, fixed, last_affected, source: "osv_bulk", advisory_id: "GHSA-jfh8-c2jp-5v3q" });
+// #2841: the API's fix-status rule (core-backend cve/fixstatus.go), as served.
+const FIX_STATUS = { state: "available", basis: "patch_evidence_release", unread_inputs: [] };
 const LOG4SHELL_REMEDIATION = {
   cve_id: LOG4SHELL,
   state: "assessed",
   not_assessed_reason: null,
+  fix_status: FIX_STATUS,
   cisa: { kev_listed: true, required_action: CISA_ACTION, due_date: "2021-12-24T00:00:00Z", short_description: "Apache Log4j2 contains a vulnerability.", notes_urls: ["https://nvd.nist.gov/vuln/detail/CVE-2021-44228"] },
   fixed_branches: [
     {
@@ -119,6 +123,7 @@ const HUGE = {
   ),
 };
 const SUMMARY = {
+  fix_status: FIX_STATUS,
   vendor_remediation_kinds: { vendor_fix: 1, workaround: 1 },
   vendor_advisories: 3,
   vendors_not_parsed: ["cisco"],
@@ -155,8 +160,41 @@ const DETAIL = {
   remediation_items_not_stored: 0,
 };
 
+// #2841: what the route answers when the X-EG-* installed-version headers are sent (cve/remediation.go).
+const INSTALLED_BASE = { ecosystem: "Maven", ecosystem_recognised: true, package: "org.apache.logging.log4j:log4j-core" };
+const NOT_AFFECTED_REASON = "the version is outside every affected range on record for this package, so per the ranges on record it is not affected by this CVE and has no fix to name";
+const MOVED_PAST = "fixed_in moved past the overlapping interval [2.10.0, 2.15.0) of the same record: the interval that holds this version, [2.4, 2.12.2), ends inside it, so its own bound is still affected";
+const WITH_INSTALLED = {
+  "2.14.1": {
+    ...LOG4SHELL_REMEDIATION,
+    installed: { ...INSTALLED_BASE, version: "2.14.1", verdict: "affected", version_evidence: "advisory_interval", interval: { introduced: "2.13.0", fixed: "2.15.0" } },
+    fixed_in: "2.15.0",
+  },
+  "2.17.1": { ...LOG4SHELL_REMEDIATION, installed: { ...INSTALLED_BASE, version: "2.17.1", verdict: "not_affected" }, fixed_in: null, fixed_in_reason: NOT_AFFECTED_REASON },
+  // #3074: a holding range whose own bound another range of the record still holds (synthetic
+  // ranges, the detail as core-backend's registryFixFor renders it).
+  "2.11.0": {
+    ...LOG4SHELL_REMEDIATION,
+    installed: { ...INSTALLED_BASE, version: "2.11.0", verdict: "affected", version_evidence: "advisory_interval", interval: { introduced: "2.4", fixed: "2.12.2" } },
+    fixed_in: "2.15.0",
+    fixed_in_detail: MOVED_PAST,
+  },
+};
+// The installed version's request headers (core-backend cve/handler.go MatchEcosystemHeader..).
+const INSTALLED_HEADERS = ["x-eg-ecosystem", "x-eg-package", "x-eg-version"];
+
+// #2841: a CNA's lowercase "patch" tag (CVE-2026-69486, MSRC's record, production 2026-10-11),
+// which the API's fix_references kept only once it matched the tag in either case.
+const CNA_PATCH = {
+  ...NOTHING,
+  cve_id: "CVE-2026-69486",
+  fix_status: { state: "fix_referenced", basis: "patch_evidence_reference_only", unread_inputs: [] },
+  fix_references: [{ url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-69486", tags: ["patch"] }],
+};
+
 const ANSWERS = {
   [REM(LOG4SHELL)]: LOG4SHELL_REMEDIATION,
+  [REM("CVE-2026-69486")]: CNA_PATCH,
   [REM("CVE-2099-30001")]: REJECTED,
   [REM("CVE-2099-30002")]: NOTHING,
   [REM("CVE-2099-30003")]: PARTIAL,
@@ -170,10 +208,13 @@ const ANSWERS = {
 
 let stub;
 const seen = [];
+const seenHeaders = [];
 before(async () => {
   stub = http.createServer((req, res) => {
     seen.push(req.url);
-    const a = ANSWERS[req.url];
+    seenHeaders.push(req.headers);
+    const asked = req.headers["x-eg-version"];
+    const a = asked !== undefined && req.url === REM(LOG4SHELL) ? WITH_INSTALLED[decodeURIComponent(asked)] : ANSWERS[req.url];
     if (a === undefined) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
@@ -232,6 +273,12 @@ for (const era of ERAS) {
       assert.equal(t.title, "How one CVE is fixed");
       assert.deepEqual(t.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
       assert.deepEqual(t.inputSchema.required, ["cve_id"]);
+      // #2841: the installed version, optional, all three or none.
+      // #3013: and full, which every tool takes.
+      assert.deepEqual(Object.keys(t.inputSchema.properties), ["cve_id", "ecosystem", "package", "version", "full"]);
+      for (const k of ["ecosystem", "package", "version"]) assert.match(t.inputSchema.properties[k].description, /Sent in a request header\./, k);
+      assert.match(t.description, /ecosystem, package and version \(all three or none, sent in request headers, never in the URL\) add installed/);
+      assert.match(t.description, /^How one CVE is fixed[^]*Returns fix_status /);
       const known = schemaNames(t.outputSchema);
       assert.deepEqual([...new Set(t.description.match(FIELD_TOKEN) ?? [])].filter((x) => !known.has(x)), []);
       assert.doesNotMatch(t.description, REMOVED_CLAIMS);
@@ -249,16 +296,86 @@ for (const era of ERAS) {
       assert.deepEqual(sc.coverage.vendors_not_parsed, ["cisco"]);
       assert.deepEqual(sc.coverage.sections_failed, []);
       const note = noteOf(res);
-      assert.match(note, /cisa\.required_action is CISA's text, verbatim, due 2021-12-24T00:00:00Z: CISA's required_action is directed at US federal civilian agencies \(BOD 22-01\) and is not EchelonGraph's advice\./);
+      assert.match(note, /cisa\.required_action is CISA's text, verbatim, due 2021-12-24T00:00:00Z: CISA's required_action is directed at US federal civilian agencies \(under BOD 26-04, which replaced BOD 22-01 on 10 June 2026\) and is not EchelonGraph's advice\./);
       assert.match(note, /vendor_fix from redhat RHSA-2021:5129; workaround from redhat RHSA-2021:5129\./);
       assert.match(note, /paloalto PAN-SA-2021-0007 lists no remediation for CVE-2021-44228 \(none_in_source\), which is not a finding that no fix exists\./);
       assert.match(note, /EchelonGraph does not read the remediation of cisco cisco-sa-apache-log4j-qRuKNEbd \(not_parsed\)/);
       assert.match(note, /fixed_branches lists 1 affected package with 3 affected ranges, 3 with a fix on record/);
+      assert.match(note, /fix_status for CVE-2021-44228 is available \(basis patch_evidence_release\), the API's fix-status rule\./);
+      assert.equal(sc.coverage.installed_asked, null, "no installed version was asked");
+      assert.ok(seenHeaders.at(-1) && INSTALLED_HEADERS.every((h) => !(h in seenHeaders.at(-1))), "no installed-version header is sent without one");
       assert.match(note, /Every text is relayed as stated by its source; EchelonGraph has not tested it\./);
       // No generation: the note carries no remediation text of its own, and no vendor text.
       assert.doesNotMatch(note, /upgrade to|deny all|apply (?:the )?patch|we recommend/i);
       for (const t of textsOf(sc.data)) assert.ok(!note.includes(t), "a vendor text is in the note");
       assert.deepEqual(textsOf(sc.data), [RH_FIX, RH_WORKAROUND], "every text is the API's, byte for byte");
+    });
+
+    it("#2841: an installed version travels in the X-EG-* headers, never the URL; fixed_in and installed are relayed, and what was asked is echoed", async () => {
+      seen.length = 0;
+      seenHeaders.length = 0;
+      const res = await call("cve_remediation", { cve_id: LOG4SHELL, ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: " 2.14.1 " });
+      assert.ok(!res.isError, noteOf(res));
+      assert.deepEqual(seen, [REM(LOG4SHELL)], "the URL is the bare route");
+      for (const v of ["Maven", "log4j-core", "2.14.1", "ecosystem", "version"]) assert.ok(!seen[0].includes(v), `${v} is in the URL ${seen[0]}`);
+      // Percent-encoded, as the backend's matchHeaderValue decodes them; trimmed.
+      assert.deepEqual(INSTALLED_HEADERS.map((h) => seenHeaders[0][h]), ["Maven", "org.apache.logging.log4j%3Alog4j-core", "2.14.1"]);
+      const sc = res.structuredContent;
+      assert.deepEqual(sc.data, WITH_INSTALLED["2.14.1"], "data is the API's JSON whole");
+      assert.deepEqual(sc.coverage.installed_asked, { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" });
+      const note = noteOf(res);
+      assert.match(note, /For the installed version asked \(Maven org\.apache\.logging\.log4j:log4j-core 2\.14\.1\), installed\.verdict is affected and fixed_in is 2\.15\.0: the fixed bound of the affected range \[2\.13\.0, 2\.15\.0\) that holds it, as the advisory states it; EchelonGraph has not tested it\./);
+      assert.doesNotMatch(note, /upgrade to/i);
+
+      const none = await call("cve_remediation", { cve_id: LOG4SHELL, ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.17.1" });
+      assert.equal(none.structuredContent.data.fixed_in, null);
+      assert.match(noteOf(none), new RegExp(`installed\\.verdict is not_affected and fixed_in is null: ${NOT_AFFECTED_REASON.replace(/[.()]/g, "\\$&")}\\.`));
+    });
+
+    // #3074: when fixed_in moved past an overlapping range, the note does not render the holding
+    // range with fixed_in as its bound (that range is not on record): it relays fixed_in_detail.
+    it("#3074: fixed_in past an overlapping range is said with fixed_in_detail, never as the holding range's own bound", async () => {
+      const res = await call("cve_remediation", { cve_id: LOG4SHELL, ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.11.0" });
+      assert.ok(!res.isError, noteOf(res));
+      assert.deepEqual(res.structuredContent.data, WITH_INSTALLED["2.11.0"], "data is the API's JSON whole");
+      const note = noteOf(res);
+      assert.ok(
+        note.includes(`installed.verdict is affected and fixed_in is 2.15.0: the first version above it that no affected range on record holds (${MOVED_PAST}), as the advisory states it; EchelonGraph has not tested it.`),
+        note,
+      );
+      // Control: the sentence for an unmoved fixed_in would name [2.4, 2.15.0), a range no record holds.
+      assert.doesNotMatch(note, /\[2\.4, 2\.15\.0\)/);
+    });
+
+    it("#2841: a partial installed version is refused with invalid_input naming what is missing, and nothing is sent", async () => {
+      for (const [args, missing] of [
+        [{ ecosystem: "npm" }, /package and version are missing \(given: ecosystem\)/],
+        [{ ecosystem: "npm", package: "lodash" }, /version is missing \(given: ecosystem and package\)/],
+        [{ version: "1.0.0" }, /ecosystem and package are missing \(given: version\)/],
+        [{ ecosystem: "npm", package: "  ", version: "1.0.0" }, /package is missing \(given: ecosystem and version\)/],
+      ]) {
+        seen.length = 0;
+        const res = await call("cve_remediation", { cve_id: LOG4SHELL, ...args });
+        assert.equal(res.structuredContent.state, "invalid_input", JSON.stringify(args));
+        assert.match(noteOf(res), /ecosystem, package and version go together, all three or none/);
+        assert.match(noteOf(res), missing, JSON.stringify(args));
+        assert.deepEqual(seen, [], `${JSON.stringify(args)}: a request was sent`);
+      }
+    });
+
+    it("#2841: an API that ignores the headers (no fixed_in) is said to have not assessed the installed version", async () => {
+      const res = await call("cve_remediation", { cve_id: "CVE-2099-30002", ecosystem: "npm", package: "x", version: "1.0.0" });
+      assert.match(noteOf(res), /The answer carries no fixed_in for the installed version asked \(npm x 1\.0\.0\): the API did not assess it, which is not a finding either way\./);
+    });
+
+    it("#2841: a reference the CNA tagged lowercase patch is a fix reference, named in either spelling, beside the fix_status it supports", async () => {
+      const res = await call("cve_remediation", { cve_id: "CVE-2026-69486" });
+      assert.ok(!res.isError, noteOf(res));
+      assert.deepEqual(res.structuredContent.data.fix_references, CNA_PATCH.fix_references);
+      const note = noteOf(res);
+      assert.match(note, /fix_status for CVE-2026-69486 is fix_referenced \(basis patch_evidence_reference_only\), the API's fix-status rule\./);
+      assert.match(note, /fix_references lists 1 reference the CVE record tags as a patch or mitigation \(NVD's Patch or Mitigation, or the CNA's patch or mitigation\), each with the tags as written\./);
+      assert.doesNotMatch(note, /No reference of the CVE record is tagged/);
     });
 
     it("REJECTED: not_assessed, nothing relayed as a fix", async () => {
@@ -274,6 +391,7 @@ for (const era of ERAS) {
       assert.equal(res.structuredContent.state, "measured");
       assert.match(note, /fixed_branches is empty: no affected package range is on record, which is not a finding that no fix exists\./);
       assert.match(note, /No vendor advisory on record names CVE-2099-30002, which is not a finding that no vendor published a fix\./);
+      assert.match(note, /No reference of the CVE record is tagged as a patch or mitigation, in NVD's spelling \(Patch, Mitigation\) or the CNA's \(patch, mitigation\)\./);
       // Every sentence that speaks of "no fix" says it is not a finding.
       for (const u of note.split(/(?<=\.)\s+/)) if (/no fix/i.test(u)) assert.match(u, /not a finding/, u);
       assert.doesNotMatch(note, /\b(unpatched|no fix is available)\b/i);
@@ -288,11 +406,27 @@ for (const era of ERAS) {
       assert.doesNotMatch(note, /No vendor advisory on record/);
     });
 
-    it("past the text budget: vendor texts cut first, kinds, states and URLs kept, TEXT CUT said; data whole", async () => {
+    it("past the text budget: vendor texts cut first, kinds, states and URLs kept, TEXT CUT said; data whole with full: true, its vendor_remediations cut first by default", async () => {
       const res = await call("cve_remediation", { cve_id: "CVE-2099-30004" });
       const [first] = textBlocks(res);
       assert.ok(first.length <= 30_000, `${first.length} characters`);
-      assert.deepEqual(res.structuredContent.data, HUGE);
+      // #3013: with full: true data is the answer whole and the text the same; by default the
+      // structured result is held to 30,000 characters, vendor_remediations leaving data from the
+      // end first, every field that is not a list (fix_status, fixed_in) the answer's.
+      const whole = await call("cve_remediation", { cve_id: "CVE-2099-30004", full: true });
+      assert.deepEqual(whole.structuredContent.data, HUGE);
+      assert.equal(whole.structuredContent.data_truncated, false);
+      assert.equal(textBlocks(whole)[0], first);
+      const sc = res.structuredContent;
+      assert.ok(JSON.stringify(sc).length <= 30_000, `${JSON.stringify(sc).length} characters of structured result`);
+      assert.equal(sc.data_truncated, true);
+      const kept = sc.truncated.vendor_remediations.returned;
+      assert.ok(kept < 20, JSON.stringify(sc.truncated));
+      // #3013 follow-up: each advisory kept is thinned first (product_ids, then the texts, leave).
+      assert.equal(sc.truncated.vendor_remediations.thinned, kept > 0 ? true : undefined);
+      for (const [i, a] of sc.data.vendor_remediations.entries()) assert.ok(isThinOf(a, HUGE.vendor_remediations[i]), `vendor_remediations[${i}]`);
+      for (const [k, v] of Object.entries(HUGE)) if (!Array.isArray(v)) assert.deepEqual(sc.data[k], v, k);
+      assert.match(noteOf(res), new RegExp(`DATA CUT: .*vendor_remediations keeps ${kept === 0 ? "none of its 20 entries" : `${kept} of its 20 entries, each cut to `}`));
       const shown = JSON.parse(first);
       assert.equal(shown.vendor_remediations.length, 20, "every advisory kept");
       for (const a of shown.vendor_remediations) {
@@ -322,7 +456,13 @@ for (const era of ERAS) {
     it("get_cve relays remediation and says what it is in one sentence", async () => {
       const res = await call("get_cve", { cve_id: LOG4SHELL });
       assert.deepEqual(res.structuredContent.data.remediation, SUMMARY);
-      assert.match(noteOf(res), /remediation summarises how CVE-2021-44228 is fixed, as its sources state it; cve_remediation returns each vendor's text, CISA's action and every fixed range\. Vendor advisories list vendor_fix \(1\), workaround \(1\), by the vendor's own category\./);
+      // #2841: fix_status is the summary's first field, relayed as the API sent it.
+      assert.equal(Object.keys(res.structuredContent.data.remediation)[0], "fix_status");
+      assert.equal(Object.keys(JSON.parse(textBlocks(res)[0]).remediation)[0], "fix_status", "the first text block keeps fix_status first");
+      assert.match(
+        noteOf(res),
+        /remediation summarises how CVE-2021-44228 is fixed, as its sources state it; cve_remediation returns each vendor's text, CISA's action and every fixed range\. remediation\.fix_status is available \(basis patch_evidence_release\), the API's fix-status rule\. Vendor advisories list vendor_fix \(1\), workaround \(1\), by the vendor's own category\./,
+      );
     });
 
     it("vendor_advisories_for_cve relays remediation_kinds and remediation_state; get_vendor_advisory relays remediations", async () => {

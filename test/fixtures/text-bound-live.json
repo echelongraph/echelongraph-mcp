@@ -1,42 +1,45 @@
 {
-  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record. tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh). tools.*.measured_at is when this checkout's server last measured the kept answers and answers_read_at when they were read from production (#2822); a re-measure of the kept answers (--answers test/fixtures/prod-answers) moves measured_at, never answers_read_at. cases: every case of text-bound.mjs SHAPED, each tool at its default call and largest page, held to the ceiling, and text-bound.test.mjs holds each SHAPED case within SHAPED_DRIFT of its record here; source says where the answers came from (probe-prod, or the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text).",
+  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record. tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh). tools.*.measured_at is when this checkout's server last measured the kept answers and answers_read_at when they were read from production (#2822); a re-measure of the kept answers (--answers test/fixtures/prod-answers) moves measured_at, never answers_read_at. cases: every case of text-bound.mjs SHAPED, each tool at its default call and largest page, held to the ceiling, and text-bound.test.mjs holds each SHAPED case within SHAPED_DRIFT of its record here; source says where the answers came from (probe-prod, or the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). structured (#3013, since 3.0.0's re-record): the same answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before carries none.",
   "tools": {
     "exposure_radar": {
-      "measured_at": "2026-10-11T07:45:57.182Z",
+      "measured_at": "2026-10-11T11:41:36.680Z",
       "answers_read_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.7.1",
-      "total": 41885,
+      "package_version": "2.7.2",
+      "total": 43702,
       "blocks": [
         21334,
-        17895,
-        2656
+        18662,
+        3706
       ],
+      "structured": 29962,
       "answers_kept": true
     },
     "cve_summary": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
+      "measured_at": "2026-10-11T11:41:36.680Z",
       "answers_read_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 2698,
+      "package_version": "2.7.2",
+      "total": 2725,
       "blocks": [
         584,
         1552,
-        562
+        589
       ],
+      "structured": 2565,
       "answers_kept": true
     }
   },
   "cases": {
     "cve_summary": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 2698,
+      "measured_at": "2026-10-11T11:41:36.680Z",
+      "package_version": "2.7.2",
+      "total": 2725,
       "blocks": [
         584,
         1552,
-        562
+        589
       ],
-      "source": "probe-prod"
+      "structured": 2565,
+      "source": "probe-prod answers kept in fixtures/prod-answers"
     },
     "search_cves, default page (search openssl)": {
       "measured_at": "2026-10-05T07:37:21.576Z",
@@ -83,14 +86,15 @@
       "source": "probe-prod"
     },
     "exposure_radar": {
-      "measured_at": "2026-10-11T07:45:57.182Z",
-      "package_version": "2.7.1",
-      "total": 41885,
+      "measured_at": "2026-10-11T11:41:36.680Z",
+      "package_version": "2.7.2",
+      "total": 43702,
       "blocks": [
         21334,
-        17895,
-        2656
+        18662,
+        3706
       ],
+      "structured": 29962,
       "source": "probe-prod answers kept in fixtures/prod-answers"
     },
     "kev_recent, default page (limit 50)": {

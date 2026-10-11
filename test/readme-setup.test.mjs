@@ -14,6 +14,10 @@
 //     it runs, and four of them were stopped on 8 October 2026 while this README said they refreshed;
 //     the README ships to npm and cannot follow a pause, so its sentence is true either way.
 import { describe, it } from "node:test";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { readPkgFile } from "./server-under-test.mjs";
 
@@ -97,5 +101,41 @@ describe("README freshness (#3010)", () => {
   it("control: the sentence the README carried through the 2026-10-08 pause fails", () => {
     assert.match("The CVE feed is polled from its sources on a schedule; each radar refreshes on its own.", UNCONDITIONAL_REFRESH);
     assert.doesNotMatch(BOTH_STATES, UNCONDITIONAL_REFRESH);
+  });
+});
+
+// #3096: the README's "check that the file parses" command, run as printed. Through 2.7.2 it took a
+// quoted "<path to the file>", and the macOS path pasted into it ("~/Library/…") is not expanded
+// inside double quotes, so a valid file answered ENOENT.
+describe("README Claude Desktop parse check (#3096)", () => {
+  const CHECK = /node -e "JSON\.parse\(require\('fs'\)\.readFileSync\(process\.argv\[1\], 'utf8'\)\)" "[^"\n]+"/g;
+  const home = (json) => {
+    const h = mkdtempSync(join(tmpdir(), "eg-3096-"));
+    const d = join(h, "Library", "Application Support", "Claude");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "claude_desktop_config.json"), json);
+    return h;
+  };
+  const run = (cmd, h) => spawnSync("bash", ["-c", cmd], { env: { ...process.env, HOME: h }, encoding: "utf8" });
+  const VALID = '{"preferences":{},"mcpServers":{"echelongraph":{"command":"npx","args":["-y","echelongraph-mcp"]}}}';
+  const checks = claudeDesktop().match(CHECK) ?? [];
+
+  it("prints one per OS, each with its path filled in", () => {
+    assert.equal(checks.length, 2, `found ${checks.length} parse checks`);
+    assert.ok(checks[0].endsWith('"$HOME/Library/Application Support/Claude/claude_desktop_config.json"'), checks[0]);
+    assert.ok(checks[1].endsWith('"$env:APPDATA\\Claude\\claude_desktop_config.json"'), checks[1]);
+  });
+  it("the macOS one passes a valid file silently and fails one with curly quotes", { skip: process.platform === "win32" }, () => {
+    const ok = run(checks[0], home(VALID));
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.stdout + ok.stderr, "");
+    const bad = run(checks[0], home("{“mcpServers”:{}}"));
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /SyntaxError/);
+  });
+  it("control: the ~ form it replaced fails on a valid file", { skip: process.platform === "win32" }, () => {
+    const r = run(`node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "~/Library/Application Support/Claude/claude_desktop_config.json"`, home(VALID));
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /ENOENT/);
   });
 });

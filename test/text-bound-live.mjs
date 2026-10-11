@@ -8,7 +8,9 @@
 // (#2783). This measures every case of text-bound.mjs SHAPED, each tool at its default call and at
 // its largest page, on production's answers, with this package's own server (so the text measured
 // is the text this checkout would send), and compares each with the ceiling and the record
-// (fixtures/text-bound-live.json).
+// (fixtures/text-bound-live.json). #3013: beside each text it measures the structured result, as
+// compact JSON (JSON.stringify(res.structuredContent)), which is what Claude Code hands the model and
+// sizes, records it as `structured`, and goes red when one is past STRUCTURED_BUDGET.
 //
 // Where production's answers come from:
 //   (default)        scripts/probe-prod.sh, which names itself as an operator so the read is never
@@ -27,7 +29,8 @@
 //                    answerFile names them); only those two are measured.
 //
 //   node test/text-bound-live.mjs [--hosted [URL]]   measure and compare; exit 1 when a case is
-//                                                    past CEILING or answered an error, or when
+//                                                    past CEILING (or its structured result past
+//                                                    STRUCTURED_BUDGET) or answered an error, or when
 //                                                    exposure_radar or cve_summary moved more than
 //                                                    MARGIN from its record or has none
 //   ... --record                                     then write the record: every case measured,
@@ -62,7 +65,26 @@ import { fileURLToPath } from "node:url";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { connectHttp } from "./mcp-http-client.mjs";
 import { PKG, serverCommand } from "./server-under-test.mjs";
-import { CEILING, KEPT_SOURCE, LIVE_RECORD, LIVE_TOOLS, MARGIN, PROD_ANSWERS, SHAPED, answerFile, argsOf, keptSizesOffRecord, readLiveRecord, setKeptSize, shareOfCeiling, textSize } from "./text-bound.mjs";
+import {
+  CEILING,
+  KEPT_SOURCE,
+  LIVE_RECORD,
+  LIVE_TOOLS,
+  MARGIN,
+  PROD_ANSWERS,
+  SHAPED,
+  STRUCTURED_BUDGET,
+  answerFile,
+  argsOf,
+  keptSizesOffRecord,
+  prefixFor,
+  readLiveRecord,
+  setKeptSize,
+  shareOfCeiling,
+  structuredSize,
+  textSize,
+  unprefixed,
+} from "./text-bound.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROBE = path.resolve(HERE, "..", "..", "scripts", "probe-prod.sh");
@@ -100,22 +122,25 @@ async function probe(method, url, headers, body) {
 // (a replayed hosted answer), or production through probe-prod.sh.
 let serve = { kind: "map", answers: {} };
 const fetched = {};
+// #3013: served under a path that makes its base as long as production's (prefixFor).
+let prefix = "";
 const stub = http.createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", async () => {
-    const { pathname } = new URL(req.url, "http://stub");
+    const url = unprefixed(req.url, prefix);
+    const { pathname } = new URL(url, "http://stub");
     try {
       if (serve.kind === "probe") {
         const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => k.startsWith("x-eg-") || k === "content-type"));
         const body = chunks.length ? Buffer.concat(chunks).toString("utf8") : undefined;
-        const r = await probe(req.method, req.url, headers, body);
-        if (r.status === 200) fetched[req.url] = r.body;
+        const r = await probe(req.method, url, headers, body);
+        if (r.status === 200) fetched[url] = r.body;
         res.writeHead(r.status, { "content-type": "application/json" });
         res.end(r.body);
         return;
       }
-      const body = serve.kind === "one" ? serve.body : (serve.answers[req.url] ?? serve.answers[pathname]);
+      const body = serve.kind === "one" ? serve.body : (serve.answers[url] ?? serve.answers[pathname]);
       res.writeHead(body ? 200 : 404, { "content-type": body ? "application/json" : "text/plain" });
       res.end(body ? JSON.stringify(body) : "404 page not found\n");
     } catch (e) {
@@ -125,7 +150,9 @@ const stub = http.createServer((req, res) => {
   });
 });
 await new Promise((r) => stub.listen(0, "127.0.0.1", r));
-const stubBase = `http://127.0.0.1:${stub.address().port}`;
+const stubOrigin = `http://127.0.0.1:${stub.address().port}`;
+prefix = prefixFor(stubOrigin);
+const stubBase = `${stubOrigin}${prefix}`;
 const env = { ...process.env, ECHELONGRAPH_API_BASE: stubBase, ECHELONGRAPH_API_TIMEOUT_MS: "60000" };
 const client = await connect({ era: MODERN, ...serverCommand(), env, stderr: "ignore" });
 const remote = hosted ? await connectHttp({ era: MODERN, url: hosted, userAgent: SYNTHETIC_UA, requestTimeoutMs: 120_000 }) : undefined;
@@ -163,7 +190,8 @@ try {
     }
     if (!res) res = await client.callTool({ name: c.tool, arguments: args });
     const { total, blocks } = textSize(res, stubbed ? stubBase : undefined);
-    const m = { total, blocks, state: res.structuredContent?.state ?? null, isError: res.isError === true, source: how };
+    const structured = structuredSize(res, stubbed ? stubBase : undefined);
+    const m = { total, blocks, structured, state: res.structuredContent?.state ?? null, isError: res.isError === true, source: how };
     measured[c.label] = m;
     const drift = c.kept && stubbed ? prior.tools?.[c.kept] : undefined;
     const was = prior.cases?.[c.label];
@@ -186,7 +214,12 @@ try {
       verdict += `; PAST THE CEILING of ${CEILING}`;
       red = true;
     }
-    console.log(`${shareOfCeiling(c.label, total)}; blocks ${blocks.join(" + ")}; ${verdict}${how === source ? "" : `; ${how}`}`);
+    // #3013: the structured result, held to its budget on every case (not only those with a record).
+    if (!m.isError && structured > STRUCTURED_BUDGET) {
+      verdict += `; STRUCTUREDCONTENT PAST THE BUDGET of ${STRUCTURED_BUDGET}`;
+      red = true;
+    }
+    console.log(`${shareOfCeiling(c.label, total)}; blocks ${blocks.join(" + ")}; structuredContent ${structured} / ${STRUCTURED_BUDGET}; ${verdict}${how === source ? "" : `; ${how}`}`);
     if (c.kept && serve.kind === "probe") for (const p of LIVE_TOOLS[c.kept]) if (fetched[p] !== undefined) keptBodies[p] = JSON.parse(fetched[p]);
   }
 } finally {
@@ -206,12 +239,12 @@ if (record) {
   for (const c of cases) {
     const m = measured[c.label];
     if (!m || m.isError) continue;
-    cs[c.label] = { measured_at: readAt, package_version: PKG.version, total: m.total, blocks: m.blocks, source: m.source };
+    cs[c.label] = { measured_at: readAt, package_version: PKG.version, total: m.total, blocks: m.blocks, structured: m.structured, source: m.source };
     // #2822: when the answers were read from production. Read here (probe-prod) it is now; the
     // answers already kept keep the time they were read; answers from another directory carry no
     // time, so it is null rather than now.
     const answersReadAt = !answersDir ? readAt : keptDir ? (prior.tools?.[c.kept]?.answers_read_at ?? null) : null;
-    if (c.kept && keptAll) tools[c.kept] = { measured_at: readAt, answers_read_at: answersReadAt, package_version: PKG.version, total: m.total, blocks: m.blocks, answers_kept: true };
+    if (c.kept && keptAll) tools[c.kept] = { measured_at: readAt, answers_read_at: answersReadAt, package_version: PKG.version, total: m.total, blocks: m.blocks, structured: m.structured, answers_kept: true };
   }
   const written = { ...prior, tools: { ...prior.tools, ...tools }, cases: { ...(prior.cases ?? {}), ...cs } };
   fs.writeFileSync(LIVE_RECORD, `${JSON.stringify(written, null, 2)}\n`);
@@ -223,5 +256,5 @@ if (record) {
   for (const o of off) console.log(`SHAPED SIZE STALE: ${setKeptSize(o)}`);
   if (off.length) red = true;
 }
-console.log(JSON.stringify({ check: "text-bound-live", read_at: readAt, package_version: PKG.version, source, ceiling: CEILING, margin: MARGIN, measured, red }));
+console.log(JSON.stringify({ check: "text-bound-live", read_at: readAt, package_version: PKG.version, source, ceiling: CEILING, structured_budget: STRUCTURED_BUDGET, margin: MARGIN, measured, red }));
 process.exit(red ? 1 : 0);
