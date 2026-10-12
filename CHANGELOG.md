@@ -6,6 +6,80 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.0.1 — 2026-10-12
+
+- **check_sbom and scan_manifest keep every row before any row leaves `data`** (#3132). In 3.0.0
+  the structured cut had one level for a row, which kept every match, so a row still large once
+  thinned left `data`, and every row after it went with it. Hosted 3.0.0 kept 1 of 5 rows for five
+  Debian 12 purls, all affected (linux-libc-dev 6.1.55-1 has 200 matches). It kept 2 of 51 rows for
+  Juice Shop 11.1.2 with `pkg:composer/magento/community-edition@2.3.0` at index 2. For that purl
+  alone it kept no row, and the note said "check 0 or fewer purls per call". Now, past the thinned
+  level, every row's matches are capped at the same number, the most that fit. A row with more
+  keeps its first matches (highest `effective_score` first) and carries `matches_truncated`: its
+  total, the number returned, and the KEV-listed and ransomware CVE IDs and the `fixed_in` versions
+  of all its matches. Next, each match is cut to `cve_id`, `kev_listed`, `ransomware`, `fixed_in`
+  and `effective_score`, the row keeping `matched_package`, `matched_via` and an upstream row's
+  `matched_version_from` and `purl_name`. Only when that cannot keep every row is each row cut to
+  `index`, `purl`, `verdict`, `not_assessed_reason` and `cve_ids`. Rows leave only when even that
+  cannot keep them all, clean rows first as before, and they leave at the compact match level, at
+  most 10 matches a row, so each row kept still says its KEV flags and `fixed_in`. Once the cut is
+  settled, the rows kept take back detail in input order while room is left. Replayed on those
+  answers, the three cases keep 5 of 5 rows, 51 of 51 and 1 of 1. On the production synthetic's
+  201-purl probe, all affected, 3.0.0 kept 43 rows; this release keeps 54 compact ones, the
+  log4j-core 2.14.1 row with CVE-2021-44228 (`fixed_in` 2.15.0). The note no longer says
+  "0 or fewer".
+- **`not_sent_purls` is kept whole or left out, never cut short** (#3132). It is the list a client
+  sends again. When a `DATA CUT` leaves it out, check_sbom's note gives the purls not sent as
+  positions in the input: `coverage.sent` + 1 to `coverage.distinct_purls`, in the order the note
+  states. scan_manifest's positions would count purls read from the files, which a client cannot
+  rebuild, so its note says the same call with `full: true` returns the list instead.
+- **cve_remediation drops a vendor advisory only after `patches` and `fixed_branches`** (#3139).
+  CVE-2023-44487's default answer kept 2 of its 20 advisories, while `fixed_branches` (50 rows) and
+  `patches` (30) stayed whole. Now every advisory is kept, thinned. Then `fixed_branches` is thinned
+  (to the package, its range, `fixed_version` and each range's `introduced`, `fixed` and
+  `last_affected`; each range's `source` and `advisory_id` go), and each package's ranges are
+  capped at the most that fit, a package so cut carrying `fixed_branches_truncated` (total and
+  returned). Then `patches` are thinned (to `vendor`, `patch_url` and `published_at`), every one
+  kept, and `fix_references` is cut. Only then do `patches` rows leave, then `fixed_branches` rows.
+  Room left goes back to the capped ranges. Replayed, that answer keeps all 20 advisories, all 50
+  `fixed_branches` and all 30 `patches`, each thinned, and 17 of 20 `fix_references`, at 29,931
+  characters. When
+  advisories do leave, the `DATA CUT` note names `vendor_advisories_for_cve`, which lists every
+  one.
+- **`patch_available`'s schema text says what `true` beside an empty `patch_evidence` means**
+  (#3138). It means evidence of a fix once held has since been withdrawn: the flag is never set
+  back to false. `remediation.fix_status` is then the current reading. The text used to say `true`
+  means EchelonGraph holds evidence of a fix, while hosted get_cve CVE-2026-1281 answered `true`
+  beside `[]` and `none_confirmed`. get_cve's and search_cves' descriptions now say `true` means
+  EchelonGraph holds, or once held, fix evidence for the CVE, and `patch_evidence` is what it holds
+  now.
+- **A success's `outputSchema` admits top-level fields it does not name** (#3121). A client
+  validates answers against the tool list it read, and the hosted endpoint never tells it to read
+  again. In 3.0.0 a Claude Code session that listed the tools under 2.7.2 failed every tool's
+  call: "data must NOT have additional properties", from `data_truncated`, which 3.0.0 added to
+  every success. A field added at the top level in a minor release no longer breaks such a client.
+  The failure branch and each tool's `data` schema stay closed, so a field added inside `data`
+  still needs a reconnect, and the server still checks its own answers against the closed success
+  branch (`test/checked-strict.test.mjs`). If you see "does not match the tool's output schema" after an upgrade, reconnect
+  the client (README, Versioning).
+- `test/text-bound-live.mjs --hosted` calls a 3.0.0 or later endpoint with `full: true`. It
+  refuses to replay a cut `data` as the API's answer (#3140). Without `full: true`, get_cve
+  CVE-2021-44228 replayed 77 of its 396 `cpe_match` entries. The vendor tools' `/coverage` is now
+  served from the case's fixture beside the replayed answer, not as that answer. The record
+  (`test/fixtures/text-bound-live.json`) was re-measured on hosted 3.0.0 and holds a structured size
+  for each of the 23 cases measured; scan_manifest's 64-package lock, cve_remediation and cve_intel
+  with `fixed_branches` are measured on production for the first time. Four fixtures were re-read
+  where production had moved more than 10% from them (search_cves, epss_history,
+  vendor_advisories_for_cve, and scan_manifest's lock, which now replays production's own rows).
+
+- **The hosted endpoint's `mcp_handler_error` log names the cause of createMcpHandler's errors**
+  (#2923). 2.7.1's `error_class` matched only the legacy transport's messages, so all 78 production
+  lines read from 2026-10-06 were `other`. It now also matches the bundled SDK's "Rejected inbound
+  request (", "Rejected 2025-era request on a modern-only endpoint (", "Unsupported protocol
+  version" (code -32022, and the legacy transport's "Bad Request: " form) and "Missing required
+  client capabilities". As before, only the label and the numeric code are logged, never the
+  message.
+
 ## 3.0.0 — 2026-10-11
 
 A major version (README, Versioning): the structured result is now held to 30,000 characters by

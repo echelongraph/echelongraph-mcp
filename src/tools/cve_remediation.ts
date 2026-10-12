@@ -38,7 +38,7 @@
 import * as z from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { ANNOTATIONS, CVE_ID, SHOWN_BASE, api, badInput, checked, crashed, envelopeSchema, failed, failure, field, NOT_A_FINDING, okHead, opt, strAt, succeeded, type ToolResult } from "../index.js";
-import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type TextCut } from "../textBudget.js";
+import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type RowKeep, type TextCut } from "../textBudget.js";
 import { fixStatusSchema } from "../fixStatus.js";
 import { MATCH_HEADERS } from "./check_affected.js";
 
@@ -150,6 +150,12 @@ function schemas() {
               }),
             ),
           ),
+          fixed_branches_truncated: z
+            .object({ total: z.number().int(), returned: z.number().int() })
+            .optional()
+            .describe(
+              "Present only where the structured result's cut (DATA CUT) kept this package's first ranges, not all: total, its ranges in the answer; returned, the ones data keeps. The same call with full: true returns every range.",
+            ),
         }),
       ),
     ),
@@ -193,9 +199,44 @@ const CUT: TextCut = {
 // Before any advisory leaves, every advisory's items are thinned: product_ids first, keeping each
 // text; then the texts, keeping each item's kind, source_category, url and fixed_build, so every
 // advisory stays named with its state, kinds and links (get_vendor_advisory returns one whole).
-// Only then do advisories leave from the end, then the patches, then any other list at the top of
-// data. fix_status and fixed_in (#2841) are not lists, and installed is an object, so none of them
-// is ever cut.
+// fix_status and fixed_in (#2841) are not lists, and installed is an object, so none of them is
+// ever cut.
+//
+// #3139: through 3.0.0 advisories then left from the end, before patches, and fixed_branches had no
+// step, so CVE-2023-44487 (KEV-listed) kept 2 of its 20 advisories at 29,704 characters while
+// fixed_branches (13,581 characters, 50 rows) and patches (7,471, 30) stayed whole, and the note
+// named no tool that lists the other 18 (measured on hosted 3.0.0, 2026-10-11; also CVE-2018-12126
+// 6/20, CVE-2019-11135 2/3, CVE-2018-3639 16/20). Now vendor_remediations is a keepAll step: every
+// advisory stays, thinned, while patches (each to its vendor, patch_url and published_at: the
+// erratum, which vendor_remediations names again for Red Hat) and then fixed_branches (each to its
+// package, range, fixed_version and its ranges' introduced, fixed and last_affected, what the
+// sbom_review prompt walks; the per-range source, advisory_id and dependents_count go) are thinned
+// and then lose rows from the end, and then any other list at the top of data (fix_references).
+// Only when all of that is cut and the result is still past the budget do advisories leave, from
+// the end; whenever one does, the note names vendor_advisories_for_cve, which lists every vendor
+// advisory naming the CVE, as where the rest are.
+// #3139's review: that order dropped 2 of CVE-2023-44487's 30 patches while its 50 fixed_branches
+// rows stayed whole (13,581 characters). Decided (2026-10-11): fixed_branches is thinned before any
+// patch row leaves. The order is now:
+//   1. vendor_remediations thinned, as above, every advisory kept (keepAll);
+//   2. fixed_branches thinned (each package to its ecosystem, package_name, version_range,
+//      fixed_version and its ranges' introduced, fixed and last_affected: each range's source and
+//      advisory_id go, and the package's dependents_count and source), then each package's ranges
+//      capped at one number, the most that fit (at least 1), a package with more carrying
+//      fixed_branches_truncated with its total and returned; every package kept (keepAll);
+//   3. patches thinned (vendor, patch_url and published_at), every patch kept (keepAll);
+//   4. any other list at the top of data (fix_references), cut from the end;
+//   5. then patch rows leave from the end, then fixed_branches rows, and only then advisories
+//      (textBudget.ts: the last keepAll step's entries leave first);
+//   6. the room left goes back to each package's ranges, in the order of fixed_branches (giveBack):
+//      step 2 caps them before the patches are cut, and a cap that held while every patch was
+//      whole would otherwise stay after the patches are thinned.
+// Round 2 replayed CVE-2023-44487 at 28 of 30 patches: fix_references (2,191 characters) were cut
+// after patch rows left, and the 30 thinned were about 240 characters past the budget beside them.
+// Round 3 (#3139's second review, 2026-10-11): patches is a keepAll step, so fix_references are cut
+// first and CVE-2023-44487 keeps all 20 advisories, all 50 fixed_branches and all 30 patches, each
+// thinned (test/cve_remediation.test.mjs); round 1 (patches cut before fixed_branches was thinned)
+// kept 11 patches without fix_references.
 //
 // #3013's review: the second level leaves every item's text out of data, and the text is the
 // vendor's step itself (a workaround's or mitigation's wording), which the triage_cve and
@@ -206,6 +247,7 @@ const CUT: TextCut = {
 const ADVISORY_FIELDS = ["vendor", "vendor_display_name", "vendor_advisory_id", "vendor_published_at", "withdrawn", "remediation_state", "remediation_kinds", "items_total"] as const;
 const ITEM_TEXT_ELSEWHERE =
   "No item in data keeps its text, the vendor's own wording of the step (a workaround or mitigation among them): get_vendor_advisory, given an advisory's vendor and its vendor_advisory_id as advisory_id, returns it among that advisory's remediations, whole in its structuredContent.data with full: true.";
+const FIXED_BRANCHES_THIN: RowKeep = ["ecosystem", "package_name", "version_range", "fixed_version", ["fixed_branches", ["introduced", "fixed", "last_affected"]]];
 const CVE_REMEDIATION_DATA: DataCut = {
   steps: [
     {
@@ -214,15 +256,44 @@ const CVE_REMEDIATION_DATA: DataCut = {
         [...ADVISORY_FIELDS, ["items", ["kind", "source_category", "source_subcategory", "text", "text_truncated", "text_chars", "url", "fixed_build", "product_count"]]],
         [...ADVISORY_FIELDS, ["items", ["kind", "source_category", "url", "fixed_build"]]],
       ],
+      keepAll: true,
     },
-    { lists: ["patches"] },
+    {
+      lists: ["fixed_branches"],
+      thin: [
+        FIXED_BRANCHES_THIN,
+        {
+          keep: FIXED_BRANCHES_THIN,
+          capped: "fixed_branches",
+          least: 1,
+          mark: (row, cap) => {
+            const n = Array.isArray(row.fixed_branches) ? row.fixed_branches.length : 0;
+            return n > cap ? { fixed_branches_truncated: { total: n, returned: cap } } : {};
+          },
+          said: (cap) => `each package's fixed_branches keeping at most its first ${cap} ranges, a package with more carrying fixed_branches_truncated with its total and returned`,
+        },
+      ],
+      keepAll: true,
+      giveBack: true,
+    },
+    // #3139 round 3: every patch row stays, thinned (keepAll), while the step after it (any other
+    // list at the top of data: fix_references) is cut; patch rows leave only after that, and
+    // before any fixed_branches row or advisory (the last keepAll step's entries leave first).
+    { lists: ["patches"], thin: [["vendor", "patch_url", "published_at"]], keepAll: true },
   ],
-  // Said where the advisories kept are thinned to a level whose items keep no text.
-  page: (_t, _d, at) => {
+  // Said where the advisories kept are thinned to a level whose items keep no text, and (#3139)
+  // wherever an advisory is left out.
+  page: (t, _d, at) => {
     const items = at.keeps.vendor_remediations?.find((x): x is readonly [string, readonly string[]] => typeof x !== "string" && x[0] === "items");
-    return items && !items[1].includes("text") ? ITEM_TEXT_ELSEWHERE : "";
+    const v = t.vendor_remediations;
+    return [items && !items[1].includes("text") ? ITEM_TEXT_ELSEWHERE : "", v && v.returned < v.total ? advisoriesElsewhere(v.total - v.returned) : ""].filter(Boolean).join(" ");
   },
 };
+// #3139: where the advisories a cut leaves out are read. vendor_advisories_for_cve lists every one
+// naming the CVE, with its vendor and vendor_advisory_id (CVE-2023-44487's 20 at 15,505
+// characters on hosted 3.0.0), and get_vendor_advisory then returns any one whole.
+const advisoriesElsewhere = (n: number): string =>
+  `vendor_advisories_for_cve, given this CVE, lists every vendor advisory naming it, the ${n} left out of data among them, each with its vendor and vendor_advisory_id.`;
 
 const listed = (xs: readonly string[]): string => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 const arr = (v: unknown): unknown[] | null => (Array.isArray(v) ? v : null);
@@ -277,7 +348,14 @@ function fixStatusSentence(cve: string, fs: unknown): string | null {
   const unread = Array.isArray(field(fs, "unread_inputs")) ? (field(fs, "unread_inputs") as unknown[]).filter((x): x is string => typeof x === "string") : [];
   const why = state === "none_confirmed" ? ", which is not a finding that no fix exists" : "";
   const notRead = unread.length ? `; it rests without ${listed(unread)}, which the API could not read (unread_inputs)` : "";
-  return `fix_status for ${cve} is ${state}${basis ? ` (basis ${basis})` : ""}, the API's fix-status rule${why}${notRead}.`;
+  // #3076, third pass: what vendor_fix_released evidence is, so "available" is not read as more
+  // than it says. Relayed from the field the API set, nothing inferred.
+  const released = field(fs, "vendor_released");
+  const qualifier =
+    released !== null && released !== undefined && typeof released === "object"
+      ? `; the vendor states a fix is released, but the CVE record names no fixed version (vendor_released), so the fixed release is the vendor advisory's to name`
+      : "";
+  return `fix_status for ${cve} is ${state}${basis ? ` (basis ${basis})` : ""}, the API's fix-status rule${why}${qualifier}${notRead}.`;
 }
 
 // The sentence on the installed version asked: what the API answered for it, relayed.

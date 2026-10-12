@@ -30,226 +30,280 @@
   },
   "cases": {
     "cve_summary": {
-      "measured_at": "2026-10-11T11:41:36.680Z",
-      "package_version": "2.7.2",
-      "total": 2725,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 2679,
       "blocks": [
-        584,
+        538,
         1552,
         589
       ],
-      "structured": 2565,
-      "source": "probe-prod answers kept in fixtures/prod-answers"
+      "structured": 2525,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_cves, default page (search openssl)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 13651,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 15924,
       "blocks": [
-        11682,
-        1227,
-        742
+        13211,
+        1840,
+        873
       ],
-      "source": "probe-prod"
+      "structured": 9064,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_cves, largest page (search openssl, limit 50)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 30739,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 18831,
       "blocks": [
-        28770,
-        1227,
-        742
+        15991,
+        1967,
+        873
       ],
-      "source": "probe-prod"
+      "structured": 17583,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "get_cve, CVE-2021-44228": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 22960,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 27380,
       "blocks": [
-        21782,
-        419,
-        759
+        24419,
+        2020,
+        941
       ],
-      "source": "probe-prod"
+      "structured": 29874,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "cve_exposure, CVE-2023-44487": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 4365,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 4392,
       "blocks": [
         2003,
         1421,
-        941
+        968
       ],
-      "source": "probe-prod"
+      "structured": 4803,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "exposure_radar": {
-      "measured_at": "2026-10-11T11:41:36.680Z",
-      "package_version": "2.7.2",
-      "total": 43702,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 43581,
       "blocks": [
-        21334,
-        18662,
-        3706
+        21182,
+        18692,
+        3707
       ],
-      "structured": 29962,
-      "source": "probe-prod answers kept in fixtures/prod-answers"
+      "structured": 29982,
+      "source": "the hosted endpoint's own text (3.0.0), not this checkout's"
     },
     "kev_recent, default page (limit 50)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 28812,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 28805,
       "blocks": [
-        27578,
-        444,
-        790
+        27545,
+        443,
+        817
       ],
-      "source": "probe-prod"
+      "structured": 22875,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "kev_recent, largest page (limit 200)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 31717,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 32488,
       "blocks": [
-        29861,
-        1064,
-        792
+        29815,
+        1773,
+        900
       ],
-      "source": "probe-prod"
+      "structured": 29797,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "epss_history, CVE-2021-44228": {
-      "measured_at": "2026-10-05T20:16:16.149Z",
-      "package_version": "2.6.8",
-      "total": 2771,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 3750,
       "blocks": [
-        697,
-        571,
-        1503
+        1261,
+        924,
+        1565
       ],
-      "source": "probe-prod"
+      "structured": 3382,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, openssl 3.0.0": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 26149,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 26824,
       "blocks": [
-        24299,
-        952,
-        898
+        24298,
+        1494,
+        1032
       ],
-      "source": "probe-prod"
+      "structured": 11996,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 29794,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 30442,
       "blocks": [
-        27515,
-        1382,
-        897
+        27525,
+        1884,
+        1033
       ],
-      "source": "probe-prod"
+      "structured": 29250,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_sbom, Juice Shop 11.1.2 (50 components)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 28824,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 34623,
       "blocks": [
-        24696,
-        2467,
-        1661
+        29435,
+        3393,
+        1795
       ],
-      "source": "probe-prod"
+      "structured": 24884,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "cve_intel, CVE-2021-44228": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 17355,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 19477,
       "blocks": [
-        14300,
-        1232,
-        1823
+        16196,
+        1404,
+        1877
       ],
-      "source": "probe-prod"
+      "structured": 14401,
+      "source": "the hosted endpoint's own text (3.0.0), not this checkout's"
     },
     "get_cwe, CWE-79": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 28457,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 28485,
       "blocks": [
-        26907,
+        26908,
         776,
-        774
+        801
       ],
-      "source": "probe-prod"
+      "structured": 24153,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "vendor_advisories_for_cve, CVE-2021-44228": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 15561,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 18686,
       "blocks": [
-        9753,
-        1277,
-        4531
+        12670,
+        1638,
+        4378
       ],
-      "source": "probe-prod"
+      "structured": 14983,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "get_vendor_advisory, aws 2026-098-AWS": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 3082,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 3240,
       "blocks": [
-        1838,
+        1987,
         128,
-        1116
+        1125
       ],
-      "source": "probe-prod"
+      "structured": 2984,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_vendor_advisories, default page (query log4j)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 33118,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 34124,
       "blocks": [
-        28303,
-        172,
-        4643
+        28743,
+        781,
+        4600
       ],
-      "source": "probe-prod"
+      "structured": 25518,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_vendor_advisories, largest page (query log4j, limit 50)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 23629,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 25496,
       "blocks": [
-        18098,
-        888,
-        4643
+        19210,
+        1686,
+        4600
       ],
-      "source": "probe-prod"
+      "structured": 29826,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, flash_player 10.0.0 (200 matches and an excluded sample of 50)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 30152,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 30937,
       "blocks": [
         27798,
-        1455,
-        899
+        2040,
+        1099
       ],
-      "source": "probe-prod"
+      "structured": 29960,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, PyPI django 1.11.0 (the registry path)": {
-      "measured_at": "2026-10-05T07:37:21.576Z",
-      "package_version": "2.6.5",
-      "total": 23889,
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 26257,
       "blocks": [
-        22101,
-        847,
-        941
+        23477,
+        1705,
+        1075
       ],
-      "source": "probe-prod"
+      "structured": 15511,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
+    },
+    "scan_manifest, package-lock.json (64 packages)": {
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 32922,
+      "blocks": [
+        27649,
+        3043,
+        2230
+      ],
+      "structured": 22787,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
+    },
+    "cve_intel, CVE-2021-44228, with fixed_branches (#2817)": {
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 19477,
+      "blocks": [
+        16196,
+        1404,
+        1877
+      ],
+      "structured": 14401,
+      "source": "the hosted endpoint's own text (3.0.0), not this checkout's"
+    },
+    "cve_remediation, CVE-2021-44228": {
+      "measured_at": "2026-10-11T22:38:02.490Z",
+      "package_version": "3.0.1",
+      "total": 22569,
+      "blocks": [
+        18021,
+        3171,
+        1377
+      ],
+      "structured": 26740,
+      "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     }
   }
 }

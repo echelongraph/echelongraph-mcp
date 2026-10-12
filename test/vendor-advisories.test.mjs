@@ -24,7 +24,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
 
@@ -159,7 +160,7 @@ const coverageRequests = (seen) => seen.filter((s) => s.url === COVERAGE_PATH);
 // The sentence the list and the search add for the fixture's two vendors still being read.
 const BACKFILLING_NOTE =
   "The older advisories of 2 vendors are still being read (history_backfill in_progress or not_started): microsoft (held from 2026-05-20 to 2026-09-30, and before that only in part, the earliest held dated 2016-01-12; history_backfill in_progress); paloalto (held from 2026-09-09 to 2026-10-02; history_backfill not_started). EchelonGraph does not yet hold all of their older advisories, so none found from them is not a finding that they published none.";
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 
 for (const era of [MODERN, "2025-06-18"]) {
   describe(`#2719 vendor-advisory tools [${era}]`, () => {

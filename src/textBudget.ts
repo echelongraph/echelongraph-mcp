@@ -63,7 +63,11 @@ import * as z from "zod";
 //      the tool names leave first (the clean rows, counted in data.summary), then the last of the
 //      rest, or for a step of series named keepNewest (exposure_radar's daily and weekly counts,
 //      which the API sends oldest first) its last ones, the newest, the oldest leaving first; a
-//      step that cannot fit even empty is emptied, and the next one is cut;
+//      step that cannot fit even empty is emptied, and the next one is cut. A level can cut inside
+//      each entry on its own terms (an EntryLevel, #3132: check_sbom's rows keep at most the same
+//      number of matches, the most that fit, so only the rows with more lose any), and a step named
+//      keepAll (#3139: cve_remediation's vendor_remediations) keeps every entry at its leanest level
+//      while the later steps are cut, its entries leaving only once they all are;
 //   2. then every other list at the top level of data, the same way. A list inside an object of
 //      data (get_cve's remediation summary, with fix_status, #2841) is cut only where a DataCut
 //      names it, and none names get_cve's. Once a step fits, the room it leaves goes back to the
@@ -71,7 +75,9 @@ import * as z from "zod";
 //      emptied while its rows were whole, keeps its entries once the thinned rows fit);
 //   3. no string is shortened and no value changes: a thinned entry keeps some of its fields as
 //      they are (every field a thinning level drops is optional in the outputSchema, so data still
-//      validates against it), and no field outside the lists cut changes; the envelope says
+//      validates against it), and no field outside the lists cut changes (the one field a cut
+//      adds is an EntryLevel's mark, check_sbom's matches_truncated, which says what the row's own
+//      cut left out, and which its outputSchema names); the envelope says
 //      data_truncated true, truncated gives each list cut by its path in data with its total, the
 //      number returned and, where its entries are thinned, thinned true, and the note ends with
 //      sentences starting DATA CUT that say what was cut and to which fields, how to read the rest
@@ -363,7 +369,59 @@ export type LeaveOutFirst = { field: string; values: readonly string[]; why: str
 // statsTrendSQL): each keeps its last entries, the newest, its oldest leaving first, so a cut
 // series still ends at the latest day or week, and the note says it keeps the newest. The data is
 // never reordered.
-export type DataCutStep = { lists: readonly string[]; leaveOutFirst?: LeaveOutFirst; thin?: readonly RowKeep[]; keepNewest?: true };
+//
+// #3132: a level of `thin` is the fields it keeps (RowKeep), or an EntryLevel, which also cuts
+// inside each entry on that entry's own terms. Through 3.0.0 every level was a RowKeep, and the
+// same for every entry, so check_sbom's one level (SBOM_ROW_THIN) kept every match object of every
+// row, and a single row still past the budget so thinned (linux-libc-dev 6.1.55-1's 200 matches,
+// 42,417 characters thinned; magento/community-edition 2.3.0's 200) left, and every row after it
+// with it: a Debian 12 SBOM of five affected rows kept 1, one large purl alone kept none. An
+// EntryLevel with `capped` names a list inside each entry (check_sbom's matches) and caps it in
+// every entry at the same number m, the most that fit with every entry kept, so only the entries
+// with more than m lose any of it, the largest first; `mark` gives the fields an entry carries
+// beside those kept (check_sbom's per-row matches_truncated: the row's own total, the number its
+// matches keep, and what the matches cut held), given the entry whole and m (Infinity at a level
+// that caps nothing); `said` is the clause the DATA CUT sentence adds for the level. Only at the
+// leanest level do entries leave, as before.
+//
+// #3132's review: `least` is the smallest cap at which a capped level is taken; below it the next
+// level is tried (check_sbom's SBOM_ROW_THIN capped is passed rather than kept with no match, where
+// the compact level after it still holds some).
+export type EntryLevel = {
+  keep: RowKeep;
+  capped?: string;
+  least?: number;
+  mark?: (whole: Record<string, unknown>, cap: number) => Record<string, unknown>;
+  said?: (cap: number) => string;
+};
+export type ThinLevel = RowKeep | EntryLevel;
+// #3139: with `keepAll`, the step's entries are thinned level by level as above, but none leaves
+// in it: when even its leanest level does not fit with every entry, every entry is kept at that
+// level and the cut goes on to the next steps; only once every later step is cut, and the result is
+// still past the budget, do this step's entries leave (cve_remediation's vendor_remediations: its
+// fixed_branches and patches are cut before any advisory leaves, so CVE-2023-44487 keeps all 20
+// advisories thinned, where 3.0.0 kept 2 and fixed_branches whole).
+//
+// #3132's review: three more, for check_sbom's and scan_manifest's lists.
+//  - `leaveAt`: when not even the leanest level keeps every entry, the entries leave at this level
+//    of `thin` (its index), capped at `cap` where it caps, not at the leanest. Once entries leave
+//    anyway, the page sentence names a page size whose rows come back with that level's detail; at
+//    the leanest level (check_sbom's cve_ids-only rows) a page of that size came back with none.
+//  - `giveBack`: once the cut is settled, the step's entries, in their order in data, take back
+//    detail while the result fits: each the richest level of `thin` above its own that fits, a
+//    capped level at the most entries that fit, stopping at the first entry that takes back none.
+//  - `whole`: each list of the step keeps all its entries or none, never its first ones
+//    (data.not_sent_purls: a client retries the list, and its first entries are not it).
+export type DataCutStep = {
+  lists: readonly string[];
+  leaveOutFirst?: LeaveOutFirst;
+  thin?: readonly ThinLevel[];
+  keepNewest?: true;
+  keepAll?: true;
+  leaveAt?: { level: number; cap: number };
+  giveBack?: true;
+  whole?: true;
+};
 // What data keeps of each list cut, by its path in data: its entries in the answer, the entries
 // data holds, and thinned, true when each of them is cut to some of its fields (absent otherwise).
 export type Truncated = Record<string, { total: number; returned: number; thinned?: true }>;
@@ -414,22 +472,51 @@ type CutList = {
   n: number;
   firstOut?: LeaveOutFirst;
   thin?: RowKeep;
+  // #3132: the clause an EntryLevel's `said` gives for the cap it was cut at.
+  thinSaid?: string;
   newest?: true;
   named: number;
+  // #3132's review: the level of the step's `thin` the entries are cut to (absent: whole) and the
+  // cap it was cut at; and the entries that took back detail (giveBack), by their index in the
+  // list, each with its level and cap. chars counts the entries without those.
+  level?: number;
+  cap: number;
+  over: Map<number, GivenBack>;
   chars: (k: number) => number;
+  kept: (k: number) => number[];
   keep: (k: number) => unknown[];
 };
-const thinned = (e: unknown, keep: RowKeep): unknown =>
-  isPlainObject(e) ? cutRow(e, keep, { keep, clip: Number.POSITIVE_INFINITY }, { left: new Set(), clipped: 0, capped: 0 }) : e;
+// An entry that took back detail (#3132's review): the entry so cut, its level of the step's `thin`
+// and cap, and the fields and clause the DATA CUT sentence says of it.
+type GivenBack = { entry: unknown; level: number; cap: number; keep: RowKeep; said?: string };
+// A level as its fields, and what it does inside each entry (#3132).
+const levelOf = (l: ThinLevel): EntryLevel => (Array.isArray(l) ? { keep: l as RowKeep } : (l as EntryLevel));
+const thinned = (e: unknown, level: ThinLevel, cap = Number.POSITIVE_INFINITY): unknown => {
+  if (!isPlainObject(e)) return e;
+  const { keep, capped, mark } = levelOf(level);
+  const t = cutRow(e, keep, { keep, clip: Number.POSITIVE_INFINITY }, { left: new Set(), clipped: 0, capped: 0 });
+  const inner = capped ? t[capped] : undefined;
+  if (capped && Array.isArray(inner) && inner.length > cap) t[capped] = inner.slice(0, cap);
+  return mark ? { ...t, ...mark(e, cap) } : t;
+};
+// The longest list named `capped` inside any entry of a list (#3132): the cap a level starts below.
+const longestInside = (v: unknown, capped: string): number =>
+  Array.isArray(v) ? v.reduce<number>((m, e) => Math.max(m, Array.isArray(field(e, capped)) ? (field(e, capped) as unknown[]).length : 0), 0) : 0;
 // An entry JSON cannot write (undefined) is written null in a list.
 const entryChars = (e: unknown): number => JSON.stringify(e)?.length ?? 4;
 const listOf = (data: Record<string, unknown>, at: readonly string[]): unknown => at.reduce<unknown>((o, k) => field(o, k), data);
-function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOutFirst, thin?: RowKeep, newest?: true): CutList | undefined {
+function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOutFirst, level?: ThinLevel, newest?: true, cap = Number.POSITIVE_INFINITY, levelAt?: number): CutList | undefined {
   const at = path.split(".");
   const v = listOf(data, at);
   if (!Array.isArray(v) || v.length === 0) return undefined;
   const n = v.length;
-  const entries = thin ? v.map((e) => thinned(e, thin)) : v;
+  const entries = level ? v.map((e) => thinned(e, level, cap)) : v;
+  const thin = level ? levelOf(level).keep : undefined;
+  // A capped level's clause only where its cap cuts an entry's list (#3139's review: a package
+  // with one range is not "at most its first 1").
+  const lv = level ? levelOf(level) : undefined;
+  const bites = lv?.capped === undefined || v.some((e) => (Array.isArray(field(e, lv.capped as string)) ? (field(e, lv.capped as string) as unknown[]).length : 0) > cap);
+  const thinSaid = lv && bites ? lv.said?.(cap) : undefined;
   const lens = entries.map(entryChars);
   // The indices in the order they leave: from the end, or, for a series kept newest, from the start.
   const leavingOrder = (i: number) => (newest ? i : n - 1 - i);
@@ -442,19 +529,26 @@ function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOut
   for (const i of order) leaving.push(leaving[leaving.length - 1] + lens[i]);
   const all = leaving[n];
   const kept = (k: number) => Math.max(0, Math.min(n, k));
+  const over = new Map<number, GivenBack>();
+  const keptAt = (k: number): number[] => {
+    const out = new Set(order.slice(0, n - kept(k)));
+    return entries.map((_, i) => i).filter((i) => !out.has(i));
+  };
   return {
     path,
     at,
     n,
     firstOut,
     thin,
+    ...(thinSaid ? { thinSaid } : {}),
     ...(newest ? { newest } : {}),
     named,
+    ...(levelAt !== undefined ? { level: levelAt } : {}),
+    cap,
+    over,
     chars: (k) => all - leaving[n - kept(k)] + Math.max(0, kept(k) - 1),
-    keep: (k) => {
-      const out = new Set(order.slice(0, n - kept(k)));
-      return entries.filter((_, i) => !out.has(i));
-    },
+    kept: keptAt,
+    keep: (k) => keptAt(k).map((i) => (over.has(i) ? over.get(i)?.entry : entries[i])),
   };
 }
 // `o` with the list at `at` replaced by `v`, each object on the way copied, its keys in their order.
@@ -465,6 +559,26 @@ function withList(o: Record<string, unknown>, at: readonly string[], v: unknown[
 const orListed = (xs: readonly string[]): string => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} or ${xs[xs.length - 1]}`);
 // The fields a thinning level keeps, as a sentence says them.
 const keepSaid = (keep: RowKeep): string => listed(keep.map((x) => (typeof x === "string" ? x : `${x[0]} (each with ${listed([...x[1]])})`)));
+
+// The clause on the entries that took back detail (#3132's review): their positions among those
+// kept, in their order in data, grouped where one level and cap holds a run of them (#3132's second
+// review: not always the first kept, since give-back passes an entry that cannot take any back).
+function givenBackSaid(list: CutList, k: number): string {
+  const kept = list.kept(k);
+  const runs: { from: number; to: number; g: GivenBack }[] = [];
+  kept.forEach((i, pos) => {
+    const g = list.over.get(i);
+    if (!g) return;
+    const last = runs[runs.length - 1];
+    if (last && last.to === pos && last.g.level === g.level && last.g.cap === g.cap) last.to = pos + 1;
+    else runs.push({ from: pos + 1, to: pos + 1, g });
+  });
+  if (runs.length === 0) return "";
+  const n = runs.reduce((t, r) => t + r.to - r.from + 1, 0);
+  const one = (r: (typeof runs)[number]) =>
+    `${r.from === r.to ? `entry ${r.from}` : `entries ${r.from} to ${r.to}`} cut to ${keepSaid(r.g.keep)}${r.g.said ? `, ${r.g.said}` : ""}`;
+  return `; with the room left, ${n} of the entries kept take back detail (by position among those kept, in their order in data): ${runs.map(one).join("; ")}`;
+}
 
 // What a cut keeps of each list it has cut so far, as truncated and as the DATA CUT sentences.
 function cutSaid(
@@ -495,7 +609,9 @@ function cutSaid(
     const leftOut =
       out === 0 ? "" : first === 0 ? `, the ${end} ${out} left out` : first === out ? `, the ${out} left out being entries ${which}` : `, the ${out} left out being the ${first} ${which} and the ${end} ${out - first} of the rest`;
     if (isThinned(x)) {
-      parts.push(`${list.path} keeps ${k === list.n ? `all ${k}` : `${k} of its ${list.n}`} entries, each cut to ${keepSaid(list.thin as RowKeep)}${leftOut}`);
+      parts.push(
+        `${list.path} keeps ${k === list.n ? `all ${k}` : `${k} of its ${list.n}`} entries, each cut to ${keepSaid(list.thin as RowKeep)}${list.thinSaid ? `, ${list.thinSaid}` : ""}${leftOut}${givenBackSaid(list, k)}`,
+      );
       continue;
     }
     if (!list.firstOut || first === 0 || k === 0) {
@@ -582,15 +698,41 @@ export function cutData(
   let fits = false;
   for (const [s, step] of steps.entries()) {
     // Every entry whole, then each thinning level in turn, every entry kept; at the leanest level
-    // the entries leave until the result fits.
-    const levels: readonly (RowKeep | undefined)[] = [undefined, ...(step.thin ?? [])];
+    // the entries leave until the result fits (with keepAll, #3139, not in this step: see below).
+    const levels: readonly (ThinLevel | undefined)[] = [undefined, ...(step.thin ?? [])];
     let lists: CutList[] = [];
     let k = 0;
+    const at = (level: ThinLevel | undefined, cap?: number, levelAt?: number) =>
+      step.lists.map((p) => listAt(data, p, step.leaveOutFirst, level, step.keepNewest, cap, levelAt)).filter((l): l is CutList => l !== undefined && !kept.has(l.path));
     for (const [i, thin] of levels.entries()) {
-      lists = step.lists.map((p) => listAt(data, p, step.leaveOutFirst, thin, step.keepNewest)).filter((l): l is CutList => l !== undefined && !kept.has(l.path));
+      lists = at(thin, undefined, i - 1);
       if (lists.length === 0) break;
       const base = JSON.stringify(apply(lists.map((list) => ({ list, k: 0 })))).length;
       const top = Math.max(...lists.map((l) => l.n));
+      // #3132: a level that caps a list inside each entry, every entry kept: the most entries of
+      // that inner list, the same number in each, that fit; a level where even none fits is passed.
+      // #3132's review: a level with `least` is taken at that cap or more, or passed.
+      const capped = thin === undefined ? undefined : levelOf(thin).capped;
+      if (capped !== undefined) {
+        const longest = Math.max(0, ...step.lists.map((p) => longestInside(listOf(data, p.split(".")), capped)));
+        const least = (thin === undefined ? undefined : levelOf(thin).least) ?? 0;
+        if (longest > least && size(at(thin, least, i - 1), top, base) <= STRUCTURED_BUDGET) {
+          let m = least;
+          let hi = longest - 1;
+          while (m < hi) {
+            const mid = Math.ceil((m + hi) / 2);
+            if (size(at(thin, mid, i - 1), top, base) <= STRUCTURED_BUDGET) m = mid;
+            else hi = mid - 1;
+          }
+          lists = at(thin, m, i - 1);
+          k = top;
+          fits = true;
+          break;
+        }
+        if (i < levels.length - 1) continue;
+        // The last level, and even its least cap does not fit: the entries go on at that cap.
+        lists = at(thin, least, i - 1);
+      }
       if (i < levels.length - 1) {
         if (size(lists, top, base) <= STRUCTURED_BUDGET) {
           k = top;
@@ -598,6 +740,25 @@ export function cutData(
           break;
         }
         continue;
+      }
+      if (step.keepAll) {
+        // #3139: every entry stays, at this level; the later steps are cut first.
+        k = top;
+        fits = size(lists, top, base) <= STRUCTURED_BUDGET;
+        break;
+      }
+      // #3132's review: entries leave at the step's leaveAt level, where it names one.
+      if (step.leaveAt && step.thin) {
+        const { level, cap } = step.leaveAt;
+        lists = at(step.thin[level], cap, level);
+      }
+      if (step.whole) {
+        // Every entry or none (#3132's review: data.not_sent_purls).
+        if (size(lists, 0, base) <= STRUCTURED_BUDGET) {
+          k = size(lists, top, base) <= STRUCTURED_BUDGET ? top : 0;
+          fits = true;
+        }
+        break;
       }
       if (size(lists, 0, base) <= STRUCTURED_BUDGET) {
         // The most entries each list of the step keeps with the result inside the budget.
@@ -613,15 +774,43 @@ export function cutData(
     for (const list of lists) kept.set(list.path, { list, k: Math.min(k, list.n), step: s });
     if (fits) break;
   }
+  const exact = (): number => {
+    const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, false, wholeFit);
+    return JSON.stringify(structured(apply(), truncated, said)).length;
+  };
+  // #3139: every step cut and the result still past the budget: a keepAll step's entries leave now,
+  // the step's first, as many as must, the rest of data as the steps after it left it. The steps
+  // after it then take back what room is left (below), as though it were the step that fits.
+  // #3139's review: with more than one keepAll step, the last one's entries leave first
+  // (cve_remediation's fixed_branches before any vendor advisory).
+  if (!fits) {
+    for (const [s, step] of [...steps.entries()].reverse()) {
+      if (!step.keepAll || fits) continue;
+      const entries = [...kept.values()].filter((e) => e.step === s);
+      if (entries.length === 0) continue;
+      const set = (k: number) => {
+        for (const e of entries) e.k = Math.min(k, e.list.n);
+      };
+      set(0);
+      if (exact() > STRUCTURED_BUDGET) continue;
+      let k = 0;
+      let hi = Math.max(...entries.map((e) => e.list.n));
+      while (k < hi) {
+        const mid = Math.ceil((k + hi) / 2);
+        set(mid);
+        if (exact() <= STRUCTURED_BUDGET) k = mid;
+        else hi = mid - 1;
+      }
+      set(k);
+      for (const e of entries) e.step = steps.length;
+      fits = true;
+    }
+  }
   // The room the step that fits leaves goes back to the steps emptied before it, the last first,
   // each step's lists keeping at most the same number of their entries, as many as fit, at the
   // level they were thinned to (scan_manifest's not_checked, emptied while its rows were whole,
   // keeps its entries once the thinned rows fit).
   if (fits) {
-    const exact = (): number => {
-      const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, false, wholeFit);
-      return JSON.stringify(structured(apply(), truncated, said)).length;
-    };
     const last = Math.max(...[...kept.values()].map((e) => e.step));
     for (let s = last - 1; s >= 0; s--) {
       const entries = [...kept.values()].filter((e) => e.step === s);
@@ -631,6 +820,12 @@ export function cutData(
       };
       let k = Math.min(...entries.map((e) => e.k));
       let hi = Math.max(...entries.map((e) => e.list.n));
+      if (steps[s].whole) {
+        // Every entry or none (#3132's review).
+        at(hi);
+        if (exact() > STRUCTURED_BUDGET) at(k);
+        continue;
+      }
       while (k < hi) {
         const mid = Math.ceil((k + hi) / 2);
         at(mid);
@@ -638,6 +833,61 @@ export function cutData(
         else hi = mid - 1;
       }
       at(k);
+    }
+  }
+  // #3132's review: then a giveBack step's entries, in their order in data, take back detail (see
+  // DataCutStep): each the richest level above its own that fits. A RowKeep level is tried whole;
+  // of the capped levels, only the leanest at or above the entry's own (check_sbom's compact one,
+  // or the entry's own), uncapped and then at the most inner entries that fit, so a row takes back
+  // more of its matches compact before fewer of them thinned. #3132's second review: an entry that
+  // takes back nothing is passed, not an end (through round 2 it ended give-back, so a row at the
+  // compact level holding every match, too large to move up, kept every later capped row at its
+  // cap while room was left); the entries that took some are named by position (givenBackSaid).
+  if (fits) {
+    for (const [s, step] of steps.entries()) {
+      if (!step.giveBack || !step.thin) continue;
+      const thin = step.thin;
+      for (const e of [...kept.values()].filter((x) => x.step === s)) {
+        const { list } = e;
+        const own = list.level;
+        if (own === undefined || list.thin === undefined) continue;
+        const whole = listOf(data, list.at);
+        if (!Array.isArray(whole)) continue;
+        let leanestCapped = -1;
+        for (let j = 0; j <= own; j++) if (levelOf(thin[j]).capped !== undefined) leanestCapped = j;
+        const tryAt = (i: number, j: number, c: number): boolean => {
+          const l = levelOf(thin[j]);
+          list.over.set(i, { entry: thinned(whole[i], thin[j], c), level: j, cap: c, keep: l.keep, ...(l.said && l.capped && c < Number.POSITIVE_INFINITY ? { said: l.said(c) } : {}) });
+          if (exact() <= STRUCTURED_BUDGET) return true;
+          list.over.delete(i);
+          return false;
+        };
+        for (const i of list.kept(e.k)) {
+          // An entry its own level already keeps as the richest would is passed, not an end.
+          if (JSON.stringify(thinned(whole[i], thin[0])) === JSON.stringify(thinned(whole[i], thin[own], list.cap))) continue;
+          let took = false;
+          for (let j = 0; j <= own && !took; j++) {
+            const l = levelOf(thin[j]);
+            const inner = l.capped !== undefined && Array.isArray(field(whole[i], l.capped)) ? (field(whole[i], l.capped) as unknown[]).length : 0;
+            if (l.capped === undefined) {
+              if (j < own) took = tryAt(i, j, Number.POSITIVE_INFINITY);
+              continue;
+            }
+            if (j !== leanestCapped) continue;
+            if (j < own || list.cap < inner) took = tryAt(i, j, Number.POSITIVE_INFINITY);
+            if (took) break;
+            let c = j === own ? list.cap + 1 : (l.least ?? 0);
+            let hi = inner - 1;
+            if (c > hi || !tryAt(i, j, c)) continue;
+            while (c < hi) {
+              const mid = Math.ceil((c + hi) / 2);
+              if (tryAt(i, j, mid)) c = mid;
+              else hi = mid - 1;
+            }
+            took = tryAt(i, j, c);
+          }
+        }
+      }
     }
   }
   const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, !fits, wholeFit);

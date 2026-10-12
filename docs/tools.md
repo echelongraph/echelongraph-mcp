@@ -62,8 +62,8 @@ Both tools relay the API's JSON as it was sent, and the note says what the score
 
 ## What `patch_available` says
 
-`patch_available` is `true` when EchelonGraph holds evidence of a fix for the CVE, and
-`patch_evidence` lists the sources of that evidence, strongest first: `vendor_patch` (a vendor
+`patch_available` is `true` when EchelonGraph holds, or once held, evidence of a fix for the CVE,
+and `patch_evidence` lists the sources it holds now, strongest first: `vendor_patch` (a vendor
 patch on record, from Ubuntu or Red Hat), `fixed_version` (a fixed version recorded for an
 affected package, or the fixed bound of an affected version range), `release_reference` (a
 reference that EchelonGraph confirmed through the GitHub API is a published release containing
@@ -78,7 +78,9 @@ that only mentions a patch, and a CVE's presence in CISA's KEV catalog, are not 
 made public as `date_public` (with `date_public_source` `cna`), and the CNA as `cna`, each only
 where the CVE record has it. `false` means no fix evidence is on record, which is **not** a
 finding that no fix exists. Once `true`, `patch_available` is not set back to `false`, so it can be
-`true` beside an empty `patch_evidence`. An answer with no `patch_evidence` (an API older than that
+`true` beside an empty `patch_evidence`: evidence of a fix once held has since been withdrawn, and
+`remediation.fix_status` in the CVE's record is the current reading, not `patch_available` (since
+3.0.1 the field's outputSchema text says so). An answer with no `patch_evidence` (an API older than that
 field) does not name the evidence, and a `false` there is not a finding that no fix exists either.
 Both tools relay the two fields as the API sends them.
 

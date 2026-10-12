@@ -28,7 +28,8 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 import {
@@ -45,6 +46,7 @@ import {
   assertDataCutOf,
   assertStructuredUnderBudget,
   cutPairs,
+  isEntryCutOf,
   isThinOf,
   keptSizesOffRecord,
   productionText,
@@ -469,22 +471,28 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.match(note, /In it, not_sent_purls keeps its first 10 of 800 entries\. The 800 purls not sent are the input's distinct purls from position 1201 on, counted in the order the note gives for them, so a second call can send them without reading the list\./);
     // The order is in the note's own sentence on the purls not sent (#2799 review), which a list the
     // text keeps whole is given by too.
-    assert.match(note, /they are the input's distinct purls from position 1201 on, counted in the order this tool read them \(the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place\), and data\.not_sent_purls lists them whole with full: true \(past the structured result's budget, that list can be cut by default\)/);
+    assert.match(note, /they are the input's distinct purls from position 1201 on, counted in the order this tool read them \(the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place\), and data\.not_sent_purls lists them \(past the structured result's budget it is left out whole by default, never cut short, and those positions are coverage\.sent \+ 1 to coverage\.distinct_purls; with full: true it is always there\)/);
     // #3013: beside a cut data, the rows left out of the text are in data only with full: true.
     assert.match(note, /Only \d+ of the 1200 rows of results are in it; the other \d+ are left out of it: the \d+ whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\), and the last \d+ of the rest, and structuredContent\.data holds them with full: true\./);
     assert.match(note, /To read every row in the text, check \d+ or fewer purls per call\./);
     // #3013: the structured result's cut goes in the same order: the purls not sent first (the note
-    // says from which position they run), then the rows, clean and not-assessed ones first; the
-    // purls not sent then keep the first of their entries that the room the rows leave holds.
+    // says from which position they run), then the rows, clean and not-assessed ones first.
+    // #3132's review: the purls not sent are the list a client retries, so data keeps all of them
+    // or none (round 1 kept the first 3 of 800); with none, coverage.sent + 1 to
+    // coverage.distinct_purls are their positions, exactly. check_sbom-large-rows.test.mjs holds
+    // the cut alone to it over several shapes, with its control.
     const sc = res.structuredContent;
     assert.deepEqual(Object.keys(sc.truncated), ["not_sent_purls", "results"]);
     const sent = sc.truncated.not_sent_purls.returned;
-    assert.ok(sent < 800, `${sent}`);
-    assert.deepEqual(sc.data.not_sent_purls, data.not_sent_purls.slice(0, sent));
+    assert.ok(sent === 0 || sent === 800, `data keeps ${sent} of the 800 purls not sent: a list to retry that is not the whole`);
+    assert.deepEqual(sc.data.not_sent_purls ?? [], sent === 0 ? [] : data.not_sent_purls);
+    const input = [...new Set(argsOf(SHAPED.find((x) => x.label === LIMITED)).purls.map((p) => p.trim()))];
+    assert.deepEqual(input.slice(sc.coverage.sent, sc.coverage.distinct_purls), data.not_sent_purls, "coverage's positions are not the purls not sent");
     assert.ok(sc.data.results.length > 0 && sc.data.results.length < affected, `${sc.data.results.length} rows in data`);
     assert.deepEqual(sc.data.results.map((r) => r.verdict).filter((v) => v === "not_affected" || v === "not_assessed"), [], "a clean or not-assessed row stayed in data beside affected rows left out");
-    const keptSaid = sent === 0 ? "none of its 800 entries" : `its first ${sent} of 800 entries`;
-    assert.match(note, new RegExp(String.raw`DATA CUT: .* not_sent_purls keeps ${keptSaid}; results keeps \d+ of its 1200 entries, each cut to index, purl, verdict, not_assessed_reason, cve_ids, matched_package, matched_via and matches \(each with cve_id, kev_listed, ransomware, epss_score, effective_score, score_assessed, fixed_in and fixed_in_reason\), the \d+ left out being the 960 whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\) and the last \d+ of the rest\.`));
+    const keptSaid = sent === 0 ? "none of its 800 entries" : "all 800 entries";
+    // #3132's review: rows leave only once no level keeps every row, and at the compact level.
+    assert.match(note, new RegExp(String.raw`DATA CUT: .* not_sent_purls keeps ${keptSaid}; results keeps \d+ of its 1200 entries, each cut to index, purl, verdict, not_assessed_reason, cve_ids, matched_package, matched_via, matched_version_from, purl_name and matches \(each with cve_id, kev_listed, ransomware, fixed_in and effective_score\)(?:, each row's matches keeping at most its first 10 .*)?, the \d+ left out being the 960 whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\) and the last \d+ of the rest(?:; with the room left, \d+ of the entries kept take back detail \(by position among those kept, in their order in data\): .*?)?\. truncated gives`));
     assert.equal(sc.truncated.results.thinned, true);
     assert.equal(sc.data.summary.affected, data.summary.affected, "data.summary is cut");
   });
@@ -497,7 +505,10 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
   // effective_score and score_assessed beside kev_listed, epss_score and fixed_in;
   // prompt-fields.test.mjs holds each prompt's to SBOM_ROW_THIN).
   const SBOM_ROW_FIELDS = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids", "matched_package", "matched_via"];
+  const SBOM_ROW_MIN = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids"];
   const SBOM_MATCH_FIELDS = ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason"];
+  // #3132's review: a compact match (check_sbom.ts SBOM_ROW_COMPACT) keeps these.
+  const SBOM_MATCH_COMPACT = ["cve_id", "kev_listed", "ransomware", "fixed_in", "effective_score"];
   it("check_sbom and scan_manifest thin every row before one leaves, drop clean and not-assessed rows before affected ones, and keep every affected row that fits", (t) => {
     const rowTools = TOOL_CASES.filter((c) => c.tool === "check_sbom" || c.tool === "scan_manifest");
     for (const c of rowTools) {
@@ -510,11 +521,22 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       assert.ok(tr, `${c.label}: results is not cut, so the case holds nothing`);
       assert.equal(tr.thinned, true, `${c.label}: rows left data (${tr.returned} of ${tr.total}) without being thinned first`);
       const byIndex = new Map(answer.map((r) => [r.index, r]));
+      // #3132: a row keeps SBOM_ROW_FIELDS while it keeps matches, and SBOM_ROW_MIN at the leanest
+      // levels; a row whose matches are cut says so (matches_truncated, isEntryCutOf); rows leave
+      // data only once every row is at the leanest level, with no match left in any of them.
       for (const r of kept) {
         const a = byIndex.get(r.index);
-        assert.ok(isThinOf(r, a), `${c.label}: row ${r.index} is not the answer's row, thinned`);
-        for (const f of SBOM_ROW_FIELDS) assert.ok(Object.hasOwn(r, f) || !Object.hasOwn(a, f), `${c.label}: row ${r.index} leaves out ${f}`);
-        for (const [i, m] of (r.matches ?? []).entries()) for (const f of SBOM_MATCH_FIELDS) assert.ok(Object.hasOwn(m, f) || !Object.hasOwn(a.matches[i], f), `${c.label}: row ${r.index}, match ${i} leaves out ${f}`);
+        assert.ok(isEntryCutOf(r, a), `${c.label}: row ${r.index} is not the answer's row, thinned or cut on its own terms`);
+        for (const f of Object.hasOwn(r, "matches") ? SBOM_ROW_FIELDS : SBOM_ROW_MIN) assert.ok(Object.hasOwn(r, f) || !Object.hasOwn(a, f), `${c.label}: row ${r.index} leaves out ${f}`);
+        for (const [i, m] of (r.matches ?? []).entries()) {
+          const fields = Object.hasOwn(m, "epss_score") || !Object.hasOwn(a.matches[i], "epss_score") ? SBOM_MATCH_FIELDS : SBOM_MATCH_COMPACT;
+          for (const f of fields) assert.ok(Object.hasOwn(m, f) || !Object.hasOwn(a.matches[i], f), `${c.label}: row ${r.index}, match ${i} leaves out ${f}`);
+        }
+      }
+      // #3132's review: rows leave data at the compact level, so each row kept that had matches
+      // keeps its first ones (round 1 left them with cve_ids alone).
+      if (tr.returned < tr.total) {
+        for (const r of kept.filter((x) => byIndex.get(x.index).matches?.length)) assert.ok(r.matches?.length > 0, `${c.label}: rows left data, and row ${r.index} kept none of its matches`);
       }
       const affected = answer.filter((r) => r.verdict === "affected").length;
       const keptAffected = kept.filter((r) => r.verdict === "affected").length;
@@ -980,7 +1002,7 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
 
   // #3013: in both modes, cut and whole.
   it("every structured result still validates against the tool's advertised outputSchema, by default and with full: true", () => {
-    const ajv = new AjvJsonSchemaValidator();
+    const ajv = new StrictOutputValidator();
     for (const c of TOOL_CASES) {
       const schema = tools.find((t) => t.name === c.tool).outputSchema;
       for (const [mode, res] of [["default", measured[c.label]], ["full: true", whole[c.label]]]) {

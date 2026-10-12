@@ -2,8 +2,9 @@
 // The classifier must name a cause from a fixed vocabulary and never echo client input.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { PKG_DIR, readPkgFile } from "./server-under-test.mjs";
 
 const P = await import(pathToFileURL(path.join(PKG_DIR, "dist", "httpPolicy.js")).href);
@@ -25,6 +26,29 @@ describe("#2923: mcp_handler_error is classified without the message", () => {
       assert.equal(P.classifyHandlerError(new Error(msg)).error_class, cls);
     });
   }
+  // #2923's 2.7.1 audit: production's 78 lines were all "other". These are the bundled SDK's
+  // createMcpHandler messages, read from its dist (@modelcontextprotocol/server/dist/index.mjs and
+  // the chunk that defines its errors), each template filled the way the SDK fills it.
+  const SDK = path.dirname(fileURLToPath(import.meta.resolve("@modelcontextprotocol/server")));
+  const sdkText = fs.readdirSync(SDK).filter((f) => f.endsWith(".mjs")).map((f) => fs.readFileSync(path.join(SDK, f), "utf8")).join("\n");
+  const sdkCases = [
+    ["`Rejected inbound request (${stdHeaderRejection.cell}): ${stdHeaderRejection.message}`", "Rejected inbound request (headers): Mcp-Method header does not match the body's method", "rejected_inbound_request"],
+    ["`Rejected inbound request (${outcome.cell}): ${outcome.message}`", "Rejected inbound request (era-classification): server/discover with protocol_version 1999-01-01", "rejected_inbound_request"],
+    ["`Rejected 2025-era request on a modern-only endpoint (${strict.cell}): ${strict.message}`", "Rejected 2025-era request on a modern-only endpoint (legacy): initialize", "rejected_legacy_on_modern_only"],
+    ["message = `Unsupported protocol version: ${data.requested}`", "Unsupported protocol version: 1999-01-01", "unsupported_protocol_version"],
+    ["`Bad Request: Unsupported protocol version: ${protocolVersion}", "Bad Request: Unsupported protocol version: 1999-01-01 (supported versions: 2025-06-18)", "unsupported_protocol_version"],
+    ["message = `Missing required client capabilities: ${", "Missing required client capabilities: sampling", "missing_client_capability"],
+  ];
+  for (const [template, msg, cls] of sdkCases) {
+    it(`the SDK's ${JSON.stringify(template.slice(0, 48))}… is ${cls}`, () => {
+      assert.ok(sdkText.includes(template), `the bundled SDK no longer has ${template}`);
+      assert.equal(P.classifyHandlerError(new Error(msg)).error_class, cls);
+    });
+  }
+  it("an UnsupportedProtocolVersionError (-32022), as createMcpHandler reports it, keeps its code and is classified", () => {
+    const e = Object.assign(new Error("Unsupported protocol version: unknown"), { name: "ProtocolError", code: -32022 });
+    assert.deepEqual(P.classifyHandlerError(e), { error_name: "ProtocolError", error_class: "unsupported_protocol_version", error_code: -32022 });
+  });
   it("an unrecognised message is other, and no field holds any of the message", () => {
     const secret = "CVE-2099-0001 pkg:npm/secret-internal@1.0.0";
     const out = P.classifyHandlerError(new Error(`something new: ${secret}`));

@@ -298,11 +298,16 @@ export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>
 // (purls.slice(answers.length * MAX_COMPONENTS)), which it can rebuild from its own input, given
 // the order they are counted in (`readOrder`), which the sentence says whenever it gives the
 // position, not only when the text cuts the list. #3013: the structured result's cut empties
-// data.not_sent_purls before any row leaves (it is rebuilt from the position), and gives it back
-// only the first entries the room the rows leave holds, so the sentence says it lists them whole
-// with full: true. `retry` is the tool and argument to send them to ("check_sbom
-// again with purls set to").
-export function sendingSentences(g: Sending, distinct: number, readOrder: string, retry: string): string[] {
+// data.not_sent_purls before any row leaves (it is rebuilt from the position). #3132's review:
+// round 1 then gave it back the first entries the room the rows left held (3 of the rate-limited
+// case's 800), a list a client would retry as though it were the whole; the cut now keeps it whole
+// or not at all (check_sbom.ts sbomData), and the sentence gives the positions as coverage holds
+// them. `retry` is the tool and argument to send them to ("check_sbom again with purls set to").
+// #3132's second review: those positions index the purls this tool read, which a check_sbom
+// client rebuilds from its own purl list (or SBOM), but a scan_manifest client cannot without
+// reading the files as this tool does; with `positions` false (scan_manifest), the sentence sends
+// it to the same call with full: true, which always returns the list, instead.
+export function sendingSentences(g: Sending, distinct: number, readOrder: string, retry: string, positions = true): string[] {
   const out: string[] = [];
   if (g.batches > 1) {
     out.push(
@@ -319,7 +324,7 @@ export function sendingSentences(g: Sending, distinct: number, readOrder: string
     const one = notSent === 1;
     const where = one ? `it is the input's distinct purl at position ${g.sent + 1}` : `they are the input's distinct purls from position ${g.sent + 1} on`;
     out.push(
-      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${one ? "it is" : "they are"} not checked and not clean; ${where}, ${readOrder}, and data.not_sent_purls lists ${one ? "it" : "them"} whole with full: true (past the structured result's budget, that list can be cut by default): call ${retry} ${one ? "it" : "them"}${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
+      `${plural(notSent, "purl was", "purls were")} NOT sent (not_sent_reason ${g.not_sent_reason}: ${g.not_sent_detail}), so ${one ? "it is" : "they are"} not checked and not clean; ${where}, ${readOrder}, and data.not_sent_purls lists ${one ? "it" : "them"} (past the structured result's budget it is left out whole by default, never cut short${positions ? `, and ${one ? "that position is" : "those positions are"} coverage.sent + 1 to coverage.distinct_purls; with full: true it is always there` : ": the same call with full: true always returns it"}): call ${retry} ${one ? "it" : "them"}${g.not_sent_reason === "request_failed" ? "" : " after a minute"}.`,
     );
   }
   return out;
@@ -453,6 +458,19 @@ export const Row = z.looseObject({
   undetermined: opt(z.array(z.looseObject({ cve_id: opt(z.string()) }))),
   capped: opt(z.boolean()),
   candidates_capped: opt(z.boolean()),
+  // #3132: set by this server's structured cut (check_sbom.ts SBOM_ROW_LEVELS), never by the API.
+  matches_truncated: z
+    .strictObject({
+      total: z.number().int().min(0),
+      returned: z.number().int().min(0),
+      kev_listed_cve_ids: z.array(z.string()).optional(),
+      ransomware_cve_ids: z.array(z.string()).optional(),
+      fixed_in_versions: z.array(z.string()).optional(),
+    })
+    .optional()
+    .describe(
+      "Present only on a row whose matches the structured result's cut (DATA CUT) shortened or left out: total, the row's matches in the answer; returned, the ones data keeps (its first, highest effective_score first); and, while they fit, of all its matches, the CVE IDs KEV-listed (kev_listed_cve_ids) or used in ransomware (ransomware_cve_ids), and the distinct fixed_in versions (fixed_in_versions). The same call with full: true returns every match.",
+    ),
 });
 
 // The batch route's answer, as data carries it: its fields, merged over the batches.

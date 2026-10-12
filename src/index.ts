@@ -87,7 +87,7 @@ import {
   type TextCut,
   type Truncated,
 } from "./textBudget.js";
-import { SHODAN_ATTRIBUTION, SHODAN_OWNERSHIP } from "./requiredText.js";
+import { PATCH_AVAILABLE_WITHDRAWN, SHODAN_ATTRIBUTION, SHODAN_OWNERSHIP } from "./requiredText.js";
 
 // The package actually running, read from the package.json that ships beside dist/. The MCP
 // handshake (serverInfo) and the User-Agent both carry its name and version, so the API's
@@ -453,7 +453,9 @@ function unexpectedShape(tool: string, error: z.ZodError): ToolResult {
 // Every success is checked against the tool's own outputSchema before it is returned.
 export const checked = (tool: string, schema: z.ZodType, r: ToolResult): ToolResult => {
   if (r.isError) return r;
-  const p = schema.safeParse(r.structuredContent);
+  // #3121: the published schema's success branch is open; this server's own answers are held to
+  // the closed one.
+  const p = (STRICT.get(schema) ?? schema).safeParse(r.structuredContent);
   return p.success ? r : unexpectedShape(tool, p.error);
 };
 
@@ -2497,6 +2499,20 @@ const TRUNCATED = z.record(
   z.strictObject({ total: z.number().int().min(0), returned: z.number().int().min(0), thinned: z.literal(true).optional() }),
 );
 
+// #3121: the success branch is published open to fields it does not name, and this server holds
+// its own answers to the closed one (STRICT, read by checked). Through 3.0.0 both branches were
+// closed (additionalProperties false), and a client validates against the outputSchema it listed,
+// which the hosted endpoint never tells it to list again (stateless, listChanged false): a Claude
+// Code session that listed the tools under 2.7.2 failed its first check_sbom call once 3.0.0 went
+// live, "Structured content does not match the tool's output schema: data must NOT have additional
+// properties" (ajv's root is "data"; 3.0.0 added data_truncated and truncated to every success),
+// until it reconnected. So a field added beside them in a minor release would break every such
+// session too, against the README's semver promise. Opening the success branch keeps such a field
+// additive for a client holding an older list; the failure branch stays closed (a failure is never
+// read as data), and data keeps each tool's own schema. The suite validates answers against the
+// closed branch (test/strict-output.mjs), and checked() does here, so a field this server adds
+// without naming it in the schema still fails, as it did when the branch was closed.
+const STRICT = new WeakMap<z.ZodType, z.ZodType>();
 export function envelopeSchema(o: {
   data: z.ZodType;
   coverage: z.ZodType | null;
@@ -2504,9 +2520,17 @@ export function envelopeSchema(o: {
   extra?: Record<string, z.ZodType>;
   error?: z.ZodType;
 }) {
+  const published = envelopeOf(o, z.looseObject);
+  STRICT.set(published, envelopeOf(o, z.strictObject));
+  return published;
+}
+function envelopeOf(
+  o: Parameters<typeof envelopeSchema>[0],
+  success: typeof z.looseObject | typeof z.strictObject,
+) {
   const coverage = o.coverage ? o.coverage.nullable() : z.null();
   return z.discriminatedUnion("state", [
-    z.strictObject({
+    success({
       state: z.enum(["measured", "not_assessed"]).describe(SUCCESS_STATE),
       measured_at: Instant.nullable().describe("When the underlying observation was made, as the API states it; null when the answer does not say or holds no observation."),
       method: z.string().describe("How the numbers were produced."),
@@ -2555,9 +2579,9 @@ const CPE_CONFIGURATIONS_DESCRIPTION =
 // templates, internal/cve/fix_statement.go). The last two are the record's own words: get_cve
 // relays the solution's sentence as cna_solution, and the description is in the record.
 // One constant string each (the site's tool-claims check folds only constant strings).
-const PATCH_EVIDENCE_LABELS = ["vendor_patch", "fixed_version", "release_reference", "vendor_advisory_fix", "nvd_patch_reference", "cna_patch_reference", "cna_solution", "description_fix"] as const;
+const PATCH_EVIDENCE_LABELS = ["vendor_patch", "fixed_version", "release_reference", "vendor_advisory_fix", "nvd_patch_reference", "cna_patch_reference", "cna_solution", "description_fix", "vendor_fix_released"] as const;
 const PATCH_EVIDENCE_SOURCES =
-  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range), release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions, written by its CNA, that names a fixed version; relayed as cna_solution) and description_fix (a sentence of the CVE description that names a fixed version)";
+  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range), release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions or workarounds, written by its CNA, that names a fixed version; relayed as cna_solution), description_fix (a sentence of the CVE description that names a fixed version) and vendor_fix_released (the vendor states, in the CVE record, that a fix is released and the record names no fixed version; check the vendor's advisory)";
 // #3070, #3076: what the CVE record's CNA wrote, as GET /cves/:id serves it (core-backend
 // cna_record.go). One constant string each.
 const CVE_CNA_ABSENT =
@@ -2568,14 +2592,25 @@ const DATE_PUBLIC_FIELD =
 const DATE_PUBLIC_SOURCE_FIELD = "Whose date date_public is: cna, the CVE record's CNA. Absent whenever date_public is.";
 const CNA_FIELD = "The CNA that wrote the CVE record: short_name as the record gives it, and name, the CVE Program's name for that CNA (the short name where its list does not hold it). " + CVE_CNA_ABSENT;
 const CNA_SOLUTION_FIELD =
-  "The sentence of the CVE record's solutions, written by its CNA, that names a released fix, verbatim: what makes cna_solution patch evidence. It is the CNA's text, not EchelonGraph's advice. Absent where the record's solutions name no fixed version, as well as where the field itself is: " +
+  "The sentence of the CVE record's solutions or workarounds, written by its CNA, that names a released fix, verbatim: what makes cna_solution patch evidence. It is the CNA's text, not EchelonGraph's advice. Absent where the record's solutions name no fixed version, as well as where the field itself is: " +
   CVE_CNA_ABSENT;
 // #2842: what the descriptions say; the sources, and that patch_available once true is never set
 // back, are the outputSchema's (PATCH_AVAILABLE_FIELD, PATCH_EVIDENCE_FIELD).
 const PATCH_AVAILABLE_DESCRIPTION =
-  "patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names its sources, strongest first. patch_available false means no fix evidence is on record, which is not a finding that no fix exists.";
+  "patch_available is true when EchelonGraph holds, or once held, fix evidence for the CVE; patch_evidence is what it holds now, strongest first. patch_available false means no fix evidence is on record, which is not a finding that no fix exists.";
+// #3138: true says evidence was held at some point, not that it is held now: the sources held now
+// are patch_evidence's, and true beside an empty one is a withdrawal (requiredText.ts
+// PATCH_AVAILABLE_WITHDRAWN, pinned there). #3138's review: round 1 changed the field text only,
+// and this sentence, in get_cve's and search_cves' descriptions, still said true means
+// EchelonGraph holds evidence; it now says "holds, or once held", in 9 more characters than it
+// had, as get_cve's description had 9 left under #2924's headroom of 100 below the 2,048 cut
+// (get_cve 1,948 characters, search_cves 1,807; test/prompts-resources.test.mjs holds the
+// headroom, test/client-cut.mjs (b) the cut, and marketing-site lib/mcpToolClaims.test.ts the
+// word "for" in get_cve's description, which its /pulse/mcp row uses).
 const PATCH_AVAILABLE_FIELD =
-  "true: EchelonGraph holds evidence of a fix for the CVE, its sources named in patch_evidence. false: no fix evidence is on record, which is not a finding that no fix exists. Once true it is never set back to false. An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either.";
+  "true: EchelonGraph holds, or once held, evidence of a fix for the CVE; patch_evidence names the sources it holds now. " +
+  PATCH_AVAILABLE_WITHDRAWN +
+  " false: no fix evidence is on record, which is not a finding that no fix exists. An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either.";
 const PATCH_EVIDENCE_FIELD =
   "The sources of the fix evidence EchelonGraph holds for the CVE, strongest first: " +
   PATCH_EVIDENCE_SOURCES +

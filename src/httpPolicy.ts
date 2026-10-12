@@ -496,7 +496,22 @@ export function uaFamily(ua: string | undefined): string {
 // method name), so the message is never logged. It is matched against the SDK's own fixed
 // prefixes and only the matching label is logged; anything unrecognised is "other". A
 // ProtocolError also carries its numeric JSON-RPC code, which is content-free.
+//
+// #2923 (2.7.1 audit, 2026-10-10): 78 of 78 production lines were "other": the list held the legacy
+// transport's messages, not those of the bundled SDK's createMcpHandler (@modelcontextprotocol/server
+// 2.1.0 dist/index.mjs), which reports "Rejected inbound request (<cell>): …" (:1346, :1384, :1458),
+// "Rejected 2025-era request on a modern-only endpoint (<cell>): …" (:1438), an
+// UnsupportedProtocolVersionError, "Unsupported protocol version: <requested>", code -32022 (:1338;
+// src-D-y6h4N7.mjs:3693), and a MissingRequiredClientCapabilityError, "Missing required client
+// capabilities: …" (:1357; src-D-y6h4N7.mjs:3727). The legacy transport's own wording is
+// "Bad Request: Unsupported protocol version: …" (index.mjs:896). All of these lead the list, each
+// with its fixed prefix only (the cell and the rest can name the client's method or version).
 const HANDLER_ERROR_CLASSES: ReadonlyArray<readonly [string, string]> = [
+  ["Rejected 2025-era request on a modern-only endpoint (", "rejected_legacy_on_modern_only"],
+  ["Rejected inbound request (", "rejected_inbound_request"],
+  ["Unsupported protocol version", "unsupported_protocol_version"],
+  ["Bad Request: Unsupported protocol version", "unsupported_protocol_version"],
+  ["Missing required client capabilities", "missing_client_capability"],
   ["Not Acceptable", "not_acceptable"],
   ["Unsupported Media Type", "unsupported_media_type"],
   ["Method not allowed", "method_not_allowed"],

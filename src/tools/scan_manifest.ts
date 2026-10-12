@@ -4,7 +4,8 @@
 //
 // Where the files are read: HERE, in this MCP server, as check_sbom reads an SBOM (on the caller's
 // machine when it runs from npm; on EchelonGraph's hosted endpoint when it is called there, whose
-// body cap admits a large body for this tool and check_sbom alone, httpPolicy.ts). The caller
+// body cap admits a large body for a tools/call of this tool or check_sbom, or a prompts/get of
+// sbom_review, and nothing else (httpPolicy.ts LARGE_BODY_TARGETS, #3149)). The caller
 // passes each file's text; this server never reads the caller's filesystem. Each file is read
 // into purls by its reader (manifests/), and only the distinct purls are sent, in POST bodies of
 // at most MAX_COMPONENTS (never a URL, #1983). Filenames, file contents, comments, hashes and
@@ -71,12 +72,23 @@ export const SCAN_MANIFEST_DESCRIPTION =
 
 // The text's cut: check_sbom's rows and levels, and data.not_checked beside them, cut to its
 // first TEXT_NOT_CHECKED once the first level does not fit (structuredContent.data keeps it whole).
+// #3132's second review: check_sbom's sentence on not_sent_purls says a second call can send them
+// without reading the list, from their positions in the input; here those positions index purls
+// read from the files, which a client cannot rebuild, so the sentence names full: true instead.
 export function manifestText(sent: number): TextCut {
   const sbom = sbomText(sent);
   return {
     ...sbom,
     sides: [
-      ...(sbom.sides ?? []),
+      ...(sbom.sides ?? []).map((side) =>
+        side.list === "not_sent_purls"
+          ? {
+              ...side,
+              said: (_inText: number, total: number) =>
+                `The ${total} purls not sent are the purls this tool read from position ${sent + 1} on, counted in the order the note gives for them; structuredContent.data.not_sent_purls lists every one with full: true.`,
+            }
+          : side,
+      ),
       {
         list: "not_checked",
         cap: TEXT_NOT_CHECKED,
@@ -190,7 +202,7 @@ function noteFor(head: string, x: Read, d: object | null, g: Sending): { note: s
       `${plural(nc, "entry was", "entries were")} NOT checked and ${nc === 1 ? "is" : "are"} not clean (${parts.join(", ")}): data.not_checked lists each with its file, line and reason, whole with full: true (past the structured result's budget, that list can be cut by default), and none was sent to the API.`,
     );
   }
-  out.push(...sendingSentences(g, x.purls.length, READ_ORDER, "check_sbom with purls set to"));
+  out.push(...sendingSentences(g, x.purls.length, READ_ORDER, "check_sbom with purls set to", false));
   if (d === null) return { note: out.join(" "), assessed: 0 };
   const v = verdictSentences(d, g);
   out.push(...v.sentences);

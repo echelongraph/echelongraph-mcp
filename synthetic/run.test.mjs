@@ -86,6 +86,91 @@ BODIES["/api/v1/public/cves/match"] = {
   assessed: true, candidate_count: 1, candidates_capped: false, capped: false, count: 0, excluded: [], excluded_count: 0, match_layer: "registry", not_assessed_reason: "",
   product: "", product_named_count: 0, undecidable_excluded_count: 0, undecided_candidate_count: 0, vendor: "", vendor_advisory_count: 0, version: "4.17.20", matches: [],
 };
+// #3135: the matcher-verdict probes, pinned here where they are metric labels and values, and read off
+// the module (as PROMPT_PROBES is below) so a probes.mjs without them fails the tests that read them,
+// each by name, instead of failing this whole file at import.
+const MAYAN_CVE = "CVE-2025-14692";
+const MAYAN_FIXED_IN = "4.10.2";
+const MAGENTO = "magento/community-edition";
+const COSMICSTING_CVE = "CVE-2024-34102";
+const SESSIONREAPER_CVE = "CVE-2025-54236";
+const MALI_CVE = "CVE-2022-38181";
+const VERDICT_LABELS = [
+  "verdict:pypi/mayan-edms@4.9.0",
+  `verdict:packagist/${MAGENTO}@2.4.4-p13`,
+  `verdict:packagist/${MAGENTO}@2.4.5-p2`,
+  "verdict:cpe/midgard_gpu_kernel_driver@r20p0",
+];
+const VERDICT_PROBES = probeTable.VERDICT_PROBES;
+// #3135: the Mali probe is pending until #3131 is deployed: listed, tested, not called. The lines a run
+// writes are the active labels. These tests follow whichever state probes.mjs is in (pending: no Mali
+// line; enabled: a Mali line, called and judged), so enabling it is one edit there and a redeploy;
+// a test that needs the other state sets it for its own run and puts it back.
+const EXPECT_PENDING = probeTable.EXPECT_PENDING ?? {};
+const MALI_LABEL = "verdict:cpe/midgard_gpu_kernel_driver@r20p0";
+const MALI_PENDING_REASON = "#3131 not yet deployed";
+const MALI_PENDING = Boolean(EXPECT_PENDING[MALI_LABEL]);
+const activeVerdicts = () => VERDICT_LABELS.filter((l) => !EXPECT_PENDING[l]);
+async function withPendingAs(label, reason, fn) {
+  const was = EXPECT_PENDING[label];
+  if (reason === undefined) delete EXPECT_PENDING[label];
+  else EXPECT_PENDING[label] = reason;
+  try {
+    return await fn();
+  } finally {
+    if (was === undefined) delete EXPECT_PENDING[label];
+    else EXPECT_PENDING[label] = was;
+  }
+}
+const withPendingEnabled = (label, fn) => withPendingAs(label, undefined, fn);
+// #3135: GET /cves/match for each VERDICT_PROBES lookup, as production answered it on 2026-10-11
+// (the hosted endpoint at 3.0.0), trimmed to what the expects read; the stub picks one by the request
+// headers check_affected sends (X-EG-Ecosystem, X-EG-Package, X-EG-Product, X-EG-Version). Its
+// `regressed` set answers as the rule before each fix would: fixed_in_rule (#3074: the holding
+// interval's own bound, 4.9.7, no detail), comparator (#3101: p13 below p9 and p2 above p14, so
+// CosmicSting matches 2.4.4-p13 and SessionReaper misses 2.4.5-p2), cpe_comparator (#3131: r20p0
+// outside [r4p0, r31p0], which is production's answer until #3131 is deployed).
+const registryAnswer = (ecosystem, pkg, version, matches, notAffected) => ({
+  assessed: true, ecosystem, ecosystem_recognised: true, package: pkg, version, match_layer: "registry", not_assessed_reason: "",
+  count: matches.length, capped: false, candidates_capped: false, degraded: false, undetermined_count: 0, undetermined: [], not_affected_count: notAffected,
+  cve_ids: matches.map((m) => m.cve_id), matches,
+});
+const registryMatch = (cve, extra) => ({
+  cve_id: cve, severity: "HIGH", cvss_v3_score: 7.5, kev_listed: false, ransomware: false, epss_score: 0.01, effective_score: 7.5, effective_severity: "HIGH", score_assessed: true,
+  match_method: "registry package", match_confidence: 0.95, vendor_unknown: false, version_evidence: "advisory_interval", ...extra,
+});
+const MAYAN_DETAIL = "fixed_in moved past the overlapping interval [0, 4.10.2) of the same record: the interval that holds this version, [4.9.0, 4.9.7), ends inside it, so its own bound is still affected";
+const VERDICT_ANSWERS = {
+  "PyPI|mayan-edms|4.9.0": (regressed) =>
+    registryAnswer("PyPI", "mayan-edms", "4.9.0", [
+      registryMatch(MAYAN_CVE, {
+        severity: "MEDIUM", cvss_v3_score: 6.1, effective_score: 6.1, effective_severity: "MEDIUM", matched_criteria: "pkg:pypi/mayan-edms", interval: { introduced: "4.9.0", fixed: "4.9.7" },
+        ...(regressed.has("fixed_in_rule") ? { fixed_in: "4.9.7" } : { fixed_in: MAYAN_FIXED_IN, fixed_in_detail: MAYAN_DETAIL }),
+      }),
+    ], 4),
+  [`Packagist|${MAGENTO}|2.4.4-p13`]: (regressed) =>
+    registryAnswer("Packagist", MAGENTO, "2.4.4-p13", [
+      registryMatch("CVE-2025-54236", { kev_listed: true, fixed_in: null, fixed_in_reason: "the interval that holds this version ends at last_affected 2.4.4-p15; no fixed version is recorded" }),
+      ...(regressed.has("comparator") ? [registryMatch(COSMICSTING_CVE, { kev_listed: true, interval: { introduced: "0", fixed: "2.4.4-p9" }, fixed_in: "2.4.4-p9" })] : []),
+    ], 327),
+  [`Packagist|${MAGENTO}|2.4.5-p2`]: (regressed) =>
+    registryAnswer("Packagist", MAGENTO, "2.4.5-p2", [
+      registryMatch(COSMICSTING_CVE, { kev_listed: true, interval: { introduced: "2.4.5-p1", fixed: "2.4.5-p8" }, fixed_in: "2.4.5-p8" }),
+      ...(regressed.has("comparator") ? [] : [registryMatch(SESSIONREAPER_CVE, { kev_listed: true, fixed_in: null, fixed_in_reason: "the interval that holds this version ends at last_affected 2.4.5-p14; no fixed version is recorded" })]),
+    ], 229),
+  "|midgard_gpu_kernel_driver|r20p0": (regressed) => {
+    const cpe = (cve) => ({ cve_id: cve, severity: "MEDIUM", cvss_v3_score: 5.5, kev_listed: true, ransomware: false, score_assessed: true, cpe_vendor: "arm", vendor_unknown: false, match_method: "cpe", matched_criteria: "cpe:2.3:o:arm:midgard_gpu_kernel_driver:*:*:*:*:*:*:*:*" });
+    const matches = [cpe("CVE-2023-4211"), ...(regressed.has("cpe_comparator") ? [] : [cpe(MALI_CVE)])];
+    return { assessed: true, product: "midgard_gpu_kernel_driver", version: "r20p0", vendor: "", match_layer: "cpe", not_assessed_reason: "", count: matches.length, capped: false, candidates_capped: false, excluded: [], excluded_count: 0, matches };
+  },
+};
+const verdictAnswerFor = (headers, regressed) => {
+  // The tool percent-encodes each value (check_affected.ts), so magento/community-edition arrives as
+  // magento%2Fcommunity-edition.
+  const h = (n) => decodeURIComponent(headers[n] ?? "");
+  const key = headers["x-eg-product"] ? `|${h("x-eg-product")}|${h("x-eg-version")}` : `${h("x-eg-ecosystem")}|${h("x-eg-package")}|${h("x-eg-version")}`;
+  return VERDICT_ANSWERS[key]?.(regressed);
+};
 BODIES[BATCH_PATH] = CALL_ANSWER;
 // #2834, #2836: the rows production served for check_sbom's two probe purls on 2026-10-11, trimmed to
 // what EXPECT.check_sbom reads. A batch carrying either gets its row after CALL_ANSWER's two, so
@@ -226,7 +311,7 @@ async function startStub() {
       return;
     }
     const { pathname } = new URL(req.url, "http://stub");
-    const body = BODIES[req.url] ?? BODIES[pathname];
+    const body = (pathname === "/api/v1/public/cves/match" ? verdictAnswerFor(req.headers, state.regressed) : undefined) ?? BODIES[req.url] ?? BODIES[pathname];
     if (body === undefined) {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("404 page not found\n");
@@ -806,6 +891,103 @@ describe("#2774: what the hosted leg's check_sbom probe sends, and must show", (
   });
 });
 
+// #3135: VERDICT_PROBES, each expect both polarities, against the stub's production-shaped answers and
+// the rule before each fix.
+describe("#3135: what the matcher-verdict probes must show", () => {
+  const sc = (label, regressed = []) => {
+    const p = VERDICT_PROBES.find((v) => v.label === label);
+    const a = p.arguments;
+    const key = a.product ? `|${a.product}|${a.version}` : `${a.ecosystem}|${a.package}|${a.version}`;
+    return { state: "measured", data: VERDICT_ANSWERS[key](new Set(regressed)) };
+  };
+  const expectOf = (label) => VERDICT_PROBES.find((v) => v.label === label).expect;
+  const [MAYAN, P13, P2, MALI] = VERDICT_LABELS;
+
+  it("VERDICT_PROBES is a list of check_affected calls under the four pinned labels, with the arguments verified live", () => {
+    assert.ok(Array.isArray(VERDICT_PROBES), `probes.mjs exports no VERDICT_PROBES list (it is ${typeof VERDICT_PROBES})`);
+    assert.deepEqual(VERDICT_PROBES.map((v) => v.label), VERDICT_LABELS);
+    assert.deepEqual(VERDICT_PROBES.map((v) => [v.tool, v.arguments]), [
+      ["check_affected", { ecosystem: "PyPI", package: "mayan-edms", version: "4.9.0" }],
+      ["check_affected", { ecosystem: "Packagist", package: MAGENTO, version: "2.4.4-p13" }],
+      ["check_affected", { ecosystem: "Packagist", package: MAGENTO, version: "2.4.5-p2" }],
+      ["check_affected", { product: "midgard_gpu_kernel_driver", version: "r20p0" }],
+    ]);
+    for (const v of VERDICT_PROBES) assert.equal(typeof v.expect, "function", v.label);
+  });
+  it("met: production's answers as the fixed rules give them (#3074, #3101, #3131)", () => {
+    for (const label of VERDICT_LABELS) assert.equal(expectOf(label)(sc(label)), undefined, label);
+  });
+  it("#3074 unmet: the per-range rule's fixed_in 4.9.7, a version the same record still holds affected", () => {
+    assert.equal(
+      expectOf(MAYAN)(sc(MAYAN, ["fixed_in_rule"])),
+      `PyPI mayan-edms 4.9.0 ${MAYAN_CVE} fixed_in "4.9.7", fixed_in_detail null (interval {"introduced":"4.9.0","fixed":"4.9.7"}, fixed_in_reason null); want a version above 4.9.7 with fixed_in_detail (#3074)`,
+    );
+  });
+  it("#3135: the mayan probe wants fixed_in above the holding range's 4.9.7 with a detail, not 4.10.2 exactly", () => {
+    const s = sc(MAYAN);
+    const m = s.data.matches[0];
+    const withFix = (fixed_in, extra = {}) => ({ ...s, data: { ...s.data, matches: [{ ...m, fixed_in, ...extra }] } });
+    assert.equal(probeTable.MAYAN_HOLDING_FIXED, "4.9.7");
+    // A later advisory overlapping [0, 4.10.2) moves the walk past it: no regression, so no page.
+    for (const later of ["4.10.2", "4.10.3", "4.11", "5.0.0", "4.9.8", "4.9.7.1"]) assert.equal(expectOf(MAYAN)(withFix(later)), undefined, later);
+    // At or below the holding bound, or no version it can order, is unmet.
+    for (const bad of ["4.9.7", "4.9.7.0", "4.9.6", "4.9.0", "", "unknown", null]) {
+      assert.match(expectOf(MAYAN)(withFix(bad)), /; want a version above 4\.9\.7 with fixed_in_detail \(#3074\)$/, String(bad));
+    }
+    assert.match(expectOf(MAYAN)({ ...s, data: { ...s.data, matches: [(({ fixed_in, ...rest }) => rest)(m)] } }), /fixed_in absent, /);
+  });
+  it("#3135: releaseAbove orders the dotted numeric release and refuses what has none", () => {
+    const { releaseAbove } = probeTable;
+    assert.equal(typeof releaseAbove, "function", "probes.mjs exports no releaseAbove");
+    assert.deepEqual(
+      [["4.10.2", "4.9.7"], ["4.9.10", "4.9.7"], ["4.9.7", "4.9.7"], ["4.9.7.0", "4.9.7"], ["4.9.7", "4.10.2"], ["v5", "4.9.7"], ["4.9.7.post1", "4.9.7"], ["x", "4.9.7"], [undefined, "4.9.7"]].map(([a, b]) => releaseAbove(a, b)),
+      [true, true, false, false, false, true, false, undefined, undefined],
+    );
+  });
+  it("#3074 unmet, each named: 4.10.2 without its detail, the match cut from matches, no match, not assessed", () => {
+    const s = sc(MAYAN);
+    const m = s.data.matches[0];
+    const without = { ...s, data: { ...s.data, matches: [{ ...m, fixed_in_detail: "  " }] } };
+    assert.match(expectOf(MAYAN)(without), /fixed_in "4\.10\.2", fixed_in_detail " {2}" .*want a version above 4\.9\.7 with fixed_in_detail/);
+    assert.match(expectOf(MAYAN)({ ...s, data: { ...s.data, matches: [] } }), /CVE-2025-14692 is in cve_ids but not in matches/);
+    assert.match(expectOf(MAYAN)({ ...s, data: { ...s.data, matches: [], cve_ids: [] } }), /^PyPI mayan-edms 4\.9\.0: CVE-2025-14692 not matched \(assessed true/);
+    assert.match(expectOf(MAYAN)({ state: "not_assessed", data: { assessed: false, not_assessed_reason: "package_not_in_advisory_corpus" } }), /not assessed \(assessed false, .*not_assessed_reason "package_not_in_advisory_corpus"\); want CVE-2025-14692 matched$/);
+  });
+  it("#3101 unmet: text order matches CosmicSting to 2.4.4-p13 and misses SessionReaper at 2.4.5-p2", () => {
+    assert.equal(
+      expectOf(P13)(sc(P13, ["comparator"])),
+      `Packagist ${MAGENTO} 2.4.4-p13: ${COSMICSTING_CVE} matched (fixed_in "2.4.4-p9", interval {"introduced":"0","fixed":"2.4.4-p9"}); want it not affected`,
+    );
+    assert.match(expectOf(P2)(sc(P2, ["comparator"])), new RegExp(`^Packagist ${MAGENTO} 2\\.4\\.5-p2: ${SESSIONREAPER_CVE} not matched \\(assessed true, match_layer "registry", count 1, .*\\); want it matched$`));
+  });
+  it("#3101: an absence is read only from an answer that looked at everything; undetermined is not 'not affected'", () => {
+    const s = sc(P13);
+    for (const [over, why] of [[{ assessed: false }, "assessed false"], [{ capped: true }, "capped true"], [{ candidates_capped: true }, "candidates_capped true"], [{ degraded: true }, "degraded true"]]) {
+      assert.match(expectOf(P13)({ ...s, data: { ...s.data, ...over } }), new RegExp(`did not look at every candidate \\(.*${why.replace(" ", " ")}.*\\), so ${COSMICSTING_CVE}'s absence is not a finding$`), why);
+    }
+    const und = { ...s, data: { ...s.data, undetermined_count: 1, undetermined: [{ cve_id: COSMICSTING_CVE, reason: "version_undecidable" }] } };
+    assert.equal(expectOf(P13)(und), `Packagist ${MAGENTO} 2.4.4-p13: ${COSMICSTING_CVE} undetermined ("version_undecidable"); want it not affected`);
+    // Matched, though cut from matches: cve_ids names every match.
+    const cut = { ...s, data: { ...s.data, cve_ids: [...s.data.cve_ids, COSMICSTING_CVE] } };
+    assert.match(expectOf(P13)(cut), /CVE-2024-34102 matched \(fixed_in null, interval null\); want it not affected$/);
+  });
+  it("#3101: a presence is read from cve_ids too, which names every match when matches is cut", () => {
+    const s = sc(P2);
+    assert.equal(expectOf(P2)({ ...s, data: { ...s.data, matches: s.data.matches.slice(0, 1) } }), undefined);
+  });
+  it("#3135: the Mali probe is a separate VERDICT_PROBES entry, pending (not called) until #3131 is deployed, then enabled by deleting its EXPECT_PENDING entry", () => {
+    // Pending as shipped; enabled, the table is empty. Either way nothing else is ever pending.
+    assert.deepEqual({ ...EXPECT_PENDING }, MALI_PENDING ? { [MALI_LABEL]: MALI_PENDING_REASON } : {}, "EXPECT_PENDING names only the Mali probe, with its reason, or nothing once it is enabled");
+    assert.equal(MALI, MALI_LABEL);
+    assert.equal(probeTable.MALI_LABEL, MALI_LABEL);
+    for (const l of VERDICT_LABELS.filter((x) => x !== MALI_LABEL)) assert.equal(EXPECT_PENDING[l], undefined, `${l} must never be pending`);
+  });
+  it("#3131 unmet: r20p0 outside [r4p0, r31p0] — production's answer until #3131 is deployed", () => {
+    assert.match(expectOf(MALI)(sc(MALI, ["cpe_comparator"])), /^midgard_gpu_kernel_driver r20p0: CVE-2022-38181 not matched \(assessed true, match_layer "cpe", count 1, capped false, candidates_capped false, degraded null, not_assessed_reason null\); want it matched$/);
+    assert.equal(MALI_CVE, "CVE-2022-38181");
+  });
+});
+
 describe("judging one result", () => {
   const schema = {
     type: "object",
@@ -978,7 +1160,9 @@ async function startHttpEntry(apiBase, extraEnv = {}) {
 // instead of failing this whole file at import.
 const PROMPT_LABELS = ["prompt:triage_cve", "prompt:workload_triage"];
 const PROMPT_PROBES = probeTable.PROMPT_PROBES;
-const EXTRAS = [...PROMPT_LABELS, RESOURCE_PROBE.label];
+// #3135: the matcher-verdict lines come first, after the tools and before the prompts; a pending one
+// writes none.
+const EXTRAS = [...activeVerdicts(), ...PROMPT_LABELS, RESOURCE_PROBE.label];
 
 describe("#2737: the hosted leg over Streamable HTTP", () => {
   let stub, srv;
@@ -1000,7 +1184,15 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       stub.state.seen.length = 0;
       r = await run(stub, { remoteUrl: srv.url });
     });
-    it("every published tool, both prompts and the resource succeed on both eras over http", () => {
+    it("#3135: the Mali verdict follows EXPECT_PENDING: pending, it writes no line on either era, so it cannot page; enabled, one http line per era, and it passes", () => {
+      const mali = r.probes.filter((l) => l.tool === MALI_LABEL);
+      if (MALI_PENDING) assert.equal(mali.length, 0, JSON.stringify(mali));
+      else {
+        assert.deepEqual(mali.map((l) => [l.transport, l.era, l.outcome]).sort(), [[HTTP, LEGACY, "success"], [HTTP, MODERN, "success"]].sort(), JSON.stringify(mali));
+      }
+      assert.equal(r.exitCode, 0);
+    });
+    it("every published tool, the active matcher verdicts (#3135), both prompts and the resource succeed on both eras over http", () => {
       for (const era of [MODERN, LEGACY]) {
         for (const tool of [...PUBLISHED, ...EXTRAS]) {
           const l = r.probes.find((p) => p.transport === HTTP && p.tool === tool && p.era === era);
@@ -1023,7 +1215,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       assert.equal(new Set(keys).size, keys.length, "a (tool, era, transport) reported twice");
       const stdio = r.probes.filter((l) => l.transport === STDIO);
       assert.equal(stdio.length, 2 * PUBLISHED.length);
-      assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the prompt and resource probes are the hosted leg's");
+      assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the verdict, prompt and resource probes are the hosted leg's");
       const http = r.probes.filter((l) => l.transport === HTTP);
       for (const x of EXTRAS) assert.equal(http.filter((l) => l.tool === x).length, 2, `${x}: want one http line per era`);
       assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length));
@@ -1154,7 +1346,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
     assert.ok(!sent.includes("injected") && !sent.includes("9.9"), sent);
   });
 
-  it("an API answering 500 fails every published tool over http with state_failed; the prompts and the resource make no API call and still pass", async () => {
+  it("an API answering 500 fails every published tool and every matcher verdict (#3135) over http with state_failed; the prompts and the resource make no API call and still pass", async () => {
     stub.state.mode = "500";
     const r = await runHttp();
     stub.state.mode = "ok";
@@ -1165,10 +1357,78 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         assert.equal(l.outcome, "failure", `${tool} [${era}]`);
         assert.equal(l.reason, AFTER[tool] ? "no_valid_probe_input" : "state_failed", `${tool} [${era}]: ${JSON.stringify(l)}`);
       }
-      for (const x of EXTRAS) assert.equal(r.of(x, era)?.outcome, "success", `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
+      // A verdict is a check_affected call: the API's 500 fails it as it fails the tool's own probe.
+      for (const x of activeVerdicts()) assert.deepEqual([r.of(x, era)?.outcome, r.of(x, era)?.reason], ["failure", "state_failed"], `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
+      if (MALI_PENDING) assert.equal(r.of(MALI_LABEL, era), undefined, "a pending verdict is never called");
+      for (const x of EXTRAS.filter((e) => !VERDICT_LABELS.includes(e))) assert.equal(r.of(x, era)?.outcome, "success", `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
     }
     assert.equal(r.exitCode, 2);
     assert.deepEqual(r.complete[0].transports, [HTTP]);
+  });
+
+  // #3135: each rule before its fix, answered by the API, fails its own verdicts and nothing else:
+  // the answers fit check_affected's outputSchema, so only the expect can tell them apart.
+  // The cpe_comparator case runs with the Mali probe enabled (its entry out of EXPECT_PENDING), as it
+  // will be once #3131 is deployed.
+  for (const [regression, failing, saw] of [
+    ["fixed_in_rule", [VERDICT_LABELS[0]], /CVE-2025-14692 fixed_in "4\.9\.7", fixed_in_detail null .*want a version above 4\.9\.7 with fixed_in_detail \(#3074\)$/],
+    ["comparator", [VERDICT_LABELS[1], VERDICT_LABELS[2]], /CVE-2024-34102 matched \(fixed_in "2\.4\.4-p9".*want it not affected$|CVE-2025-54236 not matched .*want it matched$/],
+    ["cpe_comparator", [VERDICT_LABELS[3]], /midgard_gpu_kernel_driver r20p0: CVE-2022-38181 not matched \(assessed true, match_layer "cpe", count 1,.*want it matched$/],
+  ]) {
+    it(`#3135: an API with the ${regression} regression fails ${failing.join(" and ")} over http, expectation_unmet, and nothing else`, async () => {
+      stub.state.mode = "ok";
+      stub.state.regressed = new Set([regression]);
+      let r;
+      try {
+        r = regression === "cpe_comparator" ? await withPendingEnabled(MALI_LABEL, () => runHttp({ eras: [LEGACY] })) : await runHttp({ eras: [LEGACY] });
+      } finally {
+        stub.state.regressed = new Set();
+      }
+      for (const label of failing) {
+        const l = r.of(label, LEGACY);
+        assert.deepEqual([l?.outcome, l?.reason, l?.state, l?.transport], ["failure", "expectation_unmet", "measured", HTTP], JSON.stringify(l ?? "no line"));
+        assert.match(l.detail, saw, l.detail);
+      }
+      for (const x of [...PUBLISHED, ...EXTRAS.filter((e) => !failing.includes(e))]) assert.equal(r.of(x, LEGACY)?.outcome, "success", `${x}: ${JSON.stringify(r.of(x, LEGACY) ?? "no line")}`);
+      assert.equal(r.exitCode, 2);
+    });
+  }
+
+  // Production's answer before #3131 (the cpe_comparator regression), with the Mali probe pending:
+  // no Mali line, nothing pages. Run pending whatever probes.mjs says, and again as it says, so the
+  // state in force is the one judged: pending pages nothing, enabled fails expectation_unmet.
+  const preCpe = async () => {
+    stub.state.mode = "ok";
+    stub.state.regressed = new Set(["cpe_comparator"]);
+    try {
+      return await runHttp({ eras: [LEGACY] });
+    } finally {
+      stub.state.regressed = new Set();
+    }
+  };
+  it("#3135: pending, production's answer before #3131 (the cpe_comparator regression) writes no Mali line and pages nothing", async () => {
+    const r = await withPendingAs(MALI_LABEL, MALI_PENDING_REASON, preCpe);
+    assert.equal(r.of(MALI_LABEL, LEGACY), undefined, JSON.stringify(r.of(MALI_LABEL, LEGACY)));
+    assert.equal(r.exitCode, 0, JSON.stringify(r.probes.filter((l) => l.outcome !== "success")));
+    assert.equal(Boolean(EXPECT_PENDING[MALI_LABEL]), MALI_PENDING, "probes.mjs's own state is put back");
+  });
+  it(`#3135: as probes.mjs ships it (Mali ${MALI_PENDING ? "pending" : "enabled"}), production's answer before #3131 ${MALI_PENDING ? "writes no Mali line and pages nothing" : "fails the Mali line, expectation_unmet"}`, async () => {
+    const r = await preCpe();
+    const l = r.of(MALI_LABEL, LEGACY);
+    if (MALI_PENDING) {
+      assert.equal(l, undefined, JSON.stringify(l));
+      assert.equal(r.exitCode, 0, JSON.stringify(r.probes.filter((x) => x.outcome !== "success")));
+    } else {
+      assert.deepEqual([l?.outcome, l?.reason], ["failure", "expectation_unmet"], JSON.stringify(l ?? "no line"));
+      assert.equal(r.exitCode, 2);
+    }
+  });
+
+  it("#3135: enabled (its EXPECT_PENDING entry deleted), the Mali verdict is called on both eras and passes on #3131's answer", async () => {
+    stub.state.mode = "ok";
+    const r = await withPendingEnabled(MALI_LABEL, () => runHttp());
+    for (const era of [MODERN, LEGACY]) assert.equal(r.of(MALI_LABEL, era)?.outcome, "success", `${era}: ${JSON.stringify(r.of(MALI_LABEL, era) ?? "no line")}`);
+    assert.equal(Boolean(EXPECT_PENDING[MALI_LABEL]), MALI_PENDING, "probes.mjs's own state is put back");
   });
 
   it("the deliberate-failure canary fails over http on both eras too", async () => {
@@ -1452,6 +1712,18 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
       for (const k of Object.keys(table)) assert.ok(names.has(k), `${label} names ${k}, which tools/list does not answer`);
     }
     for (const deps of Object.values(AFTER)) for (const d of deps) assert.ok(names.has(d), `AFTER waits on ${d}, which tools/list does not answer`);
+  });
+  it("#3135: every VERDICT_PROBES call is of a tool the hosted endpoint lists on both eras, with arguments its inputSchema accepts", () => {
+    assert.ok(Array.isArray(VERDICT_PROBES), "probes.mjs exports no VERDICT_PROBES list");
+    for (const era of [MODERN, LEGACY]) {
+      const tools = listed[`http ${era}`];
+      for (const v of VERDICT_PROBES) {
+        const tool = tools.find((t) => t.name === v.tool);
+        assert.ok(tool, `${v.label}: ${v.tool} is not listed (http ${era}), so it would read not_published on every run`);
+        const choice = chooseInput(v.tool, tool, SEEN, { [v.tool]: [v.arguments] });
+        assert.deepEqual([choice.index, choice.args], [0, v.arguments], `${v.label} (http ${era}): its arguments do not fit the inputSchema: ${JSON.stringify(choice)}`);
+      }
+    }
   });
   it("#2846: every PROMPT_PROBES prompt is listed by the hosted endpoint on both eras, sent only the arguments it declares and every one it requires", async () => {
     assert.ok(Array.isArray(PROMPT_PROBES), "probes.mjs exports no PROMPT_PROBES list");

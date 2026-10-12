@@ -29,7 +29,8 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
@@ -294,7 +295,7 @@ async function startStub() {
 
 const textBlocks = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
 const noteOf = (res) => textBlocks(res)[res.isError ? 0 : 1] ?? "";
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 const lock = (name) => ({ filename: "package-lock.json", content: fixture(name) });
 
 for (const era of [MODERN, "2025-06-18"]) {
@@ -460,7 +461,29 @@ for (const era of [MODERN, "2025-06-18"]) {
       const sc = res.structuredContent;
       assert.deepEqual([sc.coverage.sent, sc.coverage.not_sent, sc.coverage.not_sent_reason, sc.coverage.partial], [200, 1200, "time_budget", true]);
       assert.equal(sc.data.not_sent_purls[0], "pkg:pypi/pkg200@1.0.200");
-      assert.match(noteOf(res), /1200 purls were NOT sent .* from position 201 on, counted in the order this tool read them \(the files in the order given, each file's entries in the order the file lists them, each purl at its first place\), and data\.not_sent_purls lists them whole with full: true \(past the structured result's budget, that list can be cut by default\): call check_sbom with purls set to them after a minute\./);
+      assert.match(noteOf(res), /1200 purls were NOT sent .* from position 201 on, counted in the order this tool read them \(the files in the order given, each file's entries in the order the file lists them, each purl at its first place\), and data\.not_sent_purls lists them \(past the structured result's budget it is left out whole by default, never cut short: the same call with full: true always returns it\): call check_sbom with purls set to them after a minute\./);
+    });
+
+    // #3132's second review (nit 5): with not_sent_purls left out, the note gave the purls not sent
+    // as positions coverage.sent + 1 to coverage.distinct_purls, which for scan_manifest index purls
+    // this tool read from the files, which a client cannot rebuild without reading them the same
+    // way, and the TEXT CUT said a second call could send them without reading the list. The note now
+    // sends it to the same call with full: true instead. Control: the round-2 build gives the
+    // positions here.
+    it("#3132's second review: not_sent_purls left out by the cut, the note sends the client to full: true, not to positions it cannot map", async () => {
+      fresh({ 2: { status: 429, headers: { "retry-after": "60" }, body: { error: "component budget exceeded" } } });
+      const content = Array.from({ length: 1400 }, (_, i) => `pkg${i}==1.0.${i}`).join("\n");
+      const res = await call({ files: [{ filename: "requirements.txt", content }] });
+      const sc = res.structuredContent;
+      assert.equal(sc.coverage.not_sent, 1200);
+      assert.deepEqual(sc.truncated.not_sent_purls, { total: 1200, returned: 0 }, JSON.stringify(sc.truncated));
+      assert.deepEqual(sc.data.not_sent_purls, []);
+      const note = noteOf(res);
+      assert.doesNotMatch(note, /coverage\.sent \+ 1 to coverage\.distinct_purls/);
+      // The TEXT CUT's sentence on the list's first 10 in the text says the same.
+      assert.doesNotMatch(note, /a second call can send them without reading the list/);
+      assert.match(note, /The 1200 purls not sent are the purls this tool read from position 201 on, counted in the order the note gives for them; structuredContent\.data\.not_sent_purls lists every one with full: true\./);
+      assert.match(note, /data\.not_sent_purls lists them \(past the structured result's budget it is left out whole by default, never cut short: the same call with full: true always returns it\): call check_sbom with purls set to them after a minute\./);
     });
 
     // #3013's review: the note said "data.not_checked lists each with its file, line and reason"

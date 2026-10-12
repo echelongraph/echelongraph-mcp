@@ -47,7 +47,10 @@
 // https://mcp.echelongraph.io/mcp; unset, there is no hosted leg), the same run then speaks
 // Streamable HTTP to that endpoint (test/mcp-http-client.mjs's HttpMcpClient, the wire the
 // endpoint's own tests use) on both eras: lists the tools, calls every one with the same probe
-// table, judged the same way against the outputSchema the ENDPOINT advertises, then a prompts/get
+// table, judged the same way against the outputSchema the ENDPOINT advertises, then a tools/call per
+// probes.mjs VERDICT_PROBES entry not in EXPECT_PENDING (#3135: the matcher answers that tell #3074's
+// fixed_in walk and the #3101/#3131 comparators from the rules before them, tools "verdict:…"; the
+// #3131 Mali one is pending until #3131 is deployed), then a prompts/get
 // per probes.mjs PROMPT_PROBES entry (triage_cve with a CVE; workload_triage with source
 // kubernetes, #2846) and one resources/read (echelongraph://methodology), tools "prompt:triage_cve",
 // "prompt:workload_triage" and "resource:methodology". check_sbom is sent its 201 purls as
@@ -101,7 +104,7 @@ import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
-import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE } from "./probes.mjs";
+import { AFTER, EXPECT, EXPECT_PENDING, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE, VERDICT_PROBES } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
@@ -358,7 +361,9 @@ async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
 }
 
 // Probe one era of one session, however it is opened: one line per tool (and, with extras, one
-// per PROMPT_PROBES entry and one for the resource), with the leg's probe table and expectations.
+// per VERDICT_PROBES entry not in EXPECT_PENDING (#3135: a pending one is not called and writes no
+// line), one per PROMPT_PROBES entry and one for the resource), with the leg's probe table and
+// expectations.
 // onListed gets the opening exchange's instructions and the tools/list answer (#2842).
 export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, onListed = () => {}, extras = false, probes = PROBES, expect = EXPECT }) {
   let client;
@@ -406,6 +411,32 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
       emit({ tool: name, era, latency_ms: latency, input: choice.index, ...verdict });
     }
     if (extras) {
+      // #3135: the matcher's verdicts, each one call of a listed tool under its own label, judged as
+      // the tool's own probe is and then by its expect. Its arguments are checked against the tool's
+      // inputSchema before they are sent, as chooseInput checks a candidate. A label in EXPECT_PENDING
+      // is not called and writes no line: its fix is not deployed yet, and a line would page.
+      for (const v of VERDICT_PROBES) {
+        if (EXPECT_PENDING[v.label]) continue;
+        const tool = byName.get(v.tool);
+        if (!tool) {
+          emit({ tool: v.label, era, outcome: "not_published" });
+          continue;
+        }
+        const choice = chooseInput(v.tool, tool, seen, { [v.tool]: [v.arguments] });
+        if (!choice.args) {
+          emit({ tool: v.label, era, outcome: "failure", reason: choice.reason });
+          continue;
+        }
+        const t0 = performance.now();
+        let res;
+        try {
+          res = await client.callTool({ name: v.tool, arguments: choice.args });
+        } catch (e) {
+          emit({ tool: v.label, era, outcome: "failure", latency_ms: Math.round(performance.now() - t0), ...errorReason(e) });
+          continue;
+        }
+        emit({ tool: v.label, era, latency_ms: Math.round(performance.now() - t0), ...judge(res, tool, v.expect) });
+      }
       // One prompts/list per era, read by every prompt probe: a list that fails is a failure line
       // for each prompt's label, as one that answers is read for each.
       let prompts;

@@ -99,7 +99,7 @@ const API_ROW_LIMIT: Partial<Record<ListName, number>> = { exploits: 10, affecte
 const TIMELINE_RELAYED = 20;
 
 const CVE_INTEL_METHOD =
-  "EchelonGraph's per-CVE enrichment (GET /api/v1/public/cves/:id/enrichment). cwes: CWE classifications stored from NVD, GitHub (GHSA) and CVE.org records, each with the source that gave it, named from the MITRE CWE catalog EchelonGraph embeds. exploits: public exploit references from EchelonGraph's cve_exploits records, whose data model holds Metasploit modules (metasploit), Exploit-DB entries (exploit_db), nuclei templates (nuclei_template), GitHub proof-of-concept repositories (github_poc) and vendor proofs of concept (vendor_poc), filled by a curated seed and by one poller per automated source, each run only where it is enabled, so which sources are current depends on the deployment. affected_packages and fixed_versions: package-ecosystem advisory data, each row naming its source. timeline: EchelonGraph's enrichment history for the CVE, newest first.";
+  "EchelonGraph's per-CVE enrichment (GET /api/v1/public/cves/:id/enrichment). cwes: CWE classifications stored from NVD, GitHub (GHSA) and CVE.org records, each with the source that gave it, named from the MITRE CWE catalog EchelonGraph embeds. exploits: EchelonGraph's cve_exploits records, whose data model holds public exploit code, namely Metasploit modules (metasploit), Exploit-DB entries (exploit_db), GitHub proof-of-concept repositories (github_poc) and vendor proofs of concept (vendor_poc), and Nuclei detection templates (nuclei_template), which check whether a system is affected and are not necessarily exploit code, filled by a curated seed and by one poller per automated source, each run only where it is enabled, so which sources are current depends on the deployment. affected_packages and fixed_versions: package-ecosystem advisory data, each row naming its source. timeline: EchelonGraph's enrichment history for the CVE, newest first.";
 
 const VERIFIED_STATUS_DESCRIPTION =
   "verified_status is the label stored with each reference: verified for a Metasploit module, for an Exploit-DB entry Exploit-DB marks verified, and for curated seed rows marked so; reported for a public artefact nothing has confirmed works (nuclei templates, GitHub proofs of concept, unverified Exploit-DB entries); unconfirmed where a curated row says so. It is a label from the source, not a guarantee that the exploit works against a given system.";
@@ -107,6 +107,10 @@ const VERIFIED_STATUS_DESCRIPTION =
 const FIXED_BRANCHES_DESCRIPTION =
   'fixed_branches lists each affected range of the package on record: introduced, and fixed (the range\'s fix) or last_affected (its last affected version, where no fix is on record), each null when absent, with advisory_id (the OSV record that published the range) and source (the loader\'s label for that record), both null on a row loaded before they were stored. Ranges with an advisory_id are in the order their record lists them (records in id order); ranges without one are oldest first. To pick the range for an installed version, compare in the ecosystem\'s version order (release numbers part by part, as numbers: 2.4 is below 2.13.0): the version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; its fix is that range\'s fixed, or, while another range still holds that, the other range\'s fixed (none past a range without one); a version in no range is outside every range on record. fixed_branches is null where the package\'s ranges were never loaded, and [] where no version range is on record (the advisory gives none, only commit ranges, or more than are stored), which is not a finding that no fix exists: fixed_version can still name one. fixed_version is one range\'s fix, kept for compatibility (one per package: the range the loader kept, the advisory\'s last as a rule), not the fix for every affected range: for CVE-2021-44228, its advisory gives log4j-core three ranges, and fixed_version 2.12.2 is the fix for the one from 2.4, while the range holding 2.14.1 (from 2.13.0) is fixed in 2.15.0.';
 
+// #3039: a Nuclei template is a detection check, not necessarily exploit code (core-backend
+// egkev.ExploitCodeKinds, #3038; /pulse words it so since #3022). The head says "exploit code,
+// detection templates" where it said "public exploit code"; the method and the note say what a
+// template is, and count templates apart. The room: "the newest" and "per-CVE" (14 characters).
 // #2876: the exploit dates are named for what they are. Within the 100 characters of headroom
 // under the 2048-character client cut (prompts-resources.test.mjs), the room came from tighter
 // glosses and from the input hint, which inputSchema's cve_id description carries.
@@ -115,7 +119,7 @@ const FIXED_BRANCHES_DESCRIPTION =
 // still-affected 4.17.21 (ranges [0, 4.17.21) and [4.0.0, 4.18.0); the fix is 4.18.0). It now
 // states the walk FIXED_BRANCHES_DESCRIPTION and branchSentences state, in fewer characters than
 // the old rule (a range's bounds folded into the list of its fields), so the headroom holds.
-export const CVE_INTEL_DESCRIPTION = `Weakness, public exploit code, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (the newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
+export const CVE_INTEL_DESCRIPTION = `Weakness, exploit code, detection templates, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
 
 // ── outputSchema ──
 const Rows = (shape: Record<string, z.ZodType>) => z.array(z.looseObject(shape));
@@ -218,6 +222,25 @@ function cweSentence(cve: string, cwes: unknown[]): string {
   return `${cve} is classified under ${listed(named)}.`;
 }
 
+// #3039: exploit code and detection templates are counted apart. A Nuclei template
+// (nuclei_template) checks whether a system is affected; it is not necessarily exploit code
+// (core-backend egkev.ExploitCodeKinds, #3038), and until #3039 the note called a Nuclei-only CVE's
+// one template "1 public exploit reference" (CVE-2026-42018 on the hosted endpoint, 2026-10-10;
+// 2,800 production CVEs hold only Nuclei rows). The kind counts are exploits_by_kind's, and where
+// the answer carries none, the listed rows' when they are every reference on record.
+const DETECTION_KIND = "nuclei_template";
+const DETECTION_NOTE = "a detection template checks whether a system is affected; it is not necessarily exploit code";
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+// The number of Nuclei detection templates among the references: exploits_by_kind's count where
+// the answer carries the map, the listed rows' where they are all of them, undefined otherwise.
+function templateCount(d: object, rows: unknown[], total: number | undefined): number | undefined {
+  const byKind = field(d, "exploits_by_kind");
+  if (byKind !== null && typeof byKind === "object" && !Array.isArray(byKind)) return numAt(d, "exploits_by_kind", DETECTION_KIND) ?? 0;
+  const listed = rows.filter((r) => strAt(r, "kind") === DETECTION_KIND).length;
+  return total === undefined || rows.length === total ? listed : undefined;
+}
+
 function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
   const total = numAt(d, "exploits_total");
   const verified = numAt(d, "exploits_by_status", "verified");
@@ -231,7 +254,15 @@ function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
         `exploits is empty and the answer carries no exploits_total, so it does not count the references on record for ${cve}; an empty list is not evidence that no public exploit exists.`,
       ];
     }
-    return [`exploits lists ${rows.length} public exploit reference${rows.length === 1 ? "" : "s"} for ${cve}, ${verifiedRows} with verified_status verified; the answer carries no exploits_total, so it does not say how many are on record.${cut}`];
+    const listedTemplates = rows.filter((r) => strAt(r, "kind") === DETECTION_KIND).length;
+    const code = rows.length - listedTemplates;
+    const what =
+      listedTemplates === 0
+        ? `${plural(rows.length, "public exploit reference", "public exploit references")}`
+        : code === 0
+          ? `${plural(rows.length, "Nuclei detection template", "Nuclei detection templates")} and nothing else (${DETECTION_NOTE})`
+          : `${plural(rows.length, "reference", "references")}: ${plural(code, "public exploit reference", "public exploit references")} and ${plural(listedTemplates, "Nuclei detection template", "Nuclei detection templates")} (${DETECTION_NOTE})`;
+    return [`exploits lists ${what} for ${cve}, ${verifiedRows} with verified_status verified; the answer carries no exploits_total, so it does not say how many are on record.${cut}`];
   }
   if (total === 0) {
     return [
@@ -240,7 +271,23 @@ function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
   }
   const v = verified === undefined ? "" : `, ${verified} of them with verified_status verified`;
   const cut = capped === true ? ` exploits_capped is true: exploits lists ${rows.length} of the ${total}, verified first.` : "";
-  return [`EchelonGraph holds ${total} public exploit reference${total === 1 ? "" : "s"} for ${cve} (exploits_total)${v}.${cut}`];
+  const templates = templateCount(d, rows, total);
+  if (templates === undefined) {
+    return [
+      `EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}; the answer carries no exploits_by_kind, so it does not say how many are exploit code and how many Nuclei detection templates (${DETECTION_NOTE}).${cut}`,
+    ];
+  }
+  if (templates === 0) {
+    return [`EchelonGraph holds ${plural(total, "public exploit reference", "public exploit references")} for ${cve} (exploits_total)${v}.${cut}`];
+  }
+  if (templates >= total) {
+    return [
+      `EchelonGraph holds ${plural(total, "Nuclei detection template", "Nuclei detection templates")} for ${cve} and nothing else in exploits (exploits_total ${total}): ${DETECTION_NOTE}. It holds no Metasploit module, Exploit-DB entry or proof of concept for ${cve}, which is not evidence that none exists.${cut}`,
+    ];
+  }
+  return [
+    `EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}: ${plural(total - templates, "public exploit reference", "public exploit references")} and ${plural(templates, "Nuclei detection template", "Nuclei detection templates")}; ${DETECTION_NOTE}.${cut}`,
+  ];
 }
 
 function listSentence(name: "affected_packages" | "fixed_versions", rows: unknown[]): string {

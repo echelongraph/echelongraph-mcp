@@ -9,7 +9,9 @@
 //       within its first `cut` characters;
 //   (c) a tool tools/list serves has no REQUIRED_IN_HEAD entry, or an entry names a tool it does not serve;
 //   (d) the head of the instructions or of a description names Shodan without SHODAN_OWNERSHIP, or a
-//       description in a tool's outputSchema does.
+//       description in a tool's outputSchema does;
+//   (e) #3138: a REQUIRED_IN_OUTPUT_SCHEMA sentence is not in the description of the field it names
+//       in that tool's success branch, or names a field or tool that is not served.
 // Pure, so a test can hand it a changed copy and see it fail (the controls in tools.test.mjs).
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -57,5 +59,26 @@ export function cutProblems({ instructions, tools }, r = REQUIRED) {
     if (!Object.hasOwn(r.REQUIRED_IN_HEAD, t.name) || !r.REQUIRED_IN_HEAD[t.name].length) found.push(`(c) ${t.name}: no REQUIRED_IN_HEAD entry in src/requiredText.ts`);
   }
   for (const name of Object.keys(r.REQUIRED_IN_HEAD)) if (!served.has(name)) found.push(`(c) REQUIRED_IN_HEAD names ${name}, which tools/list does not serve`);
+  // (e)
+  for (const [name, fields] of Object.entries(r.REQUIRED_IN_OUTPUT_SCHEMA ?? {})) {
+    const t = tools.find((x) => x.name === name);
+    if (!t) {
+      found.push(`(e) REQUIRED_IN_OUTPUT_SCHEMA names ${name}, which tools/list does not serve`);
+      continue;
+    }
+    const success = (t.outputSchema?.oneOf ?? []).find((b) => b.properties?.state?.enum?.includes("measured"));
+    for (const [p, sentences] of Object.entries(fields)) {
+      const node = p.split(".").reduce((s, k) => {
+        const list = k.endsWith("[]");
+        const at = s?.properties?.[list ? k.slice(0, -2) : k];
+        return list ? at?.items : at;
+      }, success);
+      if (typeof node?.description !== "string") {
+        found.push(`(e) ${name}: its outputSchema's success branch has no described field ${p}`);
+        continue;
+      }
+      for (const x of sentences) if (!node.description.includes(x)) found.push(`(e) ${name}: the description of ${p} in its outputSchema lacks: ${x}`);
+    }
+  }
   return found;
 }

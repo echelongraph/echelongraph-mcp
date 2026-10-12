@@ -9,7 +9,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
 
@@ -65,7 +66,7 @@ before(async () => {
 });
 after(() => new Promise((resolve) => stub.close(resolve)));
 
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 const textBlocks = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
 
 function recordProps(s) {

@@ -22,7 +22,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
 
@@ -133,6 +134,15 @@ const DATED = {
   exploits_by_kind: { exploit_db: 1, nuclei_template: 1, github_poc: 1 },
   exploits_by_status: { verified: 1, reported: 2 },
 };
+// #3039: a CVE EchelonGraph holds only a Nuclei detection template for (CVE-2026-42018 on the
+// hosted endpoint, 2026-10-10: its one reference is http/cves/2026/CVE-2026-42018.yaml), as an
+// answer with counts serves it and as an API older than exploits_total serves it.
+const NUCLEI_ROW = { kind: "nuclei_template", source_name: "http/cves/2026/CVE-2026-42018.yaml", source_url: "https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2026/CVE-2026-42018.yaml", source_published_at: null, eg_first_seen_at: "2026-09-18T04:00:00Z", verified_status: "reported" };
+const NUCLEI_ONLY = { ...EMPTY_ENRICHMENT, exploits: [NUCLEI_ROW], exploits_total: 1, exploits_by_kind: { nuclei_template: 1 }, exploits_by_status: { reported: 1 } };
+const { exploits_total: _nt, exploits_capped: _nc, exploits_by_kind: _nk, exploits_by_status: _ns, failed_sections: _nf, ...NUCLEI_ONLY_OLDER } = NUCLEI_ONLY;
+// The positive claims #3039 removes for a template: "public exploit reference(s)", and "exploit
+// code" anywhere but in "not necessarily exploit code".
+const CODE_CLAIM = /public exploit references?|(?<!not necessarily )exploit code/;
 // What a date renderer gets wrong: a null printed as text, a null or a placeholder read as a time.
 const BAD_DATE_TEXT = /"null"|Invalid Date|1970|first seen null|-01-01T00:00:00/i;
 
@@ -186,6 +196,8 @@ const ANSWERS = {
   [ENRICH("CVE-2099-27305")]: { status: 500, body: { error: "boom" } },
   [ENRICH("CVE-2099-28170")]: BRANCHES,
   [ENRICH("CVE-2099-28760")]: DATED,
+  [ENRICH("CVE-2026-42018")]: NUCLEI_ONLY,
+  [ENRICH("CVE-2099-30390")]: NUCLEI_ONLY_OLDER,
   "/api/v1/public/cwes/CWE-79": CWE79,
   "/api/v1/public/cwes/CWE-79?page=3": { ...CWE79, page: 3 },
   "/api/v1/public/cwes/CWE-79?page=200": { ...CWE79, page: 200, cves: [] },
@@ -215,7 +227,7 @@ before(async () => {
 });
 after(() => new Promise((resolve) => stub.close(resolve)));
 
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 const textBlocks = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
 const noteOf = (res) => textBlocks(res)[res.isError ? 0 : 1] ?? "";
 const sentences = (t) => t.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -289,7 +301,8 @@ for (const era of ERAS) {
         assert.deepEqual(t.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
         assert.equal(t.outputSchema.type, "object");
         const ok = t.outputSchema.oneOf.find((b) => b.properties.state.enum.includes("measured"));
-        assert.equal(ok.additionalProperties, false);
+        // #3121: published open to fields it does not name; the suite validates with it closed.
+        assert.notEqual(ok.additionalProperties, false);
         for (const k of ["state", "measured_at", "method", "coverage", "freshness", "notes", "data"]) assert.ok(ok.required.includes(k), `${name}: ${k}`);
       }
     });
@@ -337,10 +350,40 @@ for (const era of ERAS) {
       assert.ok(n.includes("timeline relays the 20 newest of the 25 enrichment-history rows the API returned (timeline_total 140)."), n);
       assert.ok(n.includes("Not relayed from the answer: vendor_advisories, patches, ai, trending and historical_incidents."), n);
       assert.doesNotMatch(JSON.stringify(res), /generated text/, "the ai section is not relayed");
-      assert.match(sc.method, /metasploit\), Exploit-DB entries \(exploit_db\), nuclei templates \(nuclei_template\), GitHub proof-of-concept repositories \(github_poc\) and vendor proofs of concept \(vendor_poc\)/);
+      assert.match(sc.method, /public exploit code, namely Metasploit modules \(metasploit\), Exploit-DB entries \(exploit_db\), GitHub proof-of-concept repositories \(github_poc\) and vendor proofs of concept \(vendor_poc\), and Nuclei detection templates \(nuclei_template\), which check whether a system is affected and are not necessarily exploit code/);
       assert.match(sc.method, /each run only where it is enabled, so which sources are current depends on the deployment/);
       assert.doesNotMatch(sc.method, /\bpolled (daily|every)\b/i, "method claims no source is polled");
       assertTextIsStructure("cve_intel ok", res);
+    });
+
+    it("#3039 cve_intel: a Nuclei-only CVE is one detection template, never exploit code or a public exploit reference", async () => {
+      for (const [cve, want] of [
+        ["CVE-2026-42018", "EchelonGraph holds 1 Nuclei detection template for CVE-2026-42018 and nothing else in exploits (exploits_total 1): a detection template checks whether a system is affected; it is not necessarily exploit code. It holds no Metasploit module, Exploit-DB entry or proof of concept for CVE-2026-42018, which is not evidence that none exists."],
+        ["CVE-2099-30390", "exploits lists 1 Nuclei detection template and nothing else (a detection template checks whether a system is affected; it is not necessarily exploit code) for CVE-2099-30390, 0 with verified_status verified; the answer carries no exploits_total, so it does not say how many are on record."],
+      ]) {
+        const res = await call("cve_intel", { cve_id: cve });
+        assert.ok(!res.isError, noteOf(res));
+        const n = noteOf(res);
+        assert.ok(n.includes(want), n);
+        for (const note of res.structuredContent.notes) assert.doesNotMatch(note, CODE_CLAIM, `${cve}: ${note}`);
+        assertTextIsStructure(`cve_intel nuclei-only ${cve}`, res);
+      }
+      // The description and the method name the template as a detection check.
+      const d = tools.find((t) => t.name === "cve_intel").description;
+      assert.match(d, /^Weakness, exploit code, detection templates, affected packages and fixed versions for one CVE/);
+      assert.doesNotMatch(d, /public exploit code/, "the description calls the whole list public exploit code");
+      assert.ok(d.length <= 1948, `${d.length} characters: the budget is 1,948`);
+      const [, , ok] = results.find(([n, a]) => n === "cve_intel" && a.cve_id === "CVE-2026-42018");
+      assert.match(ok.structuredContent.method, /Nuclei detection templates \(nuclei_template\), which check whether a system is affected and are not necessarily exploit code/);
+    });
+
+    it("#3039 control: the pre-#3039 wording is caught by the claim check", () => {
+      for (const old of [
+        "EchelonGraph holds 1 public exploit reference for CVE-2026-42018 (exploits_total).",
+        "exploits lists 1 public exploit reference for CVE-2099-30390, 0 with verified_status verified",
+        "public exploit code on record.",
+      ]) assert.match(old, CODE_CLAIM, old);
+      assert.doesNotMatch("it is not necessarily exploit code.", CODE_CLAIM);
     });
 
     it("cve_intel: zero references is a counted zero, never 'no exploit exists'", async () => {
@@ -438,7 +481,8 @@ for (const era of ERAS) {
       assert.equal(JSON.parse(blocks[0]).exploits[1].source_published_at, null);
       for (const [i, b] of blocks.entries()) assert.doesNotMatch(b, BAD_DATE_TEXT, `text block ${i}`);
       assert.doesNotMatch(noteOf(res), /\bnull\b/, "the note says nothing about a null date");
-      assert.ok(noteOf(res).includes("EchelonGraph holds 3 public exploit references for CVE-2099-28760 (exploits_total), 1 of them with verified_status verified."), noteOf(res));
+      // #3039: the template is counted apart from the two references to exploit code.
+      assert.ok(noteOf(res).includes("EchelonGraph holds 3 references for CVE-2099-28760 (exploits_total), 1 of them with verified_status verified: 2 public exploit references and 1 Nuclei detection template; a detection template checks whether a system is affected; it is not necessarily exploit code."), noteOf(res));
       assert.ok(sc.notes.includes("measured_at is null: the answer has no single observation time; each row carries its own (source_published_at and eg_first_seen_at, enriched_at)."), JSON.stringify(sc.notes));
       assertTextIsStructure("cve_intel #2876 dates", res);
 

@@ -119,3 +119,20 @@ export const REQUIRED_IN_HEAD: Readonly<Record<string, readonly string[]>> = {
   get_vendor_advisory: ["withdrawn (true: the vendor rescinded it", "which are not active vulnerabilities"],
   search_vendor_advisories: ["never exactly 1,000", "The query is sent in a request header, never in the URL.", "which are not active vulnerabilities"],
 };
+
+// #3138: sentences a tool's outputSchema must carry, by the path of the field in its success
+// branch (a dot between an object and a field inside it, [] for each entry of a list).
+// test/client-cut.mjs (e) holds every one to tools/list's outputSchema, with a control in
+// tools.test.mjs. Through 3.0.0 patch_available's field text said true means "EchelonGraph holds
+// evidence of a fix for the CVE, its sources named in patch_evidence", while #2861's rule never sets
+// it back to false, so every withdrawal of evidence leaves true beside patch_evidence [] (hosted
+// get_cve CVE-2026-1281, 2026-10-11: true, [], and remediation.fix_status none_confirmed), and an
+// agent reading the field through its schema reported a fix on record where EchelonGraph held
+// none. The sentence says what that pair means and which field is the current reading; it names a
+// field, not a tool (test/description-policy.test.mjs: no schema text names another tool).
+export const PATCH_AVAILABLE_WITHDRAWN =
+  "true beside an empty patch_evidence means evidence of a fix once held has since been withdrawn (patch_available is never set back to false), and fix_status (remediation.fix_status in the CVE's record) is the current reading, not patch_available.";
+export const REQUIRED_IN_OUTPUT_SCHEMA: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  get_cve: { "data.patch_available": [PATCH_AVAILABLE_WITHDRAWN] },
+  search_cves: { "data.cves[].patch_available": [PATCH_AVAILABLE_WITHDRAWN] },
+};

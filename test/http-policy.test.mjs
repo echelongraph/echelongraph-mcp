@@ -102,7 +102,7 @@ describe("bounded access-log fields", () => {
 });
 
 describe("#2747: the request-body caps and the large-body slots", () => {
-  it("the large cap is for check_sbom and scan_manifest alone, above their content caps and below Cloud Run's 32 MiB", async () => {
+  it("the large cap is for a tools/call of check_sbom or scan_manifest and a prompts/get of sbom_review alone (#3149), above their content caps and below Cloud Run's 32 MiB", async () => {
     const S = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
     // #2835: scan_manifest takes a project's lockfiles, up to the same number of characters.
     const M = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "scan_manifest.js")).href);

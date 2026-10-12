@@ -25,7 +25,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
 import { ACCEPT, legacy, modern, modernHeaders, modernMeta, parseRpcBody, post } from "./mcp-http-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
@@ -38,7 +39,7 @@ const TOKEN = "forward-token-for-tests-2316";
 const MARKER = "zzmarkerterm2316";
 // The platform's chain for a direct client at `addr` (core-backend ratelimitkey_test.go).
 const chain = (addr) => `${addr}, 169.254.169.126, 0.0.0.0`;
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 
 // ── the stub API ──
 let stub;
@@ -456,7 +457,8 @@ describe("#2747: check_sbom takes a real SBOM document over the hosted endpoint"
 // document is. A real package-lock (fixtures/manifests/tree.v3.package-lock.json, written by npm
 // 10), its registry entries cycled under new names to 700 distinct packages: ~200 KiB of
 // lockfile, three times the general 64 KiB cap. Control: before #2835, LARGE_BODY_TARGETS named
-// check_sbom alone, and this body was refused 413.
+// check_sbom alone, and this body was refused 413. It now names a tools/call of check_sbom or
+// scan_manifest and a prompts/get of sbom_review (#3149), and nothing else.
 describe("#2835: scan_manifest takes a lockfile past 64 KiB over the hosted endpoint", () => {
   const TREE = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "manifests", "tree.v3.package-lock.json"), "utf8"));
   const registry = Object.entries(TREE.packages).filter(([k, e]) => k.startsWith("node_modules/") && !e.link && String(e.resolved ?? "").startsWith("https://registry.npmjs.org/"));

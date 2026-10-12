@@ -66,6 +66,12 @@ const text = (t: string) => ({ messages: [{ role: "user" as const, content: { ty
 // gives them as the vendor's, untested, and a not_parsed or none_in_source state as no finding that
 // the vendor lists no fix. vendor_advisories_for_cve rows carry remediation_kinds too, so step 4
 // sends the model to get_vendor_advisory where a row lists a workaround or a mitigation.
+//
+// Its exploit lines (#3039): cve_intel's exploits hold Nuclei detection templates beside exploit
+// code, and a template checks whether a system is affected; it is not necessarily exploit code
+// (core-backend egkev.ExploitCodeKinds, #3038). Until #3039 step 2 called the whole list "public
+// exploit code" and the template asked for "public exploit code on record", so an agent reported
+// exploit code for the ~2,800 CVEs EchelonGraph holds only a template for.
 // #3013's review: the Patch line has the model state a vendor's workaround or mitigation step,
 // whose wording is each item's text, and cve_remediation's cut can leave that text out of data
 // (its second thinning level) or shorten it in the text (its TEXT CUT); no string is shortened in
@@ -76,14 +82,14 @@ export function triageCveText(cve: string): string {
   return [
     `Triage ${cve} using the EchelonGraph MCP tools. Call them in this order, each with cve_id ${cve}:`,
     "1. get_cve: the record. Read score_assessed before echelongraph_score (false: not yet scored, which is not a score of 0); read severity, cvss_v3_score, epss_score and epss_percentile, and the CISA-KEV fields kev_listed, kev_added_date, kev_due_date and kev_ransomware, and, where the record carries it, kev_required_action, CISA's own text.",
-    "2. cve_intel: weaknesses (cwes), public exploit code (exploits and exploits_total; verified_status is the label stored with each reference, not a guarantee that it works, and an empty list is not evidence that no exploit exists), affected_packages (each package's affected ranges with their fixes in fixed_branches) and fixed_versions.",
+    "2. cve_intel: weaknesses (cwes), public exploit code and detection templates (exploits, exploits_total and exploits_by_kind; a nuclei_template row is a Nuclei detection template, which checks whether a system is affected and is not necessarily exploit code; verified_status is the label stored with each reference, not a guarantee that it works, and an empty list is not evidence that no exploit exists), affected_packages (each package's affected ranges with their fixes in fixed_branches) and fixed_versions.",
     "3. cve_remediation: how it is fixed, as its sources state it: fixed_branches (each affected package's ranges with their fixes), vendor_remediations (each vendor advisory naming the CVE, with its vendor, vendor_advisory_id, remediation_state and remediation_kinds, each kind the vendor's own category) and fix_references (the record's references tagged Patch or Mitigation).",
     "4. vendor_advisories_for_cve: the vendor advisories that name it, with remediation_kinds and remediation_state where a row carries them. Call get_vendor_advisory for one whose remediation you need in full, such as one whose remediation_kinds include workaround or mitigation.",
     "5. epss_history: how its EPSS score changed, one point per recorded change (series_kind change_only): before series_starts_at a missing point means not recorded, not unchanged.",
     "6. cve_exposure: internet exposure on record. exposure_state says what the count is; exposed_hosts counts distinct ip:port services, not machines; the result is not_assessed with measured_at null, so present any count as undated and on record, and exposure_state not_assessed as not assessed.",
     ENVELOPE_RULES,
     "Then answer with this template, one line each, naming the tool and the measured_at behind every line:",
-    "- Exploited? CISA-KEV listing and its date, known ransomware use, and public exploit code on record.",
+    "- Exploited? CISA-KEV listing and its date, known ransomware use, and public exploit code on record (Metasploit modules, Exploit-DB entries, GitHub or vendor proofs of concept); give Nuclei detection templates apart, as detection checks, never as exploit code.",
     "- Likelihood: EPSS score and percentile, and how it has moved.",
     "- Reachable? exposure_state and the count on record, or not assessed.",
     `- Patch: fixed versions, vendor remediation and fix references; where the results hold none, write "none on record", which is not a finding that no fix exists. For each affected package whose cve_intel row carries fixed_branches, give every range with its fix: from introduced ("0" is the first version) up to its fixed, or up to and including last_affected, where no fix is on record for that range; never one range's fix as the fix for every affected branch or the version every install should move to. cve_intel keeps one fixed_version per ecosystem and package, its advisory's last range's as a rule, which need not be the fix for every affected version of the package: where a row has no fixed_branches (null or absent), give fixed_version as the fixed version cve_intel records for that package, never as the fix for every affected branch, and for the fix on a given branch point to get_cve's references tagged Vendor Advisory or Patch, where it has them, and to the vendor advisories. From cve_remediation, give each vendor_remediations advisory by vendor and vendor_advisory_id with its remediation_kinds, a workaround or mitigation as the step that vendor states, which EchelonGraph has not tested and which is not a fix, and its fix_references; a remediation_state of not_parsed or none_in_source is not a finding that the vendor lists no fix. ${VENDOR_STEP_ELSEWHERE}`,

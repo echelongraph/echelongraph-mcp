@@ -18,11 +18,13 @@
 // RemediationResponse, vendoradv/handler.go Detail and ByCVE).
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
-import { isThinOf } from "./text-bound.mjs";
+import { assertDataCutOf, isThinOf } from "./text-bound.mjs";
 
 const ERAS = [MODERN, "2025-06-18"];
 const LOG4SHELL = "CVE-2021-44228";
@@ -122,6 +124,11 @@ const HUGE = {
     ),
   ),
 };
+// #3139: CVE-2023-44487 (KEV-listed) as hosted 3.0.0 answered it with full: true (2026-10-11),
+// each advisory item cut to the fields the first thinning level keeps (product_ids dropped). Its
+// default answer kept 2 of 20 advisories while fixed_branches (13,581 characters, 50 rows) and
+// patches (7,471, 30) stayed whole.
+const RAPID_RESET = JSON.parse(fs.readFileSync(new URL("./fixtures/cve_remediation-CVE-2023-44487.json", import.meta.url), "utf8")).data;
 const SUMMARY = {
   fix_status: FIX_STATUS,
   vendor_remediation_kinds: { vendor_fix: 1, workaround: 1 },
@@ -192,13 +199,27 @@ const CNA_PATCH = {
   fix_references: [{ url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-69486", tags: ["patch"] }],
 };
 
+// #3076, third pass: Cisco's "has released software updates" with no version (cause G,
+// CVE-2025-20362's shape).
+const VENDOR_RELEASED = {
+  ...NOTHING,
+  cve_id: "CVE-2025-20362",
+  fix_status: {
+    state: "available", basis: "vendor_fix_released", unread_inputs: [],
+    vendor_released: { statement: "Cisco strongly recommends that all customers upgrade to the fixed software releases that are listed in the Fixed Software [\"#fs\"] section of this advisory." },
+  },
+};
+
 const ANSWERS = {
   [REM(LOG4SHELL)]: LOG4SHELL_REMEDIATION,
   [REM("CVE-2026-69486")]: CNA_PATCH,
+  [REM("CVE-2025-20362")]: VENDOR_RELEASED,
   [REM("CVE-2099-30001")]: REJECTED,
   [REM("CVE-2099-30002")]: NOTHING,
   [REM("CVE-2099-30003")]: PARTIAL,
   [REM("CVE-2099-30004")]: HUGE,
+  [REM("CVE-2023-44487")]: RAPID_RESET,
+  [REM("CVE-2099-44487")]: { ...RAPID_RESET, cve_id: "CVE-2099-44487", fix_references: [] },
   [REM("CVE-2099-30005")]: { status: 500, body: { error: "boom" } },
   [REM("CVE-2099-30006")]: { cve_id: "CVE-2099-30006" },
   [`/api/v1/public/cves/${LOG4SHELL}`]: CVE_RECORD,
@@ -227,7 +248,7 @@ before(async () => {
 });
 after(() => new Promise((resolve) => stub.close(resolve)));
 
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 const textBlocks = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
 const noteOf = (res) => textBlocks(res)[res.isError ? 0 : 1] ?? "";
 function schemaNames(s, out = new Set()) {
@@ -378,6 +399,15 @@ for (const era of ERAS) {
       assert.doesNotMatch(note, /No reference of the CVE record is tagged/);
     });
 
+    it("#3076 third pass: a vendor's released-fix statement with no version is said for what it is, never a version", async () => {
+      const g = await call("cve_remediation", { cve_id: "CVE-2025-20362" });
+      assert.ok(!g.isError, noteOf(g));
+      assert.deepEqual(g.structuredContent.data.fix_status, VENDOR_RELEASED.fix_status, "fix_status relayed whole, vendor_released kept");
+      assert.match(noteOf(g), /fix_status for CVE-2025-20362 is available \(basis vendor_fix_released\), the API's fix-status rule; the vendor states a fix is released, but the CVE record names no fixed version \(vendor_released\), so the fixed release is the vendor advisory's to name\./);
+      // Control: a fix_status without vendor_released carries no such qualifier.
+      assert.doesNotMatch(noteOf(await call("cve_remediation", { cve_id: "CVE-2026-69486" })), /vendor_released/);
+    });
+
     it("REJECTED: not_assessed, nothing relayed as a fix", async () => {
       const res = await call("cve_remediation", { cve_id: "CVE-2099-30001" });
       assert.ok(!res.isError);
@@ -427,6 +457,10 @@ for (const era of ERAS) {
       for (const [i, a] of sc.data.vendor_remediations.entries()) assert.ok(isThinOf(a, HUGE.vendor_remediations[i]), `vendor_remediations[${i}]`);
       for (const [k, v] of Object.entries(HUGE)) if (!Array.isArray(v)) assert.deepEqual(sc.data[k], v, k);
       assert.match(noteOf(res), new RegExp(`DATA CUT: .*vendor_remediations keeps ${kept === 0 ? "none of its 20 entries" : `${kept} of its 20 entries, each cut to `}`));
+      // #3139: advisories leave only once patches and fixed_branches are cut, and the note then
+      // names the tool that lists every one.
+      for (const l of ["patches", "fixed_branches"]) if (HUGE[l].length) assert.ok(sc.truncated[l], `${l} was not cut before advisories left: ${JSON.stringify(sc.truncated)}`);
+      assert.ok(noteOf(res).includes(`vendor_advisories_for_cve, given this CVE, lists every vendor advisory naming it, the ${20 - kept} left out of data among them, each with its vendor and vendor_advisory_id.`), noteOf(res));
       const shown = JSON.parse(first);
       assert.equal(shown.vendor_remediations.length, 20, "every advisory kept");
       for (const a of shown.vendor_remediations) {
@@ -434,6 +468,73 @@ for (const era of ERAS) {
         for (const i of a.items) assert.ok(i.url?.startsWith("https://access.redhat.com/errata/"), "URL kept whole");
       }
       assert.match(noteOf(res), /TEXT CUT/);
+    });
+
+    // #3139: patches and fixed_branches are thinned and cut before any advisory leaves.
+    // #3139's review: fixed_branches is thinned before any patch row leaves. #3139's second review:
+    // fix_references is cut before any patch row leaves too. Round 2 kept 28 of the 30 patches here
+    // (29,946 characters) and fix_references whole; now all 30 stay, thinned, and fix_references
+    // keeps 17 of its 20 (29,931 characters, measured 2026-10-11 on this fixture).
+    it("#3139: CVE-2023-44487 (hosted 3.0.0 kept 2 of 20 advisories): all 20 advisories, all 50 fixed_branches and all 30 patches kept thinned, fix_references cut first, within 30,000 characters", async (t) => {
+      const res = await call("cve_remediation", { cve_id: "CVE-2023-44487" });
+      const sc = res.structuredContent;
+      const size = JSON.stringify(sc).length;
+      assert.ok(size <= 30_000, `${size} characters of structured result`);
+      assertDataCutOf(sc, RAPID_RESET, "CVE-2023-44487");
+      assert.deepEqual(sc.truncated.vendor_remediations, { total: 20, returned: 20, thinned: true });
+      assert.deepEqual(
+        sc.data.vendor_remediations.map((a) => [a.vendor, a.vendor_advisory_id, a.remediation_state]),
+        RAPID_RESET.vendor_remediations.map((a) => [a.vendor, a.vendor_advisory_id, a.remediation_state]),
+      );
+      assert.deepEqual(sc.truncated.fixed_branches, { total: 50, returned: 50, thinned: true }, JSON.stringify(sc.truncated));
+      assert.deepEqual(sc.truncated.patches, { total: 30, returned: 30, thinned: true }, `a patch row left before fix_references was cut: ${JSON.stringify(sc.truncated)}`);
+      assert.equal(sc.data.patches.length, 30);
+      assert.equal(sc.truncated.fix_references?.total, 20, JSON.stringify(sc.truncated));
+      assert.ok(sc.truncated.fix_references.returned < 20, JSON.stringify(sc.truncated));
+      t.diagnostic(`${size} characters, ${JSON.stringify(sc.truncated)}`);
+      // A thinned fixed_branches row keeps what the sbom_review prompt walks.
+      for (const r of sc.data.fixed_branches) assert.deepEqual(Object.keys(r).filter((k) => !["ecosystem", "package_name", "version_range", "fixed_version", "fixed_branches"].includes(k)), []);
+      assert.ok(sc.data.fixed_branches.some((r) => r.fixed_branches?.[0] && "introduced" in r.fixed_branches[0] && "fixed" in r.fixed_branches[0]));
+      // Every advisory is in data, so the note does not send the model elsewhere for one.
+      assert.doesNotMatch(noteOf(res), /vendor_advisories_for_cve/);
+      assert.ok(validator.getValidator(tools.find((t) => t.name === "cve_remediation").outputSchema)(sc).valid);
+    });
+
+    // #3139's review: the same answer without fix_references. Round 1 (35073f92) cut patches first
+    // and kept 11 of 30 beside all 50 fixed_branches rows whole (13,581 characters); fixed_branches
+    // thinned first (8,876), every patch stays.
+    it("#3139's review: fixed_branches is thinned before a patch row leaves: CVE-2023-44487 without fix_references keeps all 30 patches and all 50 fixed_branches", async () => {
+      const res = await call("cve_remediation", { cve_id: "CVE-2099-44487" });
+      const sc = res.structuredContent;
+      assert.ok(JSON.stringify(sc).length <= 30_000);
+      assertDataCutOf(sc, { ...RAPID_RESET, cve_id: "CVE-2099-44487", fix_references: [] }, "CVE-2023-44487 without fix_references");
+      assert.deepEqual(sc.truncated.vendor_remediations, { total: 20, returned: 20, thinned: true });
+      assert.deepEqual(sc.truncated.fixed_branches, { total: 50, returned: 50, thinned: true }, JSON.stringify(sc.truncated));
+      assert.equal(sc.data.patches.length, 30, `patches left while fixed_branches could be thinned: ${JSON.stringify(sc.truncated)}`);
+      // No package here has more than one range, so none is capped and the note says no cap.
+      assert.ok(sc.data.fixed_branches.every((r) => r.fixed_branches_truncated === undefined));
+      assert.doesNotMatch(noteOf(res), /keeping at most its first \d+ ranges/);
+    });
+
+    it("#3139's review: a package's ranges are capped, with a count, before a patch row leaves, and take back room once the patches are cut", async () => {
+      const fb = RAPID_RESET.fixed_branches.map((r, i) =>
+        i === 0 ? { ...r, fixed_branches: Array.from({ length: 120 }, (_, j) => ({ introduced: `${j}.0.0`, fixed: `${j}.0.9`, last_affected: null, source: "osv_bulk", advisory_id: `GHSA-xxxx-xxxx-${String(j).padStart(4, "0")}` })) } : r,
+      );
+      ANSWERS[REM("CVE-2099-44488")] = { ...RAPID_RESET, cve_id: "CVE-2099-44488", fix_references: [], fixed_branches: fb };
+      const res = await call("cve_remediation", { cve_id: "CVE-2099-44488" });
+      const sc = res.structuredContent;
+      assert.ok(JSON.stringify(sc).length <= 30_000);
+      assertDataCutOf(sc, { ...RAPID_RESET, cve_id: "CVE-2099-44488", fix_references: [], fixed_branches: fb }, "120 ranges");
+      assert.deepEqual(sc.truncated.fixed_branches, { total: 50, returned: 50, thinned: true });
+      const big = sc.data.fixed_branches[0];
+      assert.equal(big.fixed_branches_truncated?.total, 120);
+      assert.equal(big.fixed_branches.length, big.fixed_branches_truncated.returned);
+      // Capped at 1 while the patches were whole; with them thinned, it takes back 25 (2026-10-11).
+      assert.ok(big.fixed_branches.length > 1, `${big.fixed_branches.length} ranges kept`);
+      assert.equal(sc.data.patches.length, 30, JSON.stringify(sc.truncated));
+      assert.match(noteOf(res), /fixed_branches keeps all 50 entries, each cut to ecosystem, package_name, version_range, fixed_version and fixed_branches \(each with introduced, fixed and last_affected\).*; with the room left, 1 of the entries kept take back detail \(by position among those kept, in their order in data\): entry 1 cut to /);
+      assert.deepEqual(big.fixed_branches, fb[0].fixed_branches.slice(0, big.fixed_branches.length).map(({ introduced, fixed, last_affected }) => ({ introduced, fixed, last_affected })));
+      assert.ok(sc.data.vendor_remediations.length === 20);
     });
 
     it("HTTP 500 and 404 are failures; an answer without state is a failure; a malformed id is refused with no request", async () => {

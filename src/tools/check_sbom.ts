@@ -18,7 +18,7 @@
 // rpm purl without a distro release is not assessed.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type RowKeep, type TextCut } from "../textBudget.js";
+import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type RowKeep, type TextCut, type ThinLevel } from "../textBudget.js";
 import {
   CLEAN_NOTE,
   DISTRO_NOTE,
@@ -172,15 +172,123 @@ export const SBOM_ROW_THIN: RowKeep = [
   "cve_ids",
   "matched_package",
   "matched_via",
+  "matched_version_from",
+  "purl_name",
   ["matches", ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason"]],
 ];
+// #3132: past SBOM_ROW_THIN, each row is cut on its own terms before any row leaves. Through 3.0.0
+// SBOM_ROW_THIN was the only level, and it keeps every match object, so one row still large once
+// thinned left data, and every row after it with it (rows leave from the end): measured on hosted
+// 3.0.0 (2026-10-11), five Debian 12 purls, all affected, kept 1 row (libssl3; linux-libc-dev
+// 6.1.55-1's 200 matches are 42,417 characters thinned); Juice Shop 11.1.2 with
+// magento/community-edition 2.3.0 inserted at index 2 kept 2 of 51 rows (19 affected); that purl
+// alone kept none, and the note said "check 0 or fewer purls per call". Now, in order:
+//   1. SBOM_ROW_THIN, every row, every match (as before);
+//   2. the same, with every row's matches capped at one number m, the most that fit: a row with
+//      more than m keeps its first m (the API's order: highest effective_score first) and carries
+//      matches_truncated, its own total and returned, and the CVE IDs among all its matches that
+//      are KEV-listed (kev_listed_cve_ids) or used in ransomware (ransomware_cve_ids), and the
+//      distinct fixed_in versions they name (fixed_in_versions), so what a triage ranks by first
+//      is still said of the matches cut; rows with m or fewer matches are untouched;
+//   3. SBOM_ROW_COMPACT, each match cut to cve_id, kev_listed, ransomware, fixed_in and
+//      effective_score, the row keeping matched_package, matched_via and an upstream row's
+//      matched_version_from and purl_name, matches capped at one number m as in 2 (any m, 0
+//      included), with the same matches_truncated;
+//   4. SBOM_ROW_MIN, the text's leanest level (index, purl, verdict, not_assessed_reason and
+//      cve_ids), with that matches_truncated on each row that had matches;
+//   5. SBOM_ROW_MIN with matches_truncated cut to total and returned;
+// and only then do rows leave (clean, then not assessed, then the last of the rest).
+// #3132's review: round 1 had no level 3, and level 2 was taken at m = 0. The production
+// synthetic's 201-purl probe (synthetic/probes.mjs SBOM_PROBE_PURLS, recorded on hosted 3.0.0 with
+// full: true, 2026-10-11: 201 affected rows, 415 matches, 710,724 characters) then came back at
+// level 5 with 132 rows, every match, KEV flag and fixed_in gone, and the probe's EXPECT (log4j-core
+// 2.14.1's CVE-2021-44228 match, fixed_in 2.15.0; the upstream row's matched_via) failed, where
+// 3.0.0 kept 43 rows thinned and passed. So now:
+//   - level 2 is taken only at m >= 1 (least): at m = 0 it holds less than level 3;
+//   - when not even level 5 keeps every row, rows leave at level 3 with matches capped at
+//     SBOM_LEAVING_CAP (leaveAt), not at level 5: a page of the size the note names then comes back
+//     with each row's KEV flags and fixed_in, which at level 5 no page size did;
+//   - once the cut is settled, the rows kept take back detail in input order while the result fits
+//     (giveBack): each the richest level above its own that fits, its matches at the compact level
+//     at the most that fit, stopping at the first row that takes back none.
+// Measured on that recording (test/check_sbom-large-rows.test.mjs): 54 of 201 rows, each compact
+// with every match (none has more than 7), the log4j-core row with its CVE-2021-44228 match and the
+// upstream row with matched_via, at 29,959 characters.
+// cve_ids is what the API caps at 200 a row, about 3,400 characters, so every row survives level 5
+// unless the rows are many (the probe's 201, Juice Shop's full 840 purls).
+export const SBOM_ROW_COMPACT: RowKeep = [
+  "index",
+  "purl",
+  "verdict",
+  "not_assessed_reason",
+  "cve_ids",
+  "matched_package",
+  "matched_via",
+  "matched_version_from",
+  "purl_name",
+  ["matches", ["cve_id", "kev_listed", "ransomware", "fixed_in", "effective_score"]],
+];
+export const SBOM_ROW_MIN: RowKeep = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids"];
+// The most matches a row keeps, compact, when rows leave (the API's order, highest effective_score
+// first); the rest are in its cve_ids and matches_truncated.
+export const SBOM_LEAVING_CAP = 10;
+// matches_truncated for a row whose matches data keeps `kept` of (none at levels 3 and 4); with
+// `summary`, the three lists drawn from all of the row's matches. Absent on a row with no match
+// cut, and on one with no matches.
+function matchesTruncated(row: Record<string, unknown>, kept: number, summary: boolean): Record<string, unknown> {
+  const ms = Array.isArray(row.matches) ? row.matches.filter(isObj) : [];
+  if (ms.length <= kept) return {};
+  const ids = (f: string) => [...new Set(ms.filter((m) => m[f] === true && typeof m.cve_id === "string").map((m) => m.cve_id as string))];
+  const fixed = [...new Set(ms.map((m) => m.fixed_in).filter((v): v is string => typeof v === "string"))];
+  return {
+    matches_truncated: {
+      total: ms.length,
+      returned: Math.min(kept, ms.length),
+      ...(summary ? { kev_listed_cve_ids: ids("kev_listed"), ransomware_cve_ids: ids("ransomware"), fixed_in_versions: fixed } : {}),
+    },
+  };
+}
+const MATCHES_TRUNCATED_SAID =
+  "carrying matches_truncated, which gives its own total and returned, and, of all its matches, the CVE IDs KEV-listed (kev_listed_cve_ids) or used in ransomware (ransomware_cve_ids) and the distinct fixed_in versions (fixed_in_versions)";
+const cappedSaid = (cap: number) =>
+  `each row's matches keeping at most its first ${cap} (the API's order, highest effective_score first), a row with more than that ${MATCHES_TRUNCATED_SAID}`;
+export const SBOM_ROW_LEVELS: readonly ThinLevel[] = [
+  SBOM_ROW_THIN,
+  { keep: SBOM_ROW_THIN, capped: "matches", least: 1, mark: (row, cap) => matchesTruncated(row, cap, true), said: cappedSaid },
+  { keep: SBOM_ROW_COMPACT, capped: "matches", mark: (row, cap) => matchesTruncated(row, cap, true), said: cappedSaid },
+  { keep: SBOM_ROW_MIN, mark: (row) => matchesTruncated(row, 0, true), said: () => `a row that had matches ${MATCHES_TRUNCATED_SAID}` },
+  { keep: SBOM_ROW_MIN, mark: (row) => matchesTruncated(row, 0, false), said: () => "a row that had matches carrying matches_truncated with its total and returned 0" },
+];
+const SBOM_LEAVE_AT = { level: 2, cap: SBOM_LEAVING_CAP };
+// The page sentence (#3132): never "0 or fewer". Rows leave only once no level keeps them all, so a
+// call of as many purls as data kept rows keeps each of its rows; when not one row fits, no page
+// size does, and the note says where a row is read instead.
+// #3132's review: the lists beside the rows go first, scan_manifest's not_checked before
+// not_sent_purls, which keeps every purl or none (whole): those purls are the list a client
+// retries, and round 1 kept 3 of the rate-limited case's 800. With none kept, the note gives them
+// exactly as positions in the input (sendingSentences: coverage.sent + 1 to
+// coverage.distinct_purls), and the room the rows leave goes back to not_sent_purls before
+// not_checked.
 export function sbomData(sides: readonly string[], page: (kept: number) => string): DataCut {
+  const others = sides.filter((x) => x !== "not_sent_purls");
   return {
     steps: [
-      { lists: sides },
-      { lists: ["results"], thin: [SBOM_ROW_THIN], leaveOutFirst: { field: "verdict", values: ["not_affected", "not_assessed"], why: "data.summary counts every verdict" } },
+      ...(others.length ? [{ lists: others }] : []),
+      ...(sides.includes("not_sent_purls") ? [{ lists: ["not_sent_purls"], whole: true as const }] : []),
+      {
+        lists: ["results"],
+        thin: SBOM_ROW_LEVELS,
+        leaveOutFirst: { field: "verdict", values: ["not_affected", "not_assessed"], why: "data.summary counts every verdict" },
+        leaveAt: SBOM_LEAVE_AT,
+        giveBack: true,
+      },
     ],
-    page: (t) => (t.results && t.results.returned < t.results.total ? page(t.results.returned) : ""),
+    page: (t) =>
+      t.results && t.results.returned < t.results.total
+        ? t.results.returned > 0
+          ? page(t.results.returned)
+          : `Not one row fits data even cut to ${SBOM_ROW_COMPACT.map((x) => (typeof x === "string" ? x : x[0])).join(", ")}, so no number of purls per call does: the same call with full: true returns every row whole.`
+        : "",
   };
 }
 const SBOM_DATA = sbomData(["not_sent_purls"], (k) => `To read every row in data, check ${k} or fewer purls per call.`);

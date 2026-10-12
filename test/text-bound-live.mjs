@@ -20,11 +20,16 @@
 //                    repository.
 //   --hosted [URL]   the hosted MCP endpoint (default https://mcp.echelongraph.io/mcp), as
 //                    echelongraph-mcp-synthetic/1.0, the synthetic's identity, never counted as
-//                    adoption: each case's call is made there, and its structuredContent.data,
-//                    which is the API's answer for every tool that relays it as sent, is replayed
-//                    to this package. exposure_radar and cve_intel relay their own cut of their
-//                    answers, so for them the endpoint's own text, the released version's, is
-//                    reported instead, marked, and compared with nothing but the ceiling.
+//                    adoption: each case's call is made there, with full: true when the endpoint
+//                    reports 3.0.0 or later (#3140: since #3013 its default data is cut past
+//                    30,000 characters, so without it the replay was a cut, not the API's answer),
+//                    and its structuredContent.data, which is then the API's answer for every tool
+//                    that relays it as sent, is replayed to this package; an answer whose
+//                    data_truncated is true, or a 3.0.0-or-later endpoint called without full: true,
+//                    is refused (text-bound.mjs hostedReplay). exposure_radar and cve_intel relay
+//                    their own cut of their answers, so for them the endpoint's own text, the
+//                    released version's at its default call, is reported instead, marked, and
+//                    compared with nothing but the ceiling.
 //   --answers DIR    exposure_radar's and cve_summary's answers from DIR (files named as
 //                    answerFile names them); only those two are measured.
 //
@@ -76,6 +81,9 @@ import {
   STRUCTURED_BUDGET,
   answerFile,
   argsOf,
+  extraAnswers,
+  hostedArgs,
+  hostedReplay,
   keptSizesOffRecord,
   prefixFor,
   readLiveRecord,
@@ -140,7 +148,9 @@ const stub = http.createServer((req, res) => {
         res.end(r.body);
         return;
       }
-      const body = serve.kind === "one" ? serve.body : (serve.answers[url] ?? serve.answers[pathname]);
+      // #3140: a replayed hosted answer is served for the tool's request; the routes it reads beside
+      // that one (the vendor tools' /coverage) are served from the case's fixture (extraAnswers).
+      const body = serve.kind === "one" ? (serve.extra?.[pathname] ?? serve.body) : (serve.answers[url] ?? serve.answers[pathname]);
       res.writeHead(body ? 200 : 404, { "content-type": body ? "application/json" : "text/plain" });
       res.end(body ? JSON.stringify(body) : "404 page not found\n");
     } catch (e) {
@@ -177,13 +187,22 @@ try {
       serve = { kind: "map", answers: Object.fromEntries(LIVE_TOOLS[c.kept].map((p) => [p, JSON.parse(fs.readFileSync(path.join(answersDir, path.basename(answerFile(p))), "utf8"))])) };
       Object.assign(keptBodies, serve.answers);
     } else if (hosted) {
-      const there = await remote.callTool({ name: c.tool, arguments: args });
-      if (RELAYS_A_CUT.has(c.tool) || there.isError) {
-        res = there;
+      const version = remote.getServerVersion()?.version;
+      if (RELAYS_A_CUT.has(c.tool)) {
+        res = await remote.callTool({ name: c.tool, arguments: args });
         stubbed = false;
-        how = `the hosted endpoint's own text (${remote.getServerVersion()?.version ?? "its released version"}), not this checkout's`;
+        how = `the hosted endpoint's own text (${version ?? "its released version"}), not this checkout's`;
       } else {
-        serve = { kind: "one", body: there.structuredContent.data };
+        // #3140: the API's answer whole, never the endpoint's default cut of it.
+        const asked = hostedArgs(args, version);
+        const there = await remote.callTool({ name: c.tool, arguments: asked });
+        if (there.isError) {
+          res = there;
+          stubbed = false;
+          how = `the hosted endpoint's own text (${version ?? "its released version"}), not this checkout's`;
+        } else {
+          serve = { kind: "one", body: hostedReplay(there, asked, version), extra: extraAnswers(c) };
+        }
       }
     } else {
       serve = { kind: "probe" };

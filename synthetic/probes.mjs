@@ -261,7 +261,8 @@ export const EXPECT = {
   },
 };
 
-// #2774: the hosted endpoint takes a request body over 64 KiB for check_sbom and scan_manifest alone (#2747, #2835), and a
+// #2774: the hosted endpoint takes a request body over 64 KiB only for httpPolicy.ts's LARGE_BODY_TARGETS: tools/call
+// check_sbom and scan_manifest, and prompts/get sbom_review (#2747, #2835, #3149), and a
 // 2-purl list never tested that: a return of the 413 would have left every probe green. So the
 // hosted leg sends check_sbom the SAME 201 purls as a CycloneDX 1.5 document, pretty-printed as an
 // SBOM tool writes it, each component with its name, version, purl, licence and a SHA-512 (the
@@ -319,6 +320,139 @@ export const HTTP_EXPECT = {
     return EXPECT.check_sbom(sc);
   },
 };
+
+// THE MATCHER'S VERDICTS (#3135). check_affected's probe above (lodash 4.17.20, openssl 3.0.0) holds
+// under any version comparator and either fixed_in rule, so a core-backend that brought back the
+// per-range fixed_in (#3074) or ordered the number inside an identifier as text (#3101 on the registry
+// rung, #3131 on the CPE rung) answered it green. These are the answers that tell the old rules from
+// the new, one call each, on the hosted leg after its tools and before its prompts, each its own line
+// labelled with its fixed `label` (the metric's tool label, so it is bounded and never renamed), judged
+// as a tools/call (judge(), against the endpoint's outputSchema) and then by its `expect`. A tool the
+// endpoint does not list is not_published; arguments its inputSchema refuses are no_valid_probe_input,
+// never sent. A label in EXPECT_PENDING (below) is not called at all. The hosted leg only: the
+// verdict is core-backend's, and the stdio leg reaches the same API; up to four more calls per era
+// (eight per run) on a route with no per-minute component budget.
+//   verdict:pypi/mayan-edms@4.9.0 (#3074)  CVE-2025-14692 matches with a fixed_in whose release is
+//                       strictly above 4.9.7 and a non-empty fixed_in_detail: 4.9.0 sits in
+//                       [4.9.0, 4.9.7), whose bound 4.9.7 is inside [0, 4.10.2) of the same record.
+//                       The per-range rule says "4.9.7", the holding interval's own bound and a version
+//                       still affected, with no detail. Not pinned to "4.10.2": a later advisory that
+//                       overlaps [0, 4.10.2) moves the correct walk past it, and that is no regression to
+//                       page on (#3135's decision). Live 2026-10-11 (hosted 3.0.0): fixed_in "4.10.2",
+//                       interval {introduced 4.9.0, fixed 4.9.7}, fixed_in_detail "fixed_in moved past
+//                       the overlapping interval [0, 4.10.2) …"; 3 matches.
+//   verdict:packagist/magento/community-edition@2.4.4-p13 (#3101)  CVE-2024-34102 (CosmicSting, KEV)
+//                       does NOT match: it is fixed in 2.4.4-p9, and p13 is above p9 only when 13 is
+//                       read as a number. Absent is a finding only of an answer that looked: assessed
+//                       true, neither list capped, not degraded, and the CVE in neither matches,
+//                       cve_ids (which names every match even when matches is cut) nor undetermined.
+//                       Live 2026-10-11: assessed, 26 matches, 327 not affected, uncapped, absent.
+//   verdict:packagist/magento/community-edition@2.4.5-p2 (#3101)  CVE-2025-54236 (SessionReaper, KEV)
+//                       matches: 2.4.5-p2 is below last_affected 2.4.5-p14 only when 2 < 14. Live
+//                       2026-10-11: present among 124 matches (fixed_in null: the range records only
+//                       last_affected).
+//   verdict:cpe/midgard_gpu_kernel_driver@r20p0 (#3131)  the CPE path: CVE-2022-38181 (KEV) matches,
+//                       NVD's range [r4p0, r31p0] holding r20p0 once r20p0 is read as r 20 p 0.
+//                       Absent before #3131 (2026-10-11: 7 matches, compareVersions("r4p0", "r31p0")
+//                       = +1, so the range held nothing); present since #3131 reached production in
+//                       echelon-core-backend-01165-t9m (2026-10-12 03:19Z: 14 matches, all four KEV
+//                       CVEs), when its EXPECT_PENDING entry was removed.
+// An unmet `expect` is expectation_unmet with what it saw as detail (create-mcp-synthetic-monitoring.sh's
+// runbook says how to read each).
+export const MAYAN_CVE = "CVE-2025-14692";
+// The bound of the interval that holds 4.9.0, [4.9.0, 4.9.7): the per-range rule's answer. fixed_in
+// must be strictly above it; 4.10.2 is what the walk said live on 2026-10-11.
+export const MAYAN_HOLDING_FIXED = "4.9.7";
+export const MAGENTO = "magento/community-edition";
+export const COSMICSTING_CVE = "CVE-2024-34102";
+export const SESSIONREAPER_CVE = "CVE-2025-54236";
+export const MALI_CVE = "CVE-2022-38181";
+export const MALI_LABEL = "verdict:cpe/midgard_gpu_kernel_driver@r20p0";
+// VERDICT_PROBES labels that are NOT called yet, each with why: run.mjs skips them (no call, no line,
+// so nothing to page on). The Mali probe waits on #3131 reaching production. TO ENABLE IT, once
+// #3131's core-backend is deployed: check it live (curl -sS https://app.echelongraph.io/api/v1/public/cves/match
+// -H 'X-EG-Product: midgard_gpu_kernel_driver' -H 'X-EG-Version: r20p0' | jq '[.matches[].cve_id] |
+// index("CVE-2022-38181")' answers a number, not null), delete its entry here, and redeploy the job
+// (infrastructure/mcp-synthetic/deploy.sh). Nothing else changes: run.test.mjs judges whichever state
+// this table is in (pending: no Mali line; enabled: a Mali line, called and judged) and tests the other too.
+export const EXPECT_PENDING = {};
+// a's dotted numeric release is strictly above b's (missing components are 0); undefined when either
+// does not begin with one. The release alone: "4.9.7.post1" is not above "4.9.7" here, which can only
+// err toward a line that fails, never toward one that passes the per-range rule's answer.
+export function releaseAbove(a, b) {
+  const rel = (v) => (typeof v === "string" ? /^v?(\d+(?:\.\d+)*)/.exec(v.trim())?.[1]?.split(".").map(Number) : undefined);
+  const x = rel(a), y = rel(b);
+  if (!x || !y) return undefined;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+// What an answer says about one CVE: its match (matches, else cve_ids), its undetermined entry, and
+// whether the answer looked at everything (an absence is read only from one that did).
+function verdictFor(sc, cve) {
+  const d = sc?.data ?? {};
+  const matches = Array.isArray(d.matches) ? d.matches : [];
+  const match = matches.find((m) => m?.cve_id === cve);
+  const listed = match !== undefined || (Array.isArray(d.cve_ids) && d.cve_ids.includes(cve));
+  const undetermined = Array.isArray(d.undetermined) ? d.undetermined.find((u) => u?.cve_id === cve) : undefined;
+  const whole = d.assessed === true && d.capped !== true && d.candidates_capped !== true && d.degraded !== true;
+  const seen = `assessed ${JSON.stringify(d.assessed ?? null)}, match_layer ${JSON.stringify(d.match_layer ?? null)}, count ${JSON.stringify(d.count ?? null)}, capped ${JSON.stringify(d.capped ?? null)}, candidates_capped ${JSON.stringify(d.candidates_capped ?? null)}, degraded ${JSON.stringify(d.degraded ?? null)}, not_assessed_reason ${JSON.stringify(d.not_assessed_reason || null)}`;
+  return { match, listed, undetermined, whole, assessed: d.assessed === true, seen };
+}
+const present = (what, cve) => (sc) => {
+  const v = verdictFor(sc, cve);
+  if (!v.assessed) return `${what}: not assessed (${v.seen}); want ${cve} matched`;
+  if (!v.listed) return `${what}: ${cve} not matched${v.undetermined ? `, undetermined (${JSON.stringify(v.undetermined.reason ?? null)})` : ""} (${v.seen}); want it matched`;
+  return undefined;
+};
+const absent = (what, cve) => (sc) => {
+  const v = verdictFor(sc, cve);
+  if (!v.whole) return `${what}: the answer did not look at every candidate (${v.seen}), so ${cve}'s absence is not a finding`;
+  if (v.listed) return `${what}: ${cve} matched (fixed_in ${JSON.stringify(v.match?.fixed_in ?? null)}, interval ${JSON.stringify(v.match?.interval ?? null)}); want it not affected`;
+  if (v.undetermined) return `${what}: ${cve} undetermined (${JSON.stringify(v.undetermined.reason ?? null)}); want it not affected`;
+  return undefined;
+};
+export const VERDICT_PROBES = [
+  {
+    label: "verdict:pypi/mayan-edms@4.9.0",
+    tool: "check_affected",
+    arguments: { ecosystem: "PyPI", package: "mayan-edms", version: "4.9.0" },
+    expect: (sc) => {
+      const what = "PyPI mayan-edms 4.9.0";
+      const unmet = present(what, MAYAN_CVE)(sc);
+      if (unmet) return unmet;
+      const m = verdictFor(sc, MAYAN_CVE).match;
+      if (!m) return `${what}: ${MAYAN_CVE} is in cve_ids but not in matches (cut from structuredContent); want its match with fixed_in`;
+      const detail = typeof m.fixed_in_detail === "string" ? m.fixed_in_detail.trim() : "";
+      if (releaseAbove(m.fixed_in, MAYAN_HOLDING_FIXED) !== true || !detail) {
+        // The interval before the reason: the detail is cut at 300 characters (judge()).
+        return `${what} ${MAYAN_CVE} fixed_in ${m.fixed_in === undefined ? "absent" : JSON.stringify(m.fixed_in)}, fixed_in_detail ${detail ? "set" : JSON.stringify(m.fixed_in_detail ?? null)} (interval ${JSON.stringify(m.interval ?? null)}, fixed_in_reason ${JSON.stringify(m.fixed_in_reason ?? null)}); want a version above ${MAYAN_HOLDING_FIXED} with fixed_in_detail (#3074)`;
+      }
+      return undefined;
+    },
+  },
+  {
+    label: `verdict:packagist/${MAGENTO}@2.4.4-p13`,
+    tool: "check_affected",
+    arguments: { ecosystem: "Packagist", package: MAGENTO, version: "2.4.4-p13" },
+    expect: absent(`Packagist ${MAGENTO} 2.4.4-p13`, COSMICSTING_CVE),
+  },
+  {
+    label: `verdict:packagist/${MAGENTO}@2.4.5-p2`,
+    tool: "check_affected",
+    arguments: { ecosystem: "Packagist", package: MAGENTO, version: "2.4.5-p2" },
+    expect: present(`Packagist ${MAGENTO} 2.4.5-p2`, SESSIONREAPER_CVE),
+  },
+  // PENDING until #3131 is deployed (EXPECT_PENDING above): not called while its label is there.
+  {
+    label: MALI_LABEL,
+    tool: "check_affected",
+    arguments: { product: "midgard_gpu_kernel_driver", version: "r20p0" },
+    expect: present("midgard_gpu_kernel_driver r20p0", MALI_CVE),
+  },
+];
 
 // The hosted leg's prompt and resource probes (#2737), one line each per era, after the tools, the
 // prompts in this order. `label` is the line's `tool` (the metric label): a fixed string, so it

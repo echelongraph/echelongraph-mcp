@@ -27,7 +27,9 @@ import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator, strictOutputSchema } from "./strict-output.mjs";
+import { AjvJsonSchemaValidator as AjvJsonSchemaValidatorPublished } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, DOC_PAGES, readDocs, readPkgFile, serverCommand } from "./server-under-test.mjs";
 
@@ -1016,7 +1018,7 @@ const realInstant = (s) => typeof s === "string" && Date.parse(s) > 0;
 
 // A JSON Schema validator: ajv 8 as the SDK bundles it, dispatching on the schema's $schema
 // dialect (2020-12 here). It is what an MCP client runs over structuredContent.
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 function assertValid(where, schema, value) {
   const v = validator.getValidator(schema)(value);
   assert.ok(v.valid, `${where}: structuredContent does not validate against the outputSchema: ${v.errorMessage}\n${JSON.stringify(value).slice(0, 600)}`);
@@ -3161,6 +3163,37 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.ok(has(cutProblems({ ...served, tools: [...tools, dummy] }), /^\(c\) dummy_tool: no REQUIRED_IN_HEAD entry/));
       assert.ok(has(cutProblems({ ...served, tools: tools.filter((t) => t.name !== "get_cwe") }), /^\(c\) REQUIRED_IN_HEAD names get_cwe/));
     });
+    // #3138: what patch_available true beside an empty patch_evidence means, pinned to the field's
+    // text in get_cve's and search_cves' outputSchemas (src/requiredText.ts REQUIRED_IN_OUTPUT_SCHEMA).
+    it("#3138: get_cve's and search_cves' patch_available field text says true beside an empty patch_evidence is a withdrawal, and fix_status the current reading", () => {
+      assert.match(REQUIRED.PATCH_AVAILABLE_WITHDRAWN, /^true beside an empty patch_evidence means evidence of a fix once held has since been withdrawn .* fix_status .* is the current reading/);
+      assert.deepEqual(Object.keys(REQUIRED.REQUIRED_IN_OUTPUT_SCHEMA).sort(), ["get_cve", "search_cves"]);
+      assert.deepEqual(cutProblems(served).filter((p) => p.startsWith("(e)")), []);
+    });
+    it("control E: patch_available's field text without the withdrawal sentence (3.0.0's) fails (e), for each tool", () => {
+      const old =
+        "true: EchelonGraph holds evidence of a fix for the CVE, its sources named in patch_evidence. false: no fix evidence is on record, which is not a finding that no fix exists. Once true it is never set back to false.";
+      const withField = (name, at, f) => ({
+        ...served,
+        tools: served.tools.map((t) => {
+          if (t.name !== name) return t;
+          const o = structuredClone(t.outputSchema);
+          const success = o.oneOf.find((b) => b.properties.state.enum.includes("measured"));
+          f(at(success.properties.data));
+          return { ...t, outputSchema: o };
+        }),
+      });
+      const cases = [
+        ["get_cve", (d) => d.properties.patch_available, "data.patch_available"],
+        ["search_cves", (d) => d.properties.cves.items.properties.patch_available, "data.cves[].patch_available"],
+      ];
+      for (const [name, at, p] of cases) {
+        const reverted = cutProblems(withField(name, at, (x) => (x.description = old)));
+        assert.ok(reverted.includes(`(e) ${name}: the description of ${p} in its outputSchema lacks: ${REQUIRED.PATCH_AVAILABLE_WITHDRAWN}`), reverted.join("\n"));
+        const gone = cutProblems(withField(name, at, (x) => delete x.description));
+        assert.ok(gone.includes(`(e) ${name}: its outputSchema's success branch has no described field ${p}`), gone.join("\n"));
+      }
+    });
     it("control D: check_sbom's hosted-endpoint sentence moved past the cut fails (b)", () => {
       const p = cutProblems(withDescription("check_sbom", (d) => pastCut(d, "over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's")));
       assert.ok(has(p, /^\(b\) check_sbom: its description's first 2048 characters lack: over the hosted endpoint/), p.join("\n"));
@@ -3220,10 +3253,34 @@ describe(`against a stub API [${ERA}]`, () => {
         for (const k of ["state", "measured_at", "method", "coverage", "freshness", "notes", "error"]) assert.ok(bad.required.includes(k), `${t.name}: failure does not require ${k}`);
         assert.equal(bad.properties.data, undefined, `${t.name}: a failure may carry data`);
         assert.equal(bad.additionalProperties, false, `${t.name}: a failure admits fields the schema does not name`);
-        assert.equal(ok.additionalProperties, false, `${t.name}: a success admits envelope fields the schema does not name`);
+        // #3121: a success is published open to fields it does not name (a field added in a minor
+        // release must not fail a client that listed the tools before it); the suite closes it again.
+        assert.notEqual(ok.additionalProperties, false, `${t.name}: a success's published branch is closed, so a field added later fails a client that listed the tools before it`);
         assert.deepEqual(bad.properties.measured_at, { type: "null" }, `${t.name}: a failure may carry measured_at`);
         // Every state, and only these four.
         assert.deepEqual([...ok.properties.state.enum, ...bad.properties.state.enum].sort(), [...STATES].sort());
+      }
+    });
+    // #3121: a client validates an answer against the outputSchema it listed, and the hosted endpoint
+    // never tells it to list again (stateless, listChanged false). 3.0.0 added data_truncated and
+    // truncated to every success, and a Claude Code session that listed the tools under 2.7.2 failed
+    // its first check_sbom call: "data must NOT have additional properties" (ajv names the root
+    // "data"). Every published success branch now admits a top-level field it does not name; the
+    // closed copy the suite validates with (strict-output.mjs), and a failure, do not.
+    it("#3121: every tool's published success branch admits an unknown top-level field; the suite's strict copy and the failure branch refuse it", () => {
+      const published = new AjvJsonSchemaValidatorPublished();
+      const rootExtra = (schema, branch) => {
+        const b = branchOf(schema, branch);
+        const r = published.getValidator({ ...(schema.$schema ? { $schema: schema.$schema } : {}), ...b })({ state: branch, a_field_added_later: true });
+        return /data must NOT have additional properties/.test(r.errorMessage ?? "");
+      };
+      assert.equal(tools.length, LISTED.length);
+      for (const t of tools) {
+        assert.equal(rootExtra(t.outputSchema, "measured"), false, `${t.name}: its published success branch refuses a field it does not name`);
+        assert.equal(rootExtra(t.outputSchema, "not_assessed"), false, `${t.name}: not_assessed`);
+        // Control: the copy the suite validates answers with is closed, as 3.0.0 published it.
+        assert.equal(rootExtra(strictOutputSchema(t.outputSchema), "measured"), true, `${t.name}: the strict copy admits a field it does not name`);
+        assert.equal(rootExtra(t.outputSchema, "failed"), true, `${t.name}: a failure admits a field it does not name`);
       }
     });
     it("the server instructions say the data is public, what freshness means, that exposure numbers are aggregate, and whose the Shodan data is", () => {
@@ -3947,18 +4004,23 @@ describe(`against a stub API [${ERA}]`, () => {
         const t = tools.find((x) => x.name === name);
         const d = t.description;
         // #2842: the sources, named in full, are the outputSchema's (patch_evidence, below).
-        assert.ok(d.includes("patch_available is true when EchelonGraph holds evidence of a fix for the CVE, and patch_evidence names its sources, strongest first."), `${name}: ${d}`);
+        // #3138's review: "holds, or once held": true beside an empty patch_evidence is a withdrawal.
+        assert.ok(d.includes("patch_available is true when EchelonGraph holds, or once held, fix evidence for the CVE; patch_evidence is what it holds now, strongest first."), `${name}: ${d}`);
+        assert.ok(!d.includes("patch_available is true when EchelonGraph holds evidence"), `${name}: the description still says true means evidence is held now`);
+        assert.ok(d.length <= 2048 - 100, `${name}: ${d.length} characters, past #2924's headroom`);
         const ev = branchOf(t.outputSchema, "measured").properties.data;
         const evRec = name === "get_cve" ? ev : ev.properties.cves.items;
         // #3076: rule 3's labels sit in strength order, vendor_advisory_fix after release_reference and
         // the record's own statements (cna_solution, description_fix) last.
-        assert.ok(evRec.properties.patch_evidence.description.includes("release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions, written by its CNA, that names a fixed version; relayed as cna_solution) and description_fix (a sentence of the CVE description that names a fixed version)"), name);
+        assert.ok(evRec.properties.patch_evidence.description.includes("release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions or workarounds, written by its CNA, that names a fixed version; relayed as cna_solution), description_fix (a sentence of the CVE description that names a fixed version) and vendor_fix_released (the vendor states, in the CVE record, that a fix is released and the record names no fixed version; check the vendor's advisory)"), name);
         assert.ok(d.includes("patch_available false means no fix evidence is on record, which is not a finding that no fix exists."), `${name}: ${d}`);
         // #2842: and the API-older rule is patch_available's field description.
         assert.ok(toolText(t).includes("An answer with no patch_evidence (an API older than that field) does not name the evidence, and a false there is not a finding that no fix exists either."), `${name}`);
         const data = branchOf(t.outputSchema, "measured").properties.data;
         const rec = name === "get_cve" ? data : data.properties.cves.items;
-        assert.match(rec.properties.patch_available.description, /^true: EchelonGraph holds evidence of a fix for the CVE, its sources named in patch_evidence\. false: no fix evidence is on record, which is not a finding that no fix exists\./, name);
+        // #3138: true is evidence held now or once; true beside an empty patch_evidence is a withdrawal.
+        assert.match(rec.properties.patch_available.description, /^true: EchelonGraph holds, or once held, evidence of a fix for the CVE; patch_evidence names the sources it holds now\. true beside an empty patch_evidence means evidence of a fix once held has since been withdrawn/, name);
+        assert.ok(rec.properties.patch_available.description.includes(" false: no fix evidence is on record, which is not a finding that no fix exists."), name);
         assert.match(rec.properties.patch_evidence.description, /^The sources of the fix evidence EchelonGraph holds for the CVE, strongest first: vendor_patch .* Absent \(an API older than the field\): the answer does not name the evidence\.$/, name);
         assert.deepEqual(rec.properties.patch_available.type, ["boolean", "null"], name);
         const labels = JSON.stringify(rec.properties.patch_evidence);

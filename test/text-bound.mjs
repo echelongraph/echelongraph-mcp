@@ -71,6 +71,35 @@ export function isThinOf(t, d) {
 }
 
 /**
+ * #3132: whether `t` is `d`, a check_sbom or scan_manifest row, cut on its own terms
+ * (src/tools/check_sbom.ts SBOM_ROW_LEVELS): a row without matches_truncated is `d` thinned
+ * (isThinOf); a row with it keeps some of `d`'s other fields unchanged, its first
+ * matches_truncated.returned matches, each thinned (none, and no matches field, at the leanest
+ * levels), and matches_truncated's total is `d`'s matches; its lists, where present, are drawn from
+ * all of them: the CVE IDs KEV-listed, those used in ransomware, and the distinct fixed_in versions.
+ */
+export function isEntryCutOf(t, d) {
+  // #3139's review: a cve_remediation fixed_branches row whose ranges are capped keeps its first
+  // fixed_branches_truncated.returned ranges, each thinned, and the total is the row's ranges.
+  if (t !== null && typeof t === "object" && !Array.isArray(t) && Object.hasOwn(t, "fixed_branches_truncated")) {
+    const { fixed_branches_truncated: ft, fixed_branches: ranges, ...rest } = t;
+    const all = Array.isArray(d?.fixed_branches) ? d.fixed_branches : [];
+    if (!isThinOf(rest, d) || ft === null || typeof ft !== "object" || Object.keys(ft).some((k) => k !== "total" && k !== "returned")) return false;
+    return ft.total === all.length && ft.returned >= 1 && ft.returned < ft.total && Array.isArray(ranges) && ranges.length === ft.returned && isThinOf(ranges, all.slice(0, ft.returned));
+  }
+  if (t === null || typeof t !== "object" || Array.isArray(t) || !Object.hasOwn(t, "matches_truncated")) return isThinOf(t, d);
+  const { matches_truncated: mt, matches, ...rest } = t;
+  const all = Array.isArray(d?.matches) ? d.matches : [];
+  if (!isThinOf(rest, d) || mt === null || typeof mt !== "object") return false;
+  if (mt.total !== all.length || !(mt.returned >= 0 && mt.returned < mt.total)) return false;
+  if (matches === undefined ? mt.returned !== 0 : !(matches.length === mt.returned && isThinOf(matches, all.slice(0, mt.returned)))) return false;
+  const ids = (f) => [...new Set(all.filter((m) => m?.[f] === true && typeof m.cve_id === "string").map((m) => m.cve_id))];
+  const lists = { kev_listed_cve_ids: ids("kev_listed"), ransomware_cve_ids: ids("ransomware"), fixed_in_versions: [...new Set(all.map((m) => m?.fixed_in).filter((v) => typeof v === "string"))] };
+  for (const [k, v] of Object.entries(lists)) if (Object.hasOwn(mt, k) && !isDeepStrictEqual(mt[k], v)) return false;
+  return Object.keys(mt).every((k) => ["total", "returned", ...Object.keys(lists)].includes(k));
+}
+
+/**
  * #3013: that `sc.data` is `whole` (the answer, as the same call with full: true returns it) cut as
  * `sc.truncated` says: with data_truncated false, data is whole and truncated absent; with it true,
  * each list truncated names (by its path in data) holds `returned` of the answer's `total` entries,
@@ -99,7 +128,7 @@ export function assertDataCutOf(sc, whole, label = "data") {
     assert.equal(cut.length, returned, `${label}: truncated.${p}.returned is ${returned}, and data's list holds ${cut.length}`);
     assert.ok(returned < total || thinned, `${label}: truncated names ${p}, which is neither cut nor thinned (${returned} of ${total})`);
     assert.ok(!thinned || returned > 0, `${label}: truncated.${p} says thinned with no entry kept`);
-    const same = thinned ? isThinOf : isDeepStrictEqual;
+    const same = thinned ? isEntryCutOf : isDeepStrictEqual;
     let j = 0;
     for (const [i, e] of cut.entries()) {
       while (j < all.length && !same(e, all[j])) j++;
@@ -110,6 +139,38 @@ export function assertDataCutOf(sc, whole, label = "data") {
     restWhole = without(restWhole, path);
   }
   assert.deepEqual(rest, restWhole, `${label}: data differs from the answer in more than the lists truncated names`);
+}
+
+// #3140: what text-bound-live.mjs --hosted replays as the API's answer. Since 3.0.0 (#3013) a
+// hosted tool's default structuredContent.data is cut past STRUCTURED_BUDGET, so through 3.0.0 the
+// replay measured data already cut, and stayed green whatever happened: get_cve CVE-2021-44228's
+// default data on hosted 3.0.0 has cpe_match 77 of 396 and references 77 of 103, kev_recent at
+// limit 200 keeps 64 of 200 entries, and every row tool comes back thinned. The hosted call now says
+// full: true to a server at 3.0.0 or later (one before it has no such argument, and its data is
+// never cut), and the replay refuses an answer whose data_truncated is true, or a call to a server
+// at 3.0.0 or later without full: true, rather than measure a cut as the API's answer.
+export const FULL_SINCE = [3, 0, 0];
+const versionAtLeast = (v, min) => {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v ?? ""));
+  if (!m) return undefined;
+  for (let i = 0; i < 3; i++) if (Number(m[i + 1]) !== min[i]) return Number(m[i + 1]) > min[i];
+  return true;
+};
+/** The arguments the hosted call is made with, for a server reporting `version`; throws for a server that reports none. */
+export function hostedArgs(args, version) {
+  const cuts = versionAtLeast(version, FULL_SINCE);
+  if (cuts === undefined) throw new Error(`the hosted server reports no version (${JSON.stringify(version)}), so whether its data is cut by default is unknown: refusing to replay it`);
+  return cuts ? { ...args, full: true } : args;
+}
+/** The data to replay from the hosted answer `there` to a call made with `args`; throws where it would be a cut, not the API's answer. */
+export function hostedReplay(there, args, version) {
+  if (versionAtLeast(version, FULL_SINCE) !== false && args?.full !== true) {
+    throw new Error(`the hosted server is ${version ?? "of no reported version"}, which cuts structuredContent.data by default (#3013), and the call did not say full: true: refusing to replay its data as the API's answer`);
+  }
+  if (there?.structuredContent?.data_truncated === true) {
+    throw new Error(`the hosted answer's data is cut (data_truncated true, truncated ${JSON.stringify(there.structuredContent.truncated)}): refusing to replay it as the API's answer`);
+  }
+  return there.structuredContent.data;
 }
 
 /** Every text block of a result (or text of a resource read, #2801), with `stubBase` counted as production's, summed; and each block's size. */
@@ -284,8 +345,12 @@ export function bigLock(entries = 1500, git = 100) {
 }
 export const SHAPED = [
   { label: "cve_summary", tool: "cve_summary", page: "default", args: {}, kept: "cve_summary", size: 2_725, structured: 2_565 },
-  { label: "search_cves, default page (search openssl)", tool: "search_cves", page: "default", args: { search: "openssl" }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 20 }, set: { limit: 20 }, size: 14_455, structured: 26_761 },
-  { label: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", page: "max", args: { search: "openssl", limit: 50 }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 50 }, set: { limit: 50 }, size: 31_648, structured: 14_730 },
+  // #3140: fixtures/prod-shaped/search_cves.json re-sampled from hosted 3.0.0 (full: true,
+  // 2026-10-11): the record's largest page was 18,831 characters against the old rows' 31,648, as
+  // production's rows had grown past the text cut's 200-character level. 14,455 / 26,761 and
+  // 31,648 / 14,730 on the old rows.
+  { label: "search_cves, default page (search openssl)", tool: "search_cves", page: "default", args: { search: "openssl" }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 20 }, set: { limit: 20 }, size: 15_422, structured: 28_336 },
+  { label: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", page: "max", args: { search: "openssl", limit: 50 }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 50 }, set: { limit: 50 }, size: 18_717, structured: 17_409 },
   // #3084 (merged from 24dad5eb): the KEV note names BOD 26-04, which replaced BOD 22-01, 43 characters longer in
   // the text and in the structured result's notes; the cut then keeps 86 cpe_match and references entries, not 87
   // (24,833 and 29,963 before).
@@ -315,7 +380,9 @@ export const SHAPED = [
   // #2867: 2,379 through 2.6.8. The fixture is production's answer from before core-backend served
   // complete_since and coverage, so the note now says the answer does not say from when the record
   // is complete, and the envelope's coverage carries the completeness fields (null / []).
-  { label: "epss_history, CVE-2021-44228", tool: "epss_history", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "epss_history", answers: ["CVE-2021-44228"], size: 2_798, structured: 2_531 },
+  // #3140: fixtures/prod-shaped/epss_history.json re-read from hosted 3.0.0 (full: true,
+  // 2026-10-11), the API having added complete_since and coverage; 2,798 / 2,531 before.
+  { label: "epss_history, CVE-2021-44228", tool: "epss_history", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "epss_history", answers: ["CVE-2021-44228"], size: 3_750, structured: 3_382 },
   { label: "check_affected, openssl 3.0.0", tool: "check_affected", page: "default", args: { product: "openssl", version: "3.0.0" }, fixture: "check_affected", answers: ["openssl"], repeat: { matches: 71 }, size: 26_828, structured: 11_990 },
   { label: "check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)", tool: "check_affected", page: "max", args: { product: "linux_kernel", version: "5.10.0" }, fixture: "check_affected", answers: ["linux_kernel"], repeat: { matches: 200 }, size: 30_373, structured: 29_181 },
   // The cap with the CPE path's excluded sample beside it: 50 entries, each with a sentence of detail.
@@ -345,8 +412,14 @@ export const SHAPED = [
     recount: true,
     live: "2,000 lookups would pass production's 1,200 components a minute per caller; the suite measures the same rows, repeated",
     // #3013's review: 36,606 and 29,921 (35 rows in data) before each thinned match kept ransomware,
-    // effective_score and score_assessed; 21 rows now.
-    size: 36_651, structured: 29_224,
+    // effective_score and score_assessed; 21 rows. #3132: 36,651 and 29,224 (21 rows, each with
+    // its matches) before rows left only once every row was cut to index, purl, verdict,
+    // not_assessed_reason and cve_ids; 90 rows. #3132's review: 36,575 and 29,892 (90 rows, no
+    // match in any) before rows left at the compact level (check_sbom.ts leaveAt); 28 rows now,
+    // every one affected, each with its matches compact. The text is the same cut; its note's DATA
+    // CUT sentence is longer. 36,999 and 29,483 (28 rows) while the note named a cap of 10 matches
+    // a row that no row here reaches; 29 rows now.
+    size: 36_639, structured: 29_760,
   },
   // What production answers the same call from a fresh budget (src/tools/check_sbom.ts MAX_PURLS):
   // six batches, then 429 asking for a wait past the call's 50 s, so 1,200 rows and 800 purls in
@@ -363,8 +436,13 @@ export const SHAPED = [
     limited: { after: 6, retryAfter: 60 },
     live: "it spends production's whole budget of 1,200 components a minute per caller and is then refused; the suite measures the same rows, repeated, and the 429",
     // #3013's review: 37,740 and 29,985 (33 rows and 13 purls not sent in data) before each thinned
-    // match kept ransomware, effective_score and score_assessed; 20 rows and 21 purls now.
-    size: 37_785, structured: 29_982,
+    // match kept ransomware, effective_score and score_assessed; 20 rows and 21 purls. #3132:
+    // 37,785 and 29,982 before rows left only at the leanest level; 86 rows and 3 purls.
+    // #3132's review: 37,707 and 29,973 before not_sent_purls was kept whole or not at all and rows
+    // left at the compact level; 27 rows, each with its matches compact, and no purl not sent (the
+    // note and coverage give their positions). 38,228 and 29,654 while the note named a cap no row
+    // here reaches; 27 rows still, the first taking back its matches thinned (giveBack).
+    size: 38_223, structured: 29_863,
   },
   // #2817: production's answer after core-backend with #2817 was deployed and before the OSV
   // backfill has run (prod-shaped/cve_intel.json, read again 2026-10-05T07:38Z): every
@@ -374,7 +452,11 @@ export const SHAPED = [
   // 2026-10-05T07:37:21Z); through the 2026-10-04 read, with no fixed_branches and no
   // failed_sections, it was 14,693.
   // #2835: production's batch rows (prod-shaped/check_sbom.json), one per distinct purl.
-  { label: "scan_manifest, package-lock.json (64 packages)", tool: "scan_manifest", page: "default", args: () => ({ files: [{ filename: "package-lock.json", content: TREE_LOCK() }] }), fixture: "check_sbom", answers: ["batch"], repeat: { results: 64 }, recount: true, live: "not recorded yet: the batch route it calls is deployed, but text-bound-live.mjs --record has not been run with this checkout (#2835's release step); run it, and drop this", size: 16_540, structured: 28_633 }, // #3013's review: 16,401 and 22,761 before the thinned match's three fields and the note's "whole with full: true" on not_checked; all 64 rows stay
+  // #3140: measured on production for the first time (hosted 3.0.0, full: true, 2026-10-11): 32,922
+  // characters of text against the 16,540 of check_sbom's rows repeated to 64, so the case now
+  // replays production's own answer for this lock (fixtures/prod-shaped/scan_manifest.json, all 64
+  // rows); 16,540 / 28,633 on the repeated rows.
+  { label: "scan_manifest, package-lock.json (64 packages)", tool: "scan_manifest", page: "default", args: () => ({ files: [{ filename: "package-lock.json", content: TREE_LOCK() }] }), fixture: "scan_manifest", answers: ["batch"], size: 32_922, structured: 22_787 }, // #3013's review: 16,401 and 22,761 before the thinned match's three fields and the note's "whole with full: true" on not_checked; all 64 rows stay
   {
     label: "scan_manifest, package-lock.json of 1,500 entries (1,400 distinct purls, 100 from git)",
     tool: "scan_manifest",
@@ -386,12 +468,17 @@ export const SHAPED = [
     recount: true,
     live: "1,400 lookups would pass production's 1,200 components a minute per caller; the suite measures the same rows, repeated",
     // #3013's review: 37,566 and 29,786 (33 rows in data) before the not_checked sentence said the
-    // list is whole with full: true, and each thinned match kept three more fields; 20 rows now.
-    size: 37_708, structured: 29_903,
+    // list is whole with full: true, and each thinned match kept three more fields; 20 rows.
+    // #3132: 37,708 and 29,903 before rows left only at the leanest level; 85 rows.
+    // #3132's review: 37,629 and 29,871 before rows left at the compact level; 27 rows now (38,053
+    // and 29,817 while the note named a cap no row here reaches).
+    size: 37_696, structured: 29_988,
   },
   // #3074: 17,355 until the fixed_branches description and the several-ranges note said how an
-  // installed version's fix moves past an overlapping range (+199).
-  { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 17_608, structured: 12_888 },
+  // installed version's fix moves past an overlapping range (+199). #3039: +204 text and +231
+  // structured once the note counts Nuclei detection templates apart from exploit code (17,608 and
+  // 12,888 before, measured on the merge of both, 2026-10-11).
+  { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 17_812, structured: 13_119 },
   // #2817: the same rows once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE, pending) has filled
   // each range's record: the ranges of GHSA-jfh8-c2jp-5v3q (api.osv.dev, 2026-10-05) with
   // advisory_id and source, log4j-core's three in the record's order, pax-logging-log4j2's four,
@@ -409,9 +496,12 @@ export const SHAPED = [
     answers: ["CVE-2021-44228"],
     repeat: { timeline: 100 },
     annotate: { affected_packages: { key: "package_name", values: LOG4SHELL_FIXED_BRANCHES, otherwise: {} } },
-    live: "production's rows with each range's advisory_id and source, which production serves only once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE) has run",
-    // #3074: 17,539 before the overlapping-range wording (+199, as above).
-    size: 17_792, structured: 13_072,
+    // #3140: hosted 3.0.0's cve_intel CVE-2021-44228 serves each range's advisory_id and source
+    // (2026-10-11: 14 ranges over 11 packages, DLA-2842-1 among them), so the backfill has run and
+    // this case is measured on production; cve_intel relays its own cut, so the record is the
+    // hosted endpoint's own text, as for the case above.
+    // #3074: 17,539 before the overlapping-range wording (+199, as above); #3039: +204 and +231, as above.
+    size: 17_996, structured: 13_303,
   },
   // #2841: cve_remediation for Log4Shell on production's data (prod-shaped/cve_remediation.json,
   // assembled 2026-10-05 from the stored advisories by the parsers, before the route is live): 20
@@ -425,7 +515,8 @@ export const SHAPED = [
     args: { cve_id: "CVE-2021-44228" },
     fixture: "cve_remediation",
     answers: ["CVE-2021-44228"],
-    live: "the route (GET /cves/:id/remediation) is not deployed yet: measure it there once it is (text-bound-live.mjs)",
+    // #3140: the route is deployed (hosted 3.0.0 answers cve_remediation, 2026-10-11), so this
+    // case is measured on production.
     // 20,644 through 2.7.1. 20,809 since #2841's fix-reference wording: the API keeps a CNA's
     // lowercase patch and mitigation tags, and the note and method now say both spellings.
     // #3074: 20,941 since the fixed_branches sentence says how the fix moves past an overlapping range.
@@ -451,11 +542,12 @@ export const SHAPED = [
     live: "a forced cut: no page the API serves reaches it (each row's description is cut to 240 characters at the source)",
     size: 20_557, structured: 29_519,
   },
-  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 15_432, structured: 12_675 },
+  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 18_686, structured: 14_983 },
   // #2800 review: nor does any answer reach vendor_advisories_for_cve's cut: the API sends at most 20
   // advisories for a CVE (core-backend vendoradv/store.go ListAdvisoriesByCVE, LIMIT 20), each
   // without summary, affected_products or cve_ids: CVE-2021-44228's 20 are 9,753 characters of
-  // pretty JSON.
+  // pretty JSON (12,670 on hosted 3.0.0, 2026-10-11, its rows re-read for #3140: 15,432 / 12,675 and,
+  // forced, 15,606 / 29,447 on the earlier rows).
   // Its cut levels are search_vendor_advisories' (ROW_CUT_LEVELS), but its TextCut is its own.
   // #2803: re-measured for held_since. The coverage answer in the fixture is 2.6.4's API, which has
   // no held_since, so each vendor with no complete history read is written "not known to be
@@ -471,7 +563,7 @@ export const SHAPED = [
     stretch: { advisories: { title: 20 } },
     extra: ["coverage"],
     live: "a forced cut: no answer the API serves reaches it (at most 20 advisories, each a few hundred characters)",
-    size: 15_606, structured: 29_447,
+    size: 17_914, structured: 29_170,
   },
   { label: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", page: "default", args: { vendor: "aws", advisory_id: "2026-098-AWS" }, fixture: "get_vendor_advisory", answers: ["aws 2026-098-AWS"], extra: ["coverage"], size: 3_091, structured: 2_855 },
   { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 34_472, structured: 23_851 },
@@ -528,6 +620,20 @@ export function shapedAnswers(c) {
   // production gave them: no set, repeat or recount, and after the relayed answer.
   for (const name of c.extra ?? []) out[f.answers[name].path] = f.answers[name].body;
   return out;
+}
+
+/**
+ * #3140: the answers a case's tool reads beside the one it relays (its `extra`: the vendor tools'
+ * /coverage), by path, as shapedAnswers serves them. text-bound-live.mjs --hosted serves these
+ * beside the replayed answer: the hosted endpoint answers the tool, not the API's other routes, and
+ * through the first --hosted --record (2026-10-11) the replay answered /coverage with the tool's own
+ * answer, so the vendor tools' notes were not production's (search_vendor_advisories' default page
+ * 31,104 characters against 34,472 here, its note 1,297 characters where the coverage note is 4,600).
+ */
+export function extraAnswers(c) {
+  if (!c.extra?.length) return {};
+  const f = readShaped(c.fixture);
+  return Object.fromEntries(c.extra.map((name) => [f.answers[name].path, f.answers[name].body]));
 }
 
 /** Production's text for a case's call where it was measured: {total, blocks, version, at}. */

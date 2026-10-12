@@ -21,11 +21,12 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
+// #3121: answers are validated against the closed success branch (strict-output.mjs).
+import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
-import { isThinOf } from "./text-bound.mjs";
+import { isEntryCutOf } from "./text-bound.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => fs.readFileSync(path.join(HERE, "fixtures", name), "utf8");
@@ -118,7 +119,7 @@ async function startStub() {
 
 const textBlocks = (res) => (res.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
 const noteOf = (res) => textBlocks(res)[res.isError ? 0 : 1] ?? "";
-const validator = new AjvJsonSchemaValidator();
+const validator = new StrictOutputValidator();
 
 for (const era of [MODERN, "2025-06-18"]) {
   describe(`check_sbom [${era}]`, () => {
@@ -354,10 +355,23 @@ for (const era of [MODERN, "2025-06-18"]) {
         // once every other row has.
         const others = whole.results.filter((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed");
         const kept = sc.data.results;
-        for (const r of kept) assert.ok(isThinOf(r, whole.results[r.index]), `row ${r.index} is not the answer's row, thinned`);
+        // #3132: thinned, or cut on its own terms (its matches cut, matches_truncated saying so).
+        for (const r of kept) assert.ok(isEntryCutOf(r, whole.results[r.index]), `row ${r.index} is not the answer's row, thinned`);
         assert.deepEqual(kept.map((r) => r.index), [...kept.map((r) => r.index)].sort((x, y) => x - y));
         if (kept.length < others.length) assert.ok(kept.every((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed"), "a clean row stayed beside rows left out that are not");
-        assert.match(noteOf(res), /DATA CUT: with data whole, this structured result is \d+ characters of JSON, more than the 30000 it holds unless the call says full: true, so its data is cut: results keeps (?:all 840|\d+ of its 840) entries, each cut to index, purl, verdict, not_assessed_reason, cve_ids, matched_package, matched_via and matches/);
+        // #3132's review: rows leave only once no level keeps every row, and then at the compact
+        // level (check_sbom.ts leaveAt), so each row kept that had matches keeps its first ones with
+        // their kev_listed and fixed_in; round 1 left them at cve_ids alone.
+        if (kept.length < 840) {
+          for (const r of kept.filter((x) => whole.results[x.index].matches?.length)) {
+            assert.ok(Array.isArray(r.matches) && r.matches.length > 0, `row ${r.index} left data's rows without its matches`);
+            for (const [i, m] of r.matches.entries()) {
+              const a = whole.results[r.index].matches[i];
+              for (const f of ["kev_listed", "fixed_in"]) assert.ok(Object.hasOwn(m, f) || !Object.hasOwn(a, f), `row ${r.index} ${m.cve_id} leaves out ${f}`);
+            }
+          }
+        }
+        assert.match(noteOf(res), /DATA CUT: with data whole, this structured result is \d+ characters of JSON, more than the 30000 it holds unless the call says full: true, so its data is cut: results keeps (?:all 840|\d+ of its 840) entries, each cut to index, purl, verdict, not_assessed_reason(?:, cve_ids, matched_package, matched_via, matched_version_from, purl_name and matches| and cve_ids)/);
         assert.match(noteOf(res), /The same call with full: true returns data whole\.$/);
         assert.ok(validator.getValidator(tool.outputSchema)(sc).valid, "the cut structured result does not validate against the outputSchema");
       });
@@ -407,7 +421,7 @@ for (const era of [MODERN, "2025-06-18"]) {
         // can rebuild them from: the text keeps only the first 10 of data.not_sent_purls.
         assert.ok(
           note.includes(
-            "they are the input's distinct purls from position 401 on, counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place), and data.not_sent_purls lists them whole with full: true (past the structured result's budget, that list can be cut by default): call check_sbom again with purls set to them after a minute.",
+            "they are the input's distinct purls from position 401 on, counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place), and data.not_sent_purls lists them (past the structured result's budget it is left out whole by default, never cut short, and those positions are coverage.sent + 1 to coverage.distinct_purls; with full: true it is always there): call check_sbom again with purls set to them after a minute.",
           ),
           note,
         );
