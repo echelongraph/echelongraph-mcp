@@ -997,9 +997,15 @@ function cnaRecordNote(cve: string, rec: object): string {
   const by = who ? `its CNA, ${who},` : "its CNA";
   const date = strAt(rec, "date_public");
   const fix = strAt(rec, "cna_solution");
+  // #3178: a sentence of the record's workarounds is said to be its workaround.
+  const workaround = strAt(rec, "cna_solution_section") === "workaround";
   const parts: string[] = [];
   if (date) parts.push(` date_public is when ${cve} was made public as ${by} states it in the CVE record (datePublic), not the record's publication date.`);
-  if (fix) parts.push(` cna_solution is the CVE record's own fix statement, written by ${by} and relayed verbatim: it names the fixed release, and is not EchelonGraph's advice.`);
+  if (fix && workaround) {
+    parts.push(` cna_solution is a fix statement from the CVE record's workarounds (cna_solution_section workaround), not its solutions, written by ${by} and relayed verbatim: it names the fixed release, and is not EchelonGraph's advice.`);
+  } else if (fix) {
+    parts.push(` cna_solution is the CVE record's own fix statement, written by ${by} and relayed verbatim: it names the fixed release, and is not EchelonGraph's advice.`);
+  }
   return parts.join("");
 }
 
@@ -2512,6 +2518,20 @@ const TRUNCATED = z.record(
 // read as data), and data keeps each tool's own schema. The suite validates answers against the
 // closed branch (test/strict-output.mjs), and checked() does here, so a field this server adds
 // without naming it in the schema still fails, as it did when the branch was closed.
+//
+// 3.0.2: every output schema is built once per process, and its strict copy with it. The hosted
+// endpoint builds a server for each request (http.ts: createMcpHandler's stateless leg calls
+// createServer), and through 3.0.1 the tool modules that take envelopeSchema from this file
+// (check_affected, check_sbom, epss_history, kev_recent, scan_manifest and the three vendor-advisory
+// tools) built their output schemas in their register functions, so once per request in flight.
+// 3.0.1's strict copy doubled those: 1,371 KB of heap per server, against 3.0.0's 1,168
+// (64 servers held at once, node --expose-gc). test/http-memory.test.mjs's "served as they come"
+// case holds 64 requests in flight beside two 5,000,000-character SBOMs; it failed the 3.0.1
+// release run at Dockerfile.http's 128 MiB, and passed here only at 128, where 3.0.0 passes at
+// 112. At 112 V8 aborted 3.5 s in, with 59 servers live and both documents still at their first
+// batches, so before either answer was cut (a heap snapshot near the limit). Each such module now
+// keeps its schemas per envelopeSchema, as cve_intel, cve_remediation and get_cwe already did
+// (schemasOnce): 611 KB a server, and the case passes at --max-old-space-size=80.
 const STRICT = new WeakMap<z.ZodType, z.ZodType>();
 export function envelopeSchema(o: {
   data: z.ZodType;
@@ -2592,8 +2612,12 @@ const DATE_PUBLIC_FIELD =
 const DATE_PUBLIC_SOURCE_FIELD = "Whose date date_public is: cna, the CVE record's CNA. Absent whenever date_public is.";
 const CNA_FIELD = "The CNA that wrote the CVE record: short_name as the record gives it, and name, the CVE Program's name for that CNA (the short name where its list does not hold it). " + CVE_CNA_ABSENT;
 const CNA_SOLUTION_FIELD =
-  "The sentence of the CVE record's solutions or workarounds, written by its CNA, that names a released fix, verbatim: what makes cna_solution patch evidence. It is the CNA's text, not EchelonGraph's advice. Absent where the record's solutions name no fixed version, as well as where the field itself is: " +
+  "The sentence of the CVE record's solutions or workarounds, written by its CNA, that names a released fix, verbatim: what makes cna_solution patch evidence. It is the CNA's text, not EchelonGraph's advice. cna_solution_section says which of the two sections it is. Absent where the record's solutions name no fixed version, as well as where the field itself is: " +
   CVE_CNA_ABSENT;
+// #3178: which section cna_solution is. MCP relays a field its outputSchema does not describe without saying what it
+// is, so the section is described here, beside the sentence.
+const CNA_SOLUTION_SECTION_FIELD =
+  "Which section of the CVE record cna_solution was read from: solution (the record's solutions) or workaround (its workarounds, read only where its solutions name no fix: a temporary measure the CNA lists beside its fix). A workaround's sentence is the record's workaround, never its solution. Present whenever cna_solution is; absent from an API older than the field.";
 // #2842: what the descriptions say; the sources, and that patch_available once true is never set
 // back, are the outputSchema's (PATCH_AVAILABLE_FIELD, PATCH_EVIDENCE_FIELD).
 const PATCH_AVAILABLE_DESCRIPTION =
@@ -2674,6 +2698,8 @@ const CVERecord = z.looseObject({
   date_public_source: opt(z.string()).describe(DATE_PUBLIC_SOURCE_FIELD),
   cna: opt(z.looseObject({ short_name: opt(z.string()), name: opt(z.string()) })).describe(CNA_FIELD),
   cna_solution: opt(z.string()).describe(CNA_SOLUTION_FIELD),
+  // #3178: a section the API adds later is relayed, never a failed call (as patch_evidence's labels).
+  cna_solution_section: opt(z.union([z.enum(["solution", "workaround"]), z.string()])).describe(CNA_SOLUTION_SECTION_FIELD),
   references: z.unknown().optional(),
   // #2720: NVD's configurations, losslessly, beside the flat list (see cpeConfigurationsNote).
   cpe_match: z.unknown().optional().describe(CPE_MATCH_DESCRIPTION),

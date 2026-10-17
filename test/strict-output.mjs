@@ -1,6 +1,6 @@
 // #3121: the suite's own outputSchema check, closed where the published one is open.
 //
-// Since 3.0.1 every tool's published outputSchema leaves its success branch open to top-level
+// Since 3.0.2 every tool's published outputSchema leaves its success branch open to top-level
 // fields it does not name (src/index.ts envelopeSchema), so a client that listed the tools before
 // an upgrade still validates an answer carrying a field added since: through 3.0.0 the branch was
 // closed, and a Claude Code session that listed the tools under 2.7.2 failed every check_sbom call

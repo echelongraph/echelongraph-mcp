@@ -308,7 +308,7 @@ export class Slots {
 //   - V8's heap. In that sandbox (a cgroup v1 on a 16 GB host) Node 22 sized V8's heap from the
 //     host's memory, not the cgroup's (heap_size_limit 8,195 MiB in 256 MiB), so V8 left the
 //     garbage of the requests served (~1 MB each) uncollected until the kernel killed the
-//     instance. So the image caps V8's old space at 128 MiB (Dockerfile.http), and V8 collects
+//     instance. So the image caps V8's old space at 104 MiB (Dockerfile.http; 128 until 3.0.2), and V8 collects
 //     first. On Cloud Run this is not verified: an instance that shows Node only its 256 MiB gets
 //     a default heap near the cap already, and then the cap changes little. Its start-up line says
 //     which (heap_limit_mb; memory_limit_mb, null where Node is told no limit).

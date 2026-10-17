@@ -287,9 +287,12 @@ async function kevRecent(d: KevRecentDeps, a: KevRecentArgs): Promise<ToolResult
   }
 }
 
+// One output schema per process, not per request (3.0.2; index.ts envelopeSchema says why).
+const OUTPUTS = new WeakMap<object, z.ZodType>();
 // Registers the tool on a server built by index.ts's createServer.
 export function registerKevRecent(server: McpServer, d: KevRecentDeps): void {
-  const output = d.envelopeSchema({ data: Data, coverage: Coverage, freshness: Freshness });
+  const output = OUTPUTS.get(d.envelopeSchema) ?? d.envelopeSchema({ data: Data, coverage: Coverage, freshness: Freshness });
+  OUTPUTS.set(d.envelopeSchema, output);
   server.registerTool(
     "kev_recent",
     {

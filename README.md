@@ -621,7 +621,7 @@ The npm package (stdio):
 The HTTP entrypoint, `dist/http.js` (`npm run start:http`), serves the same tools over
 Streamable HTTP on `POST /mcp`, with a liveness check on `GET /health`. In a container with
 little memory, start it with V8's heap capped below the container's limit, as EchelonGraph's
-hosted deployment does at half of 256 MiB (`node --max-old-space-size=128 --max-semi-space-size=16 dist/http.js`): Node
+hosted deployment does in 256 MiB (`node --max-old-space-size=104 --max-semi-space-size=16 dist/http.js`): Node
 otherwise sizes its heap from the memory the system reports, which in a container can be the
 host's, and the container is then killed before V8 collects.
 It reads the three variables above and:
@@ -667,7 +667,7 @@ shape. Every release is published to npm with a provenance attestation by the pu
 release workflow, from the commit tagged `v<version>`. Changes per version:
 [CHANGELOG.md](CHANGELOG.md).
 
-Since 3.0.1 a success's `outputSchema` admits top-level fields it does not name, so a field added
+Since 3.0.2 a success's `outputSchema` admits top-level fields it does not name, so a field added
 in a minor release does not fail a client still holding the tool list it read before. A client
 that shows "does not match the tool's output schema" after an upgrade is validating against the
 schema of the version it listed: reconnect it (Claude Code: `/mcp`, then reconnect `echelongraph`) or restart it. Each tool's `data`

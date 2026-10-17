@@ -416,8 +416,11 @@ async function checkAffected(kit: CheckAffectedKit, a: Args): Promise<ToolResult
   }
 }
 
+// One output schema per process, not per request (3.0.2; index.ts envelopeSchema says why).
+const OUTPUTS = new WeakMap<object, z.ZodType>();
 export function registerCheckAffected(server: McpServer, kit: CheckAffectedKit): void {
-  const output = kit.envelopeSchema({ data: DATA, coverage: COVERAGE, freshness: null });
+  const output = OUTPUTS.get(kit.envelopeSchema) ?? kit.envelopeSchema({ data: DATA, coverage: COVERAGE, freshness: null });
+  OUTPUTS.set(kit.envelopeSchema, output);
   server.registerTool(
     TOOL,
     {

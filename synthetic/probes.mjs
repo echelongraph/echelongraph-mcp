@@ -355,7 +355,7 @@ export const HTTP_EXPECT = {
 //                       NVD's range [r4p0, r31p0] holding r20p0 once r20p0 is read as r 20 p 0.
 //                       Absent before #3131 (2026-10-11: 7 matches, compareVersions("r4p0", "r31p0")
 //                       = +1, so the range held nothing); present since #3131 reached production in
-//                       echelon-core-backend-01165-t9m (2026-10-12 03:19Z: 14 matches, all four KEV
+//                       core-backend (2026-10-12 03:19Z: 14 matches, all four KEV
 //                       CVEs), when its EXPECT_PENDING entry was removed.
 // An unmet `expect` is expectation_unmet with what it saw as detail (create-mcp-synthetic-monitoring.sh's
 // runbook says how to read each).

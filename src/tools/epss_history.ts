@@ -296,8 +296,11 @@ export async function epssHistory<F extends { ok: false }>(kit: ToolKit<F>, cve_
   }
 }
 
+// One output schema per process, not per request (3.0.2; index.ts envelopeSchema says why).
+const OUTPUTS = new WeakMap<object, z.ZodType>();
 export function registerEPSSHistory<F extends { ok: false }>(server: McpServer, kit: ToolKit<F>): void {
-  const output = epssHistoryOutput(kit);
+  const output = OUTPUTS.get(kit) ?? epssHistoryOutput(kit);
+  OUTPUTS.set(kit, output);
   server.registerTool(
     TOOL,
     {

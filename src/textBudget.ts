@@ -152,32 +152,47 @@ const clipString = (s: string, n: number): string => {
   const end = n > 0 && /[\uD800-\uDBFF]/.test(s[n - 1]) ? n - 1 : n;
   return `${s.slice(0, end)}…`;
 };
+// What a cut left out, clipped and capped, for the sentence that says so. The structured cut's
+// thinning (thinned, below) says nothing of it and passes none (3.0.2: through 3.0.1 each entry it
+// thinned filled a Set of its own, discarded).
 type CutStats = { left: Set<string>; clipped: number; capped: number };
-function cutValue(v: unknown, clip: number, cap: number, s: CutStats): unknown {
+function cutValue(v: unknown, clip: number, cap: number, s?: CutStats): unknown {
   if (typeof v === "string") {
     if (v.length <= clip) return v;
-    s.clipped++;
+    if (s) s.clipped++;
     return clipString(v, clip);
   }
   if (Array.isArray(v)) {
-    if (v.length > cap) s.capped++;
+    if (s && v.length > cap) s.capped++;
     return v.slice(0, cap).map((x) => cutValue(x, clip, cap, s));
   }
   if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cutValue(x, clip, cap, s)]));
   return v;
 }
-function cutRow(row: Record<string, unknown>, keep: RowKeep, level: TextCutLevel, s: CutStats, prefix = ""): Record<string, unknown> {
-  const wanted = new Map<string, readonly string[] | null>(keep.map((k) => (typeof k === "string" ? [k, null] : [k[0], k[1]])));
+// A RowKeep as the fields it names, each with its subfields (null: kept whole), built once per
+// RowKeep (3.0.2: through 3.0.1, once per row cut; a 2,000-row answer's structured cut built it
+// some 12,000 times). A RowKeep is never changed once built.
+const wantedOf = (() => {
+  const built = new WeakMap<RowKeep, Map<string, readonly string[] | null>>();
+  return (keep: RowKeep): Map<string, readonly string[] | null> => {
+    let wanted = built.get(keep);
+    if (!wanted) built.set(keep, (wanted = new Map<string, readonly string[] | null>(keep.map((k) => (typeof k === "string" ? [k, null] : [k[0], k[1]])))));
+    return wanted;
+  };
+})();
+function cutRow(row: Record<string, unknown>, keep: RowKeep, level: TextCutLevel, s?: CutStats, prefix = ""): Record<string, unknown> {
+  const wanted = wantedOf(keep);
   const cap = level.cap ?? Number.POSITIVE_INFINITY;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(row)) {
+  for (const k of Object.keys(row)) {
+    const v = row[k];
     if (!wanted.has(k)) {
-      s.left.add(`${prefix}${k}`);
+      s?.left.add(`${prefix}${k}`);
       continue;
     }
     const sub = wanted.get(k);
     if (sub && Array.isArray(v)) {
-      if (v.length > cap) s.capped++;
+      if (s && v.length > cap) s.capped++;
       out[k] = v.slice(0, cap).map((e) => (isPlainObject(e) ? cutRow(e, sub, level, s, `${prefix}${k}[].`) : cutValue(e, level.clip, cap, s)));
     } else {
       out[k] = cutValue(v, level.clip, cap, s);
@@ -494,7 +509,7 @@ const levelOf = (l: ThinLevel): EntryLevel => (Array.isArray(l) ? { keep: l as R
 const thinned = (e: unknown, level: ThinLevel, cap = Number.POSITIVE_INFINITY): unknown => {
   if (!isPlainObject(e)) return e;
   const { keep, capped, mark } = levelOf(level);
-  const t = cutRow(e, keep, { keep, clip: Number.POSITIVE_INFINITY }, { left: new Set(), clipped: 0, capped: 0 });
+  const t = cutRow(e, keep, { keep, clip: Number.POSITIVE_INFINITY });
   const inner = capped ? t[capped] : undefined;
   if (capped && Array.isArray(inner) && inner.length > cap) t[capped] = inner.slice(0, cap);
   return mark ? { ...t, ...mark(e, cap) } : t;
@@ -505,19 +520,31 @@ const longestInside = (v: unknown, capped: string): number =>
 // An entry JSON cannot write (undefined) is written null in a list.
 const entryChars = (e: unknown): number => JSON.stringify(e)?.length ?? 4;
 const listOf = (data: Record<string, unknown>, at: readonly string[]): unknown => at.reduce<unknown>((o, k) => field(o, k), data);
+// 3.0.2: a list's entries are measured, thinned, only when the cut first asks how many characters
+// some of them take (chars), each thinned, measured and let go; and thinned to be kept only when
+// the cut asks for them (keep), only those it keeps, each once. Through 3.0.1 every list the cut
+// tried held every entry thinned for as long as the cut ran, and a level that caps a list inside
+// each entry thinned every entry at no cap before it tried any: on a 2,000-row check_sbom answer
+// (test/http-memory.test.mjs's) the structured cut allocated 108 MB, against 18 MB on 3.0.0 and 24
+// MB now (V8's sampling heap profiler, collected objects included). What is measured and kept is
+// the same: each entry thinned as before, its characters summed as before.
 function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOutFirst, level?: ThinLevel, newest?: true, cap = Number.POSITIVE_INFINITY, levelAt?: number): CutList | undefined {
   const at = path.split(".");
   const v = listOf(data, at);
   if (!Array.isArray(v) || v.length === 0) return undefined;
   const n = v.length;
-  const entries = level ? v.map((e) => thinned(e, level, cap)) : v;
+  const made: unknown[] = [];
+  const entry = (i: number): unknown => {
+    if (!level) return v[i];
+    if (!(i in made)) made[i] = thinned(v[i], level, cap);
+    return made[i];
+  };
   const thin = level ? levelOf(level).keep : undefined;
   // A capped level's clause only where its cap cuts an entry's list (#3139's review: a package
   // with one range is not "at most its first 1").
   const lv = level ? levelOf(level) : undefined;
   const bites = lv?.capped === undefined || v.some((e) => (Array.isArray(field(e, lv.capped as string)) ? (field(e, lv.capped as string) as unknown[]).length : 0) > cap);
   const thinSaid = lv && bites ? lv.said?.(cap) : undefined;
-  const lens = entries.map(entryChars);
   // The indices in the order they leave: from the end, or, for a series kept newest, from the start.
   const leavingOrder = (i: number) => (newest ? i : n - 1 - i);
   const order: number[] = [];
@@ -525,14 +552,21 @@ function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOut
   const named = order.length;
   const queued = new Set(order);
   for (let j = 0; j < n; j++) if (!queued.has(leavingOrder(j))) order.push(leavingOrder(j));
-  const leaving = [0];
-  for (const i of order) leaving.push(leaving[leaving.length - 1] + lens[i]);
-  const all = leaving[n];
+  // The characters of the entries in the order they leave, summed: leaving[j] is the first j's.
+  let leaving: number[] | undefined;
+  const sums = (): number[] => {
+    if (leaving) return leaving;
+    const lens: number[] = [];
+    for (let i = 0; i < n; i++) lens.push(entryChars(!level || i in made ? entry(i) : thinned(v[i], level, cap)));
+    leaving = [0];
+    for (const i of order) leaving.push(leaving[leaving.length - 1] + lens[i]);
+    return leaving;
+  };
   const kept = (k: number) => Math.max(0, Math.min(n, k));
   const over = new Map<number, GivenBack>();
   const keptAt = (k: number): number[] => {
     const out = new Set(order.slice(0, n - kept(k)));
-    return entries.map((_, i) => i).filter((i) => !out.has(i));
+    return Array.from({ length: n }, (_, i) => i).filter((i) => !out.has(i));
   };
   return {
     path,
@@ -546,9 +580,12 @@ function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOut
     ...(levelAt !== undefined ? { level: levelAt } : {}),
     cap,
     over,
-    chars: (k) => all - leaving[n - kept(k)] + Math.max(0, kept(k) - 1),
+    chars: (k) => {
+      const l = sums();
+      return l[n] - l[n - kept(k)] + Math.max(0, kept(k) - 1);
+    },
     kept: keptAt,
-    keep: (k) => keptAt(k).map((i) => (over.has(i) ? over.get(i)?.entry : entries[i])),
+    keep: (k) => keptAt(k).map((i) => (over.has(i) ? over.get(i)?.entry : entry(i))),
   };
 }
 // `o` with the list at `at` replaced by `v`, each object on the way copied, its keys in their order.
@@ -564,6 +601,7 @@ const keepSaid = (keep: RowKeep): string => listed(keep.map((x) => (typeof x ===
 // kept, in their order in data, grouped where one level and cap holds a run of them (#3132's second
 // review: not always the first kept, since give-back passes an entry that cannot take any back).
 function givenBackSaid(list: CutList, k: number): string {
+  if (list.over.size === 0) return "";
   const kept = list.kept(k);
   const runs: { from: number; to: number; g: GivenBack }[] = [];
   kept.forEach((i, pos) => {

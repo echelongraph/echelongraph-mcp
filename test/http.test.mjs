@@ -573,8 +573,13 @@ async function slowStub() {
       }
       state.open++;
       state.maxOpen = Math.max(state.maxOpen, state.open);
+      let settled = false;
+      // gate (#2773's 503 test): while set, an answer also waits for the test to release it, so a
+      // request holds its place exactly as long as the test needs and no timer races the admission wait.
       const t = setTimeout(
-        () => {
+        () => Promise.resolve(state.gate).then(() => {
+          if (settled) return;
+          settled = true;
           state.open--;
           if (u.pathname === "/api/v1/public/cves/summary") {
             res.writeHead(200, { "content-type": "application/json" });
@@ -587,11 +592,12 @@ async function slowStub() {
             res.writeHead(404, { "content-type": "text/plain" });
             res.end("404 page not found\n");
           }
-        },
+        }),
         batch ? state.batchMs : state.ms,
       );
       res.on("close", () => {
-        if (res.writableFinished) return;
+        if (res.writableFinished || settled) return;
+        settled = true;
         clearTimeout(t);
         state.open--;
         state.cancelled++;
@@ -650,7 +656,12 @@ describe("#2773: at most MCP_MAX_IN_FLIGHT requests are served at once; the next
   let stub, srv;
   before(async () => {
     stub = await slowStub();
-    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: "2", MCP_ADMISSION_WAIT_MS: "1500" });
+    // The 503 test holds its two places behind the stub's gate, and the API timeout is far past any
+    // hold. It used to hold them with a 4,000 ms stub against startHttp's 2,000 ms timeout: the held
+    // requests gave up at 2 s and freed their places only ~500 ms after the third's 1,500 ms wait ran
+    // out, so on a loaded, cold server the third was admitted and served instead of refused
+    // (2026-10-17, the 3.0.2 dry run: 200 !== 503, "did not answer ... within 2000 ms").
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "30000", MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: "2", MCP_ADMISSION_WAIT_MS: "1500" });
   });
   after(async () => {
     await srv?.stop();
@@ -659,34 +670,52 @@ describe("#2773: at most MCP_MAX_IN_FLIGHT requests are served at once; the next
   const call = { name: "cve_summary", arguments: {} };
   const summary = () => modern(srv.url, "tools/call", call);
 
+  // Its own server, with an admission wait far past any queue this test builds: it is about the cap
+  // and the queue, and the next test holds the 503 deadline. On the shared 1,500 ms server the third
+  // pair's wait is ~730 ms idle but reached 1,259 ms under 16 busy loops on 4 cores, and under the
+  // dev box's load during the 3.0.2 tarball test one request passed 1,500 ms and was refused
+  // (2026-10-17: 503 !== 200, after the dry run two minutes earlier had passed it).
   it("six at once are all answered, never more than two at a time, four of them after waiting", async () => {
-    stub.state.ms = 300;
-    stub.state.maxOpen = 0;
-    const before = accessLines(srv).length;
-    const rs = await Promise.all(Array.from({ length: 6 }, summary));
-    for (const r of rs) assert.equal(r.status, 200, r.text);
-    assert.equal(stub.state.maxOpen, 2, "the API saw more than MCP_MAX_IN_FLIGHT at once");
-    await sleep(100);
-    const lines = accessLines(srv).slice(before);
-    assert.equal(lines.length, 6);
-    for (const l of lines) assert.ok(l.in_flight >= 1 && l.in_flight <= 2, JSON.stringify(l));
-    assert.ok(lines.filter((l) => l.queued_ms >= 200).length >= 4, JSON.stringify(lines.map((l) => l.queued_ms)));
+    const wide = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: "2", MCP_ADMISSION_WAIT_MS: "20000" });
+    try {
+      stub.state.ms = 300;
+      stub.state.maxOpen = 0;
+      const before = accessLines(wide).length;
+      const rs = await Promise.all(Array.from({ length: 6 }, () => modern(wide.url, "tools/call", call)));
+      for (const r of rs) assert.equal(r.status, 200, r.text);
+      assert.equal(stub.state.maxOpen, 2, "the API saw more than MCP_MAX_IN_FLIGHT at once");
+      await sleep(100);
+      const lines = accessLines(wide).slice(before);
+      assert.equal(lines.length, 6);
+      for (const l of lines) assert.ok(l.in_flight >= 1 && l.in_flight <= 2, JSON.stringify(l));
+      assert.ok(lines.filter((l) => l.queued_ms >= 200).length >= 4, JSON.stringify(lines.map((l) => l.queued_ms)));
+    } finally {
+      await wide.stop();
+    }
   });
 
   it("one that waits MCP_ADMISSION_WAIT_MS is answered 503, JSON-RPC -32030, with Retry-After; /health is never held", async () => {
-    stub.state.ms = 4000;
+    stub.state.ms = 50;
+    let release;
+    stub.state.gate = new Promise((resolve) => (release = resolve));
     const held = [summary(), summary()];
-    await waitFor(() => stub.state.open === 2, "two requests at the API");
-    const t0 = Date.now();
-    const r = await summary();
-    const waited = Date.now() - t0;
-    assert.equal(r.status, 503, r.text);
-    assert.match(r.contentType, /^application\/json/);
-    assert.equal(r.message.error.code, -32030);
-    assert.match(r.message.error.message, /already serving its 2 requests at once/);
-    assert.equal(r.headers.get("retry-after"), "5");
-    assert.ok(waited >= 1400 && waited < 3800, `answered after ${waited} ms`);
-    assert.equal((await fetch(`${srv.base}/health`)).status, 200, "/health was held behind the full instance");
+    try {
+      await waitFor(() => stub.state.open === 2, "two requests at the API");
+      const t0 = Date.now();
+      const r = await summary();
+      const waited = Date.now() - t0;
+      assert.equal(r.status, 503, r.text);
+      assert.equal(stub.state.open, 2, "refused after a held place was freed, not while both were held");
+      assert.match(r.contentType, /^application\/json/);
+      assert.equal(r.message.error.code, -32030);
+      assert.match(r.message.error.message, /already serving its 2 requests at once/);
+      assert.equal(r.headers.get("retry-after"), "5");
+      assert.ok(waited >= 1400 && waited < 10_000, `answered after ${waited} ms`);
+      assert.equal((await fetch(`${srv.base}/health`)).status, 200, "/health was held behind the full instance");
+    } finally {
+      stub.state.gate = undefined;
+      release();
+    }
     for (const h of await Promise.all(held)) assert.equal(h.status, 200, h.text);
     await sleep(100);
     const refusal = accessLines(srv).find((l) => l.status === 503 && l.refused === "busy");
@@ -702,12 +731,12 @@ describe("#2773: at most MCP_MAX_IN_FLIGHT requests are served at once; the next
     for (let i = 0; i < 3; i++) stalled.push(await rawRequest(srv.url, "modern", call, { bytes: 20 }));
     await sleep(200);
     const before = accessLines(srv).length;
-    const t0 = Date.now();
+    // Served at once is the server's own queued_ms below, not this test's clock: stalled uploads
+    // that held the places would leave this call to wait MCP_ADMISSION_WAIT_MS and be refused 503,
+    // while a wall-clock bound of 1 s failed under load with nothing held (2026-10-17).
     const r = await summary();
-    const took = Date.now() - t0;
     for (const sock of stalled) sock.destroy();
     assert.equal(r.status, 200, r.text);
-    assert.ok(took < 1000, `answered after ${took} ms: the stalled uploads held the places`);
     await sleep(100);
     const line = accessLines(srv)
       .slice(before)
@@ -779,7 +808,10 @@ describe("#2773: subscriptions/listen streams take no place; the gate still boun
   let stub, srv;
   before(async () => {
     stub = await slowStub();
-    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: String(N), MCP_ADMISSION_WAIT_MS: "1500" });
+    // The control below holds its places behind the stub's gate, and the API timeout is far past any
+    // hold: a 3,000 ms stub against startHttp's 2,000 ms timeout freed them ~500 ms after the refused
+    // requests' 1,500 ms wait ran out, the race the test above lost on 2026-10-17.
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "30000", MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_IN_FLIGHT: String(N), MCP_ADMISSION_WAIT_MS: "1500" });
   });
   after(async () => {
     await srv?.stop();
@@ -818,13 +850,14 @@ describe("#2773: subscriptions/listen streams take no place; the gate still boun
         try {
           await openAll(streams, count);
           const before = accessLines(srv).length;
-          const t0 = Date.now();
+          // "At once" is the server's own queued_ms below, not this test's clock: a call the streams
+          // held would wait MCP_ADMISSION_WAIT_MS and be refused 503 (the control that lets listens
+          // take places fails every case on that), while a wall-clock bound of 1 s failed 2 runs in 6
+          // on a loaded runner (2026-10-17) with nothing held.
           const r = await summary(era);
-          const took = Date.now() - t0;
           assert.equal(r.status, 200, r.text);
           assert.notEqual(r.message.result.isError, true, r.text);
           assert.deepEqual(r.message.result.structuredContent.data, SUMMARY);
-          assert.ok(took < 1000, `answered after ${took} ms: the listen streams held the places`);
           const o = await opening(era);
           assert.equal(o.status, 200, o.text);
           await sleep(100);
@@ -857,10 +890,12 @@ describe("#2773: subscriptions/listen streams take no place; the gate still boun
 
   it(`control: with ${N + 5} listen streams open the gate still bounds ordinary calls of both eras, and a 2025-era body naming subscriptions/listen waits like one`, async () => {
     const streams = [];
+    let release = () => {};
     try {
       await openAll(streams, N + 5);
-      stub.state.ms = 3000;
+      stub.state.ms = 50;
       stub.state.maxOpen = 0;
+      stub.state.gate = new Promise((resolve) => (release = resolve));
       const held = [summary("modern"), summary("legacy")];
       await waitFor(() => stub.state.open === N, `${N} calls at the API`);
       // A listen opened now, with every place taken, is served at once.
@@ -880,10 +915,15 @@ describe("#2773: subscriptions/listen streams take no place; the gate still boun
         assert.equal(r.status, 503, r.text);
         assert.equal(r.message.error.code, -32030, r.text);
       }
-      assert.ok(waited >= 1400 && waited < 3800, `answered after ${waited} ms`);
+      assert.equal(stub.state.open, N, "refused after a held place was freed, not while every place was held");
+      assert.ok(waited >= 1400 && waited < 10_000, `answered after ${waited} ms`);
+      stub.state.gate = undefined;
+      release();
       for (const h of await Promise.all(held)) assert.equal(h.status, 200, h.text);
       assert.equal(stub.state.maxOpen, N, "the API saw more than MCP_MAX_IN_FLIGHT at once");
     } finally {
+      stub.state.gate = undefined;
+      release();
       await closeAll(streams);
     }
   });

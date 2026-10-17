@@ -583,8 +583,8 @@ A release is done when all of these hold, in this order (2026-10-05). Each step 
    CHANGELOG section, preceded by the sentence in "Release notes" above. The script does not
    create it. Glama's Auto-Release builds from it, and it is what "Watch → Releases" emails.
 5. `scripts/publish-smithery.sh`: Smithery re-scans the hosted endpoint, so its listing shows this
-   release's tools and descriptions. It refuses until step 3 holds. It reads the founder's API key
-   from Secret Manager (`smithery-api-key`, echelongraph-prod) and checks that Smithery's API lists
+   release's tools and descriptions. It refuses until step 3 holds. It reads the publisher's
+   Smithery API key from the deployment's secret store and checks that Smithery's API lists
    the release's tool count. Self-test: `scripts/publish-smithery-selftest.sh`.
 6. docker/mcp-registry#5429, while it is open: move `servers/echelongraph/server.yaml`'s
    `source.commit` to the tag's commit, then re-run `go run ./cmd/validate --name echelongraph` and

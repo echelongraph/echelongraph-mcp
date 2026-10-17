@@ -74,13 +74,15 @@ CSAF `vendor_fix`, Microsoft's Vendor Fix), `nvd_patch_reference` (an NVD refere
 (a sentence of the CVE record's solutions, written by its CNA, that names a fixed version) and
 `description_fix` (a sentence of the CVE description that names a fixed version). A reference page
 that only mentions a patch, and a CVE's presence in CISA's KEV catalog, are not evidence.
-`get_cve` relays the CNA's own sentence as `cna_solution`, its date for when the vulnerability was
-made public as `date_public` (with `date_public_source` `cna`), and the CNA as `cna`, each only
-where the CVE record has it. `false` means no fix evidence is on record, which is **not** a
+`get_cve` relays the CNA's own sentence as `cna_solution`, which section of the record it is as
+`cna_solution_section` (`solution` or `workaround`: a workaround's sentence is the record's
+workaround, never its solution), its date for when the vulnerability was made public as
+`date_public` (with `date_public_source` `cna`), and the CNA as `cna`, each only where the CVE
+record has it. `false` means no fix evidence is on record, which is **not** a
 finding that no fix exists. Once `true`, `patch_available` is not set back to `false`, so it can be
 `true` beside an empty `patch_evidence`: evidence of a fix once held has since been withdrawn, and
 `remediation.fix_status` in the CVE's record is the current reading, not `patch_available` (since
-3.0.1 the field's outputSchema text says so). An answer with no `patch_evidence` (an API older than that
+3.0.2 the field's outputSchema text says so). An answer with no `patch_evidence` (an API older than that
 field) does not name the evidence, and a `false` there is not a finding that no fix exists either.
 Both tools relay the two fields as the API sends them.
 

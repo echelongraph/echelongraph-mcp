@@ -6,8 +6,29 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
-## 3.0.1 — 2026-10-12
+## 3.0.2 — 2026-10-17
 
+3.0.1 was tagged but never published to npm: its release run's memory test
+(`test/http-memory.test.mjs`) failed. With two 2,000-purl documents and 64 other requests in
+flight, the hosted endpoint needed the whole of its image's 128 MiB heap, and V8 aborted. 3.0.2 is
+3.0.1's changes with that fixed (the first entry).
+
+- **The hosted image caps V8's old space at 104 MiB, not 128** (#3132, Dockerfile.http). With the
+  schemas built once, the memory test's live set fits in 80 MiB, and at 128 V8 let the burst's
+  garbage stand until the container peaked at 256-258 MB of its 268 MB. At 104 the peak is
+  235-241 MB with about 24 MiB of heap to spare (3.0.0 at 128: 238-252 MB). The start-up line's
+  `heap_limit_mb` now reads 152 (104 plus the young generation), not 176.
+
+- **The hosted endpoint builds each tool's output schema once, not once per request** (#3132).
+  It serves every request with a server of its own, and 3.0.1's closed copy of each success
+  branch, the check behind the open `outputSchema` (below), doubled the output schemas each one
+  built: 1,371 KB of heap a server, against 3.0.0's 1,168. The memory test's two SBOMs were still
+  at their first batches when V8 aborted, so it was not their cut that ran out. Each schema is now
+  built once per process, 611 KB a server, and the memory test passes with an 80 MiB heap, where
+  3.0.0 needed 112 and 3.0.1 128. check_sbom's and scan_manifest's structured cut also measures a
+  thinned row and lets it go, and thins again only the rows it keeps: on that test's 2,000-row
+  answer it allocated 108 MB in 3.0.1, 18 MB in 3.0.0 and 24 MB now. No answer changes: every
+  call of the suite returns the same text and `structuredContent` as 3.0.1.
 - **check_sbom and scan_manifest keep every row before any row leaves `data`** (#3132). In 3.0.0
   the structured cut had one level for a row, which kept every match, so a row still large once
   thinned left `data`, and every row after it went with it. Hosted 3.0.0 kept 1 of 5 rows for five

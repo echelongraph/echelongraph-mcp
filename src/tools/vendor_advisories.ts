@@ -434,8 +434,11 @@ const SEARCH_DATA: DataCut = {
 };
 const ROW_CUT_DESCRIPTION = " Cut, each row keeps vendor, vendor_advisory_id, title, severity and cve_ids at least, its strings and lists shortened";
 
-export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdvisoryKit): void {
-  const FOR_CVE_OUTPUT = kit.envelopeSchema({
+// The three tools' output schemas, one each per process, not per request (3.0.2; index.ts
+// envelopeSchema says why).
+const OUTPUTS = new WeakMap<object, ReturnType<typeof outputsOf>>();
+function outputsOf(envelopeSchema: VendorAdvisoryKit["envelopeSchema"]) {
+  const FOR_CVE_OUTPUT = envelopeSchema({
     data: z.looseObject({
       cve_id: opt(z.string()),
       advisories: opt(z.array(AdvisoryRow)),
@@ -459,7 +462,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     }),
     freshness: null,
   });
-  const DETAIL_OUTPUT = kit.envelopeSchema({
+  const DETAIL_OUTPUT = envelopeSchema({
     data: AdvisoryRow.extend({
       description: opt(z.string()),
       known_cve_ids: opt(z.array(z.string())).describe("The CVE IDs of cve_ids that have a record in EchelonGraph's CVE feed."),
@@ -492,7 +495,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     }),
     freshness: null,
   });
-  const SEARCH_OUTPUT = kit.envelopeSchema({
+  const SEARCH_OUTPUT = envelopeSchema({
     data: z.looseObject({
       advisories: opt(z.array(AdvisoryRow)),
       total: opt(z.number()).describe("The matches; when total_capped is true, a lower bound: 1,000 or more."),
@@ -514,6 +517,13 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     }),
     freshness: null,
   });
+  return { FOR_CVE_OUTPUT, DETAIL_OUTPUT, SEARCH_OUTPUT };
+}
+
+export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdvisoryKit): void {
+  const outputs = OUTPUTS.get(kit.envelopeSchema) ?? outputsOf(kit.envelopeSchema);
+  OUTPUTS.set(kit.envelopeSchema, outputs);
+  const { FOR_CVE_OUTPUT, DETAIL_OUTPUT, SEARCH_OUTPUT } = outputs;
 
   // The vendors' windows, read beside a tool's own request. Never a failure of the tool.
   async function readWindows(): Promise<Windows> {

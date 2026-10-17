@@ -3980,6 +3980,38 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.match(data.properties.cna.description, /^The CNA that wrote the CVE record/);
     });
 
+    // #3178: CVE-2022-24112 as GET /cves/:id serves it since the field: the sentence is the record's workaround,
+    // and get_cve says so, in the data and in the note. Control: the same sentence served as the solution, and an
+    // API older than the field, are not called a workaround. The outputSchema describes the field.
+    it("get_cve: cna_solution_section is relayed and documented, and a workaround's sentence is called the record's workaround", async () => {
+      const id = "CVE-2022-24112";
+      const statement = "upgrade to 2.10.4 or 2.12.1.";
+      const base = { ...WITH_EVIDENCE, cve_id: id, patch_evidence: ["cna_solution"], cna: { short_name: "apache", name: "Apache Software Foundation" }, cna_solution: statement };
+      const res = await getCve({ ...base, cna_solution_section: "workaround" });
+      assert.notEqual(res.isError, true, brief(res));
+      for (const rec of [res.structuredContent.data, JSON.parse(textBlocks(res)[0])]) {
+        assert.equal(rec.cna_solution_section, "workaround");
+        assert.equal(rec.cna_solution, statement);
+      }
+      const t = textOf(res);
+      assert.ok(t.includes("cna_solution is a fix statement from the CVE record's workarounds (cna_solution_section workaround), not its solutions, written by its CNA, Apache Software Foundation, and relayed verbatim"), t);
+      assert.doesNotMatch(t, /cna_solution is the CVE record's own fix statement/);
+      for (const [section, label] of [["solution", "the solution"], [undefined, "an API older than the field"]]) {
+        const other = await getCve(section ? { ...base, cna_solution_section: section } : base);
+        assert.notEqual(other.isError, true, brief(other));
+        assert.doesNotMatch(textOf(other), /workaround/, label);
+        assert.match(textOf(other), /cna_solution is the CVE record's own fix statement/, label);
+      }
+      // A section the API adds later is relayed, never a failed call.
+      const later = await getCve({ ...base, cna_solution_section: "a_later_section" });
+      assert.notEqual(later.isError, true, brief(later));
+      assert.equal(later.structuredContent.data.cna_solution_section, "a_later_section");
+      const { tools } = await client.listTools();
+      const data = branchOf(tools.find((x) => x.name === "get_cve").outputSchema, "measured").properties.data;
+      assert.match(data.properties.cna_solution_section.description, /^Which section of the CVE record cna_solution was read from: solution \(the record's solutions\) or workaround/);
+      assert.match(data.properties.cna_solution.description, /cna_solution_section says which of the two sections it is/);
+    });
+
     it("get_cve: a label the API adds later is relayed, never a failed call", async () => {
       const body = { ...WITH_EVIDENCE, patch_evidence: ["vendor_patch", "a_later_source"] };
       const res = await getCve(body);

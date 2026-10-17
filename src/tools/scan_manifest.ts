@@ -331,11 +331,15 @@ export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["e
   });
 }
 
+// One output schema per process, not per request (3.0.2; index.ts envelopeSchema says why).
+const OUTPUTS = new WeakMap<object, z.ZodType>();
 // A literal server.registerTool(name, { title, description, … }) call with constant strings:
 // marketing-site lib/mcpToolClaims.test.ts reads it here (it follows index.ts's call to this
 // function) and holds the /pulse/mcp row to this title and description.
 export function registerScanManifest<F extends FailureLike>(server: McpServer, deps: CheckSbomDeps<F>): void {
-  const output = scanManifestOutput(deps.envelopeSchema as CheckSbomDeps<FailureLike>["envelopeSchema"]);
+  const envelope = deps.envelopeSchema as CheckSbomDeps<FailureLike>["envelopeSchema"];
+  const output = OUTPUTS.get(envelope) ?? scanManifestOutput(envelope);
+  OUTPUTS.set(envelope, output);
   server.registerTool(
     SCAN_MANIFEST,
     {
