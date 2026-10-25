@@ -52,3 +52,23 @@ call was logged as a client that closed. Whether a client that aborts mid-call i
 has not been observed yet: on 2026-10-18 two calls aborted 1.5 s in ran on to their answers. So an
 abandoned `check_sbom` or `scan_manifest` call may run for up to its 50-second budget and hold its
 slot that long, and a retry of it waits for that slot (above) instead of being refused at once.
+
+Two bounds end a request whatever its client does. Through 3.1.1 there were none, and on
+2026-10-25 one abandoned `check_sbom` call never ended and held its slot for the life of the
+instance. Whether its body had stopped coming with no reset (above: whether Cloud Run passes on an
+abort mid-upload, and when, is not known) or its reset arrived and the call ran on is not settled;
+each bound ends one of the two. A request body that sends nothing for 10 seconds while it is read
+(not while it waits for a slot) is ended, answered HTTP 408 with a JSON-RPC error (code `-32600`),
+and its slot is freed. And no request runs past 60 seconds, Cloud Run's own request timeout: it is
+then stopped as a client that went is, what it holds is freed, and it is logged once, `refused`
+`timeout`. Its status there is 499, its client logged as gone, if it had already gone; else, if its
+answer had not ended, 504, a status for the log only: no answer is sent, and its stream (over
+HTTP/2) or its connection (over HTTP/1.1) is reset; else the status it was answered with, its
+answer left as it was. A server you run yourself reads them from `MCP_BODY_IDLE_MS` (`10000`) and
+`MCP_REQUEST_TIMEOUT_MS` (`60000`).
+
+To run the hosted entrypoint yourself in a small container, cap V8's heap below its limit, as
+EchelonGraph's hosted deployment does in 256 MiB
+(`node --max-old-space-size=104 --max-semi-space-size=16 dist/http.js`): Node can otherwise size
+its heap from the host's memory, and the container is killed before V8 collects, with every
+request on it.

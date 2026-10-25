@@ -6,6 +6,169 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.1.2 — 2026-10-25
+
+The hosted endpoint no longer loses a large-body slot to a request that never ends (#3362), a TEXT
+CUT names a nested list's full length (#3273), `get_cve` takes ENISA EUVD, GHSA, OSV and GCVE-0
+IDs (#2868), and two corrections to earlier entries, below. No `outputSchema` type or `required`
+changes.
+
+- **`get_cve` takes an ENISA EUVD, GitHub GHSA, OSV or GCVE-0 ID** (#2868). The server sends the
+  ID as asked; EchelonGraph's API resolves it to its CVE and answers that CVE's record with
+  `resolved_from` (the ID asked for, its namespace, and the source that mapped it: `enisa_euvd`,
+  `github` or `osv` through EchelonGraph's alias table, or `gcve_gna0`, the GCVE specification,
+  under which GCVE-0-YYYY-N is CVE-YYYY-N), and the note names it. An ID mapped to no CVE is the
+  API's 404, one mapped to several its 300 listing them. The record's `aliases` lists the CVE's
+  other IDs, and `eu_kev` its listing on ENISA's EU Known Exploited Vulnerabilities catalogue,
+  with ENISA's date, the reporting source ENISA records and ENISA's attribution; the note names it as ENISA's
+  data. Every value of ENISA's EUVD (an EUVD ID in `aliases`, a `resolved_from` mapped by
+  `enisa_euvd`, the `eu_kev` listing) carries the attribution "Source: ENISA EUVD", and each
+  sentence of the note that names ENISA's data ends with it, also where an older API answer sent
+  no `attribution`. The other CVE tools' `cve_id` stays a CVE ID. get_cve's `inputSchema` changes
+  in its `cve_id` description alone, which now names the IDs it takes; its type and `required` are
+  unchanged.
+- `search_cves` with an EUVD, GHSA, OSV or GCVE-0 ID as its search lists exactly the CVEs it names,
+  with `resolved_from` on the page, and the note says so.
+- The CVE feed's `method` says that ENISA EUVD identifiers resolve to their CVE.
+- **get_cve words ENISA's EU KEV in the score** (#2868, EchelonGraph scorer v4.1). Where ENISA's EU
+  Known Exploited Vulnerabilities catalogue lists a CVE CISA's KEV catalog does not, the API's
+  score is floored at 9.0 by rule `eu_kev_exploitation`; the note then says the 9.0 comes from that
+  listing ("an ENISA EU KEV listing floors it at 9.0 (Source: ENISA EUVD)"), exploitation and not
+  impact, as it says of a CISA KEV floor, and an EU-listed CVE with no CVSS reads "exploited (ENISA
+  EU KEV; Source: ENISA EUVD) and no CVSS severity is published yet". The outputSchema's
+  descriptions of `eg_severity` (`eu_kev_listed_no_cvss`), `eg_likelihood` (`exploited_sources`
+  `eu_kev`) and `score_factors` (`eu_kev`, `unknown_eu_kev_most_urgent`) name the listing. No
+  type, `required` or `inputSchema` changes; an answer scored before v4.1 reads as it did.
+- README: the Smithery link says what the listing is now, a registry entry for
+  `https://mcp.echelongraph.io/mcp`. Smithery shuts its proxy (`run.tools`, `server.smithery.ai`), API and
+  CLI on 2026-10-31 (https://smithery.ai/future), so anyone who connected through a Smithery URL
+  connects to `https://mcp.echelongraph.io/mcp` itself (#3356). To keep the README under its ceiling
+  below npm's cut, two details that `docs/` holds in full left it: which clients cut descriptions where
+  (docs/tools.md, "The client cut") and the API's own rate-limit page (docs/rate-limits.md). Nothing in
+  the server or its tools changes.
+
+- Repository only, not in the package: the production synthetic reads `cve://CVE-2021-44228` on
+  both the npm package and the hosted endpoint, once per protocol era, and its probe line
+  (`resource:cve`) carries the text's size, `text_chars`, into the size series and the 45,000
+  alert (#2781). Its text, get_cve's record cut by the resource's own construction since #2801
+  (20,132 characters on 2026-10-25), was read by nothing in production. The line fails on an empty
+  read, an error read (the JSON-RPC error the resource answers a failed lookup with) and a text that
+  is not the CVE's record, and is `not_listed` where the server's version is 2.5.0 or later and
+  `resources/templates/list` does not name `cve://{cve_id}`.
+- Repository only, not in the package: the production synthetic also makes each
+  `test/text-bound.mjs` SHAPED case's own call that no other probe makes, on the hosted endpoint,
+  once per run (lines `size:<tool>/<input>`, `synthetic/probes.mjs` `SIZE_PROBES`, 13 calls). The
+  five cases with `live` set are left out: three would pass the API's 1,200 components a minute per
+  caller, and two are forced cuts that no answer reaches. These
+  are the default and largest pages, the heavier check_affected lookups, the Juice Shop SBOM and
+  the 64-package lockfile. The answers that cost a client most now reach the size series and the
+  45,000 and 30,000 alerts, not only an operator's `npm run text-bound:live` (#2781's review). On
+  hosted 3.1.1 (2026-10-25), kev_recent at limit 200 was 29,965 characters of structuredContent,
+  and search_vendor_advisories' default page was 35,029 characters of text. The probes' own small
+  inputs measured 29,609 and 11,615. No size probe's body is past 64 KiB, so none takes a
+  large-body slot (#3362). The image copies the two files they send (`synthetic/Dockerfile`,
+  `.dockerignore`).
+
+- Repository only, not in the package (#3273): the production record
+  (`test/fixtures/text-bound-live.json`) is re-read from the hosted endpoint at 3.1.1
+  (`text-bound-live.mjs --hosted --record`, 2026-10-25T16:09:36Z) and committed as the harness
+  wrote it. Beside each case's `data_truncated` and `truncated` it holds `kept_fields`, the fields
+  each thinned list's entries keep, so production's cut level is measured, not read off a size:
+  search_cves' default page keeps 12 fields a row and no description, the second level, as the
+  case here does, and a new test holds every case whose list production thins to the fields
+  production's entries keep. check_sbom's Juice Shop case replays production's own 50 rows
+  (`prod-shaped/check_sbom.json`'s `juice_shop`, hosted 3.1.1 with `full: true`): 25,225 characters
+  of `structuredContent` against production's 25,223, where it repeated every 5th of them to 50,
+  21,262 against 24,884. get_cve's case replays production's answer whole
+  (`prod-shaped/get_cve.json`, hosted 3.1.1 with `full: true`, its 20 `cpe_configurations` among
+  it): 20,268 characters of text, as on record, where 2.6.2's answer repeated measured 24,876
+  (+22.7%). On it, get_cve's text keeps the first 8 of 103 references, none tagged Vendor Advisory
+  or Patch, so `triage_cve`'s Patch line points to the vendor advisories for this CVE, which
+  prompt-fields.test.mjs now holds (it read the tagged references the old answer's text kept as
+  production's). One drift stays open, named and pinned in `TEXT_DRIFT_KNOWN` and
+  `STRUCTURED_DRIFT_KNOWN`: cve_summary measures the answer kept from 2026-10-05, 2,725 characters
+  of text and 2,565 of `structuredContent` against production's 3,209 and 2,986 on record (-15.1%,
+  -14.1%), production's answer now carrying `nvd_poll` and one API instance's poller counters, and
+  `npm run text-bound:live -- --hosted` is red on it until the kept answers are re-read with
+  `scripts/probe-prod.sh`.
+
+- Repository only, not in the package: the production synthetic's hosted-versus-npm comparison
+  (#3097) also compares the resource templates, as `resources/templates/list` gives them, by
+  `uriTemplate`. `cve://{cve_id}` is listed only there, never in `resources/list`, so a hosted
+  build whose template's description, title or mimeType differs from npm's, or that drops it, was
+  read as identical; it now fails the `(hosted-vs-npm)` line (`resource template cve://{cve_id}:
+  description differs at character N`), and the line counts `compared_resource_templates`.
+- Repository only, not in the package: the stdio client the suite and the production synthetic
+  open the npm package with (`test/mcp-stdio-client.mjs`) rejects a request the server can no
+  longer read (#3389). A server that had exited, before its exit was noticed, or had closed its
+  stdin made the write fail with EPIPE. The client did not handle that error, so it was an uncaught
+  exception: it failed whichever test was running (once, in a loaded full run on 2026-10-25), and
+  in the synthetic it would crash the run rather than write the `(session)` failure line. The
+  request is now rejected at once: with the server's exit where that is already known, else with
+  the write's error. It is no longer left to wait for an exit, or the timeout, that may not come.
+
+### Fixed
+
+- **On the hosted endpoint, a request that never ends no longer holds a large-body slot for good**
+  (#3362). On 2026-10-25 the hosted endpoint's 3.1.1 revision (its one instance, two slots) lost
+  one of its slots and kept serving with the other: of two 2025-era `check_sbom` calls their client
+  aborted at 1.5 s, one never wrote its access line, and from then on two large bodies sent together
+  ran one after the other (the second's `slot_wait_ms` 788). Through 3.1.1 nothing bounded how long
+  a request could take, so a request that never ended held its slot until the instance went. Which
+  way that call hung is not settled: an `mcp_client_gone` line was written 56 ms after the other
+  call's access line, and it does not say whose it was. Its body may have stopped coming with no
+  reset reaching the server (`node:http2` has no request timeout, and on 2026-10-05 the resets of two
+  aborted calls reached it behind Cloud Run only when their answers were written), or its reset may
+  have arrived and the call run on. Each is now bounded:
+  - A body that sends no byte for 10 s while it is read (`MCP_BODY_IDLE_MS`; a wait for a slot is
+    not counted) is ended: answered 408 (JSON-RPC -32600), logged `refused` `body_stalled`, its slot
+    given back. That is under the 15 s a large body waits for a slot, so a client that retries at
+    once is served. Over HTTP/1.1 too, where Node's own `requestTimeout` ended such a socket at 300 s.
+  - Every request is over by 60 s (`MCP_REQUEST_TIMEOUT_MS`, Cloud Run's own request timeout). It is
+    then stopped as a client's going stops it, its slot and its place are given back, and its one
+    access line is written, `refused` `timeout`, whether or not what it was doing ever settles. That
+    line's status is 499 with `client_closed` if its client had gone first; else 504 if its answer
+    had not ended, a status for the log only (no answer is sent: its stream, or over HTTP/1.1 its
+    connection, is reset); else the status it was answered with. What it settles with later is
+    neither logged nor given back again: a slot given back twice, while another call held the other
+    one, let a third large body in on two slots.
+  - `check_sbom`'s and `scan_manifest`'s wait for a 429's `Retry-After` also ends when the hosted
+    request's own signal aborts. For a 2025-era request the SDK follows a copy of the request whose
+    signal Node holds only weakly, and after a garbage collection it no longer followed the client's
+    reset: a call whose client went waited out its `Retry-After` holding its slot (19.5 s of a 20 s
+    wait, under forced collection; now its access line comes within 100 ms of the reset).
+  - **The access line says how long the oldest large-body slot has been held**: two numbers about
+    the instance, not the request. `large_body_held` is the slots held as the line is written, and
+    `large_body_oldest_hold_ms` how long the oldest of those has been held (0 when none is). Every
+    hold now ends by its request's 60 s, so one far older is a slot no request will give back,
+    whether its request was being served or not. The leak wrote no line; had 3.1.1 written these,
+    every line on that revision after 13:03Z, `/health`'s and served calls' alike, would have read at
+    least 1 and an age that only grew. EchelonGraph's monitoring of the hosted endpoint alerts once
+    a line reads past 5 minutes. `mcp_remote_listening` also logs `body_idle_ms` and
+    `request_timeout_ms`.
+
+  The npm package (stdio) is unchanged.
+- **A TEXT CUT that keeps only the first entries of every list gives a list inside list entries its
+  full length** (#3273), as get_cve's does and the `cve://` resource's DATA CUT. Its sentence
+  "Every list in it keeps at most its first N entries: …, each named with its full length", and the
+  resource's `truncated`, gave such a list the length of the longest in the entries kept, not in the
+  answer: CVE-2021-44228's record (2026-10-25) holds a `cpe_configurations[].nodes[].cpeMatch` list
+  of 154 entries in its 16th configuration, and 3.1.1 said 63 at 8 kept. It now counts the lists of
+  the entries left out too. No schema changes.
+
+### Corrections
+
+- **Correction to 3.1.1's entry** (#3381). It said CVE-2026-111768 is fixed. That holds for the npm
+  package, which runs over stdio. It does not yet hold for the hosted endpoint
+  (`https://mcp.echelongraph.io/mcp`): a hosted request body is parsed whole before the bound on a
+  tool call's arguments counts anything, and that parse is not yet bounded. A fix is in progress
+  and is not in 3.1.2. Until it ships, a deployment that must hold that bound runs the npm package.
+- **Correction to 3.1.0's entry** (#2923). It said a read of production since 3.0.2 found one
+  hosted handler error with code -32022 classed `other`. That read found none on 3.0.2: every such
+  line was logged by the hosted 3.0.0 revision, the newest at 2026-10-17T18:16:43Z, before 3.0.2's
+  revision went live at 19:08Z, and none of the 142 lines 3.0.2's hosted revision logged was
+  `other`. 3.1.0's code fallback is unchanged.
+
 ## 3.1.1 — 2026-10-25
 
 A security release (#3345). It moves the runtime dependencies past three advisories, bounds what

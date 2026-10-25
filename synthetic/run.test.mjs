@@ -24,7 +24,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { connect, MODERN } from "../test/mcp-stdio-client.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, modern } from "../test/mcp-http-client.mjs";
 import { chooseInput, compareCatalogs, COMPLETE_MESSAGE, DEFAULT_CLIENT_CUT, DRIFT_TOOL, HTTP, judge, judgePrompt, judgeResource, judgeTextCut, LEGACY, loadRequiredText, probeOrder, probeSession, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, TEXT_CUT_MESSAGE, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
@@ -32,7 +33,7 @@ import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
 // tests that read them, each by name, instead of failing this whole file at import.
 import * as runner from "./run.mjs";
 import * as forwarderModule from "./forwarder.mjs";
-import { PROD_BASE, STRUCTURED_BUDGET, TRIP_WIRE, structuredSize, textSize } from "../test/text-bound.mjs";
+import { PROD_BASE, SHAPED, STRUCTURED_BUDGET, TRIP_WIRE, argsOf, structuredSize, textSize } from "../test/text-bound.mjs";
 import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, LOG4J_CORE, LOG4J_CORE_PURL, LOG4J_FIXED_IN, PROBES, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS, UPSTREAM_PURL } from "./probes.mjs";
 import * as probeTable from "./probes.mjs";
 import { BATCH_PATH, batchAnswer, CALL_ANSWER, ROWS } from "../test/fixtures/match-batch.mjs";
@@ -114,6 +115,34 @@ const VERDICT_LABELS = [
   "verdict:maven/org.apache.logging.log4j/log4j-core@2.14.1",
 ];
 const VERDICT_PROBES = probeTable.VERDICT_PROBES;
+// #2781: the cve:// resource probe's label, pinned here (a metric label: one renamed ends its
+// series), and the probe read off the module, so a probes.mjs without CVE_RESOURCE_PROBE fails the
+// tests that read it, each by name. Unlike the hosted leg's extras it is every leg's: one line per
+// era on stdio and on http, after the leg's other probes.
+const CVE_RESOURCE_LABEL = "resource:cve";
+const CVE_RESOURCE_PROBE = probeTable.CVE_RESOURCE_PROBE;
+const EVERY_LEG = [CVE_RESOURCE_LABEL];
+// #2781's review: the size probes' labels, pinned here for the same reason (metric labels), and the
+// table read off the module. The hosted leg writes one line each, once per run, in its first era.
+const SIZE_LABELS = [
+  "size:search_cves/search=openssl",
+  "size:search_cves/search=openssl,limit=50",
+  "size:kev_recent/default",
+  "size:kev_recent/limit=200",
+  "size:check_affected/cpe/openssl@3.0.0",
+  "size:check_affected/cpe/linux_kernel@5.10.0",
+  "size:check_affected/cpe/flash_player@10.0.0",
+  "size:check_affected/pypi/django@1.11.0",
+  "size:check_sbom/juice-shop-11.1.2-50.cdx.json",
+  "size:scan_manifest/tree.v3.package-lock.json",
+  "size:get_vendor_advisory/aws/2026-098-AWS",
+  "size:search_vendor_advisories/query=log4j",
+  "size:search_vendor_advisories/query=log4j,limit=50",
+];
+const SIZE_PROBES = probeTable.SIZE_PROBES ?? [];
+// What cve://CVE-2021-44228 answers, as resources.ts writes a record that fits (the envelope, then
+// data), for the session tests that stand in for a server.
+const cveRecordText = (over = {}) => JSON.stringify({ state: "measured", measured_at: "2026-10-03T09:00:00Z", method: "m", notes: ["n."], data_truncated: false, data: { cve_id: "CVE-2021-44228", severity: "CRITICAL" }, ...over }, null, 2);
 // #3135: a verdict probe whose label is in EXPECT_PENDING is listed and tested but not called; the
 // Mali probe was, until #3131 reached production, and has been called since c0f58d5d. The lines a run
 // writes are the active labels. These tests follow whichever state probes.mjs is in (held back: no
@@ -286,6 +315,11 @@ BODIES[`/api/v1/public/vendor-advisories/redhat/${encodeURIComponent(ADVISORY)}`
   references: [{ url: "https://access.redhat.com/errata/RHSA-2021:5128" }], vendor_modified_at: AT, withdrawn_at: "", withdrawn_reason: "",
 };
 BODIES["/api/v1/public/vendor-advisories"] = { advisories: [ADVISORY_ROW], total: 1, limit: 2, offset: 0, search_applied: true };
+// #2781's review: the advisory get_vendor_advisory's SHAPED case reads, which its size probe asks for.
+BODIES["/api/v1/public/vendor-advisories/aws/2026-098-AWS"] = {
+  ...ADVISORY_ROW, advisory_id: "6f1c7d2e-0000-4000-8000-000000000002", vendor: "aws", vendor_display_name: "Amazon Web Services", vendor_advisory_id: "2026-098-AWS",
+  known_cve_ids: [CVE], description: "A security update for an AWS service.", remediation: "No customer action is required.", references: [], vendor_modified_at: AT, withdrawn_at: "", withdrawn_reason: "",
+};
 
 const MCP_REASONS = ["identified_no_challenge", "resource_mismatch", "cross_origin_pointer", "bare_challenge_no_prm", "pointer_unreachable", "pointer_invalid", "no_authorization_servers", "wellknown_unreachable", "metadata_invalid", "challenge_unadjudicated", "no_http_answer"];
 BODIES["/api/v1/public/ai-exposure/stats?service=mcp"] = {
@@ -428,7 +462,8 @@ describe("the synthetic against the stub API", () => {
     it("writes exactly one line per tool per era, with the metric's labels, then one completion line", () => {
       const keys = r.probes.map((l) => `${l.tool}|${l.era}`);
       assert.equal(new Set(keys).size, keys.length, "a tool/era reported twice");
-      assert.equal(r.probes.length, 2 * (PUBLISHED.length + PLANNED.length));
+      // #2781: and one cve:// resource line per era.
+      assert.equal(r.probes.length, 2 * (PUBLISHED.length + PLANNED.length + EVERY_LEG.length));
       for (const l of r.probes) {
         assert.equal(l.severity, "INFO");
         for (const k of ["tool", "era", "outcome", "run_id", "package_version"]) assert.equal(typeof l[k], "string", `${k} missing: ${JSON.stringify(l)}`);
@@ -437,8 +472,34 @@ describe("the synthetic against the stub API", () => {
       assert.equal(r.complete.length, 1);
       assert.equal(r.lines.at(-1).message, COMPLETE_MESSAGE);
       const c = r.complete[0];
-      assert.deepEqual([c.success, c.failure, c.not_published], [2 * PUBLISHED.length, 0, 2 * PLANNED.length]);
+      assert.deepEqual([c.success, c.failure, c.not_published], [2 * (PUBLISHED.length + EVERY_LEG.length), 0, 2 * PLANNED.length]);
       assert.equal(new Set(r.lines.map((l) => l.run_id)).size, 1, "one run id per run");
+    });
+    // #2781: through 3.1.1 nothing in production read cve://, so its size was recorded nowhere. The
+    // npm leg now reads cve://CVE-2021-44228 once per era, after the tools, and its line carries the
+    // size of the text the package answered: the same as a client reading it directly.
+    it("#2781: the stdio leg reads cve://CVE-2021-44228 once per era, after the tools: a success whose text_chars is the text the package answers", async () => {
+      assert.equal(CVE_RESOURCE_PROBE?.label, CVE_RESOURCE_LABEL, "probes.mjs exports no CVE_RESOURCE_PROBE labelled resource:cve");
+      assert.equal(CVE_RESOURCE_PROBE.uri, `cve://${CVE}`);
+      // Under the synthetic's token, as the run's own requests are (the next test holds every one to it).
+      const c = await connect({ era: MODERN, command: process.execPath, args: [DIST], env: { ...process.env, ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_MCP_UA: UA_TOKEN }, stderr: "ignore" });
+      let text;
+      try {
+        text = (await c.readResource({ uri: CVE_RESOURCE_PROBE.uri })).contents[0].text;
+      } finally {
+        await c.close();
+      }
+      assert.equal(JSON.parse(text).data.cve_id, CVE, "control: the direct read is the record");
+      for (const era of [MODERN, LEGACY]) {
+        const lines = r.probes.filter((l) => l.era === era);
+        const l = lines.find((x) => x.tool === CVE_RESOURCE_LABEL);
+        assert.ok(l, `${era}: no ${CVE_RESOURCE_LABEL} line: ${JSON.stringify(lines.map((x) => x.tool))}`);
+        assert.deepEqual([l.outcome, l.reason, l.transport], ["success", undefined, STDIO], JSON.stringify(l));
+        assert.equal(l.text_chars, text.length, `${era}: text_chars ${l.text_chars}, the text read directly is ${text.length}`);
+        assert.equal(Object.hasOwn(l, "structured_chars"), false, "a resource answer has no structuredContent to size");
+        assert.ok(Number.isInteger(l.latency_ms) && l.latency_ms >= 0);
+        assert.equal(lines.at(-1).tool, CVE_RESOURCE_LABEL, `${era}: read after the tools`);
+      }
     });
     it("reports the version the server runs, from its handshake", async () => {
       const { PKG } = await import("../test/server-under-test.mjs");
@@ -499,7 +560,7 @@ describe("the synthetic against the stub API", () => {
     for (const ua of stub.state.userAgents) assert.equal(uaFamilyOf(ua), "echelongraph-mcp-synthetic", ua);
   });
 
-  it("an API answering 500 fails every published tool, on both eras, with the state as the reason", async () => {
+  it("an API answering 500 fails every published tool, on both eras, with the state as the reason; the cve:// read is an error read, rpc_error", async () => {
     stub.state.mode = "500";
     const r = await run(stub);
     stub.state.mode = "ok";
@@ -512,9 +573,14 @@ describe("the synthetic against the stub API", () => {
         assert.equal(l.reason, want, `${tool} [${era}]: ${JSON.stringify(l)}`);
       }
       for (const tool of PLANNED) assert.equal(r.of(tool, era).outcome, "not_published");
+      // #2781: resources.ts answers get_cve's failure as a JSON-RPC error (InternalError), never as
+      // data: a failure line, answered with no result, so it carries no size.
+      const cve = r.of(CVE_RESOURCE_LABEL, era);
+      assert.deepEqual([cve?.outcome, cve?.reason, cve?.rpc_code, cve?.transport], ["failure", "rpc_error", -32603, STDIO], JSON.stringify(cve ?? "no line"));
+      assert.equal(Object.hasOwn(cve, "text_chars"), false, JSON.stringify(cve));
     }
     assert.equal(r.exitCode, 2);
-    assert.equal(r.complete[0].failure, 2 * PUBLISHED.length);
+    assert.equal(r.complete[0].failure, 2 * (PUBLISHED.length + EVERY_LEG.length));
   });
 
   it("#2757: an API that refuses check_sbom's second batch fails the probe, expectation_unmet, though the answer fits its schema", async () => {
@@ -648,7 +714,7 @@ export const REQUIRED_IN_HEAD = { ...real.REQUIRED_IN_HEAD, get_cve: [...real.RE
 
   it("a forced name that is not a tool-name shape is dropped, so it can never become a metric label", async () => {
     const r = await run(stub, { eras: [LEGACY], force: ["Bad Name; rm -rf", "x".repeat(65)] });
-    assert.equal(r.probes.length, PUBLISHED.length + PLANNED.length);
+    assert.equal(r.probes.length, PUBLISHED.length + PLANNED.length + EVERY_LEG.length);
   });
 
   it("a server that cannot start is a (session) failure for each era, not silence", async () => {
@@ -1376,9 +1442,9 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       }
       assert.equal(r.exitCode, 0);
     });
-    it("every published tool, the active matcher verdicts (#3135), both prompts and the resource succeed on both eras over http", () => {
+    it("every published tool, the active matcher verdicts (#3135), both prompts and both resources (#2781: cve://) succeed on both eras over http", () => {
       for (const era of [MODERN, LEGACY]) {
-        for (const tool of [...PUBLISHED, ...EXTRAS]) {
+        for (const tool of [...PUBLISHED, ...EXTRAS, ...EVERY_LEG]) {
           const l = r.probes.find((p) => p.transport === HTTP && p.tool === tool && p.era === era);
           assert.ok(l, `${tool} [${era}] http: no line`);
           assert.equal(l.outcome, "success", `${tool} [${era}] http: ${JSON.stringify(l)}`);
@@ -1386,6 +1452,23 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         }
       }
       assert.equal(r.exitCode, 0);
+    });
+    // #2781's review: through d07da49d the synthetic sized one small input per tool, so the SHAPED
+    // cases that cost a client most (a default or largest page, a heavier lookup) were measured only
+    // when an operator ran text-bound:live. Each is now its own hosted call, once per run.
+    it("#2781's review: every size probe is one http call in the run's first era, after the methodology and before cve://, judged and sized as a tools/call", () => {
+      const first = r.probes.filter((l) => l.transport === HTTP && l.era === MODERN).map((l) => l.tool);
+      const at = (t) => first.indexOf(t);
+      for (const x of SIZE_LABELS) {
+        const l = r.probes.find((p) => p.tool === x);
+        assert.deepEqual([l?.outcome, l?.reason, l?.transport, l?.era], ["success", undefined, HTTP, MODERN], JSON.stringify(l ?? "no line"));
+        assert.ok(["measured", "not_assessed"].includes(l.state), `${x}: state ${l.state}`);
+        assert.ok(Number.isInteger(l.text_chars) && l.text_chars > 0 && Number.isInteger(l.structured_chars) && l.structured_chars > 0, `${x}: sizes ${l.text_chars} / ${l.structured_chars}`);
+        assert.ok(at(x) > at(RESOURCE_PROBE.label) && at(x) < at(CVE_RESOURCE_LABEL), `${x}: at ${at(x)}, want between the methodology (${at(RESOURCE_PROBE.label)}) and cve:// (${at(CVE_RESOURCE_LABEL)})`);
+      }
+      assert.deepEqual(first.filter((t) => t.startsWith("size:")), SIZE_LABELS, "in SIZE_PROBES' order");
+      assert.equal(r.probes.filter((l) => l.era === LEGACY && l.tool.startsWith("size:")).length, 0, "the second era makes none");
+      assert.equal(r.probes.filter((l) => l.transport === STDIO && l.tool.startsWith("size:")).length, 0, "the stdio leg makes none");
     });
     it("tools are judged against the endpoint's outputSchema: each http tool line carries the state it validated", () => {
       for (const tool of PUBLISHED) {
@@ -1398,15 +1481,19 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       const keys = r.probes.map((l) => `${l.tool}|${l.era}|${l.transport}`);
       assert.equal(new Set(keys).size, keys.length, "a (tool, era, transport) reported twice");
       const stdio = r.probes.filter((l) => l.transport === STDIO);
-      assert.equal(stdio.length, 2 * PUBLISHED.length);
-      assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the verdict, prompt and resource probes are the hosted leg's");
+      assert.equal(stdio.length, 2 * (PUBLISHED.length + EVERY_LEG.length));
+      assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the verdict, prompt and methodology probes are the hosted leg's");
+      // #2781: the cve:// resource is every leg's, one line per era on each.
+      for (const x of EVERY_LEG) assert.equal(stdio.filter((l) => l.tool === x).length, 2, `${x}: want one stdio line per era`);
       const http = r.probes.filter((l) => l.transport === HTTP);
-      for (const x of [...EXTRAS, DRIFT_TOOL]) assert.equal(http.filter((l) => l.tool === x).length, 2, `${x}: want one http line per era`);
+      for (const x of [...EXTRAS, ...EVERY_LEG, DRIFT_TOOL]) assert.equal(http.filter((l) => l.tool === x).length, 2, `${x}: want one http line per era`);
+      // #2781's review: one line per size probe in the run, on http, in its first era.
+      for (const x of SIZE_LABELS) assert.deepEqual(r.probes.filter((l) => l.tool === x).map((l) => [l.transport, l.era]), [[HTTP, MODERN]], `${x}: want one http line, in the first era`);
       // #3097: one (hosted-vs-npm) line per era beside the probes.
-      assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length) + 2);
+      assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length + EVERY_LEG.length) + 2 + SIZE_LABELS.length);
       const c = r.complete[0];
       assert.deepEqual(c.transports, [STDIO, HTTP]);
-      assert.deepEqual([c.success, c.failure], [2 * PUBLISHED.length + 2 * (PUBLISHED.length + EXTRAS.length) + 2, 0]);
+      assert.deepEqual([c.success, c.failure], [2 * (PUBLISHED.length + EVERY_LEG.length) + 2 * (PUBLISHED.length + EXTRAS.length + EVERY_LEG.length) + 2 + SIZE_LABELS.length, 0]);
     });
     it("#3097: on the npm package's version the endpoint's catalog is compared with it, era by era, and is the same: every tool, prompt and resource", async () => {
       const { PKG } = await import("../test/server-under-test.mjs");
@@ -1416,6 +1503,8 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         assert.deepEqual([l.package_version, l.npm_version, l.reason, l.detail, l.uncompared], [PKG.version, PKG.version, undefined, undefined, undefined], JSON.stringify(l));
         assert.equal(l.compared_tools, PUBLISHED.length, JSON.stringify(l));
         assert.ok(l.compared_prompts >= 2 && l.compared_resources >= 1, `control: the prompts and the resource were compared: ${JSON.stringify(l)}`);
+        // #3097's review: cve://{cve_id}, which only resources/templates/list lists, is compared too.
+        assert.equal(l.compared_resource_templates, 1, `control: the cve:// template was compared: ${JSON.stringify(l)}`);
         assert.equal(l.latency_ms, undefined, "not a tools/call: no latency for the latency metric");
       }
       assert.equal(r.complete[0].hosted_vs_npm, "identical");
@@ -1449,24 +1538,23 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       }
     });
     it("#2774: the hosted check_sbom probe is a body past 64 KiB on each era, served 200 and read as the document", () => {
+      // #2781's review: and the size probe's SBOM, once per run, under the general cap (no large-body slot, #3362).
       const sbom = srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.tool === "check_sbom");
-      assert.equal(sbom.length, 2, JSON.stringify(sbom));
-      for (const a of sbom) {
-        assert.ok(a.body_bytes > 64 * 1024, `a ${a.body_bytes}-byte body: under the general cap`);
-        assert.equal(a.status, 200);
-      }
+      assert.equal(sbom.length, 3, JSON.stringify(sbom));
+      // The probe's, one per era, past the cap; the size probe's, in the first era, under it.
+      assert.deepEqual(sbom.map((a) => a.body_bytes > 64 * 1024), [true, false, true], JSON.stringify(sbom.map((a) => a.body_bytes)));
+      for (const a of sbom) assert.equal(a.status, 200);
       for (const era of [MODERN, LEGACY]) {
         const l = r.probes.find((p) => p.transport === HTTP && p.tool === "check_sbom" && p.era === era);
         assert.deepEqual([l.outcome, l.state, l.input], ["success", "measured", 0], JSON.stringify(l));
       }
     });
     it("#2835: the hosted scan_manifest probe is a body past 64 KiB on each era, served 200, and measured", () => {
+      // #2781's review: and the size probe's lockfile, once per run, under the general cap.
       const lines = srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.tool === "scan_manifest");
-      assert.equal(lines.length, 2, JSON.stringify(lines));
-      for (const a of lines) {
-        assert.ok(a.body_bytes > 64 * 1024, `a ${a.body_bytes}-byte body: under the general cap`);
-        assert.equal(a.status, 200);
-      }
+      assert.equal(lines.length, 3, JSON.stringify(lines));
+      assert.deepEqual(lines.map((a) => a.body_bytes > 64 * 1024), [true, false, true], JSON.stringify(lines.map((a) => a.body_bytes)));
+      for (const a of lines) assert.equal(a.status, 200);
       for (const era of [MODERN, LEGACY]) {
         const l = r.probes.find((p) => p.transport === HTTP && p.tool === "scan_manifest" && p.era === era);
         assert.deepEqual([l.outcome, l.state, l.input], ["success", "measured", 0], JSON.stringify(l));
@@ -1489,8 +1577,10 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
           assert.equal(l.transport, HTTP);
           assert.deepEqual([l.outcome, l.reason, l.rpc_code], ["failure", "rpc_error", -32600], `${tool}: ${JSON.stringify(l)}`);
         }
-        for (const tool of [...PUBLISHED.filter((t) => !LARGE.includes(t)), ...EXTRAS]) assert.equal(r.of(tool, era)?.outcome, "success", `${tool} [${era}]: ${JSON.stringify(r.of(tool, era) ?? "no line")}`);
+        for (const tool of [...PUBLISHED.filter((t) => !LARGE.includes(t)), ...EXTRAS, ...EVERY_LEG]) assert.equal(r.of(tool, era)?.outcome, "success", `${tool} [${era}]: ${JSON.stringify(r.of(tool, era) ?? "no line")}`);
       }
+      // #2781's review: the size probes' SBOM and lockfile are under 64 KiB, so the cap refuses neither.
+      for (const x of SIZE_LABELS) assert.equal(r.of(x, MODERN)?.outcome, "success", `${x}: ${JSON.stringify(r.of(x, MODERN) ?? "no line")}`);
       assert.equal(r.exitCode, 2);
       const refused = canary.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.status === 413);
       assert.equal(refused.length, 2 * LARGE.length, "the endpoint logged each refusal");
@@ -1543,7 +1633,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
     assert.ok(!sent.includes("injected") && !sent.includes("9.9"), sent);
   });
 
-  it("an API answering 500 fails every published tool and every matcher verdict (#3135) over http with state_failed; the prompts and the resource make no API call and still pass", async () => {
+  it("an API answering 500 fails every published tool and every matcher verdict (#3135) over http with state_failed; the prompts and the methodology make no API call and still pass; the cve:// read is an error read, rpc_error (#2781)", async () => {
     stub.state.mode = "500";
     const r = await runHttp();
     stub.state.mode = "ok";
@@ -1560,7 +1650,12 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       // #3011: the chain probe reads vendor_advisories_for_cve's answer, which failed: like get_vendor_advisory's own probe.
       for (const x of CHAIN_LABELS) assert.deepEqual([r.of(x, era)?.outcome, r.of(x, era)?.reason], ["failure", "no_valid_probe_input"], `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
       for (const x of EXTRAS.filter((e) => !VERDICT_LABELS.includes(e) && !CHAIN_LABELS.includes(e))) assert.equal(r.of(x, era)?.outcome, "success", `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
+      // #2781: cve:// reads get_cve, whose failure the endpoint answers as a JSON-RPC error.
+      const cve = r.of(CVE_RESOURCE_LABEL, era);
+      assert.deepEqual([cve?.outcome, cve?.reason, cve?.rpc_code, cve?.transport], ["failure", "rpc_error", -32603, HTTP], JSON.stringify(cve ?? "no line"));
     }
+    // #2781's review: a size probe is a tools/call too, so the API's 500 fails it as state_failed, in the first era.
+    for (const x of SIZE_LABELS) assert.deepEqual([r.of(x, MODERN)?.outcome, r.of(x, MODERN)?.reason, r.of(x, LEGACY)], ["failure", "state_failed", undefined], `${x}: ${JSON.stringify(r.of(x, MODERN) ?? "no line")}`);
     assert.equal(r.exitCode, 2);
     assert.deepEqual(r.complete[0].transports, [HTTP]);
   });
@@ -1589,7 +1684,7 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
         assert.deepEqual([l?.outcome, l?.reason, l?.state, l?.transport], ["failure", "expectation_unmet", "measured", HTTP], JSON.stringify(l ?? "no line"));
         assert.match(l.detail, saw, l.detail);
       }
-      for (const x of [...PUBLISHED, ...EXTRAS.filter((e) => !failing.includes(e))]) assert.equal(r.of(x, LEGACY)?.outcome, "success", `${x}: ${JSON.stringify(r.of(x, LEGACY) ?? "no line")}`);
+      for (const x of [...PUBLISHED, ...EXTRAS.filter((e) => !failing.includes(e)), ...EVERY_LEG]) assert.equal(r.of(x, LEGACY)?.outcome, "success", `${x}: ${JSON.stringify(r.of(x, LEGACY) ?? "no line")}`);
       assert.equal(r.exitCode, 2);
     });
   }
@@ -1629,6 +1724,13 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
     const r = await withPendingEnabled(MALI_LABEL, () => runHttp());
     for (const era of [MODERN, LEGACY]) assert.equal(r.of(MALI_LABEL, era)?.outcome, "success", `${era}: ${JSON.stringify(r.of(MALI_LABEL, era) ?? "no line")}`);
     assert.equal(Boolean(EXPECT_PENDING[MALI_LABEL]), MALI_PENDING, "probes.mjs's own state is put back");
+  });
+
+  it("#2781's review: a run of one era (2025-06-18) makes the size probes in it, once", async () => {
+    stub.state.mode = "ok";
+    const r = await runHttp({ eras: [LEGACY] });
+    for (const x of SIZE_LABELS) assert.deepEqual(r.probes.filter((l) => l.tool === x).map((l) => [l.era, l.outcome]), [[LEGACY, "success"]], x);
+    assert.equal(r.exitCode, 0);
   });
 
   it("the deliberate-failure canary fails over http on both eras too", async () => {
@@ -1722,6 +1824,37 @@ describe("#2737: judging a prompt and a resource", () => {
     assert.equal(judgeResource({ contents: [{ uri, text: "  " }] }, uri).reason, "resource_empty");
     assert.equal(judgeResource({ contents: [] }, uri).reason, "resource_no_contents");
   });
+  // #2781: cve://'s text must be the record, beside what every resource read must show.
+  it("#2781: cve://CVE-2021-44228 must answer its entry with a non-empty text that is the record: a JSON object, state measured or not_assessed, data.cve_id the CVE read", () => {
+    assert.equal(typeof CVE_RESOURCE_PROBE?.expect, "function", "probes.mjs CVE_RESOURCE_PROBE has no expect");
+    const { uri, expect } = CVE_RESOURCE_PROBE;
+    const read = (text, at = uri) => judgeResource({ contents: [{ uri: at, mimeType: "application/json", text }] }, uri, expect);
+    assert.deepEqual(read(cveRecordText()), { outcome: "success" });
+    assert.deepEqual(read(cveRecordText({ state: "not_assessed" })), { outcome: "success" });
+    // A record cut by construction (#2801) is still the record.
+    assert.deepEqual(read(cveRecordText({ data_truncated: true, truncated: { cpe_match: { total: 396, returned: 8 } } })), { outcome: "success" });
+    // An empty read.
+    for (const blank of ["", " \n "]) assert.equal(read(blank).reason, "resource_empty", JSON.stringify(blank));
+    assert.equal(judgeResource({ contents: [] }, uri, expect).reason, "resource_no_contents");
+    assert.equal(read(cveRecordText(), "cve://CVE-2024-3400").reason, "resource_uri_missing");
+    // A text that is not the record, each named in detail.
+    for (const [text, saw] of [
+      ["get_cve failed: EchelonGraph answered HTTP 500", /^the text is not JSON \(\d+ characters, starting "get_cve failed/],
+      ["[]", /^the text is JSON an array; want CVE-2021-44228's record as an object$/],
+      ["null", /^the text is JSON null;/],
+      [cveRecordText({ state: "failed", error: { kind: "http", status: 500 }, data: undefined }), /^state "failed" \(error \{"kind":"http","status":500\}\); want measured or not_assessed for CVE-2021-44228$/],
+      [cveRecordText({ data: { cve_id: "CVE-2024-3400" } }), /^data\.cve_id "CVE-2024-3400"; want CVE-2021-44228$/],
+      [cveRecordText({ data: {} }), /^data\.cve_id null; want CVE-2021-44228$/],
+    ]) {
+      const v = read(text);
+      assert.deepEqual([v.outcome, v.reason], ["failure", "expectation_unmet"], `${text.slice(0, 40)}: ${JSON.stringify(v)}`);
+      assert.match(v.detail, saw);
+      assert.ok(v.detail.length <= 300);
+    }
+    // Control: without the probe's expect (the methodology's judging), the failed-state text passes,
+    // so the expect is what tells an error answered as data from the record.
+    assert.deepEqual(judgeResource({ contents: [{ uri, text: cveRecordText({ state: "failed" }) }] }, uri), { outcome: "success" });
+  });
 });
 
 // ── #2846: the prompt probes are a list, each its own line per era ───────────────────────────
@@ -1752,7 +1885,10 @@ describe("#2846: every prompt probe is its own line per era", () => {
         return { messages: [{ role: "user", content: { type: "text", text: says[name](args) } }] };
       },
       listResources: async () => ({ resources: [{ uri: RESOURCE_PROBE.uri }] }),
-      readResource: async ({ uri }) => ({ contents: [{ uri, mimeType: "text/markdown", text: "# How EchelonGraph measures" }] }),
+      // #2781: and the cve:// template, which every leg reads.
+      listResourceTemplates: async () => ({ resourceTemplates: [{ name: "cve", uriTemplate: "cve://{cve_id}" }] }),
+      readResource: async ({ uri }) =>
+        uri.startsWith("cve://") ? { contents: [{ uri, mimeType: "application/json", text: cveRecordText() }] } : { contents: [{ uri, mimeType: "text/markdown", text: "# How EchelonGraph measures" }] },
       close: async () => {},
     };
     return { client, calls };
@@ -1789,7 +1925,7 @@ describe("#2846: every prompt probe is its own line per era", () => {
       assert.deepEqual([l.outcome, l.era], ["success", MODERN], `${label}: ${JSON.stringify(l)}`);
       assert.ok(Number.isInteger(l.latency_ms) && l.latency_ms >= 0, `${label}: no latency`);
     }
-    assert.deepEqual(extras.map((l) => l.tool), [...PROMPT_LABELS, RESOURCE_PROBE.label]);
+    assert.deepEqual(extras.map((l) => l.tool), [...PROMPT_LABELS, RESOURCE_PROBE.label, CVE_RESOURCE_LABEL]);
     assert.deepEqual(s.calls.get, [{ name: "triage_cve", args: { cve_id: CVE } }, { name: "workload_triage", args: { source: "kubernetes" } }]);
     assert.equal(s.calls.list, 1, "prompts/list once per era, read by every prompt probe");
   });
@@ -1869,6 +2005,281 @@ describe("#2846: every prompt probe is its own line per era", () => {
   });
 });
 
+// ── #2781: the cve:// resource, read on every leg ─────────────────────────────────────────────
+// probeSession run against a session object that lists no tools and answers resources/templates/list
+// and resources/read as a case says, so each of the probe's outcomes is the case's own: the real
+// server's answers are held in the stub and hosted-leg tests above. What must hold: one line per
+// era on a leg without extras (the npm leg) as on one with them, after the leg's other probes; its
+// size when answered; a failure for an empty read, an error read and a text that is not the record;
+// not_listed (never a read) where the version the server reports is at or past 2.5.0 and the
+// template is not listed; not_published before it.
+describe("#2781: the cve:// resource probe, on every leg", () => {
+  function session({ templates = ["cve://{cve_id}"], read = async ({ uri }) => ({ contents: [{ uri, mimeType: "application/json", text: cveRecordText() }] }), listFails = false, version = "3.1.1" } = {}) {
+    const calls = { templates: 0, reads: [] };
+    const client = {
+      getServerVersion: () => ({ name: "echelongraph-mcp", version }),
+      listTools: async () => ({ tools: [] }),
+      listPrompts: async () => ({ prompts: [] }),
+      listResources: async () => ({ resources: [] }),
+      listResourceTemplates: async () => {
+        calls.templates += 1;
+        if (listFails) throw new Error("no answer within 10 ms");
+        return { resourceTemplates: templates.map((uriTemplate) => ({ name: "cve", uriTemplate })) };
+      },
+      readResource: async ({ uri }) => {
+        calls.reads.push(uri);
+        return read({ uri });
+      },
+      close: async () => {},
+    };
+    return { client, calls };
+  }
+  // The leg's lines, and the cve:// line (exactly one).
+  async function probe(s, more = {}) {
+    const lines = [];
+    await probeSession({ era: LEGACY, open: async () => s.client, force: [], emit: (l) => lines.push(l), shipped: probeTable.SHIPPED_IN, ...more });
+    const of = lines.filter((l) => l.tool === CVE_RESOURCE_LABEL);
+    assert.equal(of.length, 1, `${CVE_RESOURCE_LABEL}: ${of.length} lines, want 1: ${JSON.stringify(lines)}`);
+    return { line: of[0], lines };
+  }
+
+  it("CVE_RESOURCE_PROBE reads cve://CVE-2021-44228, listed by its template, and SHIPPED_IN gives it 2.5.0 (#2722's release)", () => {
+    assert.ok(CVE_RESOURCE_PROBE, "probes.mjs exports no CVE_RESOURCE_PROBE");
+    assert.deepEqual([CVE_RESOURCE_PROBE.label, CVE_RESOURCE_PROBE.template, CVE_RESOURCE_PROBE.uri], [CVE_RESOURCE_LABEL, "cve://{cve_id}", `cve://${CVE}`]);
+    assert.equal(probeTable.SHIPPED_IN?.[CVE_RESOURCE_LABEL], "2.5.0");
+  });
+
+  it("listed and answering the record: one success line per era, sized (text_chars, the text's length; no structured_chars), on a leg without extras and on one with them, after the leg's other probes", async () => {
+    for (const extras of [false, true]) {
+      const s = session();
+      const { line, lines } = await probe(s, { extras });
+      assert.deepEqual([line.outcome, line.reason, line.era], ["success", undefined, LEGACY], JSON.stringify(line));
+      assert.equal(line.text_chars, cveRecordText().length);
+      assert.equal(Object.hasOwn(line, "structured_chars"), false);
+      assert.ok(Number.isInteger(line.latency_ms) && line.latency_ms >= 0);
+      assert.equal(lines.at(-1), line, `extras ${extras}: the cve:// line is the leg's last`);
+      assert.deepEqual([s.calls.templates, s.calls.reads], [1, [`cve://${CVE}`]], `extras ${extras}`);
+    }
+  });
+
+  it("an empty read fails, resource_empty, and is sized 0; an answer without the URI read fails, resource_uri_missing", async () => {
+    const empty = await probe(session({ read: async ({ uri }) => ({ contents: [{ uri, mimeType: "application/json", text: "" }] }) }));
+    assert.deepEqual([empty.line.outcome, empty.line.reason, empty.line.text_chars], ["failure", "resource_empty", 0], JSON.stringify(empty.line));
+    const none = await probe(session({ read: async () => ({ contents: [] }) }));
+    assert.deepEqual([none.line.outcome, none.line.reason], ["failure", "resource_no_contents"], JSON.stringify(none.line));
+    const other = await probe(session({ read: async () => ({ contents: [{ uri: "cve://CVE-2024-3400", text: cveRecordText() }] }) }));
+    assert.deepEqual([other.line.outcome, other.line.reason], ["failure", "resource_uri_missing"], JSON.stringify(other.line));
+  });
+
+  it("an error read fails: a JSON-RPC error is rpc_error with its code and no size; a text that is the failure, not the record, is expectation_unmet", async () => {
+    const rpc = await probe(session({ read: async () => { throw new RpcError("resources/read", { code: -32603, message: "get_cve FAILED: EchelonGraph answered HTTP 500" }); } }));
+    assert.deepEqual([rpc.line.outcome, rpc.line.reason, rpc.line.rpc_code], ["failure", "rpc_error", -32603], JSON.stringify(rpc.line));
+    assert.equal(Object.hasOwn(rpc.line, "text_chars"), false, "answered no result, so no size");
+    const timeout = await probe(session({ read: async () => { throw new Error("resources/read: no answer within 90000 ms"); } }));
+    assert.deepEqual([timeout.line.outcome, timeout.line.reason], ["failure", "timeout"], JSON.stringify(timeout.line));
+    const asData = await probe(session({ read: async ({ uri }) => ({ contents: [{ uri, mimeType: "application/json", text: cveRecordText({ state: "failed", data: undefined }) }] }) }));
+    assert.deepEqual([asData.line.outcome, asData.line.reason], ["failure", "expectation_unmet"], JSON.stringify(asData.line));
+    assert.match(asData.line.detail, /^state "failed"/);
+    assert.ok(Number.isInteger(asData.line.text_chars) && asData.line.text_chars > 0, "answered, so sized");
+  });
+
+  it("#3282: a server reporting 3.1.1 whose resources/templates/list does not name cve://{cve_id}: failure, not_listed, shipped_in 2.5.0, never read; one reporting 2.4.0: not_published", async () => {
+    const at311 = session({ templates: [] });
+    const l = (await probe(at311)).line;
+    assert.deepEqual([l.outcome, l.reason, l.shipped_in], ["failure", "not_listed", "2.5.0"], JSON.stringify(l));
+    assert.deepEqual(at311.calls.reads, [], "an unlisted resource was read");
+    assert.equal(Object.hasOwn(l, "text_chars"), false);
+    const at240 = session({ templates: ["cve://{other}"], version: "2.4.0" });
+    assert.equal((await probe(at240)).line.outcome, "not_published");
+    assert.deepEqual(at240.calls.reads, []);
+    // Control: with the gate dropped (no SHIPPED_IN entry), the 3.1.1 server reads not_published.
+    const { [CVE_RESOURCE_LABEL]: _dropped, ...rest } = probeTable.SHIPPED_IN;
+    assert.equal((await probe(session({ templates: [] }), { shipped: rest })).line.outcome, "not_published");
+  });
+
+  it("a resources/templates/list that fails is a failure line, step list, and nothing is read", async () => {
+    const s = session({ listFails: true });
+    const { line } = await probe(s);
+    assert.deepEqual([line.outcome, line.step, line.reason], ["failure", "list", "timeout"], JSON.stringify(line));
+    assert.deepEqual(s.calls.reads, []);
+  });
+});
+
+// ── #2781's review: every SHAPED case is a call the synthetic makes ────────────────────────────
+// #2781's first comment set the observable at every case of test/text-bound.mjs SHAPED and the cve://
+// resource. Through d07da49d the synthetic sized one small input per tool (search_cves at limit 2,
+// check_affected's lodash), so the cases that cost a client most were measured only when an operator
+// ran text-bound:live. probes.mjs SIZE_PROBES makes each case's call that no other probe makes, on
+// the hosted leg, once per run. This holds SHAPED and the probe tables together both ways: a case
+// added, or its arguments changed, with no call here fails by name, and so does a size probe whose
+// case is gone or changed. Cases with `live` set are left out, as text-bound-live.mjs leaves them:
+// production cannot make them (a budget past the caller's, or a forced cut no answer reaches).
+const HERE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const MCP_DIR = path.resolve(HERE_DIR, "..");
+const resolveArgs = (a) => (typeof a === "function" ? a({}) : a);
+/** What is wrong between `shaped` and the size probes `sizes`, as sentences; [] when every case is a call made in production. */
+function shapedCoverage(shaped, sizes, hosted = { ...PROBES, ...HTTP_PROBES }) {
+  const out = [];
+  for (const c of shaped) {
+    if (c.resource) {
+      if (c.resource !== CVE_RESOURCE_PROBE?.uri) out.push(`${c.label}: reads ${c.resource}, which CVE_RESOURCE_PROBE (${CVE_RESOURCE_PROBE?.uri}) does not`);
+      continue;
+    }
+    if (c.live) continue;
+    const args = argsOf(c);
+    const own = hosted[c.tool]?.[0];
+    const ownSame = own !== null && typeof own === "object" && isDeepStrictEqual(own, args);
+    const mine = sizes.filter((x) => x.case === c.label);
+    if (ownSame) {
+      if (mine.length) out.push(`${c.label}: the hosted leg's own ${c.tool} probe makes this call, and SIZE_PROBES makes it again`);
+      continue;
+    }
+    if (mine.length !== 1) {
+      out.push(`${c.label}: ${mine.length} SIZE_PROBES entries name it, want 1: production makes this call nowhere`);
+      continue;
+    }
+    if (mine[0].tool !== c.tool || !isDeepStrictEqual(resolveArgs(mine[0].arguments), args)) out.push(`${c.label}: ${mine[0].label} is not the case's call (${mine[0].tool}, other arguments)`);
+  }
+  for (const x of sizes) {
+    const c = shaped.find((y) => y.label === x.case);
+    if (!c) out.push(`${x.label}: its case ${JSON.stringify(x.case)} is not in SHAPED`);
+    else if (c.live || c.resource) out.push(`${x.label}: its case is not one production makes as a tool call (${c.live ?? c.resource})`);
+  }
+  return out;
+}
+// Which paths a build context keeps, by .dockerignore's rules as these patterns use them: the last
+// pattern that matches a path, or a directory above it, decides; a "!" pattern keeps it.
+function contextKeeps(ignore, file) {
+  let kept = true;
+  for (const raw of ignore.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))) {
+    const neg = raw.startsWith("!");
+    const pat = neg ? raw.slice(1) : raw;
+    const re = new RegExp(`^${pat.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")}(/.*)?$`);
+    if (re.test(file)) kept = neg;
+  }
+  return kept;
+}
+// The image's tree as synthetic/Dockerfile's COPY lines build it (no --from), under `dir`.
+function buildImageTree(dockerfile, dir) {
+  for (const line of dockerfile.split("\n")) {
+    const m = /^COPY\s+(?!--)(.+)$/.exec(line.trim());
+    if (!m) continue;
+    const parts = m[1].trim().split(/\s+/);
+    const dest = parts.pop();
+    for (const src of parts) {
+      const to = dest.endsWith("/") ? path.join(dir, dest, path.basename(src)) : path.join(dir, dest);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(path.join(MCP_DIR, src), to);
+    }
+  }
+  fs.symlinkSync(path.join(MCP_DIR, "node_modules"), path.join(dir, "node_modules"));
+}
+
+describe("#2781's review: every SHAPED case is a call the synthetic makes in production", () => {
+  it("SIZE_PROBES is a list under the pinned labels, each naming its SHAPED case and tool", () => {
+    assert.ok(Array.isArray(probeTable.SIZE_PROBES), "probes.mjs exports no SIZE_PROBES list");
+    assert.deepEqual(SIZE_PROBES.map((x) => x.label), SIZE_LABELS);
+    for (const x of SIZE_PROBES) {
+      assert.ok(PUBLISHED.includes(x.tool), `${x.label}: ${x.tool} is not a published tool`);
+      assert.equal(typeof x.case, "string", `${x.label}: no case`);
+      assert.ok(x.label.startsWith(`size:${x.tool}/`), `${x.label}: not size:${x.tool}/…`);
+    }
+  });
+  it("every SHAPED case without `live` is a call production makes: the hosted leg's own probe input, or one SIZE_PROBES entry with the case's own arguments; and the resource case is CVE_RESOURCE_PROBE's", () => {
+    assert.deepEqual(shapedCoverage(SHAPED, SIZE_PROBES), []);
+    const asked = SHAPED.filter((c) => !c.live && !c.resource);
+    const own = asked.filter((c) => !SIZE_PROBES.some((x) => x.case === c.label)).map((c) => c.label);
+    assert.equal(own.length + SIZE_PROBES.length, asked.length, "control: each case is counted once");
+    // The cases the hosted leg's own probe makes, named so a change to either table is seen here.
+    assert.deepEqual(own, [
+      "cve_summary",
+      "get_cve, CVE-2021-44228",
+      "cve_exposure, CVE-2023-44487",
+      "exposure_radar",
+      "epss_history, CVE-2021-44228",
+      "cve_intel, CVE-2021-44228",
+      "cve_intel, CVE-2021-44228, with fixed_branches (#2817)",
+      "cve_remediation, CVE-2021-44228",
+      "get_cwe, CWE-79",
+      "vendor_advisories_for_cve, CVE-2021-44228",
+    ]);
+  });
+  it("control: an entry dropped, one with another page size, one naming a case SHAPED does not have, and one repeating the hosted leg's own call are each named", () => {
+    const [first, second, ...rest] = SIZE_PROBES;
+    assert.match(shapedCoverage(SHAPED, [second, ...rest]).join("\n"), /^search_cves, default page \(search openssl\): 0 SIZE_PROBES entries name it, want 1/);
+    const moved = { ...second, arguments: { ...second.arguments, limit: 49 } };
+    assert.match(shapedCoverage(SHAPED, [first, moved, ...rest]).join("\n"), /^search_cves, largest page \(search openssl, limit 50\): size:search_cves\/search=openssl,limit=50 is not the case's call/);
+    const gone = { ...first, case: "search_cves, default page (search openssl, 2025)" };
+    assert.ok(shapedCoverage(SHAPED, [gone, second, ...rest]).some((x) => x.startsWith(`${first.label}: its case`)));
+    const again = { label: "size:get_cve/CVE-2021-44228", case: "get_cve, CVE-2021-44228", tool: "get_cve", arguments: { cve_id: CVE } };
+    assert.deepEqual(shapedCoverage(SHAPED, [...SIZE_PROBES, again]), ["get_cve, CVE-2021-44228: the hosted leg's own get_cve probe makes this call, and SIZE_PROBES makes it again"]);
+  });
+  it("no size probe sends full: true, and none is a request body past the endpoint's 64 KiB general cap, so none takes a large-body slot (#3362)", () => {
+    for (const x of SIZE_PROBES) {
+      const args = resolveArgs(x.arguments);
+      assert.ok(args && typeof args === "object", `${x.label}: no arguments (${JSON.stringify(args)})`);
+      assert.equal(Object.hasOwn(args, "full"), false, `${x.label} sends full`);
+      const body = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: x.tool, arguments: args } }));
+      assert.ok(body < 64 * 1024, `${x.label}: a ${body}-byte body`);
+    }
+  });
+  it("a size probe whose file cannot be read is no_valid_probe_input, named, never sent; the run goes on", async () => {
+    const lines = [];
+    const called = [];
+    const tool = { name: "check_sbom", inputSchema: { type: "object" }, outputSchema: { type: "object" } };
+    const client = {
+      getServerVersion: () => ({ name: "echelongraph-mcp", version: "3.1.1" }),
+      listTools: async () => ({ tools: [tool] }),
+      callTool: async ({ name }) => (called.push(name), { isError: true, content: [], structuredContent: { state: "failed" } }),
+      listPrompts: async () => ({ prompts: [] }),
+      listResources: async () => ({ resources: [] }),
+      listResourceTemplates: async () => ({ resourceTemplates: [] }),
+      readResource: async () => ({ contents: [] }),
+      close: async () => {},
+    };
+    assert.equal(probeTable.fromFixture("no-such-file.cdx.json", JSON.parse), undefined, "control: an unread file builds no arguments");
+    const unread = { label: "size:check_sbom/no-such-file.cdx.json", case: "-", tool: "check_sbom", arguments: () => probeTable.fromFixture("no-such-file.cdx.json", (t) => ({ sbom: JSON.parse(t) })) };
+    await probeSession({ era: LEGACY, open: async () => client, force: [], emit: (l) => lines.push(l), sizes: [unread, SIZE_PROBES.find((x) => x.tool === "check_sbom")] });
+    const [missing, read] = lines.filter((l) => l.tool.startsWith("size:"));
+    assert.deepEqual([missing.tool, missing.outcome, missing.reason], [unread.label, "failure", "no_valid_probe_input"], JSON.stringify(missing));
+    assert.equal(read.tool, "size:check_sbom/juice-shop-11.1.2-50.cdx.json", "the next size probe still ran");
+    assert.equal(called.filter((n) => n === "check_sbom").length, 2, "the tool's own probe and the readable size probe were sent; the unread one was not");
+    assert.equal(lines.at(-1).tool, CVE_RESOURCE_LABEL, "and the cve:// read after them");
+  });
+  it("the image holds what the size probes read: synthetic/Dockerfile copies each SIZE_PROBE_FILES file where probes.mjs reads it, .dockerignore keeps it in the context, and the image's tree builds every size probe's arguments", async () => {
+    const files = probeTable.SIZE_PROBE_FILES;
+    assert.deepEqual(files, ["juice-shop-11.1.2-50.cdx.json", "manifests/tree.v3.package-lock.json"]);
+    const dockerfile = fs.readFileSync(path.join(HERE_DIR, "Dockerfile"), "utf8");
+    const ignore = fs.readFileSync(path.join(MCP_DIR, ".dockerignore"), "utf8");
+    for (const f of files) {
+      assert.ok(fs.existsSync(path.join(MCP_DIR, "test", "fixtures", f)), `test/fixtures/${f} is gone`);
+      assert.ok(contextKeeps(ignore, `test/fixtures/${f}`), `.dockerignore leaves test/fixtures/${f} out of the build context`);
+    }
+    assert.equal(contextKeeps(ignore, "test/text-bound.mjs"), false, "control: the rest of test/ stays out of the context");
+    const tree = (df) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eg-synthetic-image-"));
+      buildImageTree(df, dir);
+      return dir;
+    };
+    const built = async (dir) => {
+      const m = await import(`${pathToFileURL(path.join(dir, "synthetic", "probes.mjs")).href}?at=${path.basename(dir)}`);
+      await import(`${pathToFileURL(path.join(dir, "synthetic", "run.mjs")).href}?at=${path.basename(dir)}`);
+      return m.SIZE_PROBES.map((x) => [x.label, resolveArgs(x.arguments)]);
+    };
+    const image = tree(dockerfile);
+    const without = tree(dockerfile.split("\n").filter((l) => !/^COPY test\/fixtures\//.test(l)).join("\n"));
+    try {
+      for (const f of files) assert.ok(fs.existsSync(path.join(image, "test", "fixtures", f)), `the image has no test/fixtures/${f}`);
+      for (const [label, args] of await built(image)) assert.deepEqual(args, resolveArgs(SIZE_PROBES.find((x) => x.label === label).arguments), `${label}: in the image`);
+      // Control: without the COPY lines the two read from a file build nothing (no_valid_probe_input on every run).
+      const bare = (await built(without)).filter(([, a]) => a === undefined).map(([l]) => l);
+      assert.deepEqual(bare, ["size:check_sbom/juice-shop-11.1.2-50.cdx.json", "size:scan_manifest/tree.v3.package-lock.json"]);
+    } finally {
+      for (const d of [image, without]) fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── #2724: the probe table covers exactly what the server lists ───────────────────────────────
 // PUBLISHED above is a hand-kept list, and every run test is judged against it. So it is held
 // here to what this package's own dist answers to tools/list, over stdio and over the hosted entry
@@ -1885,6 +2296,8 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
   const listed = {};
   // #2846: what the hosted endpoint answers to prompts/list, per era (only the hosted leg probes prompts).
   const listedPrompts = {};
+  // #2781: what resources/templates/list answers, per transport and era (every leg reads cve://).
+  const listedTemplates = {};
   let stub, srv;
   before(async () => {
     stub = await startStub();
@@ -1893,6 +2306,7 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
       const c = await connect({ era, command: process.execPath, args: [DIST], env: { ...process.env, ECHELONGRAPH_API_BASE: stub.base }, stderr: "ignore" });
       try {
         listed[`stdio ${era}`] = (await c.listTools()).tools;
+        listedTemplates[`stdio ${era}`] = (await c.listResourceTemplates()).resourceTemplates;
       } finally {
         await c.close();
       }
@@ -1900,6 +2314,7 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
       try {
         listed[`http ${era}`] = (await h.listTools()).tools;
         listedPrompts[`http ${era}`] = (await h.listPrompts()).prompts;
+        listedTemplates[`http ${era}`] = (await h.listResourceTemplates()).resourceTemplates;
       } finally {
         await h.close();
       }
@@ -1959,8 +2374,8 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
     const { versionAtLeast } = runner;
     const SHIPPED = probeTable.SHIPPED_IN;
     assert.ok(SHIPPED && typeof SHIPPED === "object", "probes.mjs exports no SHIPPED_IN");
-    const keys = [...Object.keys(PROBES), ...PROMPT_PROBES.map((p) => p.label), RESOURCE_PROBE.label];
-    for (const k of [...keys, ...VERDICT_PROBES.map((v) => v.tool), ...probeTable.CHAIN_PROBES.map((c) => c.tool)]) {
+    const keys = [...Object.keys(PROBES), ...PROMPT_PROBES.map((p) => p.label), RESOURCE_PROBE.label, CVE_RESOURCE_PROBE.label];
+    for (const k of [...keys, ...VERDICT_PROBES.map((v) => v.tool), ...probeTable.CHAIN_PROBES.map((c) => c.tool), ...SIZE_PROBES.map((x) => x.tool)]) {
       assert.match(SHIPPED[k] ?? "", /^\d+\.\d+\.\d+$/, `${k}: no release in SHIPPED_IN, so an endpoint that drops it reads not_published`);
       assert.ok(versionAtLeast(PKG.version, SHIPPED[k]), `${k}: SHIPPED_IN ${SHIPPED[k]} is past this package's ${PKG.version}`);
     }
@@ -1991,6 +2406,27 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
         assert.deepEqual([choice.index, choice.args], [0, v.arguments], `${v.label} (http ${era}): its arguments do not fit the inputSchema: ${JSON.stringify(choice)}`);
       }
     }
+  });
+  it("#2781's review: every SIZE_PROBES call is of a tool the hosted endpoint lists on both eras, with arguments its inputSchema accepts", () => {
+    assert.ok(SIZE_PROBES.length > 0, "probes.mjs exports no SIZE_PROBES");
+    for (const era of [MODERN, LEGACY]) {
+      const tools = listed[`http ${era}`];
+      for (const x of SIZE_PROBES) {
+        const tool = tools.find((t) => t.name === x.tool);
+        assert.ok(tool, `${x.label}: ${x.tool} is not listed (http ${era})`);
+        const choice = chooseInput(x.tool, tool, SEEN, { [x.tool]: [x.arguments] });
+        assert.deepEqual([choice.index, choice.args], [0, resolveArgs(x.arguments)], `${x.label} (http ${era}): its arguments do not fit the inputSchema: ${JSON.stringify(choice).slice(0, 300)}`);
+      }
+    }
+  });
+  // #2781: the cve:// probe reads a URI of the template both transports list, so it never reads
+  // not_published (or, at this version, not_listed) on every run.
+  it("#2781: CVE_RESOURCE_PROBE's template is what resources/templates/list names on every transport and era, and its URI is that template's, filled", () => {
+    assert.deepEqual(Object.keys(listedTemplates).sort(), [`http ${LEGACY}`, `http ${MODERN}`, `stdio ${LEGACY}`, `stdio ${MODERN}`], "control: resources/templates/list answered everywhere");
+    for (const [where, templates] of Object.entries(listedTemplates)) {
+      assert.ok(templates.some((t) => t?.uriTemplate === CVE_RESOURCE_PROBE.template), `${CVE_RESOURCE_PROBE.template} is not listed (${where}): ${JSON.stringify(templates.map((t) => t?.uriTemplate))}`);
+    }
+    assert.equal(CVE_RESOURCE_PROBE.template.replace("{cve_id}", CVE), CVE_RESOURCE_PROBE.uri);
   });
   it("#2846: every PROMPT_PROBES prompt is listed by the hosted endpoint on both eras, sent only the arguments it declares and every one it requires", async () => {
     assert.ok(Array.isArray(PROMPT_PROBES), "probes.mjs exports no PROMPT_PROBES list");
@@ -2069,7 +2505,7 @@ describe("#2781: each answered probe line says what the answer costs a client (t
     await stub?.close();
   });
 
-  it("every tools/call line that was answered carries text_chars and structured_chars, on both legs and eras; a prompt's and the resource's line carries text_chars", () => {
+  it("every tools/call line that was answered carries text_chars and structured_chars, on both legs and eras; a prompt's and a resource's line carries text_chars (#2781: cve:// on both legs)", () => {
     assert.equal(typeof runner.sizesOf, "function", "run.mjs exports no sizesOf: the probe lines carry no size");
     for (const transport of [STDIO, HTTP]) {
       for (const era of [MODERN, LEGACY]) {
@@ -2080,12 +2516,11 @@ describe("#2781: each answered probe line says what the answer costs a client (t
           assert.ok(Number.isInteger(l.text_chars) && l.text_chars > 0, `${tool} [${transport} ${era}]: text_chars ${JSON.stringify(l.text_chars)}`);
           assert.ok(Number.isInteger(l.structured_chars) && l.structured_chars > 0, `${tool} [${transport} ${era}]: structured_chars ${JSON.stringify(l.structured_chars)}`);
         }
-        if (transport === HTTP) {
-          for (const label of [...PROMPT_LABELS, RESOURCE_PROBE.label]) {
-            const l = both.probes.find((p) => p.transport === HTTP && p.tool === label && p.era === era);
-            assert.ok(l && Number.isInteger(l.text_chars) && l.text_chars > 0, `${label} [${era}]: ${JSON.stringify(l)}`);
-            assert.deepEqual(sizeKeys(l), ["text_chars"], `${label} [${era}]: a prompt or resource answer has no structuredContent to size`);
-          }
+        // #2781: the cve:// resource on both legs; the prompts and the methodology on the hosted one.
+        for (const label of [...(transport === HTTP ? [...PROMPT_LABELS, RESOURCE_PROBE.label] : []), ...EVERY_LEG]) {
+          const l = both.probes.find((p) => p.transport === transport && p.tool === label && p.era === era);
+          assert.ok(l && Number.isInteger(l.text_chars) && l.text_chars > 0, `${label} [${transport} ${era}]: ${JSON.stringify(l)}`);
+          assert.deepEqual(sizeKeys(l), ["text_chars"], `${label} [${transport} ${era}]: a prompt or resource answer has no structuredContent to size`);
         }
       }
     }
@@ -2243,31 +2678,38 @@ describe("#2781: each answered probe line says what the answer costs a client (t
 const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DRIFT_FROM = "How one CVE's EPSS score (FIRST's";
 const DRIFT_TO = "How one CVE's EPSS scores (FIRST's";
-function driftedCopy() {
+// #3097's review: the cve:// resource template's description, which only resources/templates/list
+// serves (resources/list never lists a template).
+const TEMPLATE_DRIFT_FROM = "One CVE's record as get_cve returns it";
+const TEMPLATE_DRIFT_TO = "One CVE's records as get_cve returns it";
+function driftedCopy(file = path.join("tools", "epss_history.js"), from = DRIFT_FROM, to = DRIFT_TO) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eg-mcp-drift-3097-"));
   fs.cpSync(path.join(PKG_DIR, "dist"), path.join(dir, "dist"), { recursive: true });
   fs.copyFileSync(path.join(PKG_DIR, "package.json"), path.join(dir, "package.json"));
   fs.symlinkSync(fs.realpathSync(path.join(PKG_DIR, "node_modules")), path.join(dir, "node_modules"), "dir");
-  const f = path.join(dir, "dist", "tools", "epss_history.js");
+  const f = path.join(dir, "dist", file);
   const src = fs.readFileSync(f, "utf8");
-  assert.equal(src.split(DRIFT_FROM).length, 2, "control: dist/tools/epss_history.js holds the description's opening once (re-aim DRIFT_FROM)");
-  fs.writeFileSync(f, src.replace(DRIFT_FROM, DRIFT_TO));
+  assert.equal(src.split(from).length, 2, `control: dist/${file} holds ${JSON.stringify(from)} once (re-aim it)`);
+  fs.writeFileSync(f, src.replace(from, to));
   return dir;
 }
 
 describe("#3097: a hosted endpoint serving other code than the npm release it reports", () => {
-  let stub, release, drifted, copy;
+  let stub, release, drifted, copy, templateDrifted, templateCopy;
   before(async () => {
     stub = await startStub();
     copy = driftedCopy();
+    templateCopy = driftedCopy("resources.js", TEMPLATE_DRIFT_FROM, TEMPLATE_DRIFT_TO);
     release = await startHttpEntry(stub.base);
     drifted = await startHttpEntry(stub.base, {}, path.join(copy, "dist", "http.js"));
+    templateDrifted = await startHttpEntry(stub.base, {}, path.join(templateCopy, "dist", "http.js"));
   });
   after(async () => {
     await release?.stop();
     await drifted?.stop();
+    await templateDrifted?.stop();
     await stub?.close();
-    if (copy) fs.rmSync(copy, { recursive: true, force: true });
+    for (const d of [copy, templateCopy]) if (d) fs.rmSync(d, { recursive: true, force: true });
   });
   const driftLines = (r) => r.probes.filter((l) => l.tool === DRIFT_TOOL);
   const at = DRIFT_FROM.length - " (FIRST's".length + 1; // the first character that differs, 1-based
@@ -2291,6 +2733,24 @@ describe("#3097: a hosted endpoint serving other code than the npm release it re
   it("the hosted endpoint drifted (one description changed, the 2026-10-11 case): (hosted-vs-npm) fails on both eras, naming the tool, the field and where it differs", async () => {
     stub.state.mode = "ok";
     failsOnlyTheComparison(await run(stub, { remoteUrl: drifted.url }), "hosted");
+  });
+  // #3097's review: cve://{cve_id} is served only through resources/templates/list, so a catalog
+  // read from tools/list, prompts/list and resources/list alone called this build identical.
+  it("the hosted endpoint's cve:// resource template drifted (its description changed): (hosted-vs-npm) fails on both eras, naming the template, the field and where it differs", async () => {
+    stub.state.mode = "ok";
+    const r = await run(stub, { remoteUrl: templateDrifted.url });
+    const drift = driftLines(r);
+    assert.deepEqual(drift.map((l) => [l.transport, l.era, l.outcome, l.reason, l.differences, l.compared_resource_templates]),
+      [[HTTP, MODERN, "failure", "hosted_differs_from_npm", 1, 1], [HTTP, LEGACY, "failure", "hosted_differs_from_npm", 1, 1]], JSON.stringify(drift));
+    const tAt = "One CVE's record".length + 1;
+    for (const l of drift) assert.match(l.detail, new RegExp(`^resource template cve://\\{cve_id\\}: description differs at character ${tAt} \\(npm (\\d+) characters, hosted (\\d+)\\)$`), l.detail);
+    for (const l of drift) {
+      const [, npm, hosted] = l.detail.match(/npm (\d+) characters, hosted (\d+)/).map(Number);
+      assert.equal(hosted - npm, 1, `the longer description is the hosted one: ${l.detail}`);
+    }
+    const others = r.probes.filter((l) => l.tool !== DRIFT_TOOL && l.outcome === "failure");
+    assert.deepEqual(others, [], "only the comparison fails: each leg alone is healthy");
+    assert.deepEqual([r.exitCode, r.complete[0].failure, r.complete[0].hosted_vs_npm], [2, 2, "differs"]);
   });
   it("the npm package drifted (the other way): the same failure, the other length", async () => {
     stub.state.mode = "ok";
@@ -2350,13 +2810,31 @@ describe("#3097: a hosted endpoint serving other code than the npm release it re
 
 describe("#3097: comparing two catalogs", () => {
   const tool = (over = {}) => ({ name: "a", title: "A", description: "abcde", inputSchema: { type: "object", properties: { x: { type: "string" } }, required: ["x"] }, outputSchema: { type: "object" }, annotations: { readOnlyHint: true }, ...over });
-  const cat = (over = {}) => ({ instructions: "use it", tools: [tool(), tool({ name: "b" })], prompts: [{ name: "p", arguments: [{ name: "cve_id", required: true }] }], resources: [{ uri: "echelongraph://m", name: "m", mimeType: "text/markdown" }], ...over });
+  const template = (over = {}) => ({ name: "cve", uriTemplate: "cve://{cve_id}", title: "CVE record", description: "One CVE's record", mimeType: "application/json", ...over });
+  const cat = (over = {}) => ({ instructions: "use it", tools: [tool(), tool({ name: "b" })], prompts: [{ name: "p", arguments: [{ name: "cve_id", required: true }] }], resources: [{ uri: "echelongraph://m", name: "m", mimeType: "text/markdown" }], resourceTemplates: [template()], ...over });
   const diffs = (npm, hosted) => compareCatalogs(npm, hosted).differences;
 
   it("the same catalog, keys in another order and tools in another order, is the same", () => {
-    const shuffled = cat({ tools: [tool({ name: "b" }), Object.fromEntries(Object.entries(tool()).reverse())] });
+    const shuffled = cat({ tools: [tool({ name: "b" }), Object.fromEntries(Object.entries(tool()).reverse())], resourceTemplates: [Object.fromEntries(Object.entries(template()).reverse())] });
     const r = compareCatalogs(cat(), shuffled);
-    assert.deepEqual(r, { differences: [], compared: { tools: 2, prompts: 1, resources: 1 }, uncompared: [] });
+    assert.deepEqual(r, { differences: [], compared: { tools: 2, prompts: 1, resources: 1, resourceTemplates: 1 }, uncompared: [] });
+  });
+  // #3097's review: cve://{cve_id} is served only through resources/templates/list.
+  it("a resource template's description, title, mimeType or name changed alone is a difference naming the template (by uriTemplate) and the field", () => {
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [template({ description: "One CVE's records" })] })), ["resource template cve://{cve_id}: description differs at character 17 (npm 16 characters, hosted 17)"]);
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [template({ title: "CVE" })] })), ["resource template cve://{cve_id}: title differs at character 4 (npm 10 characters, hosted 3)"]);
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [template({ mimeType: "text/plain" })] })), ["resource template cve://{cve_id}: mimeType differs at character 1 (npm 16 characters, hosted 10)"]);
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [template({ name: "record" })] })), ["resource template cve://{cve_id}: name differs at character 1 (npm 3 characters, hosted 6)"]);
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [template({ _meta: { x: 1 } })] })), ["resource template cve://{cve_id}: _meta only on the hosted endpoint"]);
+  });
+  it("a resource template on one side only is named, both ways", () => {
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [] })), ["resource template cve://{cve_id}: only on npm"]);
+    assert.deepEqual(diffs(cat({ resourceTemplates: [] }), cat()), ["resource template cve://{cve_id}: only on the hosted endpoint"]);
+    assert.deepEqual(diffs(cat(), cat({ resourceTemplates: [template({ uriTemplate: "cve://{id}" })] })), ["resource template cve://{cve_id}: only on npm", "resource template cve://{id}: only on the hosted endpoint"]);
+  });
+  it("resources/templates/list one side could not read is uncompared under its own method, not a difference", () => {
+    const r = compareCatalogs(cat(), cat({ resourceTemplates: { error: "rpc_error -32601" } }));
+    assert.deepEqual([r.differences, r.uncompared, r.compared.resourceTemplates], [[], ["resources/templates/list (npm read it, hosted: rpc_error -32601)"], 0]);
   });
   it("each field of a tool changed alone is a difference naming the tool and the field", () => {
     assert.deepEqual(diffs(cat(), cat({ tools: [tool({ description: "abXde" }), tool({ name: "b" })] })), ["tool a: description differs at character 3 (npm 5 characters, hosted 5)"]);
@@ -2387,6 +2865,9 @@ describe("#3097: comparing two catalogs", () => {
     for (const [field, v] of Object.entries({ name: "z", title: "Z", description: "zzz", inputSchema: {}, outputSchema: {}, annotations: {}, icons: [] })) {
       const hosted = cat({ tools: [tool({ [field]: v }), tool({ name: "b" })] });
       assert.ok(diffs(cat(), hosted).length > 0, `a changed ${field} was not seen`);
+    }
+    for (const [field, v] of Object.entries({ name: "z", uriTemplate: "cve://{z}", title: "Z", description: "zzz", mimeType: "text/plain", annotations: {} })) {
+      assert.ok(diffs(cat(), cat({ resourceTemplates: [template({ [field]: v })] })).length > 0, `a resource template's changed ${field} was not seen`);
     }
   });
 });

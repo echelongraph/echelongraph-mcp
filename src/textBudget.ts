@@ -247,14 +247,29 @@ function cutRow(row: Record<string, unknown>, keep: RowKeep, level: TextCutLevel
   return out;
 }
 // Step 4: every list to its first n entries (and, with clip, every string to its first clip
-// characters), recording the longest list cut at each path.
+// characters), recording the longest list cut at each path. #3273's review: the longest in the
+// whole answer, the lists in the entries the cap leaves out included (longestPast). Through 3.1.1
+// only the entries kept were read, so production's CVE-2021-44228 (2026-10-25), whose longest
+// cpe_configurations[].nodes[].cpeMatch is 154 entries in its 16th configuration, read "(63) ...
+// each named with its full length" at 8 kept, in the cve:// resource's note and truncated.
 function capAll(v: unknown, n: number, clip: number, caps: Map<string, number>, s: CutStats, path: string): unknown {
   if (Array.isArray(v)) {
     if (v.length > n) caps.set(path, Math.max(caps.get(path) ?? 0, v.length));
+    for (let i = n; i < v.length; i++) longestPast(v[i], n, caps, `${path}[]`);
     return v.slice(0, n).map((x) => capAll(x, n, clip, caps, s, `${path}[]`));
   }
   if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capAll(x, n, clip, caps, s, path ? `${path}.${k}` : k)]));
   return cutValue(v, clip, Number.POSITIVE_INFINITY, s);
+}
+// capAll's lengths for an entry the cap leaves out: every list in it longer than n, at its path,
+// building nothing.
+function longestPast(v: unknown, n: number, caps: Map<string, number>, path: string): void {
+  if (Array.isArray(v)) {
+    if (v.length > n) caps.set(path, Math.max(caps.get(path) ?? 0, v.length));
+    for (const x of v) longestPast(x, n, caps, `${path}[]`);
+  } else if (isPlainObject(v)) {
+    for (const [k, x] of Object.entries(v)) longestPast(x, n, caps, path ? `${path}.${k}` : k);
+  }
 }
 const CAP_LEVELS: readonly { n: number; clip: number }[] = [
   ...[128, 64, 32, 16, 8, 4, 2, 1].map((n) => ({ n, clip: Number.POSITIVE_INFINITY })),

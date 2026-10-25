@@ -26,6 +26,11 @@ export class RpcError extends Error {
   }
 }
 
+// What a request the server will never answer is rejected with, once the server has exited.
+function exitedError(code, signal, method) {
+  return new Error(`the server exited (code ${code}, signal ${signal}) before answering ${method}`);
+}
+
 export class StdioMcpClient {
   constructor({ command, args = [], env, cwd, stderr = "inherit", clientInfo = { name: "echelongraph-mcp-test", version: "0.0.0" }, requestTimeoutMs = 30_000 }) {
     this.clientInfo = clientInfo;
@@ -37,6 +42,14 @@ export class StdioMcpClient {
     this.pending = new Map();
     this.buffer = "";
     this.proc = spawn(command, args, { env, cwd, stdio: ["pipe", "pipe", stderr] });
+    // #3389: a server that has exited (before its exit event is processed) or closed its stdin
+    // makes a write fail with EPIPE, which the socket emits as `error`; unheard, that is an
+    // uncaught exception that fails whichever test is running, or crashes a synthetic run. The
+    // request whose write failed is rejected by the write's callback (rawRequest), and the exit
+    // handler rejects the rest, so recording the error here loses nothing.
+    this.proc.stdin.on("error", (e) => {
+      this.stdinError ??= e;
+    });
     this.exited = new Promise((resolve) => this.proc.once("exit", (code, signal) => resolve({ code, signal })));
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (chunk) => this.onData(chunk));
@@ -44,7 +57,7 @@ export class StdioMcpClient {
       this.exitStatus = { code, signal };
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
-        p.reject(new Error(`the server exited (code ${code}, signal ${signal}) before answering ${p.method}`));
+        p.reject(exitedError(code, signal, p.method));
       }
       this.pending.clear();
     });
@@ -75,8 +88,12 @@ export class StdioMcpClient {
     }
   }
 
-  write(msg) {
-    this.proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  // `onError` hears a write that failed (#3389); a notification passes none, since the next
+  // request's write, or the exit, says the same.
+  write(msg, onError) {
+    this.proc.stdin.write(`${JSON.stringify(msg)}\n`, (e) => {
+      if (e && onError) onError(this.stdinError ?? e);
+    });
   }
 
   // The per-request envelope a 2026-07-28 request carries.
@@ -94,7 +111,7 @@ export class StdioMcpClient {
     return new Promise((resolve, reject) => {
       // A server that has already exited answers nothing: say so now rather than at the timeout.
       if (this.exitStatus) {
-        reject(new Error(`the server exited (code ${this.exitStatus.code}, signal ${this.exitStatus.signal}) before answering ${method}`));
+        reject(exitedError(this.exitStatus.code, this.exitStatus.signal, method));
         return;
       }
       const timer = setTimeout(() => {
@@ -102,7 +119,17 @@ export class StdioMcpClient {
         reject(new Error(`${method}: no answer within ${this.requestTimeoutMs} ms`));
       }, this.requestTimeoutMs);
       this.pending.set(id, { method, resolve, reject, timer });
-      this.write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+      // #3389: a request that never reached the server is rejected now, not at the exit (which a
+      // server that only closed its stdin may never reach) or at the timeout.
+      this.write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }, (e) => {
+        const p = this.pending.get(id);
+        if (!p) return; // already answered, timed out, or rejected at the exit
+        this.pending.delete(id);
+        clearTimeout(p.timer);
+        // A server already reaped says why it cannot answer better than the stream it left.
+        const { exitCode, signalCode } = this.proc;
+        reject(exitCode !== null || signalCode !== null ? exitedError(exitCode, signalCode, method) : new Error(`${method}: the request could not be written to the server (${e.code ?? e.message})`));
+      });
     });
   }
 

@@ -28,7 +28,9 @@ API call a tool needs to answer.
   Registry: `io.echelongraph/echelongraph-mcp` · Docs: <https://echelongraph.io/pulse/mcp>
 - Source: <https://github.com/echelongraph/echelongraph-mcp> · Changes:
   [CHANGELOG.md](CHANGELOG.md) · Security: [SECURITY.md](SECURITY.md)
-- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp) ·
+- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp), a registry
+  entry for `https://mcp.echelongraph.io/mcp` (its proxy, API and CLI
+  [shut down on 2026-10-31](https://smithery.ai/future)) ·
   [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)
 
 ## Quick start
@@ -527,8 +529,7 @@ its structured result and again in its text; and that exposure numbers are aggre
 ip:port services, not an internet-wide census.
 
 The instructions and every tool description are at most 2,048 characters, the shortest cut a
-client is known to make (Claude Code's from v2.1.280;
-its default is now 4,096), so no client that cuts there loses a sentence. A description says what its tool
+client is known to make, so no client that cuts there loses a sentence. A description says what its tool
 returns and the rules that keep a zero, a `false` or a failure from reading as a finding; what each
 field counts, in full, is in the tool's `outputSchema`, and the result's note says it again for the
 numbers it relays.
@@ -563,11 +564,11 @@ and request logs and trace spans that record URLs do not hold what was looked up
 **The hosted endpoint.** A request to `https://mcp.echelongraph.io/mcp` reaches EchelonGraph's
 server first, which then calls the same API as above. Per request it logs the HTTP method (GET,
 HEAD, POST, PUT, PATCH, DELETE, OPTIONS, CONNECT or TRACE, else `(other)`) and path, the status,
-the duration, its wait for a place (and for a large-body slot) and the requests served at once,
-the body size, the JSON-RPC method (one MCP defines, else `(other)`) and the tool
-or prompt name, the protocol version, whether an `Origin` header was sent, the first word of your
-client's User-Agent, whether your address is public (not the address), whether your client closed
-early, and whether it was throttled or refused, and why.
+the duration, its wait for a place (and for a large-body slot), the requests served at once, its
+large-body slots held (and the oldest hold's age), the body size, the JSON-RPC method (one MCP
+defines, else `(other)`) and the tool or prompt name, the protocol version, whether an `Origin`
+header was sent, the first word of your client's User-Agent, whether your address is public (not
+the address), whether your client closed early, and whether it was throttled or refused, and why.
 When one of its API calls fails, it logs the tool and JSON-RPC method, the call's route without
 the ID or query (`/api/v1/public/cves/:id`), what failed (such as a timeout, a reset or the status
 the API answered), how long it took, and whether the request was our monitor's. An error it logs
@@ -602,7 +603,6 @@ endpoint adds 120 MCP requests a minute per client address, and refuses a reques
 (6 MiB for a `check_sbom` or `scan_manifest` call, or an `sbom_review` prompt). Every limit, path
 by path:
 [docs/rate-limits.md](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/rate-limits.md).
-The API's own documentation of these limits: <https://echelongraph.io/pulse/api>.
 
 ## Configuration
 
@@ -616,10 +616,7 @@ The npm package (stdio):
 
 The HTTP entrypoint, `dist/http.js` (`npm run start:http`), serves the same tools over
 Streamable HTTP on `POST /mcp`, with a liveness check on `GET /health`. In a small container, cap
-V8's heap below its limit, as EchelonGraph's hosted deployment does in 256 MiB
-(`node --max-old-space-size=104 --max-semi-space-size=16 dist/http.js`): Node can otherwise size its
-heap from the host's memory, and the container is killed before V8 collects.
-It reads the three variables above and:
+V8's heap (docs/rate-limits.md says how). It reads the three variables above and:
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -630,7 +627,8 @@ It reads the three variables above and:
 | `MCP_LARGE_BODY_SLOTS` | `2` | How many bodies over `MCP_MAX_BODY_BYTES` it reads and serves at once; past that, two more wait up to `MCP_LARGE_BODY_WAIT_MS` (15000) for one, then 503 with `Retry-After`. |
 | `MCP_MAX_IN_FLIGHT` | `64` | How many requests it serves at once, not counting `subscriptions/listen` streams; the next, its body read, waits. |
 | `MCP_ADMISSION_WAIT_MS` | `10000` | How long a request waits to be served before it is answered 503 with `Retry-After`. |
-| `MCP_H2C` | unset | `1`: serve HTTP/2 cleartext (h2c, prior knowledge) instead of HTTP/1.1, as Cloud Run's `--use-http2` requires; an HTTP/1.1 request then gets no answer. Over h2c, a stream the client resets stops its call. |
+| `MCP_BODY_IDLE_MS`, `MCP_REQUEST_TIMEOUT_MS` | `10000`, `60000` | A body that sends nothing that long while it is read is answered 408; a request running that long in all is stopped (docs/rate-limits.md). |
+| `MCP_H2C` | unset | `1`: serve HTTP/2 cleartext (h2c, prior knowledge) instead of HTTP/1.1, as Cloud Run's `--use-http2` requires; an HTTP/1.1 request then gets no answer. |
 | `ECHELONGRAPH_FORWARD_TOKEN`, `ECHELONGRAPH_FORWARD_HOST`, `MCP_REQUIRE_FORWARD_TOKEN` | unset | EchelonGraph's hosted deployment only: the token with which it names each client to the API. Leave them unset when you run it yourself; the API then counts every request as coming from your server. |
 
 ## Develop

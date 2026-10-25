@@ -1,5 +1,5 @@
 {
-  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record, this about included (text-bound.mjs RECORD_ABOUT). tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh); answers_kept says so. cases: each case of text-bound.mjs SHAPED measured on production, held to the ceiling, and text-bound.test.mjs holds each SHAPED case's text, and (#3273) its structured result, within SHAPED_DRIFT of its record here (STRUCTURED_DRIFT_KNOWN names the cases past it, and what clears each); source says where the answers came from (probe-prod, the answers kept here, the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). Dates (#2782): measured_at is when production was read for the number, and read_ms how long that read took (null where it was not recorded); a re-measure of the kept answers (--answers test/fixtures/prod-answers --record) moves neither. answers_age_ms is how old each kept answer was, by its own generated_at, when production was read, written by the read: the API serves a radar's aggregate stale past its 60 s cache TTL to the first request after it, and the CDN 300 s more, so an honest read's answers can be minutes old; text-bound.test.mjs fails when measured_at less a kept answer's generated_at is not the age the read recorded for it. answers_read_at (#2822) is when the kept answers were read, the same read. code_measured_at is when this checkout's server last measured the answers, and code_version which code that was: package.json's version, with +unreleased when CHANGELOG.md's newest section is unreleased; package_version is package.json's version alone. total and blocks: the text's characters, all blocks and each. structured (#3013): the answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before 3.0.0 carries none. data_truncated and truncated (#3273): whether the server measured cut that structured result's data, and what it cut, so the cut level is on record, not inferred; a case recorded before carries neither.",
+  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record, this about included (text-bound.mjs RECORD_ABOUT). tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh); answers_kept says so. cases: each case of text-bound.mjs SHAPED measured on production, held to the ceiling, and text-bound.test.mjs holds each SHAPED case's text, and (#3273) its structured result, within SHAPED_DRIFT of its record here (STRUCTURED_DRIFT_KNOWN names the cases past it, and what clears each); source says where the answers came from (probe-prod, the answers kept here, the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). Dates (#2782): measured_at is when production was read for the number, and read_ms how long that read took (null where it was not recorded); a re-measure of the kept answers (--answers test/fixtures/prod-answers --record) moves neither. answers_age_ms is how old each kept answer was, by its own generated_at, when production was read, written by the read: the API serves a radar's aggregate stale past its 60 s cache TTL to the first request after it, and the CDN 300 s more, so an honest read's answers can be minutes old; text-bound.test.mjs fails when measured_at less a kept answer's generated_at is not the age the read recorded for it. answers_read_at (#2822) is when the kept answers were read, the same read. code_measured_at is when this checkout's server last measured the answers, and code_version which code that was: package.json's version, with +unreleased when CHANGELOG.md's newest section is unreleased; package_version is package.json's version alone. total and blocks: the text's characters, all blocks and each. structured (#3013): the answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before 3.0.0 carries none. data_truncated and truncated (#3273): whether the server measured cut that structured result's data, and what it cut; a case recorded before carries neither. truncated says a list was thinned, not to which level, so kept_fields (#3273's review) gives, for each list it says was thinned, the fields its entries keep in that structured result's data (text-bound.mjs keptFields), and the level a thinned list was cut to is on record, not inferred: null where no list was thinned; a case recorded before carries none.",
   "tools": {
     "exposure_radar": {
       "measured_at": "2026-10-05T07:37:21.576Z",
@@ -48,164 +48,401 @@
   },
   "cases": {
     "cve_summary": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 2679,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 3209,
       "blocks": [
-        538,
-        1552,
-        589
+        705,
+        1555,
+        949
       ],
-      "structured": 2525,
+      "structured": 2986,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_cves, default page (search openssl)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 15924,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 16383,
       "blocks": [
-        13211,
-        1840,
-        873
+        13357,
+        2105,
+        921
       ],
-      "structured": 9064,
+      "structured": 9581,
+      "data_truncated": true,
+      "truncated": {
+        "cves": {
+          "total": 20,
+          "returned": 20,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "cves": [
+          "cve_id",
+          "cvss_v3_score",
+          "echelongraph_score",
+          "epss_score",
+          "kev_listed",
+          "kev_ransomware",
+          "patch_available",
+          "patch_evidence",
+          "published",
+          "score_assessed",
+          "score_unassessed_reason",
+          "severity"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_cves, largest page (search openssl, limit 50)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 18831,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 19271,
       "blocks": [
-        15991,
-        1967,
-        873
+        16006,
+        2344,
+        921
       ],
-      "structured": 17583,
+      "structured": 18309,
+      "data_truncated": true,
+      "truncated": {
+        "cves": {
+          "total": 50,
+          "returned": 50,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "cves": [
+          "cve_id",
+          "cvss_v3_score",
+          "echelongraph_score",
+          "epss_score",
+          "kev_listed",
+          "kev_ransomware",
+          "patch_available",
+          "patch_evidence",
+          "published",
+          "score_assessed",
+          "score_unassessed_reason",
+          "severity"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "get_cve, CVE-2021-44228": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 27380,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 20268,
       "blocks": [
-        24419,
-        2020,
-        941
+        17129,
+        2138,
+        1001
       ],
-      "structured": 29874,
+      "structured": 29780,
+      "data_truncated": true,
+      "truncated": {
+        "cpe_match": {
+          "total": 396,
+          "returned": 0
+        },
+        "references": {
+          "total": 103,
+          "returned": 0
+        },
+        "cpe_configurations": {
+          "total": 20,
+          "returned": 13
+        }
+      },
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "cve_exposure, CVE-2023-44487": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 4392,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 4385,
       "blocks": [
-        2003,
-        1421,
+        1997,
+        1420,
         968
       ],
-      "structured": 4803,
+      "structured": 4796,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "exposure_radar": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 43581,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 44101,
       "blocks": [
-        21182,
-        18692,
-        3707
+        21447,
+        18949,
+        3705
       ],
-      "structured": 29982,
-      "source": "the hosted endpoint's own text (3.0.0), not this checkout's"
+      "structured": 29926,
+      "data_truncated": true,
+      "truncated": {
+        "shadow_ai.observed.trend_30d": {
+          "total": 30,
+          "returned": 3
+        },
+        "kev_exposure.trend": {
+          "total": 13,
+          "returned": 3
+        },
+        "kev_exposure.top_products": {
+          "total": 12,
+          "returned": 3
+        },
+        "kev_exposure.top_countries": {
+          "total": 10,
+          "returned": 3
+        },
+        "kev_exposure.top_cves": {
+          "total": 12,
+          "returned": 3
+        },
+        "exposed_databases.top_engines": {
+          "total": 10,
+          "returned": 3
+        },
+        "exposed_databases.top_countries": {
+          "total": 10,
+          "returned": 3
+        },
+        "leaked_credentials.top_providers": {
+          "total": 15,
+          "returned": 3
+        },
+        "leaked_credentials.top_types": {
+          "total": 15,
+          "returned": 3
+        },
+        "shadow_ai.observed.top_products": {
+          "total": 10,
+          "returned": 3
+        },
+        "shadow_ai.observed.top_countries": {
+          "total": 10,
+          "returned": 3
+        },
+        "shadow_ai.observed.top_issuers": {
+          "total": 10,
+          "returned": 3
+        }
+      },
+      "kept_fields": null,
+      "source": "the hosted endpoint's own text (3.1.1), not this checkout's"
     },
     "kev_recent, default page (limit 50)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 28805,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 28766,
       "blocks": [
-        27545,
-        443,
+        27504,
+        445,
         817
       ],
-      "structured": 22875,
+      "structured": 22836,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "kev_recent, largest page (limit 200)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 32488,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 32565,
       "blocks": [
-        29815,
-        1773,
+        29890,
+        1775,
         900
       ],
-      "structured": 29797,
+      "structured": 29965,
+      "data_truncated": true,
+      "truncated": {
+        "kev": {
+          "total": 200,
+          "returned": 64
+        }
+      },
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "epss_history, CVE-2021-44228": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 3750,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 3869,
       "blocks": [
-        1261,
-        924,
-        1565
+        1290,
+        925,
+        1654
       ],
-      "structured": 3382,
+      "structured": 3477,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, openssl 3.0.0": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 26824,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 28291,
       "blocks": [
-        24298,
-        1494,
-        1032
+        25696,
+        1566,
+        1029
       ],
-      "structured": 11996,
+      "structured": 12621,
+      "data_truncated": true,
+      "truncated": {
+        "matches": {
+          "total": 75,
+          "returned": 75,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "matches": [
+          "cve_id",
+          "effective_score",
+          "epss_score",
+          "kev_listed",
+          "ransomware",
+          "score_assessed"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 30442,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 30544,
       "blocks": [
-        27525,
-        1884,
-        1033
+        27576,
+        1938,
+        1030
       ],
-      "structured": 29250,
+      "structured": 29344,
+      "data_truncated": true,
+      "truncated": {
+        "matches": {
+          "total": 200,
+          "returned": 200,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "matches": [
+          "cve_id",
+          "effective_score",
+          "epss_score",
+          "kev_listed",
+          "ransomware",
+          "score_assessed"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_sbom, Juice Shop 11.1.2 (50 components)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 34623,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 35063,
       "blocks": [
-        29435,
+        29875,
         3393,
         1795
       ],
-      "structured": 24884,
+      "structured": 25223,
+      "data_truncated": true,
+      "truncated": {
+        "results": {
+          "total": 50,
+          "returned": 50,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "results": [
+          "cve_ids",
+          "index",
+          "matched_package",
+          "matched_via",
+          "matches",
+          "not_assessed_reason",
+          "purl",
+          "verdict"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "cve_intel, CVE-2021-44228": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 19477,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 22362,
       "blocks": [
-        16196,
-        1404,
-        1877
+        18453,
+        1712,
+        2197
       ],
-      "structured": 14401,
-      "source": "the hosted endpoint's own text (3.0.0), not this checkout's"
+      "structured": 16247,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
+      "source": "the hosted endpoint's own text (3.1.1), not this checkout's"
     },
     "get_cwe, CWE-79": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
       "total": 28485,
       "blocks": [
         26908,
@@ -213,11 +450,17 @@
         801
       ],
       "structured": 24153,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "vendor_advisories_for_cve, CVE-2021-44228": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
       "total": 18686,
       "blocks": [
         12670,
@@ -225,11 +468,17 @@
         4378
       ],
       "structured": 14983,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "get_vendor_advisory, aws 2026-098-AWS": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
       "total": 3240,
       "blocks": [
         1987,
@@ -237,90 +486,254 @@
         1125
       ],
       "structured": 2984,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_vendor_advisories, default page (query log4j)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 34124,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 34849,
       "blocks": [
-        28743,
+        29468,
         781,
         4600
       ],
-      "structured": 25518,
+      "structured": 26199,
+      "data_truncated": true,
+      "truncated": {
+        "advisories": {
+          "total": 20,
+          "returned": 20,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "advisories": [
+          "advisory_id",
+          "cve_ids",
+          "cvss_v3_score",
+          "our_first_seen_at",
+          "rejected_cve_ids",
+          "severity",
+          "summary",
+          "title",
+          "vendor",
+          "vendor_advisory_id",
+          "vendor_display_name",
+          "vendor_published_at",
+          "withdrawn"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "search_vendor_advisories, largest page (query log4j, limit 50)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 25496,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 25672,
       "blocks": [
-        19210,
+        19386,
         1686,
         4600
       ],
-      "structured": 29826,
+      "structured": 29869,
+      "data_truncated": true,
+      "truncated": {
+        "advisories": {
+          "total": 50,
+          "returned": 45,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "advisories": [
+          "cve_ids",
+          "cvss_v3_score",
+          "rejected_cve_ids",
+          "severity",
+          "title",
+          "vendor",
+          "vendor_advisory_id",
+          "vendor_published_at",
+          "withdrawn"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, flash_player 10.0.0 (200 matches and an excluded sample of 50)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 30937,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 31037,
       "blocks": [
-        27798,
-        2040,
-        1099
+        27847,
+        2094,
+        1096
       ],
-      "structured": 29960,
+      "structured": 29774,
+      "data_truncated": true,
+      "truncated": {
+        "excluded": {
+          "total": 50,
+          "returned": 2
+        },
+        "matches": {
+          "total": 200,
+          "returned": 200,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "matches": [
+          "cve_id",
+          "effective_score",
+          "epss_score",
+          "kev_listed",
+          "ransomware",
+          "score_assessed"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "check_affected, PyPI django 1.11.0 (the registry path)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 26257,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 26311,
       "blocks": [
         23477,
-        1705,
+        1759,
         1075
       ],
-      "structured": 15511,
+      "structured": 15565,
+      "data_truncated": true,
+      "truncated": {
+        "matches": {
+          "total": 30,
+          "returned": 30,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "matches": [
+          "cve_id",
+          "cvss_v3_score",
+          "echelongraph_score",
+          "echelongraph_severity",
+          "effective_score",
+          "effective_severity",
+          "epss_score",
+          "fixed_in",
+          "kev_listed",
+          "match_confidence",
+          "matched_criteria",
+          "ransomware",
+          "score_assessed",
+          "severity",
+          "vendor_unknown",
+          "version_evidence"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "scan_manifest, package-lock.json (64 packages)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 32922,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 32921,
       "blocks": [
         27649,
-        3043,
+        3042,
         2230
       ],
-      "structured": 22787,
+      "structured": 22786,
+      "data_truncated": true,
+      "truncated": {
+        "results": {
+          "total": 64,
+          "returned": 64,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "results": [
+          "cve_ids",
+          "index",
+          "matched_package",
+          "matched_via",
+          "matches",
+          "not_assessed_reason",
+          "purl",
+          "verdict"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     },
     "cve_intel, CVE-2021-44228, with fixed_branches (#2817)": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 19477,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 22362,
       "blocks": [
-        16196,
-        1404,
-        1877
+        18453,
+        1712,
+        2197
       ],
-      "structured": 14401,
-      "source": "the hosted endpoint's own text (3.0.0), not this checkout's"
+      "structured": 16247,
+      "data_truncated": false,
+      "truncated": null,
+      "kept_fields": null,
+      "source": "the hosted endpoint's own text (3.1.1), not this checkout's"
     },
     "cve_remediation, CVE-2021-44228": {
-      "measured_at": "2026-10-11T22:38:02.490Z",
-      "package_version": "3.0.1",
-      "total": 22569,
+      "measured_at": "2026-10-25T16:09:36.280Z",
+      "read_ms": 20395,
+      "code_measured_at": "2026-10-25T16:09:36.280Z",
+      "code_version": "3.1.1+unreleased",
+      "package_version": "3.1.1",
+      "total": 22577,
       "blocks": [
-        18021,
+        18029,
         3171,
         1377
       ],
-      "structured": 26740,
+      "structured": 26748,
+      "data_truncated": true,
+      "truncated": {
+        "vendor_remediations": {
+          "total": 20,
+          "returned": 20,
+          "thinned": true
+        }
+      },
+      "kept_fields": {
+        "vendor_remediations": [
+          "items",
+          "items_total",
+          "remediation_kinds",
+          "remediation_state",
+          "vendor",
+          "vendor_advisory_id",
+          "vendor_display_name",
+          "vendor_published_at",
+          "withdrawn"
+        ]
+      },
       "source": "hosted https://mcp.echelongraph.io/mcp, its data replayed to this checkout's server"
     }
   }

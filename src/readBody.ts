@@ -2,7 +2,7 @@
 // serving when it is imported; here a test can drive it with requests of its own (test/read-body.test.mjs).
 import type http from "node:http";
 import type http2 from "node:http2";
-import { largeBodyAdmissible, type Slots } from "./httpPolicy.js";
+import { largeBodyAdmissible, type SlotHold, type Slots } from "./httpPolicy.js";
 
 export function header(req: http.IncomingMessage, name: string): string | undefined {
   const v = req.headers[name];
@@ -33,17 +33,21 @@ function closedAlready(req: http.IncomingMessage): boolean {
 // the server buffers for its request (a whole ~72 KB body did on Node 20, every run) keeps its place
 // to its turn, and its close is seen only once its body has been read. Over h2c, production's
 // protocol, a reset is read at once, whatever the stream holds (test/http.test.mjs's waiter tests).
-export type BodyRead = { body: Buffer; slot: boolean } | "too_large" | "busy" | "gone";
+// "stalled" (#3362): no byte came for BODY_IDLE_MS while the body was read (its wait for a slot aside), and nothing
+// ended it either: such as a client that went mid-upload whose going never reached this server. Its slot is given back
+// here. `slot` (#3362): the hold of the slot a body read whole still holds, which the caller gives back
+// (Slots.release(hold)); undefined for a body that needed none.
+export type BodyRead = { body: Buffer; slot: SlotHold | undefined } | "too_large" | "busy" | "gone" | "stalled";
 
-// The caps and the wait readBody applies, which http.ts reads from its environment.
-export type BodyLimits = { maxBodyBytes: number; maxSbomBodyBytes: number; largeBodyWaitMs: number };
+// The caps and the waits readBody applies, which http.ts reads from its environment.
+export type BodyLimits = { maxBodyBytes: number; maxSbomBodyBytes: number; largeBodyWaitMs: number; bodyIdleMs: number };
 
 // readBody over these slots (http.ts: the instance's large-body slots) and these limits.
 export function bodyReader(
   largeBodies: Slots,
   limits: BodyLimits,
 ): (req: http.IncomingMessage, gone: AbortSignal, timing: { slotWaitMs: number }) => Promise<BodyRead> {
-  const { maxBodyBytes: MAX_BODY_BYTES, maxSbomBodyBytes: MAX_SBOM_BODY_BYTES, largeBodyWaitMs: LARGE_BODY_WAIT_MS } = limits;
+  const { maxBodyBytes: MAX_BODY_BYTES, maxSbomBodyBytes: MAX_SBOM_BODY_BYTES, largeBodyWaitMs: LARGE_BODY_WAIT_MS, bodyIdleMs: BODY_IDLE_MS } = limits;
   return readBody;
 
   async function readBody(req: http.IncomingMessage, gone: AbortSignal, timing: { slotWaitMs: number }): Promise<BodyRead> {
@@ -66,26 +70,27 @@ export function bodyReader(
     // event, and a reset or a close sent with the request's headers still reaches these listeners (3.1.0's review).
     // test/read-body.test.mjs calls it late.
     if (gone.aborted || closedAlready(req)) stopWaiting();
-    const waitForSlot = async (): Promise<boolean> => {
+    const waitForSlot = async (): Promise<SlotHold | undefined> => {
       // A free slot is no wait (slot_wait_ms stays 0), however the clock falls; nor is a refusal at once (two already
       // wait): only a real wait is timed. Timing the at-once refusal across its await logged slot_wait_ms 1 when the
       // clock's millisecond turned under load (a full npm test run, 2026-10-18).
-      if (largeBodies.tryAcquire()) return true;
-      if (!largeBodies.wouldWait(LARGE_BODY_WAIT_MS) || waitOver.signal.aborted) return false;
+      const free = largeBodies.tryAcquire();
+      if (free) return free;
+      if (!largeBodies.wouldWait(LARGE_BODY_WAIT_MS) || waitOver.signal.aborted) return undefined;
       const t = Date.now();
       const got = await largeBodies.acquire(LARGE_BODY_WAIT_MS, waitOver.signal);
       timing.slotWaitMs += Date.now() - t;
       return got;
     };
-    let slot = false;
+    let slot: SlotHold | undefined;
     try {
       if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-        if (!(await waitForSlot())) {
+        slot = await waitForSlot();
+        if (!slot) {
           if (waitOver.signal.aborted) return "gone";
           req.resume();
           return "busy";
         }
-        slot = true;
       }
       return await readBodyHolding(req, cap, slot, waitForSlot, waitOver.signal);
     } finally {
@@ -94,17 +99,35 @@ export function bodyReader(
     }
   }
 
-  function readBodyHolding(req: http.IncomingMessage, cap: number, holding: boolean, waitForSlot: () => Promise<boolean>, waitOver: AbortSignal): Promise<BodyRead> {
+  function readBodyHolding(
+    req: http.IncomingMessage,
+    cap: number,
+    holding: SlotHold | undefined,
+    waitForSlot: () => Promise<SlotHold | undefined>,
+    waitOver: AbortSignal,
+  ): Promise<BodyRead> {
     let slot = holding;
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
       let size = 0;
       let done = false;
-      const stop = (r: "too_large" | "busy" | "gone"): void => {
+      // #3362: armed while the body is read, from the first moment and again at each chunk; cleared while it waits for
+      // a slot (paused, so nothing can come) and once it is settled.
+      let idle: ReturnType<typeof setTimeout> | undefined;
+      const watch = (reading: boolean): void => {
+        clearTimeout(idle);
+        idle = reading
+          ? setTimeout(() => {
+              if (!done) stop("stalled");
+            }, BODY_IDLE_MS)
+          : undefined;
+      };
+      const stop = (r: "too_large" | "busy" | "gone" | "stalled"): void => {
         done = true;
+        watch(false);
         chunks.length = 0;
-        if (slot) largeBodies.release();
-        slot = false;
+        largeBodies.release(slot);
+        slot = undefined;
         resolve(r);
       };
       // The client went (waitOver: readBody's listeners, which also read whether it had gone before they were
@@ -115,22 +138,26 @@ export function bodyReader(
       };
       if (waitOver.aborted) return onGone();
       waitOver.addEventListener("abort", onGone, { once: true });
+      watch(true);
       req.on("data", (chunk: Buffer) => {
         if (done) return;
+        watch(true);
         size += chunk.length;
         if (size > cap) return stop("too_large");
         if (size > MAX_BODY_BYTES && !slot) {
           // A body with no Content-Length crossed MAX_BODY_BYTES: it waits for a slot holding what it has read (at most
           // MAX_BODY_BYTES and this chunk), and reads on once it has one.
           req.pause();
+          watch(false);
           chunks.push(chunk);
           void waitForSlot().then((got) => {
             if (done) {
-              if (got) largeBodies.release();
+              largeBodies.release(got);
               return;
             }
             if (!got) return stop(waitOver.aborted ? "gone" : "busy");
-            slot = true;
+            slot = got;
+            watch(true);
             req.resume();
           });
           return;
@@ -140,6 +167,7 @@ export function bodyReader(
       req.on("end", () => {
         if (done) return;
         done = true;
+        watch(false);
         resolve({ body: Buffer.concat(chunks), slot });
       });
       req.on("close", () => {
@@ -148,7 +176,8 @@ export function bodyReader(
       req.on("error", (e) => {
         if (done) return;
         done = true;
-        if (slot) largeBodies.release();
+        watch(false);
+        largeBodies.release(slot);
         reject(e);
       });
     });

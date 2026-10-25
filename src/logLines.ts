@@ -40,6 +40,10 @@ export const LOG_LINES = {
       "queued_ms",
       // #2775: how long a large body waited for a large-body slot (0 when it found one free, or needed none).
       "slot_wait_ms",
+      // #3362: the instance's large-body slots held as the line is written, and how long the oldest of them has been
+      // held (0 when none is). Nothing of the request: what lets a slot no request gives back be seen.
+      "large_body_held",
+      "large_body_oldest_hold_ms",
     ],
     optional: ["tool", "prompt"],
   },
@@ -62,6 +66,9 @@ export const LOG_LINES = {
       "large_body_wait_ms",
       "max_in_flight",
       "admission_wait_ms",
+      // #3362: the body's idle bound and the request's deadline.
+      "body_idle_ms",
+      "request_timeout_ms",
       "heap_limit_mb",
       "memory_limit_mb",
     ],

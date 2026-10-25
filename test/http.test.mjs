@@ -90,8 +90,8 @@ const stubBase = () => `http://127.0.0.1:${stub.address().port}`;
 const EVERY_LINE = [];
 const EVERY_STDERR = [];
 // Spawns dist/http.js on an ephemeral port and resolves once it logs that it is listening.
-// stdout is kept line by line: it is the access log the tests read.
-async function startHttp(extraEnv = {}) {
+// stdout is kept line by line: it is the access log the tests read. nodeArgs go before the entry (#3362's forced GC).
+async function startHttp(extraEnv = {}, nodeArgs = []) {
   const env = {
     ...process.env,
     PORT: "0",
@@ -101,7 +101,7 @@ async function startHttp(extraEnv = {}) {
     ECHELONGRAPH_FORWARD_HOST: "127.0.0.1",
     ...extraEnv,
   };
-  const proc = spawn(process.execPath, [HTTP_ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = spawn(process.execPath, [...nodeArgs, HTTP_ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
   const lines = [];
   let stderr = "";
   proc.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
@@ -1621,6 +1621,637 @@ describe("#2775: a large body that finds every slot busy waits up to 15 s for on
   });
 });
 
+// ── #3362: a request that never ended held a large-body slot for good ──
+// Measured 2026-10-25 on the hosted endpoint's 3.1.1 revision (h2c, one instance, two slots): two concurrent 2025-era
+// check_sbom calls, each a CycloneDX document of 1,500 purls, both aborted by their client at 1.5 s. One wrote its
+// access line (200, 1239 ms) and an mcp_client_gone line followed 56 ms later. The other never wrote an access line,
+// and from then on one slot was gone: two large bodies sent together with no aborts ran one after the other.
+// Whose the mcp_client_gone line was the logs do not say (its after_ms and answer_started were not read), so which
+// way the other call hung is not settled. Through 3.1.1 nothing bounded a request, and two ways reproduce here:
+//   - its body stopped coming, with no reset (these first tests). readBody.ts takes the slot at the request's headers
+//     (Content-Length past 64 KiB) and readBodyHolding settled only on 'end', 'close', 'error' or the request's gone
+//     signal; node:http2's server has no request timeout (HTTP/1.1's requestTimeout, 300 s, does end such a socket).
+//     Behind Cloud Run the h2c connection belongs to its front end, which keeps it open and shares it, and on
+//     2026-10-05 the resets of aborted calls reached the container only once it wrote to their streams (15 and 34 s
+//     in). A call still reading its body has written nothing. Now a body that sends nothing for MCP_BODY_IDLE_MS is
+//     ended (408, refused body_stalled) and gives its slot back; 2 s here.
+//   - its reset arrived (mcp_client_gone) and the call did not stop (the deadline's tests below). Now every request
+//     is ended by MCP_REQUEST_TIMEOUT_MS.
+// A stream reset is acted on wherever it lands (the control below, and the #2775 h2c tests above): after the body
+// while the tool runs, mid-upload, during a slot wait, or as the answer starts, with CANCEL, INTERNAL_ERROR or
+// NO_ERROR, by every call that stops on its request's signal.
+describe("#3362: over h2c, a large body that stops coming, with no reset, is ended, logged once, and gives its slot back", { timeout: 150_000 }, () => {
+  let stub, srv, session;
+  before(async () => {
+    stub = await slowStub();
+    // Production's two slots and 15 s slot wait; a body idle bound of 2 s, not 10, so a pass takes seconds.
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_H2C: "1", MCP_LARGE_BODY_SLOTS: "2", MCP_BODY_IDLE_MS: "2000" });
+    session = http2.connect(srv.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await srv?.stop();
+    await stub?.close();
+  });
+  // The probe's call: 1,500 never-seen lodash purls in a CycloneDX document passed as sbom, sent 2025-era.
+  const components = Array.from({ length: 1500 }, (_, i) => ({ type: "library", name: "lodash", version: `4.17.${1000 + i}`, purl: `pkg:npm/lodash@4.17.${1000 + i}` }));
+  const cdx = { name: "check_sbom", arguments: { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", version: 1, components } } };
+  const BODY = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: cdx }));
+  const goneLines = () => srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_client_gone");
+  const brief = (lines) => JSON.stringify(lines.map((l) => ({ status: l.status, refused: l.refused, client_closed: l.client_closed, body_bytes: l.body_bytes, slot_wait_ms: l.slot_wait_ms })));
+  // Production's confirmation run: two large bodies at once, no aborts. With both slots free, neither waits.
+  async function slotWaits() {
+    stub.state.batchMs = 150;
+    await waitFor(() => stub.state.open === 0, "the API to be idle");
+    const before = accessLines(srv).length;
+    const answers = await Promise.all([h2Call(session, "legacy", cdx).answer, h2Call(session, "legacy", cdx).answer]);
+    assert.deepEqual(
+      answers.map((a) => a.status),
+      [200, 200],
+      answers.map((a) => a.text.slice(0, 200)).join(" | "),
+    );
+    await waitFor(() => accessLines(srv).length >= before + 2, "the two access lines");
+    return accessLines(srv)
+      .slice(before)
+      .map((l) => l.slot_wait_ms);
+  }
+
+  it("control: B's stream reset (RST_STREAM CANCEL) after its whole body is sent, while its tool is at the API: B is logged 499, both slots are free", async () => {
+    stub.state.batchMs = 300;
+    await waitFor(() => stub.state.open === 0, "the API to be idle");
+    const before = accessLines(srv).length;
+    const batches = stub.state.batches;
+    const a = h2Call(session, "legacy", cdx);
+    const b = h2Call(session, "legacy", cdx);
+    await waitFor(() => stub.state.batches >= batches + 2, "both calls at the API");
+    b.stream.close(http2.constants.NGHTTP2_CANCEL);
+    assert.equal((await a.answer).status, 200);
+    await waitFor(() => accessLines(srv).length >= before + 2, "both calls' access lines");
+    const lines = accessLines(srv).slice(before);
+    assert.deepEqual(
+      lines.map((l) => [l.status, l.client_closed, l.body_bytes]).sort(),
+      [
+        [200, false, BODY],
+        [499, true, BODY],
+      ],
+      brief(lines),
+    );
+    assert.deepEqual(await slotWaits(), [0, 0], "a slot was still held after the reset call was logged");
+  });
+
+  it("B's body stops 100,000 bytes in and nothing more comes, no reset: B must be logged, and both slots must be free again", async () => {
+    stub.state.batchMs = 150;
+    await waitFor(() => stub.state.open === 0, "the API to be idle");
+    const before = accessLines(srv).length;
+    const goneBefore = goneLines().length;
+    const a = h2Call(session, "legacy", cdx);
+    // Never ended and never reset: what the container sees when a client aborts mid-upload behind Cloud Run.
+    const b = h2Call(session, "legacy", cdx, { bytes: 100_000 });
+    const bStatus = new Promise((resolve) => b.stream.once("response", (h) => resolve(h[":status"])));
+    assert.equal((await a.answer).status, 200);
+    // By Cloud Run's request timeout (deploy-all.sh --timeout=60s) its front end has answered the client itself and
+    // nobody reads this request's answer, so B must have been ended and logged by then. Before the fix it never was.
+    const bLogged = await waitFor(() => accessLines(srv).length >= before + 2, "B's access line", 65_000).then(
+      () => true,
+      () => false,
+    );
+    const lines = accessLines(srv).slice(before);
+    const gone = goneLines().slice(goneBefore);
+    const slotWaitMs = await slotWaits();
+    assert.deepEqual(
+      { bLogged, slotWaitMs },
+      { bLogged: true, slotWaitMs: [0, 0] },
+      `access lines since the two calls: ${brief(lines)}; mcp_client_gone since: ${JSON.stringify(gone)}`,
+    );
+    // B's one line: ended by the idle bound, nothing of its body kept, no client said to have gone; and its answer.
+    const bLines = lines.filter((l) => l.status !== 200);
+    assert.deepEqual(
+      bLines.map((l) => [l.status, l.refused, l.client_closed, l.body_bytes, l.slot_wait_ms]),
+      [[408, "body_stalled", false, 0, 0]],
+      brief(lines),
+    );
+    assert.deepEqual(gone, [], "a client was said to have gone that never reset its stream");
+    assert.equal(await bStatus, 408);
+    b.stream.close(http2.constants.NGHTTP2_CANCEL);
+  });
+
+  it("B's headers come and no byte of its body: it is logged 408 at the idle bound, once, and its slot is free", async () => {
+    const before = accessLines(srv).length;
+    const t0 = Date.now();
+    const b = h2Call(session, "legacy", cdx, { bytes: 0 });
+    await waitFor(() => accessLines(srv).length >= before + 1, "B's access line", 10_000);
+    const took = Date.now() - t0;
+    b.stream.close(http2.constants.NGHTTP2_CANCEL);
+    await sleep(300);
+    const lines = accessLines(srv).slice(before);
+    assert.deepEqual(
+      lines.map((l) => [l.status, l.refused, l.body_bytes]),
+      [[408, "body_stalled", 0]],
+      brief(lines),
+    );
+    assert.ok(took >= 1900 && took < 8000, `logged after ${took} ms, with MCP_BODY_IDLE_MS 2000`);
+    assert.deepEqual(await slotWaits(), [0, 0]);
+  });
+});
+
+// The same body over HTTP/1.1. Node's http server ends such a socket at its requestTimeout (300 s); until then the
+// request held its slot exactly as over h2c, and Cloud Run's front end, which reads a whole HTTP/1.1 answer itself
+// (#2775), passes no close on (the diagnosis held one for 10 s and more).
+describe("#3362: over HTTP/1.1, a large body that stops coming is ended the same way", { timeout: 60_000 }, () => {
+  let srv;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000", MCP_LARGE_BODY_SLOTS: "1", MCP_BODY_IDLE_MS: "1500" });
+  });
+  after(() => srv?.stop());
+  const purls = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+  const probe = { name: "check_sbom", arguments: { sbom: "x".repeat(70 * 1024) } };
+
+  it("a body that stops 70,000 bytes in is answered 408 and its connection closed at the idle bound, logged once, and the slot is free", async () => {
+    const before = accessLines(srv).length;
+    const t0 = Date.now();
+    const sock = await rawRequest(srv.url, "legacy", purls, { bytes: 70_000 });
+    let text = "";
+    sock.on("data", (d) => (text += d));
+    const closed = new Promise((resolve) => sock.once("close", resolve));
+    await waitFor(() => accessLines(srv).length >= before + 1, "its access line", 10_000);
+    const took = Date.now() - t0;
+    await Promise.race([closed, sleep(3_000)]);
+    assert.match(text, /^HTTP\/1\.1 408 /, text.slice(0, 200));
+    assert.ok(sock.destroyed || sock.readableEnded, "the server kept the connection open");
+    assert.ok(took >= 1400 && took < 8000, `logged after ${took} ms, with MCP_BODY_IDLE_MS 1500`);
+    const lines = accessLines(srv).slice(before);
+    assert.deepEqual(
+      lines.map((l) => [l.status, l.refused, l.client_closed, l.body_bytes]),
+      [[408, "body_stalled", false, 0]],
+      JSON.stringify(lines),
+    );
+    sock.destroy();
+    const mark = accessLines(srv).length;
+    assert.equal((await legacy(srv.url, "tools/call", probe, { revision: "2025-06-18" })).status, 200);
+    await waitFor(() => accessLines(srv).length > mark, "the probe's access line");
+    assert.equal(accessLines(srv).slice(mark)[0].slot_wait_ms, 0, "the stalled body's slot was still held");
+  });
+});
+
+// #3362: the backstop. A request whose handler has not settled by MCP_REQUEST_TIMEOUT_MS (production: 60 s, Cloud
+// Run's own request timeout) is answered for at once: its work is stopped as a client's going stops it, its slot and
+// place are given back, and its one access line says refused timeout. Its client still there and its answer not ended
+// (these tests): status 504, its stream reset. Its client gone first: 499 and client_closed (the next describe). When
+// what it was doing settles later, nothing is logged or released again: a second release of its slot, while another
+// call held the other one, would let two more large bodies in at once, three on two slots.
+describe("#3362: a request not settled by MCP_REQUEST_TIMEOUT_MS is ended then, logged once, and gives its slot back once", { timeout: 90_000 }, () => {
+  let stub, srv, session;
+  const DEADLINE = 5000;
+  before(async () => {
+    stub = await slowStub();
+    // An API timeout far past the deadline: only the deadline ends a call its API never answers.
+    srv = await startHttp({
+      ECHELONGRAPH_API_BASE: stub.base,
+      ECHELONGRAPH_API_TIMEOUT_MS: "600000",
+      MCP_RATE_LIMIT_PER_MIN: "1000",
+      MCP_H2C: "1",
+      MCP_LARGE_BODY_SLOTS: "2",
+      MCP_REQUEST_TIMEOUT_MS: String(DEADLINE),
+    });
+    session = http2.connect(srv.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await srv?.stop();
+    await stub?.close();
+  });
+  const components = Array.from({ length: 1500 }, (_, i) => ({ type: "library", name: "lodash", version: `4.17.${1000 + i}`, purl: `pkg:npm/lodash@4.17.${1000 + i}` }));
+  const cdx = { name: "check_sbom", arguments: { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", version: 1, components } } };
+  const BODY = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: cdx }));
+
+  it("a call its API never answers: one line at the deadline (504, timeout), its stream reset; with another call on the other slot, two more large calls then run one at a time", async () => {
+    stub.state.batchMs = 10;
+    stub.state.maxOpen = 0;
+    let openGate;
+    stub.state.gate = new Promise((resolve) => (openGate = resolve));
+    try {
+      const before = accessLines(srv).length;
+      const cancelled = stub.state.cancelled;
+      const t0 = Date.now();
+      const a = h2Call(session, "legacy", cdx);
+      await waitFor(() => stub.state.open === 1, "A at the API");
+      // H takes the other slot halfway to A's deadline, and holds it past A's end.
+      await sleep(DEADLINE / 2);
+      const h = h2Call(session, "legacy", cdx);
+      await waitFor(() => stub.state.open === 2, "H at the API");
+      const aAnswer = await a.answer;
+      const aEnded = Date.now() - t0;
+      await waitFor(() => accessLines(srv).length >= before + 1, "A's access line");
+      await waitFor(() => stub.state.cancelled > cancelled, "A's API call cut off");
+      // A has settled by now (its API call was cut off) and found nothing more to give back or log.
+      await sleep(300);
+      const aLines = accessLines(srv).slice(before);
+      assert.deepEqual(
+        aLines.map((l) => [l.status, l.refused, l.client_closed, l.body_bytes, l.tool]),
+        [[504, "timeout", false, BODY, "check_sbom"]],
+        JSON.stringify(aLines),
+      );
+      assert.ok(aLines[0].duration_ms >= DEADLINE - 100 && aLines[0].duration_ms < DEADLINE + 2000, `A's line says ${aLines[0].duration_ms} ms`);
+      assert.ok(aEnded >= DEADLINE - 100 && aEnded < DEADLINE + 3000, `A's stream ended after ${aEnded} ms`);
+      // A 2025-era answer starts with its SSE headers (200) before the tool has run: the reset is that no result follows.
+      assert.ok(aAnswer.message === undefined && !aAnswer.text.includes('"result"'), `A was answered: ${aAnswer.status} ${aAnswer.text.slice(0, 200)}`);
+      assert.ok(!srv.lines.some((l) => JSON.parse(l).message === "mcp_request_failed"), "A's late end was logged as a failure");
+      // H holds one slot; one is free. X takes it; Y must wait for a slot. Had A's slot been given back twice, both
+      // would have one at once, and three calls would be at the API together.
+      const x = h2Call(session, "legacy", cdx);
+      await waitFor(() => stub.state.open === 2, "X at the API");
+      const y = h2Call(session, "legacy", cdx);
+      await sleep(300);
+      assert.equal(stub.state.open, 2, "a third large call reached the API while two held both slots");
+      openGate();
+      stub.state.gate = undefined;
+      const [hA, xA, yA] = await Promise.all([h.answer, x.answer, y.answer]);
+      assert.deepEqual([hA.status, xA.status, yA.status], [200, 200, 200], [hA, xA, yA].map((r) => r.text.slice(0, 120)).join(" | "));
+      assert.equal(stub.state.maxOpen, 2, `${stub.state.maxOpen} calls were at the API at once on two slots`);
+      await waitFor(() => accessLines(srv).length >= before + 4, "H's, X's and Y's lines");
+      const waits = accessLines(srv)
+        .slice(before + 1)
+        .map((l) => l.slot_wait_ms)
+        .sort((p, q) => p - q);
+      assert.ok(waits[0] === 0 && waits[1] === 0 && waits[2] > 0, `slot_wait_ms ${JSON.stringify(waits)}: Y did not wait for a slot`);
+      for (const l of accessLines(srv)) assert.ok(l.large_body_held >= 0 && l.large_body_held <= 2, `large_body_held ${l.large_body_held} on two slots`);
+    } finally {
+      openGate?.();
+      stub.state.gate = undefined;
+    }
+  });
+
+  it("a body that keeps trickling past the deadline: one line at the deadline (504, timeout, no body kept), its stream reset, the slot free", async () => {
+    await waitFor(() => stub.state.open === 0, "the API to be idle");
+    const before = accessLines(srv).length;
+    const t0 = Date.now();
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: cdx });
+    const stream = session.request({ ":method": "POST", ":path": "/mcp", "content-type": "application/json", accept: ACCEPT, "content-length": String(Buffer.byteLength(body)), "mcp-protocol-version": "2025-06-18" });
+    stream.on("error", () => {});
+    let sent = 0;
+    const drip = setInterval(() => {
+      if (stream.closed || stream.destroyed) return clearInterval(drip);
+      stream.write(body.slice(sent, sent + 1000));
+      sent += 1000;
+    }, 400);
+    const closed = new Promise((resolve) => stream.once("close", resolve));
+    try {
+      await waitFor(() => accessLines(srv).length >= before + 1, "its access line", DEADLINE + 5000);
+      await Promise.race([closed, sleep(2000)]);
+    } finally {
+      clearInterval(drip);
+    }
+    const took = Date.now() - t0;
+    assert.ok(stream.closed || stream.destroyed, "its stream was left open");
+    assert.ok(took >= DEADLINE - 100 && took < DEADLINE + 4000, `ended after ${took} ms`);
+    assert.ok(sent < Buffer.byteLength(body), "the whole body was sent: nothing tested");
+    await sleep(300);
+    const lines = accessLines(srv).slice(before);
+    assert.deepEqual(
+      lines.map((l) => [l.status, l.refused, l.body_bytes, l.rpc_method]),
+      [[504, "timeout", 0, "(none)"]],
+      JSON.stringify(lines),
+    );
+    const mark = accessLines(srv).length;
+    stub.state.batchMs = 10;
+    assert.equal((await h2Call(session, "legacy", cdx).answer).status, 200);
+    await waitFor(() => accessLines(srv).length > mark, "the next call's line");
+    assert.equal(accessLines(srv).slice(mark)[0].slot_wait_ms, 0, "the trickling body's slot was still held");
+  });
+
+  it("over HTTP/1.1, in both eras, a call its API never answers is logged 504 timeout at the deadline, once, and the server answers on", async () => {
+    // Its own server: HTTP/1.1, the deadline at 1.5 s. A 2025-era answer has written its SSE headers by then and is
+    // written to after its response is destroyed; a 2026-era one has written nothing.
+    const h1 = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, ECHELONGRAPH_API_TIMEOUT_MS: "600000", MCP_RATE_LIMIT_PER_MIN: "1000", MCP_REQUEST_TIMEOUT_MS: "1500" });
+    let openGate;
+    stub.state.gate = new Promise((resolve) => (openGate = resolve));
+    try {
+      await waitFor(() => stub.state.open === 0, "the API to be idle");
+      const before = accessLines(h1).length;
+      const call = { name: "cve_summary", arguments: {} };
+      const answered = await Promise.all([
+        modern(h1.url, "tools/call", call).then((r) => r.message?.result, () => undefined),
+        legacy(h1.url, "tools/call", call, { revision: "2025-06-18" }).then((r) => r.message?.result, () => undefined),
+      ]);
+      assert.deepEqual(answered, [undefined, undefined], "a call was answered past its deadline");
+      await waitFor(() => accessLines(h1).length >= before + 2, "both calls' lines", 10_000);
+      await sleep(300);
+      const lines = accessLines(h1).slice(before);
+      assert.deepEqual(
+        lines.map((l) => [l.status, l.refused, l.tool, l.protocol_version]).sort(),
+        [
+          [504, "timeout", "cve_summary", "2025-06-18"],
+          [504, "timeout", "cve_summary", MODERN],
+        ],
+        JSON.stringify(lines),
+      );
+      assert.equal((await fetch(`${h1.base}/health`)).status, 200, "the server stopped answering");
+    } finally {
+      openGate();
+      stub.state.gate = undefined;
+      await h1.stop();
+    }
+  });
+});
+
+// #3362, the review of the first fix: the case the deadline exists for is a call whose client went (mcp_client_gone was
+// written) and that did not stop. Its deadline line must still say that its client went: 499 and client_closed, as any
+// request's whose client went, whatever had been written to it. The first fix's line said client_closed false (and,
+// over HTTP/1.1, 200 or 499 by era) for exactly that call. Here every API call ignores its request's abort
+// (fixtures/fetch-ignores-abort.mjs), as such a call would, and its API answers only when the test opens the gate.
+describe("#3362: a call whose client went and that did not stop is logged at the deadline as its client's going: 499, client_closed", { timeout: 90_000 }, () => {
+  let stub;
+  const DEADLINE = 3000;
+  const ignoresAbort = pathToFileURL(path.join(PKG_DIR, "test", "fixtures", "fetch-ignores-abort.mjs")).href;
+  const env = () => ({
+    ECHELONGRAPH_API_BASE: stub.base,
+    ECHELONGRAPH_API_TIMEOUT_MS: "600000",
+    MCP_RATE_LIMIT_PER_MIN: "1000",
+    MCP_LARGE_BODY_SLOTS: "2",
+    MCP_REQUEST_TIMEOUT_MS: String(DEADLINE),
+  });
+  before(async () => {
+    stub = await slowStub();
+  });
+  after(() => stub?.close());
+  const components = Array.from({ length: 1500 }, (_, i) => ({ type: "library", name: "lodash", version: `4.17.${1000 + i}`, purl: `pkg:npm/lodash@4.17.${1000 + i}` }));
+  const cdx = { name: "check_sbom", arguments: { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", version: 1, components } } };
+  const BODY = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: cdx }));
+  const goneLines = (srv) => srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_client_gone");
+  // Holds the stub's answers until the returned function is called.
+  const closeGate = () => {
+    let open;
+    stub.state.gate = new Promise((resolve) => (open = resolve));
+    return () => {
+      open();
+      stub.state.gate = undefined;
+    };
+  };
+
+  it("h2c, 2025-era check_sbom (production's call): reset while at the API; one line at the deadline, 499 timeout client_closed, its slot given back once", async () => {
+    const srv = await startHttp({ ...env(), MCP_H2C: "1" }, ["--import", ignoresAbort]);
+    const session = http2.connect(srv.base);
+    session.on("error", () => {});
+    const openGate = closeGate();
+    try {
+      await waitFor(() => stub.state.open === 0, "the API to be idle");
+      stub.state.batchMs = 10;
+      const before = accessLines(srv).length;
+      const cancelled = stub.state.cancelled;
+      const t0 = Date.now();
+      const b = h2Call(session, "legacy", cdx);
+      await waitFor(() => stub.state.open === 1, "B at the API");
+      b.stream.close(http2.constants.NGHTTP2_CANCEL);
+      await waitFor(() => goneLines(srv).length === 1, "B's mcp_client_gone line");
+      await waitFor(() => accessLines(srv).length >= before + 1, "B's access line", DEADLINE + 5000);
+      const took = Date.now() - t0;
+      // The control: B's API call ran on past its client's reset, so only the deadline ended B.
+      assert.equal(stub.state.cancelled, cancelled, "B's API call stopped at the reset: nothing here needed the deadline");
+      assert.equal(stub.state.open, 1, "B's API call is no longer waiting");
+      const line = accessLines(srv).slice(before)[0];
+      assert.deepEqual(
+        [line.status, line.refused, line.client_closed, line.body_bytes, line.tool, line.large_body_held],
+        [499, "timeout", true, BODY, "check_sbom", 0],
+        JSON.stringify(line),
+      );
+      assert.ok(took >= DEADLINE - 100 && took < DEADLINE + 3000, `B's line came ${took} ms in, with MCP_REQUEST_TIMEOUT_MS ${DEADLINE}`);
+      // B's API call answers now, and B ends: nothing more is logged, and no slot is given back twice.
+      openGate();
+      await waitFor(() => stub.state.open === 0, "B's API call to end");
+      await sleep(500);
+      assert.equal(accessLines(srv).length, before + 1, "B was logged again when it ended");
+      assert.ok(!srv.lines.some((l) => JSON.parse(l).message === "mcp_request_failed"), "B's late end was logged as a failure");
+      // Two large calls at once, no aborts: production's confirmation run. Neither waits for a slot, and neither line
+      // reads more than the two slots.
+      stub.state.batchMs = 50;
+      const mark = accessLines(srv).length;
+      const answers = await Promise.all([h2Call(session, "legacy", cdx).answer, h2Call(session, "legacy", cdx).answer]);
+      assert.deepEqual(
+        answers.map((a) => a.status),
+        [200, 200],
+      );
+      await waitFor(() => accessLines(srv).length >= mark + 2, "the two calls' lines");
+      const two = accessLines(srv).slice(mark);
+      assert.deepEqual(
+        two.map((l) => l.slot_wait_ms),
+        [0, 0],
+        JSON.stringify(two),
+      );
+    } finally {
+      openGate();
+      session.close();
+      await srv.stop();
+    }
+  });
+
+  // check_sbom, not a tool its request does not wait for: a request waits for what check_sbom and scan_manifest still
+  // run (runtime.ts holdRequest), so only theirs can outlive their client.
+  it("HTTP/1.1, both eras: the client closes its connection while check_sbom is at the API; each is logged at the deadline 499 timeout client_closed, once", async () => {
+    const srv = await startHttp(env(), ["--import", ignoresAbort]);
+    const openGate = closeGate();
+    try {
+      await waitFor(() => stub.state.open === 0, "the API to be idle");
+      stub.state.batchMs = 10;
+      const before = accessLines(srv).length;
+      const cancelled = stub.state.cancelled;
+      const socks = [await rawRequest(srv.url, "modern", cdx), await rawRequest(srv.url, "legacy", cdx)];
+      await waitFor(() => stub.state.open === 2, "both calls at the API");
+      for (const s of socks) s.destroy();
+      await waitFor(() => goneLines(srv).length === 2, "both calls' mcp_client_gone lines");
+      await waitFor(() => accessLines(srv).length >= before + 2, "both calls' access lines", DEADLINE + 5000);
+      assert.equal(stub.state.cancelled, cancelled, "an API call stopped at its client's close: nothing here needed the deadline");
+      const lines = accessLines(srv).slice(before);
+      assert.deepEqual(
+        lines.map((l) => [l.status, l.refused, l.client_closed, l.tool, l.protocol_version, l.body_bytes > 65_536]).sort(),
+        [
+          [499, "timeout", true, "check_sbom", "2025-06-18", true],
+          [499, "timeout", true, "check_sbom", MODERN, true],
+        ],
+        JSON.stringify(lines),
+      );
+      assert.equal(lines.at(-1).large_body_held, 0, `${lines.at(-1).large_body_held} slots still held after both lines`);
+      for (const l of lines) assert.ok(l.duration_ms >= DEADLINE - 100 && l.duration_ms < DEADLINE + 2000, `a line says ${l.duration_ms} ms`);
+      openGate();
+      await waitFor(() => stub.state.open === 0, "the API calls to end");
+      await sleep(500);
+      assert.equal(accessLines(srv).length, before + 2, "a call was logged again when it ended");
+      assert.equal((await fetch(`${srv.base}/health`)).status, 200, "the server stopped answering");
+    } finally {
+      openGate();
+      await srv.stop();
+    }
+  });
+});
+
+// #3362, the bounded leak the diagnosis found beside it. For a 2025-era request the SDK's teardown follows a clone of
+// the Request whose AbortController Node holds only weakly; after a garbage collection the clone's signal no longer
+// followed the client's reset, so check_sbom, waiting out a 429's Retry-After on that signal alone, waited it out (19.5 s
+// of a 20 s wait, measured with this test's forced collection) and held its slot. Production's small heap
+// (Dockerfile.http --max-old-space-size=104) collects often. Now the wait also ends on the request's own signal
+// (index.ts batchSleep). check_sbom-cancel.test.mjs holds the same without a collector.
+describe("#3362: under frequent garbage collection, a 2025-era check_sbom waiting out a Retry-After stops when its stream is reset", { timeout: 60_000 }, () => {
+  let stub, srv, session;
+  before(async () => {
+    stub = await slowStub();
+    const gc = pathToFileURL(path.join(PKG_DIR, "test", "fixtures", "gc-every-5ms.mjs")).href;
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_H2C: "1", MCP_LARGE_BODY_SLOTS: "1" }, ["--expose-gc", "--import", gc]);
+    session = http2.connect(srv.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await srv?.stop();
+    await stub?.close();
+  });
+  const purls = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+  const probe = { name: "check_sbom", arguments: { sbom: "x".repeat(70 * 1024) } };
+
+  it("reset 700 ms into a 20 s Retry-After wait: logged 499 within ~1 s, the slot free, no batch sent again", async () => {
+    stub.state.retryAfter = 20;
+    const batchesBefore = stub.state.batches;
+    const before = accessLines(srv).length;
+    const { stream } = h2Call(session, "legacy", purls);
+    await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API (answered 429)");
+    await sleep(700);
+    const resetAt = Date.now();
+    stream.close(http2.constants.NGHTTP2_CANCEL);
+    stub.state.retryAfter = undefined;
+    await waitFor(
+      () => accessLines(srv).slice(before).some((l) => l.tool === "check_sbom" && l.body_bytes > 80_000),
+      "the call's access line",
+      15_000,
+    );
+    const after = Date.now() - resetAt;
+    const line = accessLines(srv)
+      .slice(before)
+      .find((l) => l.tool === "check_sbom" && l.body_bytes > 80_000);
+    assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
+    assert.ok(after < 1500, `logged ${after} ms after the reset: the Retry-After wait ran on`);
+    assert.equal((await h2Call(session, "legacy", probe).answer).status, 200);
+    assert.equal(stub.state.batches - batchesBefore, 1, "the 429'd batch was sent again after the reset");
+  });
+});
+
+// #3362: the detector. The leak wrote no line: the request that held the slot never wrote one, and #2858's busy alert
+// fires only once both slots are gone and a real client is refused. Every access line now carries the instance's
+// large-body slots held as it is written (large_body_held) and how long the oldest of those holds has been held
+// (large_body_oldest_hold_ms; httpPolicy.ts Slots.oldestHoldMs). Every hold ends by its request's deadline, so a hold
+// far older is one no request will give back, whether its holder was admitted or not, hangs or has gone, and whatever
+// else is served meanwhile. Had 3.1.1 written them, every line on that revision after 13:03Z, /health's and served calls'
+// alike, would have read at least 1 and an age that only grew; create-mcp-remote-monitoring.sh alerts past 5 minutes.
+// The review of the first fix: its count (slots held with no request in flight) read 0 while any request was in
+// flight, the holder included, and restarted at every request served. This server keeps a hold as 3.1.1 did (its idle
+// bound and deadline set past the test), so the lines are those of the leak itself. Two of them are the golden lines
+// that the monitoring self-test runs the alert's filter against (test/fixtures/large-body-slots-3362.jsonl): each line
+// written here is held to them.
+const GOLDEN_3362 = path.join(PKG_DIR, "test", "fixtures", "large-body-slots-3362.jsonl");
+describe("#3362: every access line says how many large-body slots are held, and how long the oldest hold has been held", { timeout: 60_000 }, () => {
+  let stub, srv, session;
+  before(async () => {
+    stub = await slowStub();
+    srv = await startHttp({
+      ECHELONGRAPH_API_BASE: stub.base,
+      ECHELONGRAPH_API_TIMEOUT_MS: "600000",
+      MCP_RATE_LIMIT_PER_MIN: "1000",
+      MCP_H2C: "1",
+      MCP_LARGE_BODY_SLOTS: "2",
+      MCP_BODY_IDLE_MS: "600000",
+      MCP_REQUEST_TIMEOUT_MS: "600000",
+    });
+    session = http2.connect(srv.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await srv?.stop();
+    await stub?.close();
+  });
+  const cdx = { name: "check_sbom", arguments: { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", version: 1, components: [{ type: "library", name: "x", purl: "pkg:npm/x@1.0.0", pad: "x".repeat(80_000) }] } } };
+  const health = async () => {
+    const before = accessLines(srv).length;
+    assert.equal((await h2Get(session, "/health")).status, 200);
+    await waitFor(() => accessLines(srv).length > before, "the /health line");
+    return accessLines(srv).slice(before)[0];
+  };
+  const slots = (l) => [l.large_body_held, l.large_body_oldest_hold_ms];
+  // The fields the alert's filter and its runbook read are equal to the golden line's; duration_ms and the age vary,
+  // and the age is held to the golden's range (0, or past a second and under the alert's 5 minutes).
+  function goldenProblems(got, golden) {
+    const out = [];
+    const keys = (o) => Object.keys(o).sort().join();
+    if (keys(got) !== keys(golden)) out.push(`keys ${keys(got)}, the golden line's ${keys(golden)}`);
+    for (const [k, v] of Object.entries(golden)) {
+      if (k === "duration_ms" || k === "large_body_oldest_hold_ms") continue;
+      if (got[k] !== v) out.push(`${k} is ${JSON.stringify(got[k])}, the golden line's ${JSON.stringify(v)}`);
+    }
+    const age = got.large_body_oldest_hold_ms;
+    if (golden.large_body_oldest_hold_ms === 0 ? age !== 0 : !(Number.isInteger(age) && age >= 1000 && age < 300_000)) out.push(`large_body_oldest_hold_ms ${age}, the golden line's ${golden.large_body_oldest_hold_ms}`);
+    return out;
+  }
+
+  it("held 0 at rest; a stalled body's hold, never admitted, ages on every line, a served call's included; the lines are the golden ones", async () => {
+    const rest = await health();
+    assert.deepEqual(slots(rest), [0, 0], JSON.stringify(rest));
+    // A large body that stops coming, no reset: one way the leak's request hung. It holds a slot and is never admitted.
+    const b = h2Call(session, "legacy", cdx, { bytes: 70_000 });
+    await sleep(1200);
+    const stuck = await health();
+    assert.equal(stuck.large_body_held, 1, JSON.stringify(stuck));
+    assert.ok(stuck.large_body_oldest_hold_ms >= 1000 && stuck.large_body_oldest_hold_ms < 5000, JSON.stringify(stuck));
+    // A call served meanwhile, in flight 300 ms: its own line, and the next, read the stalled hold's age, still growing.
+    stub.state.ms = 300;
+    const mark = accessLines(srv).length;
+    assert.equal((await h2Call(session, "modern", { name: "cve_summary", arguments: {} }).answer).status, 200);
+    await waitFor(() => accessLines(srv).length > mark, "the call's line");
+    const call = accessLines(srv).slice(mark)[0];
+    assert.equal(call.large_body_held, 1, JSON.stringify(call));
+    assert.ok(call.large_body_oldest_hold_ms >= stuck.large_body_oldest_hold_ms + 250, `the served call's line says ${call.large_body_oldest_hold_ms} ms, the line before it ${stuck.large_body_oldest_hold_ms}`);
+    await sleep(300);
+    const later = await health();
+    assert.ok(later.large_body_oldest_hold_ms >= call.large_body_oldest_hold_ms + 250, `${later.large_body_oldest_hold_ms} ms, 300 ms after a line that said ${call.large_body_oldest_hold_ms}`);
+    // B's client resets it: its slot is given back, and the lines say so.
+    b.stream.close(http2.constants.NGHTTP2_CANCEL);
+    await waitFor(() => accessLines(srv).some((l) => l.status === 499), "B's line");
+    assert.deepEqual(slots(await health()), [0, 0]);
+    // The golden lines: one at rest, one of the leak.
+    const golden = fs.existsSync(GOLDEN_3362) ? fs.readFileSync(GOLDEN_3362, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+    assert.equal(golden.length, 2, `${GOLDEN_3362} must hold the two lines this test writes; they were:\n${JSON.stringify(rest)}\n${JSON.stringify(stuck)}`);
+    assert.deepEqual(goldenProblems(rest, golden[0]), [], `the line at rest: ${JSON.stringify(rest)}`);
+    assert.deepEqual(goldenProblems(stuck, golden[1]), [], `the leak's line: ${JSON.stringify(stuck)}`);
+  });
+
+  // The review's first demo: a full large check_sbom admitted and left waiting at an API that does not answer read
+  // large_body_held 1 and an idle count of 0 on every line, so the first fix's alert could never see it.
+  it("a large call admitted and hung at its API: its hold ages on every line while it is in flight, and is given back when it stops", async () => {
+    let openGate;
+    stub.state.gate = new Promise((resolve) => (openGate = resolve));
+    try {
+      await waitFor(() => stub.state.open === 0, "the API to be idle");
+      stub.state.batchMs = 10;
+      const before = accessLines(srv).length;
+      const a = h2Call(session, "legacy", cdx);
+      await waitFor(() => stub.state.open === 1, "A at the API");
+      await sleep(1000);
+      const first = await health();
+      await sleep(1000);
+      const second = await health();
+      assert.deepEqual([first.large_body_held, second.large_body_held], [1, 1], `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
+      assert.ok(first.large_body_oldest_hold_ms >= 1000, `A in flight 1 s: ${first.large_body_oldest_hold_ms} ms`);
+      assert.ok(second.large_body_oldest_hold_ms >= first.large_body_oldest_hold_ms + 900, `${second.large_body_oldest_hold_ms} ms, a second after ${first.large_body_oldest_hold_ms}`);
+      assert.ok(!accessLines(srv).slice(before).some((l) => l.path === "/mcp"), "A was logged while at the API");
+      // A's client resets it: the call stops (#2775), and its slot is given back.
+      a.stream.close(http2.constants.NGHTTP2_CANCEL);
+      await waitFor(() => accessLines(srv).slice(before).some((l) => l.path === "/mcp"), "A's line");
+      assert.deepEqual(slots(await health()), [0, 0]);
+    } finally {
+      openGate?.();
+      stub.state.gate = undefined;
+    }
+  });
+});
+
 // ── #2948: every upstream failure writes one line ──
 // On 2026-10-07 a hosted get_cve answered "EchelonGraph at https://app.echelongraph.io could not be
 // reached for GET /api/…" in 460 ms, core-backend logged no request for it, and the hosted service
@@ -2029,6 +2660,87 @@ describe("over h2c (MCP_H2C=1), the access line's method is one of nine HTTP met
   });
 });
 
+// #3354: the hosted endpoint sends HSTS itself, on every answer to a request that arrived over HTTPS (the proxy in
+// front says so in X-Forwarded-Proto), error answers included; the edge load balancer replaces it with its own of the
+// same name, so a client sees one. Over plain HTTP (a local run) none is sent: RFC 6797 7.2.
+describe("#3354: Strict-Transport-Security on every answer to a request that arrived over HTTPS", () => {
+  const HSTS = "max-age=31536000; includeSubDomains";
+  const XFP = { "x-forwarded-proto": "https" };
+  const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t3354", version: "1" } } });
+  const RPC = { "content-type": "application/json", accept: ACCEPT };
+  // [label, method, path, headers, body, status]: each kind of answer this process writes.
+  const CASES = [
+    ["GET /health", "GET", "/health", {}, undefined, 200],
+    ["an unknown path", "GET", "/does-not-exist", {}, undefined, 404],
+    ["GET /mcp (the SDK's stateless 405)", "GET", "/mcp", { accept: "text/event-stream" }, undefined, 405],
+    ["POST /health", "POST", "/health", {}, "x", 405],
+    ["the CORS preflight", "OPTIONS", "/mcp", { origin: "https://client.example", "access-control-request-method": "POST" }, undefined, 204],
+    ["a refused Origin", "POST", "/mcp", { ...RPC, origin: "http://client.example" }, init, 403],
+    ["a 2025-era initialize, answered over SSE", "POST", "/mcp", RPC, init, 200],
+  ];
+  const ask = (srv, [, method, p, headers, body], extra = {}) => fetch(`${srv.base}${p}`, { method, headers: { ...headers, ...extra }, body });
+  let srv;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000" });
+  });
+  after(() => srv?.stop());
+  it("over HTTPS, each kind of answer carries exactly one header with that value", async () => {
+    for (const c of CASES) {
+      const res = await ask(srv, c, XFP);
+      await res.text();
+      assert.equal(res.status, c[5], `${c[0]}: status`);
+      // Two headers would read "a, b" here, so equality also proves there is one.
+      assert.equal(res.headers.get("strict-transport-security"), HSTS, `${c[0]}: Strict-Transport-Security`);
+    }
+  });
+  it("over plain HTTP (no X-Forwarded-Proto, or http) none is sent", async () => {
+    for (const extra of [{}, { "x-forwarded-proto": "http" }]) {
+      for (const c of CASES) {
+        const res = await ask(srv, c, extra);
+        await res.text();
+        assert.equal(res.status, c[5], `${c[0]}: status`);
+        assert.equal(res.headers.get("strict-transport-security"), null, `${c[0]} with ${JSON.stringify(extra)}: sent HSTS over plain HTTP`);
+      }
+    }
+  });
+  it("a list is read by its last value, the nearest proxy's", async () => {
+    for (const [xfp, want] of [["http, https", HSTS], ["HTTPS", HSTS], ["https, http", null], ["httpsx", null]]) {
+      const res = await fetch(`${srv.base}/health`, { headers: { "x-forwarded-proto": xfp } });
+      await res.text();
+      assert.equal(res.headers.get("strict-transport-security"), want, `X-Forwarded-Proto: ${xfp}`);
+    }
+  });
+  it("over h2c (MCP_H2C=1), /health, a 404 and a 2025-era initialize carry it too", async () => {
+    const h2 = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000", MCP_H2C: "1" });
+    const session = http2.connect(h2.base);
+    session.on("error", () => {});
+    try {
+      const one = (headers, body) =>
+        new Promise((resolve, reject) => {
+          const stream = session.request(headers);
+          let h;
+          stream.on("response", (x) => (h = x));
+          stream.on("data", () => {});
+          stream.on("end", () => resolve(h));
+          stream.on("error", reject);
+          stream.end(body);
+        });
+      for (const [p, method, extra, body, status] of [
+        ["/health", "GET", {}, undefined, 200],
+        ["/does-not-exist", "GET", {}, undefined, 404],
+        ["/mcp", "POST", RPC, init, 200],
+      ]) {
+        const h = await one({ ":method": method, ":path": p, ...XFP, ...extra }, body);
+        assert.equal(h[":status"], status, `h2c ${method} ${p}: status`);
+        assert.equal(h["strict-transport-security"], HSTS, `h2c ${method} ${p}: Strict-Transport-Security`);
+      }
+    } finally {
+      session.close();
+      await h2.stop();
+    }
+  });
+});
+
 describe("server.json advertises the remote (#1879's registry entry)", () => {
   it("one streamable-http remote at https://mcp.echelongraph.io/mcp, the path this server serves", () => {
     const sj = JSON.parse(readPkgFile("server.json"));
@@ -2116,6 +2828,9 @@ describe("#2863: every line the hosted endpoint writes is one of LOG_LINES, with
     client_closed: "whether your client closed early",
     throttled: "whether it was throttled or refused",
     refused: "throttled or refused, and why",
+    // #3362: the server's, not the request's.
+    large_body_held: "its large-body slots held",
+    large_body_oldest_hold_ms: "(and the oldest hold's age)",
   };
   // #2948: each key of the upstream-failure line → the words of the same paragraph that say it.
   const README_UPSTREAM_PHRASES = {
@@ -2307,12 +3022,12 @@ describe("#2863: every line the hosted endpoint writes is one of LOG_LINES, with
     // The README's old list (through 3.0.2): it named neither queued_ms nor in_flight, the prompt or tool name as such,
     // ua_family as the first word, client_public, client_closed, throttled or refused (#2863's 2.7.1 audit comment); nor
     // slot_wait_ms, which came with #2775's wait for a large-body slot; nor the HTTP method as a closed set (3.1.0's
-    // final review).
+    // final review); nor large_body_held and large_body_oldest_hold_ms, #3362's two numbers about the server.
     const old = readPkgFile("README.md").replace(/Per request it logs the HTTP method[\s\S]*?and why\.\s/, "Per request it logs the HTTP method and path, the status, the duration, the body size, the JSON-RPC method and (for `tools/call`) the tool name, the protocol version, whether an `Origin` header was sent, and the family of your client's User-Agent. ");
     assert.notEqual(old, readPkgFile("README.md"), "the README's access-line sentence moved: re-aim this control");
     assert.deepEqual(
       readmeProblems(LOG_LINES, old).map((p) => p.match(/logs (\w+)/)?.[1]).sort(),
-      ["client_closed", "client_public", "in_flight", "method", "prompt", "queued_ms", "refused", "slot_wait_ms", "throttled", "tool", "ua_family"],
+      ["client_closed", "client_public", "in_flight", "large_body_held", "large_body_oldest_hold_ms", "method", "prompt", "queued_ms", "refused", "slot_wait_ms", "throttled", "tool", "ua_family"],
       "the README's old access-line list passes",
     );
     // #2948: without its upstream-failure sentence, the README fails on each of that line's keys.

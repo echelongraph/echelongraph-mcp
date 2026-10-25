@@ -43,6 +43,24 @@ export function structuredSize(res, stubBase) {
   return (stubBase ? s.split(stubBase).join(PROD_BASE) : s).length;
 }
 
+/**
+ * #3273's review: for each list a structured result's data cut thinned (truncated[path].thinned),
+ * the fields its entries keep in data, the union of their keys, sorted; null where no list was
+ * thinned. truncated says a list was thinned, not to which level (search_cves' default page writes
+ * {"cves":{"total":20,"returned":20,"thinned":true}} at either), and these fields do: a search_cves
+ * row keeps description at the first level and not at the second.
+ */
+export function keptFields(sc) {
+  const out = {};
+  for (const [p, t] of Object.entries(sc?.truncated ?? {})) {
+    if (t?.thinned !== true) continue;
+    const rows = p.split(".").reduce((o, k) => o?.[k], sc.data);
+    if (!Array.isArray(rows)) continue;
+    out[p] = [...new Set(rows.flatMap((r) => (r && typeof r === "object" && !Array.isArray(r) ? Object.keys(r) : [])))].sort();
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 /** Throws, naming the case and its size, when a structured result is past STRUCTURED_BUDGET (#3013). */
 export function assertStructuredUnderBudget(label, size) {
   if (size > STRUCTURED_BUDGET) {
@@ -371,7 +389,7 @@ export const datedAfterAnswersMessage = (o) => {
 // was a seed "until the first --record replaces it" long after one had, and that a re-measure moves
 // measured_at).
 export const RECORD_ABOUT =
-  "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record, this about included (text-bound.mjs RECORD_ABOUT). tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh); answers_kept says so. cases: each case of text-bound.mjs SHAPED measured on production, held to the ceiling, and text-bound.test.mjs holds each SHAPED case's text, and (#3273) its structured result, within SHAPED_DRIFT of its record here (STRUCTURED_DRIFT_KNOWN names the cases past it, and what clears each); source says where the answers came from (probe-prod, the answers kept here, the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). Dates (#2782): measured_at is when production was read for the number, and read_ms how long that read took (null where it was not recorded); a re-measure of the kept answers (--answers test/fixtures/prod-answers --record) moves neither. answers_age_ms is how old each kept answer was, by its own generated_at, when production was read, written by the read: the API serves a radar's aggregate stale past its 60 s cache TTL to the first request after it, and the CDN 300 s more, so an honest read's answers can be minutes old; text-bound.test.mjs fails when measured_at less a kept answer's generated_at is not the age the read recorded for it. answers_read_at (#2822) is when the kept answers were read, the same read. code_measured_at is when this checkout's server last measured the answers, and code_version which code that was: package.json's version, with +unreleased when CHANGELOG.md's newest section is unreleased; package_version is package.json's version alone. total and blocks: the text's characters, all blocks and each. structured (#3013): the answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before 3.0.0 carries none. data_truncated and truncated (#3273): whether the server measured cut that structured result's data, and what it cut, so the cut level is on record, not inferred; a case recorded before carries neither.";
+  "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record, this about included (text-bound.mjs RECORD_ABOUT). tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh); answers_kept says so. cases: each case of text-bound.mjs SHAPED measured on production, held to the ceiling, and text-bound.test.mjs holds each SHAPED case's text, and (#3273) its structured result, within SHAPED_DRIFT of its record here (STRUCTURED_DRIFT_KNOWN names the cases past it, and what clears each); source says where the answers came from (probe-prod, the answers kept here, the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). Dates (#2782): measured_at is when production was read for the number, and read_ms how long that read took (null where it was not recorded); a re-measure of the kept answers (--answers test/fixtures/prod-answers --record) moves neither. answers_age_ms is how old each kept answer was, by its own generated_at, when production was read, written by the read: the API serves a radar's aggregate stale past its 60 s cache TTL to the first request after it, and the CDN 300 s more, so an honest read's answers can be minutes old; text-bound.test.mjs fails when measured_at less a kept answer's generated_at is not the age the read recorded for it. answers_read_at (#2822) is when the kept answers were read, the same read. code_measured_at is when this checkout's server last measured the answers, and code_version which code that was: package.json's version, with +unreleased when CHANGELOG.md's newest section is unreleased; package_version is package.json's version alone. total and blocks: the text's characters, all blocks and each. structured (#3013): the answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before 3.0.0 carries none. data_truncated and truncated (#3273): whether the server measured cut that structured result's data, and what it cut; a case recorded before carries neither. truncated says a list was thinned, not to which level, so kept_fields (#3273's review) gives, for each list it says was thinned, the fields its entries keep in that structured result's data (text-bound.mjs keptFields), and the level a thinned list was cut to is on record, not inferred: null where no list was thinned; a case recorded before carries none.";
 
 /** The tools whose answer is production-wide (no input), measured live, and the API paths each one reads. */
 export const LIVE_TOOLS = {
@@ -473,9 +491,10 @@ export const LOG4SHELL_FIXED_BRANCHES = {
 };
 // #2839: CISA's KEV text for CVE-2021-44228 as core-backend serves it on the record
 // (kev_required_action, kev_short_description, kev_notes_urls), copied verbatim from CISA's
-// known_exploited_vulnerabilities.json, catalogVersion 2026.10.04 (read 2026-10-05). Production's
-// get_cve answer kept in fixtures/prod-shaped/ predates the fields, so the get_cve cases `set` them
-// on it until that answer is re-captured from production after core-backend ships them.
+// known_exploited_vulnerabilities.json, catalogVersion 2026.10.04 (read 2026-10-05). Through 3.1.1
+// production's get_cve answer kept in fixtures/prod-shaped/ predated the fields, so the get_cve cases
+// `set` them on it; since #3273's review that answer is production's of 2026-10-25, which carries
+// them, equal to these, and the cases set nothing.
 export const LOG4SHELL_KEV_TEXT = {
   kev_required_action:
     "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks. Temporary mitigations using one of the measures provided at https://www.cisa.gov/uscert/ed-22-02-apache-log4j-recommended-mitigation-measures are only acceptable until updates are available.",
@@ -511,18 +530,34 @@ export const SHAPED = [
   // production's rows had grown past the text cut's 200-character level. 14,455 / 26,761 and
   // 31,648 / 14,730 on the old rows.
   // #3273: the default page repeats the file's first 4 rows, rows 0, 5, 10 and 15 of production's
-  // page: every 5th of the default page's own 20. It lands where production's size does (8,927
-  // characters of structuredContent against production's 9,064), cut here at the second level (no
-  // description). Production's level for this call is inferred from that size, not measured: the
-  // record holds no truncated for it until the next --hosted --record writes one. Every 5th of the
-  // 50, repeated to 20, fit at the first level (28,336, every row's description kept), three times
-  // production's size.
+  // page: every 5th of the default page's own 20, cut here at the second level (no description), at
+  // 8,927 characters of structuredContent against production's 9,064 (2026-10-11). Production's
+  // level for this call is on record since #3273's review: the hosted 3.1.1 read of
+  // 2026-10-25T16:09:36Z (9,581, which 8,927 here is 6.8% under) holds its kept_fields, each of its 20
+  // rows keeping cve_id, severity, cvss_v3_score, echelongraph_score, score_assessed,
+  // score_unassessed_reason, epss_score, kev_listed, kev_ransomware, published, patch_available and
+  // patch_evidence, no description: the second level, as here (text-bound.test.mjs holds each case's
+  // thinned rows to the fields the record's keep). Its truncated, {"cves":{"total":20,"returned":20,
+  // "thinned":true}}, is what the first level writes too. Every 5th of the 50, repeated to 20, fit at
+  // the first level (28,336, every row's description kept), three times production's size.
   { label: "search_cves, default page (search openssl)", tool: "search_cves", page: "default", args: { search: "openssl" }, fixture: "search_cves", answers: ["openssl"], take: { cves: 4 }, repeat: { cves: 20 }, set: { limit: 20 }, size: 15_780, structured: 8_927 },
   { label: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", page: "max", args: { search: "openssl", limit: 50 }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 50 }, set: { limit: 50 }, size: 18_717, structured: 17_409 },
   // #3084 (merged from 24dad5eb): the KEV note names BOD 26-04, which replaced BOD 22-01, 43 characters longer in
   // the text and in the structured result's notes; the cut then keeps 86 cpe_match and references entries, not 87
   // (24,833 and 29,963 before).
-  { label: "get_cve, CVE-2021-44228", tool: "get_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "get_cve", answers: ["CVE-2021-44228"], repeat: { cpe_match: 396, references: 103 }, set: LOG4SHELL_KEV_TEXT, size: 24_876, structured: 29_705 },
+  // #3273's review: production's answer whole (prod-shaped/get_cve.json, hosted 3.1.1 with full: true,
+  // 2026-10-25T15:34:38Z): its 396 cpe_match, 20 cpe_configurations and 103 references as production
+  // holds them, and eg_severity, eg_likelihood, eg_priority, remediation, cna, affected_ranges,
+  // aliases and CISA's KEV text, replayed whole. Production's on record is 20,268 / 29,780 (hosted
+  // 3.1.1, 2026-10-25T16:09:36Z, replayed to this checkout's server). Before textBudget.ts capAll
+  // counted the lists of the entries a cap leaves out, the same answer measured 20,267 (the record of
+  // 15:38:52Z): its TEXT CUT note named the longest cpe_configurations[].nodes[].cpeMatch as 63
+  // entries, the longest in the 8 configurations kept, as hosted 3.1.1's own note does (read
+  // 2026-10-25T16:02:17Z), where the answer's longest is 154.
+  // Through 3.1.1 it was 2.6.2's answer (2026-10-04), cpe_match and references repeated to
+  // production's counts and the KEV text set on it: 24,876 / 29,705, +22.7% from production's text,
+  // which the record kept from 2026-10-11 (27,380) hid until the review.
+  { label: "get_cve, CVE-2021-44228", tool: "get_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "get_cve", answers: ["CVE-2021-44228"], size: 20_268, structured: 29_780 },
   // #2801: the cve:// resource reads get_cve's answer; through 2.6.3 it was that answer's structured
   // result pretty-printed whole, 86,559 characters for this CVE on the hosted endpoint (2026-10-04).
   {
@@ -535,11 +570,18 @@ export const SHAPED = [
     answers: ["CVE-2021-44228"],
     repeat: { cpe_match: 396, references: 103 },
     set: LOG4SHELL_KEV_TEXT,
-    live: "it reads get_cve's answer for the same CVE, which the get_cve case measures on production; text-bound-live.mjs reads tools only",
+    // #2781's review: through d07da49d `live` said the get_cve case measures this read on production.
+    // It does not: the resource cuts get_cve's record its own way (every list to 8 entries), and
+    // production's size of this read is the synthetic's resource:cve line. On 2026-10-25 the read on
+    // hosted 3.1.1 was 20,132 characters (15:16Z and 16:04Z). Since #3273, fixtures/prod-shaped/get_cve.json
+    // is production's whole get_cve answer (hosted 3.1.1, full: true, its 20 cpe_configurations among it),
+    // so this case and the get_cve case move together with it.
+    live: "text-bound-live.mjs reads tools only; production's text for this read is the synthetic's resource:cve line, on both transports every run, which docs/RUNBOOK_MCP_SYNTHETIC_ALERTS.md §6 compares with this case's size",
     // #3013's review: 24,682 until the envelope said what the resource cut (data_truncated true,
     // truncated naming cpe_match and references), +155. #3084 (merged from 24dad5eb): 24,837 until
-    // get_cve's KEV note named BOD 26-04, which replaced BOD 22-01, +43.
-    size: 24_880,
+    // get_cve's KEV note named BOD 26-04, which replaced BOD 22-01, +43. #3273's review: 24,880 on
+    // 2.6.2's answer repeated; production's whole (above), its cpe_configurations cut too, 20,179.
+    size: 20_179,
   },
   { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_392, structured: 4_803 },
   { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 43_702, structured: 29_962 }, // #3010: three radars past their threshold on these 2026-10-05 answers, and the last sentence
@@ -574,7 +616,11 @@ export const SHAPED = [
   // #3013's review: each thinned match keeps ransomware, effective_score and score_assessed too,
   // which workload_triage reads (structured 17,122 before, text 31,303: the DATA CUT sentence names
   // the fields); all 50 rows still stay.
-  { label: "check_sbom, Juice Shop 11.1.2 (50 components)", tool: "check_sbom", page: "default", args: () => ({ sbom: JSON.parse(fs.readFileSync(JUICE_SHOP, "utf8")) }), fixture: "check_sbom", answers: ["batch"], repeat: { results: 50 }, recount: true, size: 31_348, structured: 21_262 },
+  // #3273: production's own 50 rows for this SBOM (prod-shaped/check_sbom.json juice_shop, hosted
+  // 3.1.1 with full: true, 2026-10-25), replayed whole. Through 3.1.1 the case repeated the file's
+  // batch rows, every 5th of production's 50 from 2026-10-04 (2 of its 18 affected), to 50: 31,348
+  // and 21,262, 14.6% under production's structured 24,884 (hosted 3.0.0, 2026-10-11).
+  { label: "check_sbom, Juice Shop 11.1.2 (50 components)", tool: "check_sbom", page: "default", args: () => ({ sbom: JSON.parse(fs.readFileSync(JUICE_SHOP, "utf8")) }), fixture: "check_sbom", answers: ["juice_shop"], size: 35_065, structured: 25_225 },
   {
     label: "check_sbom, 2,000 purls (10 batches of 200)",
     tool: "check_sbom",
@@ -783,30 +829,66 @@ export const SHAPED = [
 // sizes are this checkout's server's text (not where the record is the hosted endpoint's own).
 export const SHAPED_DRIFT = 0.1;
 
+// #3273's review: the drifts past SHAPED_DRIFT on the committed record that are known, the text's
+// (TEXT_DRIFT_KNOWN) and the structured result's (STRUCTURED_DRIFT_KNOWN), each as {label: {shaped,
+// recorded, why, clears}}: shaped the case's size here, recorded production's on record, each
+// pinned within MARGIN. A case named here that moves, or comes back within SHAPED_DRIFT, fails until
+// its entry is looked at again, so a known drift cannot grow unseen; a drift past SHAPED_DRIFT that
+// no entry names fails as before. The record is what text-bound-live.mjs --record wrote, whole: a
+// drift is named here, never written out of the record by hand (the first version of #3273's change
+// reset the record's get_cve and cve_summary entries by hand to 2026-10-11's, and the suite passed).
+//
+// cve_summary: the case measures the answer kept in fixtures/prod-answers (probe-prod, 2026-10-05),
+// whose record is tools.cve_summary's 2,725. Production's answer has moved since: hosted 3.1.1
+// relays a /cves/summary carrying nvd_poll (interval, last_completed_at, scope "fleet") and a poller
+// block, one API instance's counters, zeroed on its restart, which this server's notes speak of. Its
+// size follows the instance that answers: at 2026-10-25T15:38:52Z a poller with no last_poll_at and
+// poll_count 0, 3,157 characters of text replayed here and 2,940 of structured result; at the
+// record's read, 16:09:36Z, one that had polled twice, 3,209 and 2,986. So a re-read can move it by
+// about MARGIN with nothing changed in the API, and the pin then asks for a look. npm run
+// text-bound:live -- --hosted is red on it (MOVED more than MARGIN from tools.cve_summary). The kept
+// answers are re-read by probe-prod only, and exposure_radar's are read in the same run
+// (radar-staleness.test.mjs and tools.test.mjs read them too), so that re-read is an operator's, with
+// the sizes it names set.
+const CVE_SUMMARY_KEPT = {
+  why: "fixtures/prod-answers/cves_summary.json is production's answer of 2026-10-05 (probe-prod); production's (hosted 3.1.1, 2026-10-25) carries nvd_poll and a poller block of one API instance's counters, which this server's notes speak of, so text-bound:live --hosted is red on it",
+  clears: "npm run text-bound:live -- --record on the dev box (scripts/probe-prod.sh, which re-reads exposure_radar's kept answers too), set the SHAPED sizes it names, run npm test, then drop this entry",
+};
+export const TEXT_DRIFT_KNOWN = {
+  cve_summary: { shaped: 2_725, recorded: 3_209, ...CVE_SUMMARY_KEPT },
+};
+
+/** #3273's review: each case whose text is more than SHAPED_DRIFT from the record's for the same label (the hosted endpoint's own text left out), with the drift; `known` (TEXT_DRIFT_KNOWN) marks the ones named there. */
+export function textOffRecord(record = readLiveRecord(), shaped = SHAPED) {
+  const out = [];
+  for (const c of shaped) {
+    const r = record.cases?.[c.label];
+    if (typeof c.size !== "number" || typeof r?.total !== "number" || /own text/.test(r.source)) continue;
+    const drift = (c.size - r.total) / r.total;
+    if (Math.abs(drift) > SHAPED_DRIFT) out.push({ label: c.label, size: c.size, recorded: r.total, drift, measured_at: r.measured_at, known: Object.hasOwn(TEXT_DRIFT_KNOWN, c.label) });
+  }
+  return out;
+}
+
+/** What to do about one textOffRecord entry. */
+export const textDriftMessage = (o) =>
+  `${o.label}: its size here, ${o.size}, is ${o.drift >= 0 ? "+" : ""}${(o.drift * 100).toFixed(1)}% from production's ${o.recorded} (${o.measured_at}): its fixture's rows are not cut as production's are; re-sample them`;
+
 // #3273: the same held of the structured result. #3140 recorded production's structuredContent size
 // for every case, and only the two kept tools' were compared with SHAPED's: search_cves' default page
-// was 28,336 characters here against production's 9,064 (the fixture cut at the first level, while
-// production's size is where the second lands, its level inferred, not measured) and passed. Each case's `structured` is now held within SHAPED_DRIFT of
-// the record's for the same label, where the record is this checkout's server on production's data
-// (not the hosted endpoint's own text).
+// was 28,336 characters here against production's 9,064 and passed (the fixture cut at the first
+// level, every row's description kept, production's at the second level, which only its size said
+// until the record kept kept_fields). Each case's `structured` is now held within SHAPED_DRIFT of the
+// record's for the same label, where the record is this checkout's server on production's data (not
+// the hosted endpoint's own text).
 //
-// STRUCTURED_DRIFT_KNOWN names the cases past it on the committed record, each with why and what
-// clears it, pinned to the sizes it was named at (within MARGIN): a case named here that moves, or
-// comes back within SHAPED_DRIFT, fails until this list is looked at again, so it cannot hide a
-// further drift. Both need a read of production, so they are an operator's to clear.
+// STRUCTURED_DRIFT_KNOWN names cve_summary since the hosted 3.1.1 read of 2026-10-25 (above). The
+// cases it named before are within it on that read: check_sbom's Juice Shop case replays
+// production's own 50 rows (25,225 here against production's 25,223; it repeated every 5th of them,
+// 21,262 against 24,884, -14.6%), and epss_history's record is this checkout's server on
+// production's answer again (3,737 against 3,477, +7.5%; against 3.0.1's 3,382 it was +10.5%).
 export const STRUCTURED_DRIFT_KNOWN = {
-  "check_sbom, Juice Shop 11.1.2 (50 components)": {
-    shaped: 21_262,
-    recorded: 24_884,
-    why: "fixtures/prod-shaped/check_sbom.json keeps every 5th of production's 50 rows from 2026-10-04 (2 of its 10 affected), repeated to 50; production's own 50 rows for this SBOM (hosted 3.0.0, full: true, 2026-10-11) were measured but not kept",
-    clears: "re-capture fixtures/prod-shaped/check_sbom.json from the hosted endpoint for this SBOM with full: true (all 50 rows), as scan_manifest's was for #3140, re-measure the case and drop this entry",
-  },
-  "epss_history, CVE-2021-44228": {
-    shaped: 3_737,
-    recorded: 3_382,
-    why: "the record is 3.0.1's server on production's answer (2026-10-11); since #3143 (unreleased) the envelope's coverage carries runs_undated, refresh_runs_truncated and days_in_progress, +355 here",
-    clears: "npm run text-bound:live -- --hosted --record (this checkout's server on production's answer again), then drop this entry",
-  },
+  cve_summary: { shaped: 2_565, recorded: 2_986, ...CVE_SUMMARY_KEPT },
 };
 
 /** #3273: each case whose structured size is more than SHAPED_DRIFT from the record's for the same label (the hosted endpoint's own text left out), with the drift; `known` (STRUCTURED_DRIFT_KNOWN) marks the ones named there. */

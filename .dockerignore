@@ -5,6 +5,9 @@ test
 # copies the suite's wire-level client.
 !test/mcp-stdio-client.mjs
 !test/mcp-http-client.mjs
+# #2781's review: and the two files its size probes send (probes.mjs SIZE_PROBE_FILES).
+!test/fixtures/juice-shop-11.1.2-50.cdx.json
+!test/fixtures/manifests/tree.v3.package-lock.json
 listings
 *.tgz
 *.log

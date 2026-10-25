@@ -48,7 +48,8 @@
 // this checkout's server measured it and which code that was (text-bound.mjs codeVersion:
 // package.json's version, +unreleased when CHANGELOG.md's newest section is unreleased); and
 // data_truncated and truncated, whether that server cut the structured result's data and what it
-// cut. The record's about is text-bound.mjs RECORD_ABOUT.
+// cut, and kept_fields, the fields each list it thinned keeps (text-bound.mjs keptFields: truncated
+// says a list was thinned, not to which level). The record's about is text-bound.mjs RECORD_ABOUT.
 //
 //   node test/text-bound-live.mjs [--hosted [URL]]   measure and compare; exit 1 when a case is
 //                                                    past CEILING (or its structured result past
@@ -104,6 +105,7 @@ import {
   extraAnswers,
   hostedArgs,
   hostedReplay,
+  keptFields,
   keptSizesOffRecord,
   prefixFor,
   readTimeOf,
@@ -234,9 +236,10 @@ try {
     if (!res) res = await client.callTool({ name: c.tool, arguments: args });
     const { total, blocks } = textSize(res, stubbed ? stubBase : undefined);
     const structured = structuredSize(res, stubbed ? stubBase : undefined);
-    // #3273: the cut level, on record: whether the server measured cut its structured result's data.
+    // #3273: the cut level, on record: whether the server measured cut its structured result's data,
+    // and (#3273's review) the fields each thinned list's entries keep, which truncated does not say.
     const sc = res.structuredContent;
-    const m = { total, blocks, structured, data_truncated: typeof sc?.data_truncated === "boolean" ? sc.data_truncated : null, truncated: sc?.truncated ?? null, state: sc?.state ?? null, isError: res.isError === true, source: how };
+    const m = { total, blocks, structured, data_truncated: typeof sc?.data_truncated === "boolean" ? sc.data_truncated : null, truncated: sc?.truncated ?? null, kept_fields: keptFields(sc), state: sc?.state ?? null, isError: res.isError === true, source: how };
     measured[c.label] = m;
     const drift = c.kept && stubbed ? prior.tools?.[c.kept] : undefined;
     const was = prior.cases?.[c.label];
@@ -302,7 +305,7 @@ if (record) {
     // keeps no answers.
     const ages = !c.kept || hosted ? undefined : !answersDir ? answerAges(readAt, keptAnswersDir) : keptDir ? (was?.answers_age_ms ?? answerAges(readTime, keptAnswersDir)) : null;
     const dated = { measured_at: readTime, read_ms: readFor, ...(ages === undefined ? {} : { answers_age_ms: ages }), code_measured_at: readAt, code_version: code, package_version: PKG.version };
-    cs[c.label] = { ...dated, total: m.total, blocks: m.blocks, structured: m.structured, data_truncated: m.data_truncated, truncated: m.truncated, source: m.source };
+    cs[c.label] = { ...dated, total: m.total, blocks: m.blocks, structured: m.structured, data_truncated: m.data_truncated, truncated: m.truncated, kept_fields: m.kept_fields, source: m.source };
     if (c.kept && keptAll) {
       const { measured_at, read_ms, ...rest } = dated;
       tools[c.kept] = { measured_at, answers_read_at: readTime, read_ms, ...rest, total: m.total, blocks: m.blocks, structured: m.structured, answers_kept: true };

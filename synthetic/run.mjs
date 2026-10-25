@@ -22,10 +22,11 @@
 //                 although the version it reports is at or past the one probes.mjs SHIPPED_IN
 //                 gives it (shipped_in on the line): a rolled-back or mis-registered endpoint.
 //
-// OUTPUT: one JSON line per tool per era on stdout, message "mcp tool probe", which Cloud Run
-// stores as jsonPayload; the log-based metric mcp_tool_probe_total{tool,era,outcome,transport} counts
-// them, mcp_tool_probe_latency_ms reads latency_ms, and mcp_tool_probe_text_chars and
-// mcp_tool_probe_structured_chars read text_chars and structured_chars (#2781, below)
+// OUTPUT: one JSON line per tool per era on stdout, and one for the cve:// resource (#2781,
+// below), message "mcp tool probe", which Cloud Run stores as jsonPayload; the log-based metric
+// mcp_tool_probe_total{tool,era,outcome,transport} counts them, mcp_tool_probe_latency_ms reads
+// latency_ms, and mcp_tool_probe_text_chars and mcp_tool_probe_structured_chars read text_chars and
+// structured_chars (#2781, below)
 // (infrastructure/monitoring/create-mcp-synthetic-monitoring.sh). Then one "mcp synthetic run complete" line, the
 // liveness signal. Every line has the one severity of its message, INFO: the outcome is a
 // field, never the severity, so a re-levelled line cannot silence a metric.
@@ -34,8 +35,19 @@
 // with tool "(install)" or "(session)" and outcome failure, so the same alert sees it.
 //
 // WHAT AN ANSWER COSTS A CLIENT (#2781). Every probe line whose call was answered (a tool, a
-// verdict, a chain probe, a prompt or the resource) carries text_chars: the characters of every text block it
-// returned (a resource's contents, a prompt's messages), what lands in a client's context. A
+// verdict, a chain probe, a prompt or a resource) carries text_chars: the characters of every text block it
+// returned (a resource's contents, a prompt's messages), what lands in a client's context. That
+// includes cve://CVE-2021-44228, read on BOTH legs once per era after the leg's other probes, tool
+// "resource:cve" (probes.mjs CVE_RESOURCE_PROBE): get_cve's record as a resource, cut by the
+// resource's own construction since #2801 and, until this line, measured nowhere in production.
+// It is listed when resources/templates/list names cve://{cve_id}; an empty or error read is a
+// failure (resource_*, rpc_error, or expectation_unmet when the text is not the record). And it
+// includes the own call of every test/text-bound.mjs SHAPED case production can make (#2781's
+// review; a case with `live` set is past the API's per-minute budget, or a forced cut no answer
+// reaches): the hosted leg makes each one no other probe makes (a default or largest page, a
+// heavier lookup) once per run, in its first era, tools "size:…" (probes.mjs SIZE_PROBES), so the
+// answers that cost a client most are measured where they are served, not only when an operator
+// runs `npm run text-bound:live`. A
 // tools/call line carries structured_chars too: its structuredContent as compact JSON, what Claude
 // Code hands the model, null when the answer has none. Both are measured as test/text-bound.mjs
 // measures them (textSize's total, structuredSize; run.test.mjs holds the two equal), so the series
@@ -75,7 +87,10 @@
 // prompts/get
 // per probes.mjs PROMPT_PROBES entry (triage_cve with a CVE; workload_triage with source
 // kubernetes, #2846) and one resources/read (echelongraph://methodology), tools "prompt:triage_cve",
-// "prompt:workload_triage" and "resource:methodology". check_sbom is sent its 201 purls as
+// "prompt:workload_triage" and "resource:methodology", then, in the run's first era only, a
+// tools/call per probes.mjs SIZE_PROBES entry (#2781's review: the SHAPED cases' own calls, tools
+// "size:…", none past 64 KiB), then the cve:// read both legs make ("resource:cve", #2781).
+// check_sbom is sent its 201 purls as
 // a CycloneDX document, a request body twice the endpoint's 64 KiB general cap, and must answer
 // measured from the document (probes.mjs HTTP_PROBES and HTTP_EXPECT, #2774): the large-body path
 // #2747 opened is probed every run, and a return of its 413 fails the probe (rpc_error, rpc_code
@@ -90,9 +105,11 @@
 // served different cve_intel descriptions. So when both legs ran and the endpoint reports the
 // version the npm leg runs, each era's catalog of the two is compared: every tool object as
 // tools/list gives it (name, title, description, inputSchema, outputSchema, annotations, every
-// field), every prompt and resource as prompts/list and resources/list give them, and the
-// instructions. One more probe line per era on the http leg, tool "(hosted-vs-npm)": success when
-// they are the same; failure, reason hosted_differs_from_npm, when not, with differences (the
+// field), every prompt and resource as prompts/list and resources/list give them, every resource
+// template as resources/templates/list gives it (keyed by uriTemplate: cve://{cve_id} is listed
+// only there, never in resources/list), and the instructions. One more probe line per era on the
+// http leg, tool "(hosted-vs-npm)": success when they are the same; failure, reason
+// hosted_differs_from_npm, when not, with differences (the
 // count) and detail (the first few, e.g. "tool cve_intel: description differs at character 221"),
 // so "MCP tool failed 2 synthetic runs in a row" opens on a divergence that lasts two runs. A list
 // one side could not read is named in uncompared and is not a difference (its own probe line
@@ -150,7 +167,7 @@ import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
-import { AFTER, CHAIN_PROBES, EXPECT, EXPECT_PENDING, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE, SHIPPED_IN, VERDICT_PROBES } from "./probes.mjs";
+import { AFTER, CHAIN_PROBES, CVE_RESOURCE_PROBE, EXPECT, EXPECT_PENDING, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE, SHIPPED_IN, SIZE_PROBES, VERDICT_PROBES } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
@@ -287,13 +304,17 @@ export function judgePrompt(res, expect, unmet = "prompt_argument_not_applied") 
 }
 
 // How a resources/read answer is judged (#2737): an entry for the URI that was read, with a
-// non-empty text.
-export function judgeResource(res, uri) {
+// non-empty text. `expect`, where the probe has one (#2781: probes.mjs CVE_RESOURCE_PROBE, whose
+// text must be the record), is a function of that text: a success it does not hold for is a
+// failure, reason expectation_unmet, with what it saw as detail, as judge() reads EXPECT.
+export function judgeResource(res, uri, expect) {
   const contents = res?.contents;
   if (!Array.isArray(contents) || contents.length === 0) return { outcome: "failure", reason: "resource_no_contents" };
   const hit = contents.find((c) => c && c.uri === uri);
   if (!hit) return { outcome: "failure", reason: "resource_uri_missing" };
   if (typeof hit.text !== "string" || hit.text.trim() === "") return { outcome: "failure", reason: "resource_empty" };
+  const unmet = expect?.(hit.text);
+  if (unmet !== undefined) return { outcome: "failure", reason: "expectation_unmet", detail: String(unmet).slice(0, 300) };
   return { outcome: "success" };
 }
 
@@ -388,9 +409,12 @@ export function sizesOf(res, { localBase, asBase } = {}) {
 }
 
 // #3097: what differs between two catalogs of one era, the npm package's and the hosted
-// endpoint's: { differences: [string], compared: { tools, prompts, resources }, uncompared: [string] }.
-// A catalog is { instructions, tools, prompts, resources }; prompts and resources are a list, or
-// { error } when that side could not read it. Objects are compared whole, keys in any order.
+// endpoint's: { differences: [string], compared: { tools, prompts, resources, resourceTemplates },
+// uncompared: [string] }. A catalog is { instructions, tools, prompts, resources,
+// resourceTemplates }; prompts, resources and resourceTemplates are a list, or { error } when that
+// side could not read it. Objects are compared whole, keys in any order. A resource template
+// (resources/templates/list, keyed by uriTemplate) is compared as a resource is: cve://{cve_id} is
+// served only through that list, so without it a template changed or dropped would read the same.
 const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
 const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
 const firstDiff = (a, b) => {
@@ -421,12 +445,16 @@ function diffItems(kind, key, npm, hosted, out) {
 export function compareCatalogs(npm, hosted) {
   const differences = [];
   const uncompared = [];
-  const compared = { tools: diffItems("tool", "name", npm.tools ?? [], hosted.tools ?? [], differences), prompts: 0, resources: 0 };
-  for (const [kind, list, key] of [["prompt", "prompts", "name"], ["resource", "resources", "uri"]]) {
+  const compared = { tools: diffItems("tool", "name", npm.tools ?? [], hosted.tools ?? [], differences), prompts: 0, resources: 0, resourceTemplates: 0 };
+  for (const [kind, list, key, method] of [
+    ["prompt", "prompts", "name", "prompts/list"],
+    ["resource", "resources", "uri", "resources/list"],
+    ["resource template", "resourceTemplates", "uriTemplate", "resources/templates/list"],
+  ]) {
     const a = npm[list], b = hosted[list];
     if (Array.isArray(a) && Array.isArray(b)) compared[list] = diffItems(kind, key, a, b, differences);
     else if (!Array.isArray(a) && !Array.isArray(b) && same(a, b)) compared[list] = 0;
-    else uncompared.push(`${list}/list (${Array.isArray(a) ? "npm read it" : `npm: ${a?.error ?? "unread"}`}, ${Array.isArray(b) ? "hosted read it" : `hosted: ${b?.error ?? "unread"}`})`);
+    else uncompared.push(`${method} (${Array.isArray(a) ? "npm read it" : `npm: ${a?.error ?? "unread"}`}, ${Array.isArray(b) ? "hosted read it" : `hosted: ${b?.error ?? "unread"}`})`);
   }
   if (!same(npm.instructions, hosted.instructions)) differences.unshift(diffField("the server", "instructions", npm.instructions, hosted.instructions));
   return { differences, compared, uncompared };
@@ -443,9 +471,9 @@ function errorReason(e) {
 
 const CLIENT_INFO = { name: "echelongraph-mcp-synthetic", version: "1.0.0" };
 
-// #3097: a session's catalog: the instructions, the tools as listed, and prompts/list and
-// resources/list ({ error } where one could not be read).
-async function catalogOf(client, tools, promptsOnce, resourcesOnce) {
+// #3097: a session's catalog: the instructions, the tools as listed, and prompts/list,
+// resources/list and resources/templates/list ({ error } where one could not be read).
+async function catalogOf(client, tools, promptsOnce, resourcesOnce, templatesOnce) {
   const settle = async (once, key) => {
     try {
       return (await once())[key] ?? [];
@@ -454,7 +482,13 @@ async function catalogOf(client, tools, promptsOnce, resourcesOnce) {
       return { error: [r.reason, r.rpc_code ?? r.http_status].filter((x) => x !== undefined).join(" ") };
     }
   };
-  return { instructions: client.opening?.instructions, tools, prompts: await settle(promptsOnce, "prompts"), resources: await settle(resourcesOnce, "resources") };
+  return {
+    instructions: client.opening?.instructions,
+    tools,
+    prompts: await settle(promptsOnce, "prompts"),
+    resources: await settle(resourcesOnce, "resources"),
+    resourceTemplates: await settle(templatesOnce, "resourceTemplates"),
+  };
 }
 
 // #3097's review: one era's catalog of the npm package at `serverJs`, listed over stdio, no tool
@@ -463,14 +497,14 @@ export async function readCatalog({ era, serverJs, env, timeoutMs }) {
   const client = await connect({ era, command: process.execPath, args: [serverJs], env, stderr: "ignore", clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
   try {
     const { tools } = await client.listTools();
-    return await catalogOf(client, tools, () => client.listPrompts(), () => client.listResources());
+    return await catalogOf(client, tools, () => client.listPrompts(), () => client.listResources(), () => client.listResourceTemplates());
   } finally {
     await client.close().catch(() => {});
   }
 }
 
-// Probe one era of the npm package over stdio: one line per tool. `measure` sizes an answer
-// (sizesOf, with the forwarder's base counted as the API's).
+// Probe one era of the npm package over stdio: one line per tool, then one for the cve:// resource
+// (#2781). `measure` sizes an answer (sizesOf, with the forwarder's base counted as the API's).
 export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog, measure = sizesOf }) {
   const open = () =>
     connect({ era, command: process.execPath, args: [serverJs], env, stderr: "ignore", clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
@@ -478,11 +512,13 @@ export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerI
 }
 
 // Probe one era of the hosted endpoint over Streamable HTTP (#2737): one line per tool, then one
-// per prompt probe and one for the resource. Its own inputs and expectations where probes.mjs has
-// them (#2774: check_sbom is sent a document past the endpoint's 64 KiB general body cap).
-export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog }) {
+// per prompt probe, one for the methodology resource, with `sizes` one per SIZE_PROBES entry
+// (#2781's review: runSynthetic sets it for the run's first era only), and one for the cve://
+// resource (#2781). Its own inputs and expectations where probes.mjs has them (#2774: check_sbom is
+// sent a document past the endpoint's 64 KiB general body cap).
+export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog, sizes = false }) {
   const open = () => connectHttp({ era, url, userAgent: UA_TOKEN, clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
-  return probeSession({ era, open, force, emit, onServerInfo, onListed, onCatalog, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
+  return probeSession({ era, open, force, emit, onServerInfo, onListed, onCatalog, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT }, sizes: sizes ? SIZE_PROBES : [] });
 }
 
 // #3282: a version as its release triple, or undefined where it is not one ("unknown", "1.2", a
@@ -534,14 +570,17 @@ async function probeExtra({ era, emit, label, list, listed, call, judgeIt, serve
 // Probe one era of one session, however it is opened: one line per tool (and, with extras, one
 // per VERDICT_PROBES entry not in EXPECT_PENDING (#3135: a pending one is not called and writes no
 // line), one per CHAIN_PROBES entry (#3011, not_published where the endpoint does not advertise its
-// fix), one per PROMPT_PROBES entry and one for the resource), with the leg's probe table and
-// expectations.
+// fix), one per PROMPT_PROBES entry and one for the methodology resource), then one per `sizes`
+// entry (#2781's review: probes.mjs SIZE_PROBES, a SHAPED case's own call each, on the leg and era
+// that pass them), then, on every leg, one for the cve:// resource (#2781, CVE_RESOURCE_PROBE), with
+// the leg's probe table and expectations.
 // onListed gets the opening exchange's instructions and the tools/list answer (#2842). onCatalog,
 // when given, gets the session's catalog once its probes are done (#3097): the instructions, the
-// tools as listed, and prompts/list and resources/list (each read once per session, shared with
-// the prompt and resource probes; { error } when it could not be read). `measure` sizes each
+// tools as listed, and prompts/list, resources/list and resources/templates/list (each read once
+// per session, the first two shared with the prompt and resource probes; { error } when it could
+// not be read). `measure` sizes each
 // answer for its line (#2781, sizesOf).
-export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog, extras = false, probes = PROBES, expect = EXPECT, shipped = SHIPPED_IN, measure = sizesOf }) {
+export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog, extras = false, probes = PROBES, expect = EXPECT, shipped = SHIPPED_IN, measure = sizesOf, sizes = [] }) {
   let client;
   try {
     client = await open();
@@ -562,9 +601,10 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
       return;
     }
     onListed({ instructions: client.opening?.instructions, tools });
-    let promptsP, resourcesP;
+    let promptsP, resourcesP, templatesP;
     const promptsOnce = () => (promptsP ??= client.listPrompts());
     const resourcesOnce = () => (resourcesP ??= client.listResources());
+    const templatesOnce = () => (templatesP ??= client.listResourceTemplates());
     const byName = new Map(tools.map((t) => [t.name, t]));
     const seen = {};
     for (const name of probeOrder(tools.map((t) => t.name), force)) {
@@ -677,7 +717,46 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
         measure,
       });
     }
-    if (onCatalog) onCatalog(await catalogOf(client, tools, promptsOnce, resourcesOnce));
+    // #2781's review: each SHAPED case's own call that no probe above makes, sized and judged as a
+    // tools/call is, with no EXPECT (its job is the size). Its arguments are checked against the
+    // tool's inputSchema before they are sent, as chooseInput checks a candidate; one that cannot be
+    // built (its file unread) or does not fit is no_valid_probe_input, never sent.
+    for (const s of sizes) {
+      const tool = byName.get(s.tool);
+      if (!tool) {
+        emit({ tool: s.label, era, ...unlisted(s.tool, served, shipped) });
+        continue;
+      }
+      const choice = chooseInput(s.tool, tool, seen, { [s.tool]: [s.arguments] });
+      if (!choice.args) {
+        emit({ tool: s.label, era, outcome: "failure", reason: choice.reason });
+        continue;
+      }
+      const t0 = performance.now();
+      let res;
+      try {
+        res = await client.callTool({ name: s.tool, arguments: choice.args });
+      } catch (e) {
+        emit({ tool: s.label, era, outcome: "failure", latency_ms: Math.round(performance.now() - t0), ...errorReason(e) });
+        continue;
+      }
+      emit({ tool: s.label, era, latency_ms: Math.round(performance.now() - t0), ...measure(res), ...judge(res, tool) });
+    }
+    // #2781: cve://CVE-2021-44228 on every leg, after its other probes: listed by
+    // resources/templates/list, read, sized and judged (probes.mjs CVE_RESOURCE_PROBE).
+    await probeExtra({
+      era,
+      emit,
+      label: CVE_RESOURCE_PROBE.label,
+      list: async () => (await client.listResourceTemplates()).resourceTemplates,
+      listed: (t) => t?.uriTemplate === CVE_RESOURCE_PROBE.template,
+      call: () => client.readResource({ uri: CVE_RESOURCE_PROBE.uri }),
+      judgeIt: (res) => judgeResource(res, CVE_RESOURCE_PROBE.uri, CVE_RESOURCE_PROBE.expect),
+      served,
+      shipped,
+      measure,
+    });
+    if (onCatalog) onCatalog(await catalogOf(client, tools, promptsOnce, resourcesOnce, templatesOnce));
     if (client.protocolViolation) emit({ tool: "(session)", era, outcome: "failure", step: "stdout", reason: "protocol_violation" });
   } finally {
     await client.close().catch(() => {});
@@ -753,7 +832,8 @@ export async function runSynthetic(opts = {}) {
       const onServerInfo = (info) => {
         if (remoteVersion === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) remoteVersion = info.version;
       };
-      for (const era of eras) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(HTTP, era), onCatalog: keep(HTTP, era) });
+      // #2781's review: the size probes once per run, in the first era (a tool's text is the same on both).
+      for (const [i, era] of eras.entries()) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(HTTP, era), onCatalog: keep(HTTP, era), sizes: i === 0 });
       if (stdio) hostedVsNpm = await compareLegs(emit);
     }
     return finish();
@@ -824,6 +904,7 @@ export async function runSynthetic(opts = {}) {
         compared_tools: r.compared.tools,
         compared_prompts: r.compared.prompts,
         compared_resources: r.compared.resources,
+        compared_resource_templates: r.compared.resourceTemplates,
         ...(r.uncompared.length ? { uncompared: r.uncompared.join("; ").slice(0, 300) } : {}),
       });
     }

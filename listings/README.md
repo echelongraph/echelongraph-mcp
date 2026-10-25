@@ -43,8 +43,22 @@ measure, says when it was read.
 | Public repo About (github.com/echelongraph/echelongraph-mcp) | description, homepage and topics equal to `github-repo-settings.json` (the check's `github-repo` row, read 2026-10-18 07:03Z; #3289) | no version shown | apply the file after each release that changes it (release step 7) | someone with admin on the repo |
 | Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth; when submitted, the endpoint served 2.6.7, with its 14 read-only tools). Not edited while in review: an edit resubmits it (founder, 2026-10-10) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
 
-Smithery by URL, Docker's remote entry and Anthropic's directory all connect to the hosted
-endpoint, so the version they serve is the hosted endpoint's.
+Docker's remote entry and Anthropic's directory connect to the hosted endpoint, and Smithery's
+entry names it (until 2026-10-31 Smithery's gateway proxied it), so the version they serve is the
+hosted endpoint's.
+
+**Smithery from 2026-10-31 (#3356), read 2026-10-25.** Smithery's notice
+(https://smithery.ai/future, read 2026-10-25): on 2026-10-31 it shuts "Server URLs on run.tools and
+server.smithery.ai", the "Smithery API, Connect, and Toolbox", "Smithery accounts and API keys" and
+"The Smithery CLI and SDKs", and "Smithery will remain as a public (non-proxied) MCP registry". From
+that day our listing is a registry entry for `https://mcp.echelongraph.io/mcp`, and nothing can be
+published there: the Smithery row's "re-publish after each release" above ends on 2026-10-31, and
+release step 5 becomes a read-only check of the page. On 2026-10-25 the page's HTML named
+`https://mcp.echelongraph.io/mcp` (our record's `upstreamUrl`) beside the proxy
+`https://echelongraph-mcp--echelongraph.run.tools` (`mcpUrl`), and the Markdown view Smithery serves
+agents (and curl) gave only the proxy, under "Direct MCP Connection": the listing check reports that
+as a `wrong-url` finding until Smithery's page gives agents our URL. "Smithery" below says what the
+founder can still do before 2026-10-31.
 
 ## Who does what
 
@@ -55,7 +69,8 @@ if Glama's own differs. What is left of them is in the status table (Glama's des
 Sync Server after each release, Smithery's Settings → Verification):
 
 1. Glama: claim the listing, paste the one-line description, resync.
-2. Smithery: `smithery mcp publish https://mcp.echelongraph.io/mcp`, then paste the text.
+2. Smithery: `smithery mcp publish https://mcp.echelongraph.io/mcp`, then paste the text. Smithery's
+   CLI, API and accounts stop on 2026-10-31 (#3356), so none of this can be redone from that day.
 3. Docker: fork `docker/mcp-registry`, copy the two prepared entries, open the PR(s).
 4. Anthropic: the developer portal form at https://claude.ai/directory/manage .
 5. mcp.so: one GitHub issue on `chatmcp/mcpso`.
@@ -73,7 +88,7 @@ delisting is a finding. Every production deploy also runs the check, as a warnin
 | `../glama.json` | root of the public repo (there since v2.4.0) | Glama ownership claim |
 | `docker/server.yaml` | `servers/echelongraph/server.yaml` in a `docker/mcp-registry` fork | Docker MCP Catalog, local entry |
 | `docker/remote/server.yaml`, `tools.json`, `readme.md` | `servers/echelongraph-remote/` in the same fork | Docker MCP Catalog, remote entry |
-| `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh`, `mcpb/check-bundle.mjs` | public repo, `listings/mcpb/`; the built `echelongraph-mcp.mcpb` is attached, signed, to every new GitHub release (releases up to 2.6.5 have none) by the public repo's `release.yml` (#2815) | the one-click Claude Desktop install the README links as "Install in Claude Desktop"; also the bundle a stdio listing on Smithery would take |
+| `mcpb/manifest.json`, `mcpb/icon.png`, `mcpb/build.sh`, `mcpb/check-bundle.mjs` | public repo, `listings/mcpb/`; the built `echelongraph-mcp.mcpb` is attached, signed, to every new GitHub release (releases up to 2.6.5 have none) by the public repo's `release.yml` (#2815) | the one-click Claude Desktop install the README links as "Install in Claude Desktop"; also the bundle a stdio listing on Smithery would have taken until its publishing closed on 2026-10-31 |
 | `scripts/check-mcp-listings.mjs` (EchelonGraph repo, not mirrored) | nowhere | the listing check |
 
 None of these is in the npm package: `package.json` `files` is `dist`, `docs` (the README's
@@ -150,6 +165,40 @@ Links:
 
 ## Smithery
 
+**From 2026-10-31: a registry entry, nothing to publish (#3356).** Smithery's notice
+(https://smithery.ai/future, read 2026-10-25) shuts its proxy (server URLs on `run.tools` and
+`server.smithery.ai`), its API, Connect and Toolbox, its accounts and API keys, and its CLI and SDKs
+on 2026-10-31; it stays "a public (non-proxied) MCP registry", and "A curated set of verified
+servers, whose registry pages will show direct MCP URLs". So from that day:
+
+- Our listing is https://smithery.ai/servers/echelongraph/echelongraph-mcp , a registry entry for
+  `https://mcp.echelongraph.io/mcp`. Anyone who connected through a Smithery URL
+  (`https://echelongraph-mcp--echelongraph.run.tools`) loses the connection that day and must connect
+  to `https://mcp.echelongraph.io/mcp` itself; the README says so beside its Smithery link.
+- Nothing is published: from 2026-10-31 release step 5 (`scripts/publish-smithery.sh`) neither
+  reads Smithery's API nor runs its CLI, whatever the API still answers (the accounts and API keys
+  a publish needs stop that day, and the registry that stays is read from the same API host, so
+  its public reads may well outlive the shutdown). Before that day it reads the API first; while
+  it answers, the step publishes as before; once it is gone, the step reads the page read-only.
+  Read-only, it never fails the release on what the page says: a page that sends users to a URL
+  that is not ours is a FINDING, the step's last line, with exit 0, since no release can change
+  Smithery's page and the release runners would only retry a failure for the same answer; the
+  listing check reports it as `wrong-url` on every production deploy. The listing check
+  reads the page (HTML and the agent view) before the API; a page that no longer lists us, with the
+  API gone, is not measured (exit 2), not a finding, and never put down to the shutdown: the
+  registry stays public, so Smithery dropped us or moved the page, and only its API could have told
+  which. If it dropped us, the README's "Also listed on: Smithery" link is false: remove the link
+  (and its pin in `test/listings.test.mjs`) and the check's `smithery` row. A Smithery outage cannot
+  fail or hold a deploy (`infrastructure/cloudrun/deploy-all-listing-check.test.sh` holds that).
+- The Markdown view Smithery serves agents gave, on 2026-10-25, only the proxy as "Direct MCP
+  Connection", and its Quick Start uses the Smithery CLI (`npx -y smithery mcp add …`), which stops
+  that day: that page is Smithery's, and only Smithery can change it. What the founder can do, signed
+  in, before 2026-10-31: finish step 4 below (Settings → Verification, not recorded as done), since
+  the notice gives direct URLs on verified servers' pages; whether that puts our page among them is
+  Smithery's call, and is not known. After 2026-10-31 the account and the secret
+  `smithery-api-key` in the deployment's secret store are of no use and can be deleted.
+- Steps 1 to 5 below are a record: from 2026-10-31 none of them can be run.
+
 **Status as of 2026-10-05** (a dated record; the status table above has the latest): listed at
 https://smithery.ai/servers/echelongraph/echelongraph-mcp , published by the founder through the CLI after
 `smithery namespace create echelongraph` (the namespace did not exist; publishing to it first answered
@@ -182,7 +231,7 @@ request came from a cloud sandbox, not from the Cloudflare Workers that Smithery
 endpoint is served by Google Frontend (Cloud Run), with no Cloudflare WAF in front of it to block
 those.
 
-**To know before publishing.** Because "Smithery Gateway proxies to your upstream server",
+**To know before publishing** (until 2026-10-31, when the gateway shuts). Because "Smithery Gateway proxies to your upstream server",
 requests from Smithery's users reach the endpoint from Smithery's addresses. The endpoint's
 per-client limit (120 requests a minute, keyed on the client's public address;
 `src/httpPolicy.ts`) then counts Smithery's egress addresses, not each user. Not measured. After
@@ -623,10 +672,26 @@ A release is done when all of these hold, in this order (2026-10-05). Each step 
 4. **GitHub Release** for `vX.Y.Z`, titled `echelongraph-mcp X.Y.Z`, marked Latest. Its body is the
    CHANGELOG section, preceded by the sentence in "Release notes" above. The script does not
    create it. Glama's Auto-Release builds from it, and it is what "Watch → Releases" emails.
-5. `scripts/publish-smithery.sh`: Smithery re-scans the hosted endpoint, so its listing shows this
-   release's tools and descriptions. It refuses until step 3 holds. It reads the publisher's
-   Smithery API key from the deployment's secret store and checks that Smithery's API lists
-   the release's tool count. Self-test: `scripts/publish-smithery-selftest.sh`.
+5. `scripts/publish-smithery.sh`. Before 2026-10-31 (https://smithery.ai/future), while Smithery's
+   API answers: Smithery re-scans the hosted endpoint, so its listing shows this release's tools
+   and descriptions; it refuses until step 3 holds, reads the publisher's Smithery API key from the
+   deployment's secret store and checks that Smithery's API lists the release's tool count. From
+   2026-10-31 (the UTC day), whatever the API still answers, since accounts and API keys stop that
+   day; before it, once the API is gone, as observed (refused, no such host, 410, an HTML page), or
+   the CLI cannot be installed (#3356): it publishes nothing and reads no key (from 2026-10-31 it
+   does not read the API at all); it reads Smithery's public page (as HTML and as the Markdown agent view)
+   and exits 0 where the page names `https://mcp.echelongraph.io/mcp`, lists us without a URL, no
+   longer lists us, or cannot be read (each a dated note, "Smithery retired its API (2026-10-31…)"),
+   and where it sends users to another URL or only to Smithery's proxy: a FINDING, the last line,
+   with exit 0 all the same, since no release can change Smithery's page and the runners would retry
+   it 3 times for the same answer (the listing check reports it as `wrong-url`). Read-only, it exits
+   2 only for a bug of ours (a reader in `scripts/check-mcp-listings.mjs` failing). From 2026-10-31,
+   and before it once the API is observed gone or the CLI cannot be installed, nothing Smithery does
+   fails the release. Before 2026-10-31 an API that answers a 5xx or times out tells nothing, so the
+   step publishes as before, and a publish or read-back that fails is FAILED (exit 1), as it always
+   was (the runners retry it). Self-test: `scripts/publish-smithery-selftest.sh` (it also runs
+   the release runners' loop: "smithery ok try 1", no retry, with the API live, gone, and still
+   answering on 2026-11-05, and on a FINDING).
 6. docker/mcp-registry#5429, while it is open: move `servers/echelongraph/server.yaml`'s
    `source.commit` to the tag's commit, then re-run `go run ./cmd/validate --name echelongraph` and
    `go run ./cmd/build --tools echelongraph`. Mirror the commit in `docker/server.yaml` here.
@@ -654,7 +719,7 @@ request at a time, and reports per row: listed or not; the version shown against
 | Official MCP Registry | `registry.modelcontextprotocol.io/v0.1/servers?search=…&version=latest` | title, description | the active `isLatest` entry |
 | Hosted endpoint | `mcp.echelongraph.io/health` | none | `version` |
 | Glama | the listing page | `<title>`, meta description | `releaseVersion` in the page's data |
-| Smithery | `api.smithery.ai/servers/echelongraph/echelongraph-mcp` | displayName, description | none (a URL listing serves the hosted endpoint) |
+| Smithery (#3356) | `smithery.ai/servers/echelongraph/echelongraph-mcp`, as HTML (our server record, by `qualifiedName`) and as the Markdown it serves agents; `api.smithery.ai/servers/echelongraph/echelongraph-mcp` only where the page does not decide | display name, description | none (the entry names the hosted endpoint) |
 | mcp.so | `mcp.so/search?q=echelongraph` (its embedded results) | name, tagline | shows none |
 | PulseMCP | `pulsemcp.com/servers?q=echelongraph`, then our server page | `<title>`, meta description | shows none |
 | Docker, local and remote | `desktop.docker.com/mcp/catalog/v3/catalog.yaml` | title, description | local: the release tag whose commit Docker built (`source …/tree/<commit>` against the public repo's tags); remote: none |
@@ -662,15 +727,24 @@ request at a time, and reports per row: listed or not; the version shown against
 | Public repo About (`github-repo`, #3289) | `api.github.com/repos/echelongraph/echelongraph-mcp` | description; its description, homepage and topics are compared with `github-repo-settings.json` (topics as a set) | shows none |
 
 Exit codes: 0 every row measured, no finding; 1 at least one finding (`missing` where the table
-says listed, `version-lags`, `barred-claim`, and `differs` where the public repo's About is not
-`github-repo-settings.json`, one per field); 2 no finding, but something could not be measured
+says listed, `version-lags`, `barred-claim`, `differs` where the public repo's About is not
+`github-repo-settings.json`, one per field, and `wrong-url` where Smithery's page sends users to a
+URL that is not `https://mcp.echelongraph.io/mcp`, or only to its proxy, #3356); 2 no finding, but something could not be measured
 (a directory unreachable or challenged, a page whose shape changed, npm unreadable, a Docker build
 commit no release tag points at). A finding outranks could-not-measure, and both are printed.
 A row the script's table marks `pending` that does not list us is printed as PENDING and is not a
-finding. Once a listing is up, set its row to `listed`.
+finding. Once a listing is up, set its row to `listed`. Where Smithery's API is observed gone and
+its page no longer lists us, the Smithery row is NOT MEASURED (exit 2), not a finding and not put
+down to the shutdown (#3356): its registry stays public, so Smithery dropped us or moved the page,
+and the row says that the README's Smithery link is then false. The API is read only where the page does not decide, and keeps its old
+verdicts while it answers; an answer that tells nothing (a timeout, a 5xx) reads as the API gone
+only from 2026-10-31.
 
-`node scripts/check-mcp-listings.mjs --self-test` runs 17 cases offline against
+`node scripts/check-mcp-listings.mjs --self-test` runs 44 cases offline against
 `scripts/fixtures/mcp-listings/`: responses saved 2026-10-04 (several trimmed, in served order),
+Smithery's page (HTML and the agent view), its not-found answers and its API document saved
+2026-10-25 (#3356: the API live and listed, gone five ways, the page naming our URL, another URL or
+only the proxy, a related server's URL that is not ours, at a fixed clock either side of 2026-10-31, and our URL quoted in a tool description, which is not a URL to connect to),
 the public repo's About as `api.github.com` served it on 2026-10-18 beside a copy of this
 directory's `github-repo-settings.json` (identical: passes; one word of the description changed,
 or the homepage and a topic: fails as `differs`; a 404: `missing`; a 403: not measured),
@@ -697,6 +771,7 @@ deliberate breaks of the checker made it fail.
   warns and the deploy goes on, its listing check then warning that the self-test failed.
 - **Weekly schedule, not wired yet** (#2723: "re-checked a week later"): a scheduled CI job or
   Routine that runs `--self-test` and then the check, and alerts on exit 1 or 2. It needs egress to
-  the eight hostnames in the table, plus `registry.npmjs.org` and `api.github.com`.
-- **CI, not wired yet:** `--self-test` on changes to the script or its fixtures (offline, under a
-  second).
+  the nine hostnames in the table, plus `registry.npmjs.org` and `api.github.com`.
+- **CI, wired (#3356):** `.github/workflows/ci.yml`'s npm-publish-mcp-selftest job runs `--self-test`
+  and `scripts/publish-smithery-selftest.sh` when the script, its fixtures or
+  `scripts/publish-smithery*.sh` change (offline; Actions is off for the repository, #233).

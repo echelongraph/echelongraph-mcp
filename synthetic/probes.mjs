@@ -29,7 +29,12 @@
 //
 // THE HOSTED LEG'S OWN INPUTS (#2774). HTTP_PROBES replaces an entry for the hosted leg only, and
 // HTTP_EXPECT adds to what its answer must show; the stdio legs keep PROBES and EXPECT.
+//
+// THE SIZE PROBES (#2781's review). SIZE_PROBES, at the end of this file, are the hosted leg's calls
+// of every test/text-bound.mjs SHAPED case that no probe above makes (a default or largest page, a
+// heavier lookup), once per run, sized as every answered line is.
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 
 // Log4Shell: CISA-KEV listed, EPSS-scored, with vendor advisories, CWE and exploits on record.
 const CVE = "CVE-2021-44228";
@@ -573,8 +578,102 @@ export const PROMPT_PROBES = [
 ];
 export const RESOURCE_PROBE = { label: "resource:methodology", uri: "echelongraph://methodology" };
 
+// THE CVE RESOURCE (#2781). cve://{cve_id} serves get_cve's record as one JSON text, cut by the
+// resource's own construction since #2801 (resources.ts cveResourceText), not by get_cve's: 86,559
+// characters for this CVE before that cut, 20,132 on the hosted endpoint at 3.1.1
+// (2026-10-25T13:55Z). Through 3.1.1 nothing read it in production, so its size was recorded
+// nowhere.
+// resources/read of cve://CVE-2021-44228 on BOTH legs, as the tools are (the text is the package's
+// own cut of the API's record, so npm and hosted each cost a client their own), one line per era
+// after that leg's other probes, label "resource:cve", sized as every answered line is
+// (text_chars). Listed means resources/templates/list names its `template`: a template is never in
+// resources/list. Its answer is judged as the methodology's is (an entry for the URI read, with a
+// non-empty text, else resource_*) and then by its `expect`. An error read is a JSON-RPC error
+// (resources.ts answers a failed get_cve as one: reason rpc_error, with the server's rpc_code), and
+// the text must be the record: a JSON object, state measured or not_assessed, data.cve_id the CVE
+// read; unmet is expectation_unmet, detail what it saw. One get_cve API request per era and leg
+// (four per run), no per-minute component budget.
+export const CVE_RESOURCE_PROBE = {
+  label: "resource:cve",
+  template: "cve://{cve_id}",
+  uri: `cve://${CVE}`,
+  expect: (text) => {
+    let record;
+    try {
+      record = JSON.parse(text);
+    } catch {
+      return `the text is not JSON (${text.length} characters, starting ${JSON.stringify(text.slice(0, 40))}); want ${CVE}'s record`;
+    }
+    if (!record || typeof record !== "object" || Array.isArray(record)) return `the text is JSON ${record === null ? "null" : Array.isArray(record) ? "an array" : typeof record}; want ${CVE}'s record as an object`;
+    if (!["measured", "not_assessed"].includes(record.state)) return `state ${JSON.stringify(record.state ?? null)} (error ${JSON.stringify(record.error ?? null)}); want measured or not_assessed for ${CVE}`;
+    if (record.data?.cve_id !== CVE) return `data.cve_id ${JSON.stringify(record.data?.cve_id ?? null)}; want ${CVE}`;
+    return undefined;
+  },
+};
+
+// THE SIZE PROBES (#2781's review). #2781's first comment set the bar at every SHAPED case of
+// test/text-bound.mjs and the cve:// resource. The probes above size one small input per tool
+// (search_cves and search_vendor_advisories at limit 2, check_affected's lodash), so the cases that
+// cost a client most were measured only when an operator ran `npm run text-bound:live`. On hosted
+// 3.1.1 (2026-10-25T15:37Z): search_vendor_advisories' default page 35,029 characters of text
+// against 11,615 at limit 2; kev_recent at limit 200 29,965 of structuredContent, 35 under the
+// 30,000 budget; check_affected linux_kernel 5.10.0 30,544 against lodash's 8,474.
+// One tools/call per entry, each with its SHAPED case's own arguments (run.test.mjs holds every
+// SHAPED case without `live` to a call here, or to the hosted leg's own probe input where that is
+// the same call, and every entry here to its case), on the hosted leg only and once per run (the
+// first era: a tool's text is the same on both), after the methodology resource. The line's tool is
+// the entry's `label` (a fixed metric label: never renamed, so its series continues). It is sized
+// (text_chars, structured_chars) and judged as a tools/call is, with no EXPECT: its job is the size,
+// and a call the endpoint fails is a failure. A tool the endpoint does not list is not_published,
+// or not_listed past SHIPPED_IN's release for the tool. No body here is past the endpoint's 64 KiB
+// general cap (run.test.mjs holds it), so none takes one of the large-body slots (#3362). The API
+// budget, once per run: 50 + 64 components of the batch route's 1,200 a minute per caller (the
+// SBOM and the lockfile, one batch each), and for each other entry its route's request (the vendor
+// tools' with /coverage beside it), on routes with no per-minute component budget.
+//   case        the SHAPED label the call is (fixtures/text-bound-live.json records it under it).
+//   arguments   the case's arguments; a function for the two read from a file (SIZE_PROBE_FILES).
+// The files are mcp-server/test/fixtures/'s, which synthetic/Dockerfile copies to the same place
+// beside this file (run.test.mjs holds the two lists equal). A file that cannot be read makes the
+// line no_valid_probe_input, named, never a crash of the run.
+export const SIZE_PROBE_FILES = ["juice-shop-11.1.2-50.cdx.json", "manifests/tree.v3.package-lock.json"];
+const FIXTURES = new URL("../test/fixtures/", import.meta.url);
+/** A size probe's file, by its SIZE_PROBE_FILES name, as `build` makes it into arguments; undefined when it cannot be read or parsed. */
+export function fromFixture(name, build) {
+  try {
+    return build(fs.readFileSync(new URL(name, FIXTURES), "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+export const SIZE_PROBES = [
+  { label: "size:search_cves/search=openssl", case: "search_cves, default page (search openssl)", tool: "search_cves", arguments: { search: "openssl" } },
+  { label: "size:search_cves/search=openssl,limit=50", case: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", arguments: { search: "openssl", limit: 50 } },
+  { label: "size:kev_recent/default", case: "kev_recent, default page (limit 50)", tool: "kev_recent", arguments: {} },
+  { label: "size:kev_recent/limit=200", case: "kev_recent, largest page (limit 200)", tool: "kev_recent", arguments: { limit: 200 } },
+  { label: "size:check_affected/cpe/openssl@3.0.0", case: "check_affected, openssl 3.0.0", tool: "check_affected", arguments: { product: "openssl", version: "3.0.0" } },
+  { label: "size:check_affected/cpe/linux_kernel@5.10.0", case: "check_affected, linux_kernel 5.10.0 (200 matches, the API's cap)", tool: "check_affected", arguments: { product: "linux_kernel", version: "5.10.0" } },
+  { label: "size:check_affected/cpe/flash_player@10.0.0", case: "check_affected, flash_player 10.0.0 (200 matches and an excluded sample of 50)", tool: "check_affected", arguments: { product: "flash_player", version: "10.0.0" } },
+  { label: "size:check_affected/pypi/django@1.11.0", case: "check_affected, PyPI django 1.11.0 (the registry path)", tool: "check_affected", arguments: { ecosystem: "PyPI", package: "django", version: "1.11.0" } },
+  {
+    label: "size:check_sbom/juice-shop-11.1.2-50.cdx.json",
+    case: "check_sbom, Juice Shop 11.1.2 (50 components)",
+    tool: "check_sbom",
+    arguments: () => fromFixture(SIZE_PROBE_FILES[0], (text) => ({ sbom: JSON.parse(text) })),
+  },
+  {
+    label: "size:scan_manifest/tree.v3.package-lock.json",
+    case: "scan_manifest, package-lock.json (64 packages)",
+    tool: "scan_manifest",
+    arguments: () => fromFixture(SIZE_PROBE_FILES[1], (content) => ({ files: [{ filename: "package-lock.json", content }] })),
+  },
+  { label: "size:get_vendor_advisory/aws/2026-098-AWS", case: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", arguments: { vendor: "aws", advisory_id: "2026-098-AWS" } },
+  { label: "size:search_vendor_advisories/query=log4j", case: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", arguments: { query: "log4j" } },
+  { label: "size:search_vendor_advisories/query=log4j,limit=50", case: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", arguments: { query: "log4j", limit: 50 } },
+];
+
 // #3282: the release each probed tool, prompt and resource first shipped in, by the line's `tool`
-// (a tool's name; a prompt or resource probe's label; a verdict or chain probe reads its tool's).
+// (a tool's name; a prompt or resource probe's label; a verdict, chain or size probe reads its
+// tool's).
 // An endpoint whose handshake reports this version or a later one and does not list it is a
 // failure, reason not_listed (run.mjs unlisted): a hosted revision built from an older tag, one
 // deploy over another, or a hosted-only registration regression drops it, and through 3.0.2 that
@@ -583,8 +682,9 @@ export const RESOURCE_PROBE = { label: "resource:methodology", uri: "echelongrap
 // the five tools before 2.4.0 are given 2.4.0, the first release with the hosted entry
 // (dist/http.js), which the hosted leg is the only one to reach at an old version; 2.4.0's nine
 // (#2726); 2.5.0's prompts and resources (#2722); 2.7.0's cve_remediation (#2841), scan_manifest
-// (#2835) and workload_triage (#2846). A tool or probe added to this file is given its release
-// here (run.test.mjs holds every probe to an entry).
+// (#2835) and workload_triage (#2846); cve://{cve_id} is 2.5.0's too (#2722), probed since #2781. A
+// tool or probe added to this file is given its release here (run.test.mjs holds every probe to an
+// entry).
 export const SHIPPED_IN = {
   cve_summary: "2.4.0",
   search_cves: "2.4.0",
@@ -605,4 +705,5 @@ export const SHIPPED_IN = {
   "prompt:triage_cve": "2.5.0",
   "prompt:workload_triage": "2.7.0",
   "resource:methodology": "2.5.0",
+  "resource:cve": "2.5.0",
 };

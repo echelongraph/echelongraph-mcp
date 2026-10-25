@@ -22,6 +22,10 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && node -e 'import("@modelcontextprotocol/server/validators/ajv").then(() => console.log("ajv validator resolves"))'
 
 COPY test/mcp-stdio-client.mjs test/mcp-http-client.mjs test/
+# #2781's review: the two files probes.mjs SIZE_PROBES sends (SIZE_PROBE_FILES), each a SHAPED case's
+# own input, where probes.mjs reads them (../test/fixtures/); run.test.mjs holds this list to that one.
+COPY test/fixtures/juice-shop-11.1.2-50.cdx.json test/fixtures/
+COPY test/fixtures/manifests/tree.v3.package-lock.json test/fixtures/manifests/
 COPY synthetic/run.mjs synthetic/probes.mjs synthetic/forwarder.mjs synthetic/
 
 # Cloud Run's filesystem is in memory; npm's cache and the install go under /tmp (the runner

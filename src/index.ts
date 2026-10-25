@@ -65,6 +65,7 @@ import { registerEPSSHistory } from "./tools/epss_history.js";
 import { registerCheckAffected } from "./tools/check_affected.js";
 import { MAX_PURL_ENTRIES, MAX_SBOM_CHARS, registerCheckSbom } from "./tools/check_sbom.js";
 import { MAX_FILES, registerScanManifest } from "./tools/scan_manifest.js";
+import { realSleep } from "./tools/match_batch.js";
 import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerCveRemediation } from "./tools/cve_remediation.js";
 import { fixStatusSchema } from "./fixStatus.js";
@@ -297,6 +298,26 @@ export async function api(
     clearTimeout(timer);
     for (const s of callers) s.removeEventListener("abort", cancel);
   }
+}
+
+// #3362: check_sbom's and scan_manifest's Retry-After wait (tools/match_batch.ts) ends when the call's signal aborts,
+// and on the hosted endpoint also when its request's own does (runtime.ts requestSignal), as api()'s requests do. The
+// call's signal is the SDK's ctx.mcpReq.signal, and for a 2025-era request the SDK's teardown follows a clone of the
+// request whose signal Node holds only weakly: after a garbage collection it no longer followed the client's reset, so
+// a call whose client went waited out its Retry-After holding its large-body slot (20 s, under forced collection).
+function batchSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  const own = requestSignal();
+  if (own === undefined || own === signal) return realSleep(ms, signal);
+  const either = new AbortController();
+  const stop = (): void => either.abort();
+  const callers = [signal, own].filter((s): s is AbortSignal => s !== undefined);
+  for (const s of callers) {
+    if (s.aborted) stop();
+    else s.addEventListener("abort", stop, { once: true });
+  }
+  return realSleep(ms, either.signal).finally(() => {
+    for (const s of callers) s.removeEventListener("abort", stop);
+  });
 }
 
 type Text = { type: "text"; text: string };
@@ -559,8 +580,10 @@ export const realInstant = (s: string | undefined): s is string => s !== undefin
 // theirs is null. The summary's poller.last_poll_at is the answering instance's own NVD poller
 // (cve/poller.go Stats, in memory), and is relayed in data but never presented as the feed's
 // freshness; the note says what the whole poller block is (summaryPollerNote, #2647).
+// #2868: the API resolves ENISA EUVD (and GHSA, OSV and GCVE-0) identifiers to their CVE; the
+// method says so, since ENISA's notice asks for acknowledgement wherever its data is used.
 const CVE_FEED_METHOD =
-  "EchelonGraph's CVE Pulse feed: CVE records compiled from NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, each polled from its source on a schedule.";
+  "EchelonGraph's CVE Pulse feed: CVE records compiled from NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, each polled from its source on a schedule. ENISA EUVD identifiers resolve to their CVE.";
 // #3276: search_cves' and get_cve's, whose answers carry no poll-completion time. Through 3.0.2 it
 // said "the CVE feed's answer" carries none, read as the feed's, while cve_summary's answer carries
 // the fleet's last completed NVD poll; it now says where that is. Within 3 characters of the old
@@ -1013,8 +1036,8 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
         ? " The API relaxed the search phrase to all of its words (search_relaxed is true), so these rows are a superset of the rows that match the phrase itself."
         : "";
     // Then what each row's score is (#2535): empty when every row says it is scored, or there
-    // are no rows.
-    const tail = `${relaxedNote}${rowsScoreNote(r.data)}`;
+    // are no rows. First, when the search was an alias id (#2868), what it was resolved to.
+    const tail = `${searchResolvedNote(r.data)}${relaxedNote}${rowsScoreNote(r.data)}`;
     // A total the API did not count is not a count: the page's own rows are all that is known.
     if (counted === false) {
       const empty = shown === 0 && (offset ?? 0) === 0;
@@ -1037,6 +1060,52 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
   } catch (e) {
     return crashed(tool, e);
   }
+}
+
+// #2868: an identifier other than a CVE id. core-backend resolves an ENISA EUVD, GitHub GHSA, OSV
+// (PYSEC, GO, RUSTSEC, GSD, MAL) or GCVE-0 id to its CVE (cve/vuln_ids.go) and says so in
+// resolved_from: on get_cve's record, and at the top of a search page whose term was one. A
+// GCVE-0 id is its CVE id by the GCVE specification (source gcve_gna0); any other came through
+// EchelonGraph's alias table, from the source named. Nothing is said when the answer carries no
+// resolved_from (a CVE id, free text, or an API older than the field).
+//
+// LICENSING (#2868, the founder's decision of 2026-10-11, binding): every EUVD-sourced fact shown
+// on the API or MCP carries the attribution "Source: ENISA EUVD". A sentence of the note that
+// names ENISA's data is followed by the founder's wording itself (EUVD_ATTRIBUTION), whatever the
+// API sent: an answer missing its attribution field (an API older than it) is never relayed
+// without it, and the longer attribution the API sends in data (the EU KEV listing's) is not
+// repeated in the note (#2531's repeat share).
+const EUVD_ATTRIBUTION = "Source: ENISA EUVD.";
+function resolvedVia(rf: unknown): { id: string; how: string; attribution: string } | null {
+  const id = strAt(rf, "id");
+  const ns = strAt(rf, "namespace");
+  const source = strAt(rf, "source");
+  if (!id || !ns || !source) return null;
+  if (source === "gcve_gna0") return { id: `${id} (${ns})`, how: "by the GCVE specification, under which a GCVE-0 ID is its CVE ID", attribution: "" };
+  return {
+    id: `${id} (${ns})`,
+    how: `through EchelonGraph's alias table (source ${source})`,
+    attribution: source === "enisa_euvd" ? ` ${EUVD_ATTRIBUTION}` : "",
+  };
+}
+function resolvedNote(cve: string, rec: object): string {
+  const v = resolvedVia(field(rec, "resolved_from"));
+  return v ? ` Resolved ${v.id} to ${cve} ${v.how}.${v.attribution}` : "";
+}
+function searchResolvedNote(d: unknown): string {
+  const v = resolvedVia(field(d, "resolved_from"));
+  return v ? ` The search term ${v.id} was resolved ${v.how}: these rows are exactly the CVEs it names.${v.attribution}` : "";
+}
+// #2868: the record's listing on ENISA's EU Known Exploited Vulnerabilities catalogue, which the
+// API serves only while EchelonGraph displays ENISA's data, with ENISA's attribution. ENISA's data
+// is named as ENISA's, with its date and the reporting source where the listing gives them, and the
+// sentence ends with the attribution.
+function euKevNote(rec: object): string {
+  const ek = field(rec, "eu_kev");
+  if (field(ek, "listed") !== true) return "";
+  const date = strAt(ek, "date_added");
+  const by = strAt(ek, "reported_by");
+  return ` eu_kev: listed on ENISA's EU Known Exploited Vulnerabilities catalogue${date ? ` ${date}` : ""}${by ? `, reported by ${by}` : ""}; ENISA's data. ${EUVD_ATTRIBUTION}`;
 }
 
 // #2720: cpe_configurations is NVD's configuration tree, stored since migration 152 and filled
@@ -1119,7 +1188,16 @@ function componentsNote(cve: string, rec: object): string {
   const out: string[] = [];
   const score = numAt(rec, "echelongraph_score");
   const rule = strAt(rec, "score_factors", "rule_triggered");
-  const by = rule === "kev_exploitation" ? "a CISA KEV listing floors it at 9.0" : rule === "epss_uplift" ? "EPSS lifts it toward 9.0" : null;
+  // #2868 (scorer v4.1): Rule 1b, an ENISA EU KEV listing of a CVE CISA's catalog does not list, floors
+  // it the same way; ENISA's listing is named as ENISA's, with ENISA's attribution.
+  const by =
+    rule === "kev_exploitation"
+      ? "a CISA KEV listing floors it at 9.0"
+      : rule === "eu_kev_exploitation"
+        ? "an ENISA EU KEV listing floors it at 9.0 (Source: ENISA EUVD)"
+        : rule === "epss_uplift"
+          ? "EPSS lifts it toward 9.0"
+          : null;
   const sev = field(rec, "eg_severity");
   if (sev !== null && typeof sev === "object" && score !== undefined && by) {
     const s = numAt(sev, "score");
@@ -1129,6 +1207,8 @@ function componentsNote(cve: string, rec: object): string {
       out.push(` eg_severity is the impact severity of ${cve} alone: CVSS ${s.toFixed(1)} ${band}${who ? ` (${who})` : ""}. echelongraph_score ${score.toFixed(1)} is higher because ${by}: that is exploitation, not impact.`);
     } else if (boolAt(sev, "assessed") === false && strAt(sev, "unassessed_reason") === "kev_listed_no_cvss") {
       out.push(` eg_severity is not assessed: ${cve} is exploited (CISA KEV) and no CVSS severity is published yet, so echelongraph_score ${score.toFixed(1)} is the floor for confirmed exploitation, not an impact rating.`);
+    } else if (boolAt(sev, "assessed") === false && strAt(sev, "unassessed_reason") === "eu_kev_listed_no_cvss") {
+      out.push(` eg_severity is not assessed: ${cve} is exploited (ENISA EU KEV; Source: ENISA EUVD) and no CVSS severity is published yet, so echelongraph_score ${score.toFixed(1)} is the floor for confirmed exploitation, not an impact rating.`);
     }
   }
   const lik = field(rec, "eg_likelihood");
@@ -1194,7 +1274,7 @@ async function getCVE(cve_id: string): Promise<ToolResult> {
     if (!r.ok) return failed(tool, r);
     const written = strAt(r.data, "updated_at");
     const cve = strAt(r.data, "cve_id") ?? id;
-    return succeeded(r.data, `${okHead(tool, r.status)} Returned the record for ${cve}.${cveScoreNote(cve, r.data)}${componentsNote(cve, r.data)}${bodNote(cve, r.data)}${kevTextNote(r.data)}${cnaRecordNote(cve, r.data)}${remediationSummaryNote(cve, r.data)}`, {
+    return succeeded(r.data, `${okHead(tool, r.status)} Returned the record for ${cve}.${resolvedNote(cve, r.data)}${cveScoreNote(cve, r.data)}${componentsNote(cve, r.data)}${bodNote(cve, r.data)}${kevTextNote(r.data)}${euKevNote(r.data)}${cnaRecordNote(cve, r.data)}${remediationSummaryNote(cve, r.data)}`, {
       state: "measured",
       measured_at: instantOrNull(written),
       method: CVE_FEED_METHOD,
@@ -2975,13 +3055,57 @@ const REMEDIATION_SUMMARY_FIELD =
 // only constant strings). eg_likelihood is FIRST's EPSS until EchelonGraph's calibrated model
 // (#2874) replaces it, and says so: it is never presented as EchelonGraph's own probability.
 const EG_SEVERITY_FIELD =
-  "Impact severity alone (scorer v4.0): the CVSS base score from the best-provenance CVSS EchelonGraph holds, which no CISA KEV listing, EPSS probability or EG-KEV tier raises. score (0-10) and severity (the CVSS band), with metric cvss_base, cvss_version, vector, source and provider. assessed false, with score and severity null and unassessed_reason, where no CVSS of any version is published: kev_listed_no_cvss reads exploited, severity not yet published. Absent from a record scored before v4.0.";
+  "Impact severity alone (scorer v4.0): the CVSS base score from the best-provenance CVSS EchelonGraph holds, which no CISA KEV listing, ENISA EU KEV listing (scorer v4.1), EPSS probability or EG-KEV tier raises. score (0-10) and severity (the CVSS band), with metric cvss_base, cvss_version, vector, source and provider. assessed false, with score and severity null and unassessed_reason, where no CVSS of any version is published: kev_listed_no_cvss reads exploited, severity not yet published, and eu_kev_listed_no_cvss (v4.1) the same for a CVE only ENISA's EU KEV lists (Source: ENISA EUVD). Absent from a record scored before v4.0.";
 const EG_LIKELIHOOD_FIELD =
-  "A probability with a horizon (scorer v4.0): probability is FIRST's EPSS probability of exploitation activity in the next 30 days (source first_epss, horizon_days 30, with epss_percentile, epss_score_date and epss_model_version where stored), not EchelonGraph's own model. null, with null_reason no_epss_on_record, where no EPSS is on record: the likelihood is unknown, not low. exploited (true when CISA KEV lists the CVE or EG-KEV rates it Tier 1) and exploited_sources report confirmed exploitation apart from it; it is never folded into probability. Absent from a record scored before v4.0.";
+  "A probability with a horizon (scorer v4.0): probability is FIRST's EPSS probability of exploitation activity in the next 30 days (source first_epss, horizon_days 30, with epss_percentile, epss_score_date and epss_model_version where stored), not EchelonGraph's own model. null, with null_reason no_epss_on_record, where no EPSS is on record: the likelihood is unknown, not low. exploited (true when CISA KEV lists the CVE, ENISA's EU KEV lists it (scorer v4.1, exploited_sources eu_kev; Source: ENISA EUVD), or EG-KEV rates it Tier 1) and exploited_sources report confirmed exploitation apart from it; it is never folded into probability. Absent from a record scored before v4.0.";
 const EG_PRIORITY_FIELD =
   "The decision (scorer v4.0): ssvc, the decision CISA's SSVC table gives as EchelonGraph applies it (decision at medium mission impact, as echelongraph_ssvc_decision, and by_mission), null with null_reason not_assessed for a CVE EchelonGraph has not assessed; bod_26_04, CISA BOD 26-04's timeline if_publicly_exposed and if_not_publicly_exposed (CERT/CC's keys 3DF, 3D, 14D, 60D, FSU); inputs, kev, exploitation, automatable and technical_impact, each with its source. Absent from a record scored before v4.0.";
+// #2868: the record's identity, as GET /cves/:id serves it (core-backend cve/vuln_ids.go). One
+// constant string each, like the others here.
+const ALIASES_FIELD =
+  "The CVE's other identifiers that EchelonGraph holds, by namespace then id: GitHub GHSA ids (source github), OSV ids such as PYSEC- and GO- (source osv) and ENISA EUVD ids (source enisa_euvd), each with first_seen_at and, where the source dates it, source_updated_at. An ENISA EUVD id carries attribution, Source: ENISA EUVD; no other id does. EUVD ids are listed only while EchelonGraph displays ENISA's data. A GCVE-0 id is never listed: it is the CVE id itself. Absent where the alias table could not be read, and from an API older than the field.";
+const RESOLVED_FROM_FIELD =
+  "Present when the identifier asked for was not the CVE id: id and namespace are what was asked for (an EUVD, GHSA, OSV or GCVE-0 id), and source what mapped it to this CVE: enisa_euvd, github or osv through EchelonGraph's alias table, or gcve_gna0, the GCVE specification, under which GCVE-0-YYYY-N is CVE-YYYY-N. With source enisa_euvd it carries attribution, Source: ENISA EUVD.";
+const EU_KEV_FIELD =
+  "The CVE's listing on ENISA's EU Known Exploited Vulnerabilities catalogue: date_added (ENISA's own date for it), reported_by (the reporting source as ENISA records it), euvd_id, vendor_project, product and first_seen_at, with source enisa_euvd and attribution, ENISA's acknowledgement beginning Source: ENISA EUVD, on every listing. It is ENISA's data, not EchelonGraph's or CISA's; kev_listed is CISA's catalog. Absent where ENISA's catalogue does not list the CVE, while EchelonGraph does not display ENISA's data, and from an API older than the field.";
+// The sources an alias names (core-backend vulnalias): a source the API adds later is admitted,
+// never a failed call, as patch_evidence's labels are.
+const ALIAS_SOURCES = ["enisa_euvd", "github", "osv"] as const;
+const aliasSource = z.union([z.enum(ALIAS_SOURCES), z.string()]);
+const resolvedFrom = z.looseObject({
+  id: opt(z.string()),
+  namespace: opt(z.string()),
+  source: opt(z.union([z.enum([...ALIAS_SOURCES, "gcve_gna0"]), z.string()])),
+  attribution: opt(z.string()),
+});
 const CVERecord = z.looseObject({
   cve_id: opt(z.string()),
+  resolved_from: opt(resolvedFrom).describe(RESOLVED_FROM_FIELD),
+  aliases: opt(
+    z.array(
+      z.looseObject({
+        id: opt(z.string()),
+        namespace: opt(z.string()),
+        source: opt(aliasSource),
+        first_seen_at: opt(z.string()),
+        source_updated_at: opt(z.string()),
+        attribution: opt(z.string()),
+      }),
+    ),
+  ).describe(ALIASES_FIELD),
+  eu_kev: opt(
+    z.looseObject({
+      listed: opt(z.boolean()),
+      date_added: opt(z.string()),
+      reported_by: opt(z.string()),
+      euvd_id: opt(z.string()),
+      vendor_project: opt(z.string()),
+      product: opt(z.string()),
+      first_seen_at: opt(z.string()),
+      source: opt(aliasSource),
+      attribution: opt(z.string()),
+    }),
+  ).describe(EU_KEV_FIELD),
   description: opt(z.string()),
   severity: opt(z.string()),
   cvss_v3_score: opt(z.number()),
@@ -3036,7 +3160,7 @@ const CVERecord = z.looseObject({
     "The SSVC decision (Act, Attend, Track* or Track) EchelonGraph computes with CISA's decision table at medium mission impact. CISA publishes the table and, for some CVEs, its inputs, not a decision for a CVE. score_factors.ssvc gives the decision at low, medium and high mission impact, with each input and its source.",
   ),
   score_factors: z.unknown().optional().describe(
-    "EchelonGraph's evidence for its score. ssvc: the SSVC decision at every mission impact level, each input with its source. bod_26_04 (scorer v3.4 and later): CISA BOD 26-04's remediation timeline, if_publicly_exposed and if_not_publicly_exposed, each a list of CERT/CC's keys (3DF, 3D, 14D, 60D, FSU) named in timelines, with kev, automatable and technical_impact, each with its source; source cisa_bod_26_04_default is CISA's own default for a CVE not in KEV that nobody has assessed. eg_severity, eg_likelihood and eg_priority (scorer v4.0): the same objects as the record's top-level fields. eg_risk.severity_source (v4.0): what EG Risk's severity term read, eg_severity, vendor_severity, or unknown_kev_most_urgent (no severity published for a CISA KEV CVE, so the most urgent value).",
+    "EchelonGraph's evidence for its score. ssvc: the SSVC decision at every mission impact level, each input with its source. bod_26_04 (scorer v3.4 and later): CISA BOD 26-04's remediation timeline, if_publicly_exposed and if_not_publicly_exposed, each a list of CERT/CC's keys (3DF, 3D, 14D, 60D, FSU) named in timelines, with kev, automatable and technical_impact, each with its source; source cisa_bod_26_04_default is CISA's own default for a CVE not in KEV that nobody has assessed. eg_severity, eg_likelihood and eg_priority (scorer v4.0): the same objects as the record's top-level fields. eg_risk.severity_source (v4.0): what EG Risk's severity term read, eg_severity, vendor_severity, or unknown_kev_most_urgent (no severity published for a CISA KEV CVE, so the most urgent value; v4.1: unknown_eu_kev_most_urgent, the same for a CVE only ENISA's EU KEV lists). eu_kev (scorer v4.1): present when ENISA's EU KEV catalogue lists the CVE, { listed, source, attribution }, which says that ENISA lists it and carries ENISA's acknowledgement (Source: ENISA EUVD); rule_triggered eu_kev_exploitation is the rule that floors such a CVE at 9.0 when CISA's KEV catalog does not list it.",
   ),
   epss_score: opt(z.number()),
   epss_percentile: opt(z.number()),
@@ -3172,6 +3296,10 @@ const SEARCH_CVES_OUTPUT = envelopeSchema({
     total_counted: opt(z.boolean()).describe("false: the matches were not counted, so total is not a count."),
     total_is_lower_bound: opt(z.boolean()).describe("true: there are at least total matches."),
     search_relaxed: opt(z.boolean()).describe("true: a search phrase was relaxed to all of its words."),
+    // #2868: a search for an EUVD, GHSA, OSV or GCVE-0 id (see searchResolvedNote).
+    resolved_from: opt(resolvedFrom).describe(
+      "Present when the search term was an EUVD, GHSA, OSV or GCVE-0 id: what it was, and what mapped it (enisa_euvd, github or osv through EchelonGraph's alias table; gcve_gna0, the GCVE specification), with attribution, Source: ENISA EUVD, when enisa_euvd mapped it. The rows are then exactly the CVEs it names.",
+    ),
     limit: opt(z.number()),
     offset: opt(z.number()),
   }),
@@ -3354,6 +3482,10 @@ const INSTRUCTIONS = [
 
 export const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
+// #2868: get_cve's alone; every other CVE tool takes a CVE ID (CVE_ID_ARG, shared).
+const VULN_ID_ARG = z
+  .string()
+  .describe("a CVE ID, e.g. CVE-2023-44487, or an ENISA EUVD (EUVD-2026-90503), GitHub GHSA, OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) or GCVE-0 (GCVE-0-2024-3094) ID, which EchelonGraph resolves to its CVE");
 
 // What each description says about its structured result, naming only fields its schema holds.
 // #2842: the generic rule for the result's last text block is in the README and the methodology
@@ -3476,8 +3608,8 @@ export function createServer(): McpServer {
     "get_cve",
     {
       title: "CVE detail",
-      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity, echelongraph_score, echelongraph_severity and score_confidence, epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, kev_due_date, kev_ransomware) and, if KEV-listed, CISA's own text relayed verbatim (kev_required_action, not EchelonGraph's advice; kev_short_description; kev_notes_urls), ghsa_id, references, cpe_match (one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator; absent where none is stored, which is not a finding that no product is affected), remediation (a capped summary of its fix), published, modified and updated_at; each field only where the record has it. Pass a CVE ID like CVE-2023-44487. ${SCORE_ASSESSED_DESCRIPTION} ${PATCH_AVAILABLE_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
-      inputSchema: z.object({ cve_id: CVE_ID_ARG, full: FULL_ARG }),
+      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity, echelongraph_score, echelongraph_severity and score_confidence, epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, kev_due_date, kev_ransomware) and, if KEV-listed, CISA's own text relayed verbatim (kev_required_action, not EchelonGraph's advice; kev_short_description; kev_notes_urls), ghsa_id, references, cpe_match (one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator; absent where none is stored, which is not a finding that no product is affected), remediation (a capped summary of its fix), published, modified and updated_at; each field only where the record has it. Pass a CVE, EUVD or GHSA ID. ${SCORE_ASSESSED_DESCRIPTION} ${PATCH_AVAILABLE_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
+      inputSchema: z.object({ cve_id: VULN_ID_ARG, full: FULL_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,
     },
@@ -3515,11 +3647,12 @@ export function createServer(): McpServer {
 
   // #2721: tools/check_sbom.ts, on this file's api(), envelope and failure contract. holdRequest
   // (#2775): on the hosted endpoint, a call keeps its request's admission and large-body slot
-  // until it has stopped, not only until its answer, or its client, has gone.
-  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest });
+  // until it has stopped, not only until its answer, or its client, has gone. batchSleep (#3362): its Retry-After wait
+  // also ends when its hosted request's own signal aborts.
+  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest, sleep: batchSleep });
   // #2835: a project's lockfiles read into purls here and checked through the same batch loop
   // (tools/scan_manifest.ts, tools/match_batch.ts), held on the hosted endpoint the same way.
-  registerScanManifest(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest });
+  registerScanManifest(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest, sleep: batchSleep });
 
   registerCveIntel(server);
   // #2841: how one CVE is fixed, as its sources state it (tools/cve_remediation.ts).

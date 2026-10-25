@@ -41,9 +41,11 @@ import { forwardToken, markHttpEntrypoint, onUpstreamFailure, requestLabels, req
 import {
   Admission,
   apiRoute,
+  BODY_STALLED_CODE,
   BODY_TOO_LARGE_CODE,
   BUSY_CODE,
   DEFAULT_ADMISSION_WAIT_MS,
+  DEFAULT_BODY_IDLE_MS,
   DEFAULT_LARGE_BODY_SLOTS,
   DEFAULT_LARGE_BODY_WAIT_MS,
   DEFAULT_LARGE_BODY_WAITERS,
@@ -52,9 +54,12 @@ import {
   DEFAULT_MAX_SBOM_BODY_BYTES,
   DEFAULT_MAX_WAITING,
   DEFAULT_RATE_LIMIT_PER_MIN,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   LARGE_BODY_TARGETS_TEXT,
   Slots,
+  type SlotHold,
   FixedWindowLimiter,
+  hstsFor,
   ORIGIN_REFUSED_CODE,
   RATE_LIMITED_CODE,
   bodyFacts,
@@ -66,6 +71,7 @@ import {
   revisionLabel,
   rpcError,
   rstCodeLabel,
+  settleBy,
   isLargeBodyTarget,
   isListenStream,
   uaFamily,
@@ -97,6 +103,10 @@ const LARGE_BODY_WAIT_MS = positiveInt(process.env.MCP_LARGE_BODY_WAIT_MS, DEFAU
 // in flight per instance".
 const MAX_IN_FLIGHT = positiveInt(process.env.MCP_MAX_IN_FLIGHT, DEFAULT_MAX_IN_FLIGHT);
 const ADMISSION_WAIT_MS = positiveInt(process.env.MCP_ADMISSION_WAIT_MS, DEFAULT_ADMISSION_WAIT_MS);
+// #3362: how long a body may send nothing while it is read, and how long a request may take in all: httpPolicy.ts
+// DEFAULT_BODY_IDLE_MS and DEFAULT_REQUEST_TIMEOUT_MS.
+const BODY_IDLE_MS = positiveInt(process.env.MCP_BODY_IDLE_MS, DEFAULT_BODY_IDLE_MS);
+const REQUEST_TIMEOUT_MS = positiveInt(process.env.MCP_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
 // A large body that waited LARGE_BODY_WAIT_MS for a slot (or found two waiting already), and a
 // request that waited ADMISSION_WAIT_MS for admission, are told to come back.
 const BUSY_RETRY_AFTER_SEC = 5;
@@ -230,7 +240,22 @@ type Outcome = {
 };
 
 // The body is read by readBody.ts, over this instance's large-body slots and caps.
-const readBody = bodyReader(largeBodies, { maxBodyBytes: MAX_BODY_BYTES, maxSbomBodyBytes: MAX_SBOM_BODY_BYTES, largeBodyWaitMs: LARGE_BODY_WAIT_MS });
+const readBody = bodyReader(largeBodies, { maxBodyBytes: MAX_BODY_BYTES, maxSbomBodyBytes: MAX_SBOM_BODY_BYTES, largeBodyWaitMs: LARGE_BODY_WAIT_MS, bodyIdleMs: BODY_IDLE_MS });
+
+// #3362: what a request holds of its instance, each given back once: by the request as it settles, or by its deadline
+// (serveMcp) if it has not settled by then. A second release of its place would free a place that another request
+// holds, letting one more in past the bound (a second release of its slot's hold frees nothing: httpPolicy.ts Slots).
+// body and facts: what its access line says of it, if the deadline writes that line; clientGone: its client went
+// (clientWent in serveMcpTimed; the deadline stopping it is not its client going), which that line says too.
+type Held = { slot?: SlotHold; admitted: boolean; clientGone: boolean; body?: Buffer; facts?: ReturnType<typeof bodyFacts> };
+function releaseSlot(held: Held): void {
+  largeBodies.release(held.slot);
+  held.slot = undefined;
+}
+function releaseAdmission(held: Held): void {
+  if (held.admitted) admission.release();
+  held.admitted = false;
+}
 
 function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outcome {
   send(
@@ -247,13 +272,41 @@ function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outco
 }
 
 // #2775: the access line's slot_wait_ms is how long the request's large body waited for a slot, whatever came of it.
+// #3362: and every request is over by REQUEST_TIMEOUT_MS (httpPolicy.ts DEFAULT_REQUEST_TIMEOUT_MS). Then it is stopped
+// as one whose client went is, what it holds is given back, and this answers for it at once, so its access line is
+// written then (refused "timeout") even if what it was doing never settles. What it settles with later is neither
+// logged (settleBy) nor released (Held) again. That line's status is the one the request would have had:
+//   - its client had gone (clientWent): 499 and client_closed, as any request's whose client went, whatever status line
+//     had already been sent;
+//   - else its answer had ended: the status it was answered with. That answer is left alone: over HTTP/1.1 its socket
+//     may already carry the client's next request;
+//   - else 504, a status for the log only: no HTTP answer is sent, and its stream (h2c) or connection (HTTP/1.1) is reset.
 async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<Outcome> {
   const timing = { slotWaitMs: 0 };
-  const o = await serveMcpTimed(req, res, pathname, timing);
+  const held: Held = { admitted: false, clientGone: false };
+  const o = await settleBy(
+    REQUEST_TIMEOUT_MS,
+    (deadline) => serveMcpTimed(req, res, pathname, timing, held, deadline),
+    (): Outcome => {
+      releaseAdmission(held);
+      releaseSlot(held);
+      const answered = res.writableEnded;
+      if (!answered) res.destroy();
+      const status = held.clientGone ? 499 : answered ? res.statusCode : 504;
+      return { status, refused: "timeout", clientClosed: held.clientGone, body: held.body, facts: held.facts };
+    },
+  );
   return { ...o, slotWaitMs: timing.slotWaitMs };
 }
 
-async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse, pathname: string, timing: { slotWaitMs: number }): Promise<Outcome> {
+async function serveMcpTimed(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  pathname: string,
+  timing: { slotWaitMs: number },
+  held: Held,
+  deadline: AbortSignal,
+): Promise<Outcome> {
   const method = req.method ?? "GET";
 
   const origin = req.headers.origin;
@@ -306,6 +359,7 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
   const h2stream = (res as unknown as Partial<http2.Http2ServerResponse>).stream;
   const clientWent = (): void => {
     if (gone.signal.aborted) return;
+    held.clientGone = true;
     gone.abort();
     log("INFO", "mcp_client_gone", { after_ms: Date.now() - t0, answer_started: res.headersSent, rst_code: rstCodeLabel(h2stream?.rstCode) });
   };
@@ -318,12 +372,15 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
       if (!res.writableEnded) clientWent();
     });
   }
+  // #3362: the request's deadline (serveMcp) stops it as its client going does, but is not its client going: it neither
+  // writes mcp_client_gone nor sets held.clientGone, and once it has, a later close of the response is not one either.
+  deadline.addEventListener("abort", () => gone.abort(), { once: true });
 
   // The body is read BEFORE the request waits for admission (#2773), so a client that uploads
   // slowly holds its socket, and a large body its large-body slot, as before admission existed,
   // never one of the MAX_IN_FLIGHT places every other request needs. What a waiting request holds
-  // is its body: at most MAX_BODY_BYTES, or a large body that holds one of the slots.
-  let slot = false;
+  // is its body: at most MAX_BODY_BYTES, or a large body that holds one of the slots. And only while
+  // its bytes keep coming (#3362: BODY_IDLE_MS between them, readBody "stalled") and to its deadline.
   try {
     let body: Buffer | undefined;
     let facts: ReturnType<typeof bodyFacts> | undefined;
@@ -338,6 +395,15 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
       }
       if (read === "gone") return { status: 499, refused: "client_closed", clientClosed: true };
       if (read === "too_large") return tooLarge(res, cors);
+      if (read === "stalled") {
+        send(
+          res,
+          408,
+          rpcError(BODY_STALLED_CODE, `Request body incomplete: no byte of it came for ${BODY_IDLE_MS / 1000} s, so it was not read on.`, { idle_ms: BODY_IDLE_MS }),
+          { ...cors, Connection: "close" },
+        );
+        return { status: 408, refused: "body_stalled" };
+      }
       if (read === "busy") {
         send(
           res,
@@ -353,8 +419,10 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
         return { status: 503, refused: "large_body_busy" };
       }
       body = read.body;
-      slot = read.slot;
+      held.slot = read.slot;
       facts = bodyFacts(body);
+      held.body = body;
+      held.facts = facts;
       // Past the general cap, the body itself must be what the headers (if any) said: one of
       // LARGE_BODY_TARGETS. A 2025-era client sends no Mcp-Method, so this is where its large body
       // is held to that.
@@ -387,6 +455,7 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
       log("WARNING", "mcp_busy", { max_in_flight: MAX_IN_FLIGHT, waiting: admission.waiting });
       return { status: 503, refused: "busy", body, facts, queuedMs };
     }
+    held.admitted = true;
     const admitted = { inFlight: admission.inUse, queuedMs: Date.now() - waitStart };
     // What is still running for this request (runtime.ts holdRequest): its admission and its
     // large-body slot are held until all of it has settled, not only until the answer is written.
@@ -394,12 +463,13 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
     try {
       return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal, work)), facts, ...admitted };
     } finally {
-      // Every tool call stops on `gone` (#2775), so this wait is long only if one does not.
+      // Every tool call stops on `gone` (#2775), so this wait is long only if one does not: then the deadline gives
+      // the place and the slot back (#3362).
       await requestSettled(work);
-      admission.release();
+      releaseAdmission(held);
     }
   } finally {
-    if (slot) largeBodies.release();
+    releaseSlot(held);
   }
 }
 
@@ -469,6 +539,12 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     pathname = "(unparseable)";
   }
   const method = req.method ?? "GET";
+  // #3354: Strict-Transport-Security on every answer to a request that arrived over HTTPS (httpPolicy.ts hstsFor), set
+  // before any answer is written, so every writeHead below (send, the preflight, relay) carries it: Node merges headers
+  // set with setHeader into writeHead's, over HTTP/1.1 and h2c alike. A proxy in front that sets its own header of the
+  // same name (the edge load balancer does) replaces it.
+  const hsts = hstsFor(req.headers["x-forwarded-proto"]);
+  if (hsts) res.setHeader("Strict-Transport-Security", hsts);
 
   const finish = (o: Outcome): void => {
     const facts = o.facts ?? (o.body ? bodyFacts(o.body) : { rpc_method: "(none)" });
@@ -489,6 +565,12 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
       in_flight: o.inFlight ?? 0,
       queued_ms: o.queuedMs ?? 0,
       slot_wait_ms: o.slotWaitMs ?? 0,
+      // #3362: the instance's, not the request's: its large-body slots held as this line is written (this request's
+      // own already given back), and how long the oldest of them has been held (httpPolicy.ts Slots.oldestHoldMs).
+      // Every hold ends by its request's deadline, so a hold far older is one no request will give back, whether its
+      // holder hangs or has gone, and whatever else is served meanwhile.
+      large_body_held: largeBodies.inUse,
+      large_body_oldest_hold_ms: largeBodies.oldestHoldMs(),
     });
   };
 
@@ -555,6 +637,8 @@ server.listen(PORT, () => {
     large_body_wait_ms: LARGE_BODY_WAIT_MS,
     max_in_flight: MAX_IN_FLIGHT,
     admission_wait_ms: ADMISSION_WAIT_MS,
+    body_idle_ms: BODY_IDLE_MS,
+    request_timeout_ms: REQUEST_TIMEOUT_MS,
     heap_limit_mb: Math.round(heapLimit / MiB),
     memory_limit_mb: memoryKnown ? Math.round(memoryLimit / MiB) : null,
   });

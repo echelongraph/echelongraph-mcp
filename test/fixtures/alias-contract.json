@@ -1,0 +1,57 @@
+{
+  "about": "#2868: the answers core-backend gives for an alias id, shaped by the wire contract (GET /api/v1/public/cves/{id}: resolved_from, aliases, eu_kev; the list: a top-level resolved_from) and core-backend's own tests (internal/cve/vuln_ids_db_test.go, vuln_ids_attribution_db_test.go: every value of source enisa_euvd carries an attribution beginning \"Source: ENISA EUVD\", the founder's decision of 2026-10-11). NOT a production capture: production serves none of these fields until core-backend ships them. The EUVD id and its CVE are ENISA's positive control (EUVD-2026-90503 -> CVE-2026-80276, read from /api/enisaid on 2026-10-12); the EU KEV listing's values are illustrative of the shape (date, CSIRT) and are not a claim about that CVE. Replace each body with a capture through the hosted endpoint once production serves the fields.",
+  "get_cve_euvd": {
+    "path": "/api/v1/public/cves/EUVD-2026-90503",
+    "body": {
+      "cve_id": "CVE-2026-80276",
+      "severity": "HIGH",
+      "cvss_v3_score": 7.5,
+      "echelongraph_score": 9,
+      "score_confidence": "HIGH",
+      "score_assessed": true,
+      "kev_listed": false,
+      "resolved_from": { "id": "EUVD-2026-90503", "namespace": "euvd", "source": "enisa_euvd", "attribution": "Source: ENISA EUVD" },
+      "aliases": [
+        { "id": "EUVD-2026-90503", "namespace": "euvd", "source": "enisa_euvd", "first_seen_at": "2026-10-12T00:20:11Z", "source_updated_at": "2026-10-05T07:46:34Z", "attribution": "Source: ENISA EUVD" },
+        { "id": "GHSA-g5xq-fc7g-hgv3", "namespace": "ghsa", "source": "github", "first_seen_at": "2026-10-12T00:41:02Z" }
+      ],
+      "eu_kev": {
+        "listed": true,
+        "date_added": "2025-04-02",
+        "reported_by": "CERT-PL",
+        "euvd_id": "EUVD-2026-90503",
+        "first_seen_at": "2026-10-12T00:35:00Z",
+        "source": "enisa_euvd",
+        "attribution": "Source: ENISA EUVD (EU Known Exploited Vulnerabilities catalogue), reproduced with acknowledgement."
+      }
+    }
+  },
+  "get_cve_gcve0": {
+    "path": "/api/v1/public/cves/GCVE-0-2024-3094",
+    "body": {
+      "cve_id": "CVE-2024-3094",
+      "severity": "CRITICAL",
+      "cvss_v3_score": 10,
+      "echelongraph_score": 10,
+      "score_confidence": "HIGH",
+      "score_assessed": true,
+      "kev_listed": false,
+      "resolved_from": { "id": "GCVE-0-2024-3094", "namespace": "gcve", "source": "gcve_gna0" },
+      "aliases": []
+    }
+  },
+  "search_cves_euvd": {
+    "path": "/api/v1/public/cves",
+    "body": {
+      "cves": [{ "cve_id": "CVE-2026-80276", "severity": "HIGH", "cvss_v3_score": 7.5, "echelongraph_score": 9, "score_assessed": true, "kev_listed": false }],
+      "total": 1,
+      "total_counted": true,
+      "total_is_lower_bound": false,
+      "search_relaxed": false,
+      "limit": 2,
+      "offset": 0,
+      "reverse_available": false,
+      "resolved_from": { "id": "EUVD-2026-90503", "namespace": "euvd", "source": "enisa_euvd", "attribution": "Source: ENISA EUVD" }
+    }
+  }
+}

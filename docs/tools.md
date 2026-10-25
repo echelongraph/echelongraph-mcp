@@ -70,6 +70,37 @@ Both tools relay the API's JSON as it was sent, and the note says what the score
 | `score_assessed: false` | **NOT YET SCORED**, tagged "(score_assessed: false)": report the CVE as not yet scored, never as a zero or low score. Each of `echelongraph_score`, `echelongraph_severity` and `echelongraph_risk` it carries is named as a placeholder. A rejected record is **NOT SCORED** instead. |
 | no `score_assessed` field | The answer does not say whether the CVE was scored (an API older than the field), and a zero `echelongraph_score` in it is not a rating. |
 
+## How `get_cve` and `search_cves` take an EUVD, GHSA, OSV or GCVE-0 ID
+
+`get_cve`'s `cve_id` may be a CVE ID or another identifier of the same vulnerability: an ENISA
+EUVD ID (`EUVD-2026-90503`), a GitHub Security Advisory ID (`GHSA-xxxx-xxxx-xxxx`), an OSV ID
+that aliases a CVE (`PYSEC-`, `GO-`, `RUSTSEC-`, `GSD-`, `MAL-`) or a GCVE-0 ID
+(`GCVE-0-2024-3094`), in any letter case. The server sends it as asked; EchelonGraph's API
+resolves it to its CVE and answers with that CVE's record, carrying `resolved_from`: the ID asked
+for, its `namespace`, and the `source` that mapped it — `enisa_euvd`, `github` or `osv` through
+EchelonGraph's alias table, or `gcve_gna0`, the GCVE specification itself, under which
+GCVE-0-YYYY-N is CVE-YYYY-N. The note says so: "Resolved EUVD-2026-90503 (euvd) to
+CVE-2026-80276 through EchelonGraph's alias table (source enisa_euvd). Source: ENISA EUVD." An ID the table maps to
+no CVE is the API's 404, one that names several CVEs (a GHSA can) its 300 listing them, and an
+alias table that could not be read its 503: each is a failed result quoting the API's message,
+never an empty one.
+
+A `search_cves` search for such an ID lists exactly the CVEs it names, and the page carries
+`resolved_from` too; the note says the rows are exactly those CVEs.
+
+The record's `aliases` lists the CVE's other identifiers with their sources. Its `eu_kev`, where
+present, is the CVE's listing on ENISA's EU Known Exploited Vulnerabilities catalogue: ENISA's
+date (`date_added`), the reporting source as ENISA records it (`reported_by`), and ENISA's
+attribution on every listing. EUVD IDs in `aliases` and `eu_kev` are served only while
+EchelonGraph displays ENISA's data; the note names an EU KEV listing as ENISA's data. `kev_listed`
+remains CISA's catalog.
+
+Every value of ENISA's EUVD carries the attribution "Source: ENISA EUVD": each EUVD ID in
+`aliases`, a `resolved_from` whose `source` is `enisa_euvd`, and the `eu_kev` listing, whose
+attribution begins with it. Each sentence of the note that names ENISA's data ends with that
+attribution, and says it even where an older API answer carries no `attribution` field. GitHub's and
+OSV's values carry none.
+
 ## What `patch_available` says
 
 `patch_available` is `true` when EchelonGraph holds, or once held, evidence of a fix for the CVE,

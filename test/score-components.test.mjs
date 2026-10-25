@@ -89,6 +89,26 @@ const ANSWERS = {
     },
     eg_priority: DEFAULT_PRIORITY,
   }),
+  // #2868 (scorer v4.1): ENISA's EU KEV lists it, CISA's catalog does not; NVD 5.4. Rule 1b's floor
+  // (eu_kev_exploitation) over a MEDIUM impact. Components from the golden vector eu_kev/floor_lifts_medium_base's shape.
+  "CVE-2099-28795": record("CVE-2099-28795", {
+    echelongraph_score: 9.0, echelongraph_severity: "CRITICAL", echelongraph_risk: 64, echelongraph_ssvc_decision: "Attend",
+    score_factors: { algorithm_version: "v4.1", rule_triggered: "eu_kev_exploitation" },
+    eg_severity: {
+      ...sevCVSS(5.4, "MEDIUM"),
+      summary: "CVSS 5.4 MEDIUM (NVD CVSS v3): impact alone; no CISA KEV listing, ENISA EU KEV listing (Source: ENISA EUVD), EPSS or EG-KEV tier raises it.",
+    },
+    eg_likelihood: { ...KEV_NO_EPSS, exploited_sources: ["eu_kev"], summary: "No FIRST EPSS probability is on record, so the likelihood is unknown, not low. Confirmed exploitation, apart from the probability: ENISA EU KEV (Source: ENISA EUVD)." },
+    eg_priority: DEFAULT_PRIORITY,
+  }),
+  // #2868 (scorer v4.1): ENISA's EU KEV only, no CVSS at all (eu_kev/no_cvss).
+  "CVE-2099-28796": record("CVE-2099-28796", {
+    cvss_v3_score: null, echelongraph_score: 9.0, echelongraph_severity: "CRITICAL", echelongraph_risk: 85, echelongraph_ssvc_decision: "Attend",
+    score_factors: { algorithm_version: "v4.1", rule_triggered: "eu_kev_exploitation" },
+    eg_severity: { assessed: false, score: null, severity: null, unassessed_reason: "eu_kev_listed_no_cvss", summary: "Exploited; severity not yet published: ENISA's EU Known Exploited Vulnerabilities catalogue lists this CVE (Source: ENISA EUVD) and no CVSS base score is published for it yet." },
+    eg_likelihood: { ...KEV_NO_EPSS, exploited_sources: ["eu_kev"], summary: "No FIRST EPSS probability is on record, so the likelihood is unknown, not low. Confirmed exploitation, apart from the probability: ENISA EU KEV (Source: ENISA EUVD)." },
+    eg_priority: DEFAULT_PRIORITY,
+  }),
   // Scored before v4.0: no components.
   "CVE-2099-28794": record("CVE-2099-28794", {
     kev_listed: true, echelongraph_score: 9.0, echelongraph_severity: "CRITICAL", echelongraph_risk: 96, echelongraph_ssvc_decision: "Act",
@@ -144,8 +164,11 @@ describe("#2879 get_cve: eg_severity, eg_likelihood and eg_priority", () => {
 
   it("the outputSchema documents the three components, and the score and EG Risk for what they now are", () => {
     const props = recordProps(getCve.outputSchema);
-    assert.match(props.eg_severity?.description ?? "", /CVSS base score[^.]*which no CISA KEV listing, EPSS probability or EG-KEV tier raises/);
+    assert.match(props.eg_severity?.description ?? "", /CVSS base score[^.]*which no CISA KEV listing, ENISA EU KEV listing \(scorer v4\.1\), EPSS probability or EG-KEV tier raises/);
     assert.match(props.eg_severity.description, /kev_listed_no_cvss reads exploited, severity not yet published/);
+    // #2868 (scorer v4.1): the EU-only reason, and ENISA's listing among confirmed exploitation, attributed.
+    assert.match(props.eg_severity.description, /eu_kev_listed_no_cvss \(v4\.1\) the same for a CVE only ENISA's EU KEV lists \(Source: ENISA EUVD\)/);
+    assert.match(props.eg_likelihood.description, /ENISA's EU KEV lists it \(scorer v4\.1, exploited_sources eu_kev; Source: ENISA EUVD\)/);
     assert.match(props.eg_likelihood?.description ?? "", /FIRST's EPSS probability of exploitation activity in the next 30 days \(source first_epss/);
     assert.match(props.eg_likelihood.description, /not EchelonGraph's own model/);
     assert.match(props.eg_likelihood.description, /never folded into probability/);
@@ -177,6 +200,21 @@ describe("#2879 get_cve: eg_severity, eg_likelihood and eg_priority", () => {
       note.includes(" eg_severity is not assessed: CVE-2099-28791 is exploited (CISA KEV) and no CVSS severity is published yet, so echelongraph_score 9.0 is the floor for confirmed exploitation, not an impact rating."),
       note,
     );
+  });
+
+  it("#2868: Rule 1b's floor is named as ENISA's EU KEV listing, attributed, over the impact severity and with no CVSS", async () => {
+    const { note } = await call("CVE-2099-28795");
+    assert.ok(
+      note.includes(" eg_severity is the impact severity of CVE-2099-28795 alone: CVSS 5.4 MEDIUM (NVD CVSS v3). echelongraph_score 9.0 is higher because an ENISA EU KEV listing floors it at 9.0 (Source: ENISA EUVD): that is exploitation, not impact."),
+      note,
+    );
+    const none = await call("CVE-2099-28796");
+    assert.ok(
+      none.note.includes(" eg_severity is not assessed: CVE-2099-28796 is exploited (ENISA EU KEV; Source: ENISA EUVD) and no CVSS severity is published yet, so echelongraph_score 9.0 is the floor for confirmed exploitation, not an impact rating."),
+      none.note,
+    );
+    // CONTROL: CISA's wording is not reused for ENISA's listing.
+    assert.doesNotMatch(note + none.note, /CISA KEV listing floors it|exploited \(CISA KEV\)/);
   });
 
   it("an EPSS uplift is named as EPSS's; a likelihood on record gets no null sentence", async () => {

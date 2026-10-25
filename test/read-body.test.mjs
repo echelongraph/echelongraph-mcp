@@ -19,19 +19,19 @@ import { pathToFileURL } from "node:url";
 import { PKG_DIR } from "./server-under-test.mjs";
 
 const { bodyReader } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "readBody.js")).href);
-const { Slots, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_SBOM_BODY_BYTES, DEFAULT_LARGE_BODY_WAITERS } = await import(
+const { Slots, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_SBOM_BODY_BYTES, DEFAULT_LARGE_BODY_WAITERS, DEFAULT_BODY_IDLE_MS } = await import(
   pathToFileURL(path.join(PKG_DIR, "dist", "httpPolicy.js")).href
 );
 
 // http.ts's defaults, but a 2 s wait: the code before the fix waits it out, and the file must not hang on it.
-const LIMITS = { maxBodyBytes: DEFAULT_MAX_BODY_BYTES, maxSbomBodyBytes: DEFAULT_MAX_SBOM_BODY_BYTES, largeBodyWaitMs: 2000 };
+const LIMITS = { maxBodyBytes: DEFAULT_MAX_BODY_BYTES, maxSbomBodyBytes: DEFAULT_MAX_SBOM_BODY_BYTES, largeBodyWaitMs: 2000, bodyIdleMs: DEFAULT_BODY_IDLE_MS };
 const LARGE = DEFAULT_MAX_BODY_BYTES + 6 * 1024; // past the general cap: a body that needs a slot
 const SMALL = 1024;
 
 // What readBody answered before the event loop turned once, or "pending"; a body read is named by its size (an
 // assertion handed the Buffer itself made the test runner exhaust its heap reporting it).
 const atOnce = (p) =>
-  Promise.race([p, new Promise((resolve) => setImmediate(() => resolve("pending")))]).then((r) => (typeof r === "string" ? r : `a body of ${r.body.length} bytes, holding a slot: ${r.slot}`));
+  Promise.race([p, new Promise((resolve) => setImmediate(() => resolve("pending")))]).then((r) => (typeof r === "string" ? r : `a body of ${r.body.length} bytes, holding a slot: ${r.slot !== undefined}`));
 const live = () => new AbortController().signal; // a response still open
 const aborted = () => AbortSignal.abort();
 
@@ -94,10 +94,11 @@ async function h2Gone(declared) {
   await closed;
   return req;
 }
-// One slot, held by someone else: a large body must wait for it.
+// One slot, held by someone else (`other`, its hold): a large body must wait for it.
 const busySlots = () => {
   const slots = new Slots(1, DEFAULT_LARGE_BODY_WAITERS);
-  assert.equal(slots.tryAcquire(), true);
+  slots.other = slots.tryAcquire();
+  assert.ok(slots.other);
   return slots;
 };
 
@@ -108,9 +109,10 @@ describe("#2775: readBody answers 'gone' for a client that went before it looked
     const { req, sock } = await h1Request(LARGE, LARGE);
     const r = await bodyReader(slots, LIMITS)(req, live(), { slotWaitMs: 0 });
     assert.equal(r.body?.length, LARGE, typeof r === "string" ? r : "a body of another size");
-    assert.equal(r.slot, true);
+    assert.ok(r.slot, "no hold");
     assert.equal(slots.inUse, 1);
-    slots.release();
+    slots.release(r.slot);
+    assert.equal(slots.inUse, 0);
     sock.destroy();
   });
 
@@ -164,5 +166,93 @@ describe("#2775: readBody answers 'gone' for a client that went before it looked
     assert.equal(await atOnce(bodyReader(slots, LIMITS)(req, aborted(), { slotWaitMs: 0 })), "gone");
     assert.equal(slots.inUse, 0, "a client that had gone took the slot");
     sock.destroy();
+  });
+});
+
+// ── #3362: a body that stops coming ──
+// Measured 2026-10-25 on the hosted endpoint's 3.1.1 revision (h2c, two slots): of two 2025-era check_sbom calls whose
+// client aborted them, one never wrote its access line, and from then on one of the two slots was gone. One way that
+// happens, reproduced here: a body that stops coming with nothing ending it (no end, no reset; node:http2 has no request
+// timeout), and readBodyHolding waited for good, holding the slot it took at the headers. Whether that was that revision's
+// case is not settled (http.test.mjs's #3362 tests; the request deadline covers the other case too).
+// A body that sends no byte for bodyIdleMs while it is read is "stalled" and gives its slot back; while a body waits for
+// a slot it is not read, so that wait is not idleness (#2775's waits stand).
+const IDLE = { ...LIMITS, bodyIdleMs: 500 };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const named = (r) => (typeof r === "string" ? r : `a body of ${r.body.length} bytes, holding a slot: ${r.slot !== undefined}`);
+
+// An h2c request declaring `declared` bytes (undefined: no content-length, read as a chunked body is), of which `sent`
+// are sent; never ended and never reset unless the test does.
+async function h2Request(declared, sent) {
+  const waiting = nextRequest(h2Requests);
+  const length = declared === undefined ? {} : { "content-length": String(declared) };
+  const stream = session.request({ ":method": "POST", ":path": "/mcp", "content-type": "application/json", ...length }, { endStream: false });
+  stream.on("error", () => {});
+  if (sent > 0) stream.write("x".repeat(sent));
+  return { req: await waiting, stream };
+}
+const leave = ({ sock, stream }) => (sock ? sock.destroy() : stream.close(http2.constants.NGHTTP2_CANCEL));
+
+describe("#3362: a body that stops coming, with no end and no reset, is 'stalled' and keeps no slot", { timeout: 60_000 }, () => {
+  for (const [proto, request] of [
+    ["HTTP/1.1", h1Request],
+    ["h2c", h2Request],
+  ]) {
+    for (const [what, declared, sent] of [
+      ["a large body that stops past 64 KiB", LARGE, LARGE - 1000],
+      ["a large body of which no byte comes", LARGE, 0],
+      ["a small body that stops", SMALL, 10],
+    ]) {
+      // Its own bound: without the idle bound the read never settles, and that is this test's failure, not the file's.
+      it(`${proto}: ${what}: 'stalled' once bodyIdleMs passes with no byte, and the slot is free`, { timeout: 5_000 }, async () => {
+        const slots = new Slots(1, DEFAULT_LARGE_BODY_WAITERS);
+        const r = await request(declared, sent);
+        const t0 = Date.now();
+        const read = await bodyReader(slots, IDLE)(r.req, live(), { slotWaitMs: 0 });
+        const took = Date.now() - t0;
+        leave(r);
+        assert.equal(named(read), "stalled");
+        assert.ok(took >= 450 && took < 5000, `'stalled' after ${took} ms, with bodyIdleMs 500`);
+        assert.equal(slots.inUse, 0, "a stalled body kept its slot");
+        assert.ok(slots.tryAcquire());
+      });
+    }
+  }
+
+  it("a body that keeps coming, a chunk every 100 ms for 1.6 s, is read whole: the clock restarts at each chunk", async () => {
+    const slots = new Slots(1, DEFAULT_LARGE_BODY_WAITERS);
+    const r = await h1Request(16 * 1024, 0);
+    const read = bodyReader(slots, IDLE)(r.req, live(), { slotWaitMs: 0 });
+    for (let i = 0; i < 16; i++) {
+      await sleep(100);
+      r.sock.write("x".repeat(1024));
+    }
+    assert.equal(named(await read), "a body of 16384 bytes, holding a slot: false");
+    r.sock.destroy();
+  });
+
+  it("a body waiting for a slot is not idle: one with a Content-Length and one without, each waiting past bodyIdleMs, are read whole", async () => {
+    const slots = busySlots();
+    // Content-Length past 64 KiB: it waits for the slot before any byte is read.
+    const a = await h1Request(LARGE, LARGE);
+    const timingA = { slotWaitMs: 0 };
+    const readA = bodyReader(slots, IDLE)(a.req, live(), timingA);
+    // No content-length: read until it passes 64 KiB, then paused while it waits.
+    const b = await h2Request(undefined, LARGE);
+    b.stream.end();
+    const timingB = { slotWaitMs: 0 };
+    const readB = bodyReader(slots, IDLE)(b.req, live(), timingB);
+    await sleep(3 * IDLE.bodyIdleMs);
+    assert.equal(slots.waiting, 2, "both bodies are waiting for the slot");
+    slots.release(slots.other);
+    const gotA = await readA;
+    assert.equal(named(gotA), `a body of ${LARGE} bytes, holding a slot: true`);
+    slots.release(gotA.slot);
+    const gotB = await readB;
+    assert.equal(named(gotB), `a body of ${LARGE} bytes, holding a slot: true`);
+    assert.ok(timingA.slotWaitMs >= 3 * IDLE.bodyIdleMs - 50 && timingB.slotWaitMs > IDLE.bodyIdleMs, `waited ${timingA.slotWaitMs} and ${timingB.slotWaitMs} ms`);
+    slots.release(gotB.slot);
+    assert.equal(slots.inUse, 0);
+    a.sock.destroy();
   });
 });

@@ -27,6 +27,7 @@ import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 // #3121: answers are validated against the closed success branch (strict-output.mjs).
 import { StrictOutputValidator, strictOutputSchema } from "./strict-output.mjs";
 import { AjvJsonSchemaValidator as AjvJsonSchemaValidatorPublished } from "@modelcontextprotocol/server/validators/ajv";
@@ -3977,6 +3978,126 @@ describe(`against a stub API [${ERA}]`, () => {
     });
   });
 
+  // #2868: core-backend resolves an ENISA EUVD, GHSA, OSV or GCVE-0 id to its CVE (cve/vuln_ids.go):
+  // GET /cves/{id} answers the CVE's record with resolved_from, aliases and, while EchelonGraph
+  // displays ENISA's data, eu_kev; a list search for such an id lists exactly its CVEs with a
+  // top-level resolved_from. get_cve passes the id through, and the note says what it was resolved
+  // from, and whose the EU KEV listing is. The bodies are synthetic, shaped as the API's wire
+  // contract (fixtures/alias-contract.json), not production captures.
+  describe("#2868: an alias id resolves to its CVE, and the note says from what", () => {
+    const call = (name, args) => client.callTool({ name, arguments: args });
+    const GET = (id) => `/api/v1/public/cves/${id}`;
+    const LIST = "/api/v1/public/cves";
+    const CONTRACT = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "alias-contract.json"), "utf8"));
+    async function served(p, body, name, args) {
+      stub.state.mode = "ok";
+      stub.state.overrides[p] = body;
+      try {
+        const res = await call(name, args);
+        assert.notEqual(res.isError, true, brief(res));
+        return res;
+      } finally {
+        delete stub.state.overrides[p];
+      }
+    }
+    const headOf = (id) => `get_cve OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the record for ${id}.`;
+
+    it("get_cve EUVD resolves and says so: the id is sent as asked, and the note names the alias, its source and ENISA's EU KEV listing", async () => {
+      const body = CONTRACT.get_cve_euvd.body;
+      const seenBefore = stub.state.seen.length;
+      const res = await served(GET("EUVD-2026-90503"), body, "get_cve", { cve_id: "EUVD-2026-90503" });
+      assert.ok(stub.state.seen.slice(seenBefore).includes(GET("EUVD-2026-90503")), `requested ${stub.state.seen.slice(seenBefore)}`);
+      assert.equal(
+        noteOf(res),
+        `${headOf("CVE-2026-80276")} Resolved EUVD-2026-90503 (euvd) to CVE-2026-80276 through EchelonGraph's alias table (source enisa_euvd). Source: ENISA EUVD.` +
+          " eu_kev: listed on ENISA's EU Known Exploited Vulnerabilities catalogue 2025-04-02, reported by CERT-PL; ENISA's data. Source: ENISA EUVD.",
+      );
+      assert.deepEqual(res.structuredContent.data, body);
+      assert.equal(res.structuredContent.data.eu_kev.attribution, "Source: ENISA EUVD (EU Known Exploited Vulnerabilities catalogue), reproduced with acknowledgement.");
+    });
+
+    it("get_cve GCVE-0 says it is the CVE id by the GCVE specification, not through the alias table", async () => {
+      const body = CONTRACT.get_cve_gcve0.body;
+      const res = await served(GET("GCVE-0-2024-3094"), body, "get_cve", { cve_id: "GCVE-0-2024-3094" });
+      assert.equal(noteOf(res), `${headOf("CVE-2024-3094")} Resolved GCVE-0-2024-3094 (gcve) to CVE-2024-3094 by the GCVE specification, under which a GCVE-0 ID is its CVE ID.`);
+    });
+
+    it("search_cves alias resolves exactly: the term travels in X-EG-Search, and the note says the rows are exactly its CVEs", async () => {
+      const body = CONTRACT.search_cves_euvd.body;
+      const before = (stub.state.searchHeaders ?? []).length;
+      const res = await served(LIST, body, "search_cves", { search: "EUVD-2026-90503", limit: 2 });
+      assert.deepEqual((stub.state.searchHeaders ?? []).slice(before), ["EUVD-2026-90503"]);
+      assert.equal(
+        noteOf(res),
+        `search_cves OK: EchelonGraph answered HTTP 200 from ${stub.base}. The query matched 1 CVEs; 1 returned in this page. The search term EUVD-2026-90503 (euvd) was resolved through EchelonGraph's alias table (source enisa_euvd): these rows are exactly the CVEs it names. Source: ENISA EUVD.`,
+      );
+      assert.deepEqual(res.structuredContent.data.resolved_from, body.resolved_from);
+    });
+
+    it("control: a record or a page without resolved_from, and an eu_kev that is not a listing, add no sentence", async () => {
+      const plain = { ...CONTRACT.get_cve_euvd.body };
+      delete plain.resolved_from;
+      plain.eu_kev = { source: "enisa_euvd" };
+      const res = await served(GET(plain.cve_id), plain, "get_cve", { cve_id: plain.cve_id });
+      assert.equal(noteOf(res), headOf(plain.cve_id));
+      const page = { ...CONTRACT.search_cves_euvd.body };
+      delete page.resolved_from;
+      const n = noteOf(await served(LIST, page, "search_cves", { search: "x", limit: 2 }));
+      assert.doesNotMatch(n, /resolved|alias/i, n);
+      // A resolved_from missing its source is not a sentence either: nothing is guessed.
+      const partial = { ...CONTRACT.get_cve_euvd.body, resolved_from: { id: "EUVD-2026-90503", namespace: "euvd" } };
+      delete partial.eu_kev;
+      assert.equal(noteOf(await served(GET(partial.cve_id), partial, "get_cve", { cve_id: partial.cve_id })), headOf(partial.cve_id));
+    });
+
+    // The founder's licensing rule (#2868, 2026-10-11, binding): every EUVD-sourced fact shown on the
+    // API or MCP carries "Source: ENISA EUVD". Every sentence of the note that names ENISA's data is
+    // followed by it — also where the API sent no attribution (an API older than the field) — and
+    // the structured data relays each value's attribution as sent. GitHub's mapping is not
+    // attributed to ENISA.
+    // Control (run at integration, 2026-10-18): EUVD_ATTRIBUTION emptied — RED on both cases.
+    it("every sentence naming ENISA's data carries Source: ENISA EUVD, even where the API sent no attribution", async () => {
+      const ATTR = "Source: ENISA EUVD";
+      const full = CONTRACT.get_cve_euvd.body;
+      const sentences = (n) => n.split(/(?<=\.) (?=[A-Ze])/);
+      for (const [label, body] of [
+        ["as the API serves it", full],
+        [
+          "an API that sent no attribution",
+          {
+            ...full,
+            resolved_from: { id: "EUVD-2026-90503", namespace: "euvd", source: "enisa_euvd" },
+            eu_kev: { listed: true, date_added: "2025-04-02", reported_by: "CERT-PL", source: "enisa_euvd" },
+          },
+        ],
+      ]) {
+        const note = noteOf(await served(GET("EUVD-2026-90503"), body, "get_cve", { cve_id: "EUVD-2026-90503" }));
+        const enisa = sentences(note).filter((x) => /enisa_euvd|ENISA's EU Known/.test(x));
+        assert.equal(enisa.length, 2, `${label}: ${note}`);
+        for (const x of enisa) {
+          const at = note.indexOf(x) + x.length;
+          assert.ok(note.slice(at).trimStart().startsWith(ATTR), `${label}: "${x}" is not followed by ${ATTR}: ${note}`);
+        }
+        for (const v of [body.resolved_from, ...(body.aliases ?? []), body.eu_kev].filter((v) => v?.source === "enisa_euvd" && v.attribution)) {
+          assert.ok(v.attribution.startsWith(ATTR), `${label}: ${JSON.stringify(v)}`);
+        }
+      }
+      const page = await served(LIST, CONTRACT.search_cves_euvd.body, "search_cves", { search: "EUVD-2026-90503", limit: 2 });
+      assert.match(noteOf(page), /these rows are exactly the CVEs it names\. Source: ENISA EUVD\.$/);
+      // GitHub's mapping is GitHub's: no ENISA attribution.
+      const ghsa = { ...CONTRACT.get_cve_gcve0.body, resolved_from: { id: "GHSA-g5xq-fc7g-hgv3", namespace: "ghsa", source: "github" } };
+      assert.doesNotMatch(noteOf(await served(GET("GHSA-g5xq-fc7g-hgv3"), ghsa, "get_cve", { cve_id: "GHSA-g5xq-fc7g-hgv3" })), /ENISA/);
+    });
+
+    it("get_cve's cve_id takes the alias forms; the other CVE tools' cve_id stays a CVE ID", async () => {
+      const { tools } = await client.listTools();
+      const arg = (name) => tools.find((t) => t.name === name).inputSchema.properties.cve_id.description;
+      assert.match(arg("get_cve"), /EUVD/);
+      assert.match(arg("get_cve"), /GCVE-0/);
+      for (const name of ["cve_exposure", "epss_history"]) assert.equal(arg(name), "a CVE ID, e.g. CVE-2023-44487", name);
+    });
+  });
+
   // #2861: core-backend 2d8bb9ce serves patch_available true exactly when EchelonGraph holds
   // evidence of a fix, and patch_evidence (always a list) names its sources, strongest first. Both
   // are relayed as sent, in structuredContent and in the first text block; an API older than the
@@ -4861,17 +4982,23 @@ describe(`against a stub API [${ERA}]`, () => {
     // (2026-10-11) exposure_radar was re-measured on purpose, from 31,364 (31,370 at 2.7.1) to 31,698:
     // the note's last sentence, "Each radar refreshes on its own schedule." (41 characters), became
     // the one that names each radar's staleness threshold (369); on these fixtures no radar is past
-    // its threshold, so no stale sentence is added. The other bounds are unchanged.
+    // its threshold, so no stale sentence is added. At #2868 (2026-10-12) the CVE feed tools were
+    // re-measured on purpose, each +72: cve_summary 2,709 to 2,781, search_cves 1,115 to 1,187 and
+    // with a row not yet scored 1,803 to 1,875, get_cve 1,063 to 1,135 and not yet scored 1,583 to
+    // 1,655. The feed's method (CVE_FEED_METHOD), in the envelope block, gained "ENISA EUVD
+    // identifiers resolve to their CVE." (45 characters, and the JSON around it); data and the note
+    // are unchanged. The failed answers carry no method and are unchanged. The other bounds are
+    // unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_698], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out; #3010: the thresholds sentence
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
-      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_709],
-      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_115],
-      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_063],
+      ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_781],
+      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_187],
+      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_135],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
       ["search_cves, failed (an edge's HTTP 403 page)", "search_cves", CALLS.search_cves, "403", {}, { state: "failed" }, 705],
-      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_583],
-      ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 1_803],
+      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_655],
+      ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 1_875],
     ];
     // #2531: the check itself, one function, so the control below runs the predicate the cases
     // run. The text is every text block, with the stub's base URL counted as production's.

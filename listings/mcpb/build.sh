@@ -3,15 +3,15 @@
 # repo's release.yml builds from every release tag, checks with check-bundle.mjs on another runner
 # before npm publishes, signs with a SLSA build-provenance attestation and attaches to the GitHub release as echelongraph-mcp.mcpb, the
 # README's "Install in Claude Desktop" (#2815). It is also what Smithery's "Local (MCPB Bundle)"
-# publish path takes for a stdio server (#2723).
+# publish path took for a stdio server (#2723), until Smithery closed publishing on 2026-10-31 (#3356).
 #
 #   mcp-server/listings/mcpb/build.sh [out-dir]     # default out-dir: mcp-server/listings/mcpb/out
 #
 # It builds dist/ from this checkout, stages dist/, package.json, LICENSE, README.md, this
 # directory's manifest.json and icon.png, installs the production dependencies with
 # `npm ci --omit=dev` from package-lock.json, then validates and packs with a pinned MCPB CLI.
-# It publishes nothing: release.yml attaches the bundle it builds; a Smithery upload is a signed-in
-# step (see ../README.md).
+# It publishes nothing: release.yml attaches the bundle it builds; a Smithery upload was a signed-in
+# step, until 2026-10-31 (see ../README.md).
 set -euo pipefail
 
 MCPB_CLI="@anthropic-ai/mcpb@2.1.2"   # pinned; `npm view @anthropic-ai/mcpb version` on 2026-10-04

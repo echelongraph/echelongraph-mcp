@@ -1143,7 +1143,9 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
   // the CVE. Through 2.6.3 the line asked for "fixed versions" with nothing more, so 2.12.2 could
   // be given as the CVE's patch for log4j-core. It now says the value is one per package and not
   // the fix for every affected branch, and points to get_cve's references tagged Vendor Advisory or
-  // Patch, which production's get_cve text carries for this CVE.
+  // Patch, "where it has them", and to the vendor advisories. #3273's review: production's get_cve
+  // text for this CVE has none of those references (below), so here the vendor advisories are what
+  // the line points to.
   it("triage_cve on production's answers for CVE-2021-44228: cve_intel's one fixed_version for log4j-core, 2.12.2, is not given as the fix for every affected branch", async (t) => {
     const prompt = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: "CVE-2021-44228" } }));
     const patch = prompt.split("\n").find((l) => l.startsWith("- Patch:"));
@@ -1174,11 +1176,26 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     assert.equal(row.verdict, "affected");
     assert.ok(row.cve_ids.includes("CVE-2021-44228"));
     assert.equal(releaseOrder("2.12.2", fromPurl(row.purl).version), -1, "2.12.2 is not below the affected 2.14.1");
-    // The references the line points to are in get_cve's text.
+    // What the line points to, in the text the model is shown. #3273's review: get_cve's answer is
+    // production's whole (prod-shaped/get_cve.json, hosted 3.1.1 with full: true, 2026-10-25). Its
+    // 103 references hold 8 tagged Vendor Advisory or Patch, the first at index 36, and the text
+    // keeps the first 8 references, so it carries none of them. Hosted 3.1.1's own get_cve text
+    // (read 2026-10-25T16:02:17Z) keeps the same 8, none tagged so. Through 3.1.1 the answer here
+    // was 2.6.2's, every 4th reference, and this test read the tagged ones its text kept as
+    // production's. The line hedges with "where it has them", which is what holds for this CVE, so
+    // the vendor advisories it names beside them are what it points to. Should get_cve's text keep
+    // a tagged reference again, this fails: say which the line points to.
     const getCase = caseOf("get_cve, CVE-2021-44228");
     const record = JSON.parse(blocksOf(await call("get_cve", argsOf(getCase), shapedAnswers(getCase)))[0]);
-    const pointed = (record.references ?? []).filter((r) => (r.tags ?? []).some((tag) => tag === "Vendor Advisory" || tag === "Patch"));
-    t.diagnostic(`get_cve's text: ${pointed.length} references tagged Vendor Advisory or Patch`);
-    assert.ok(pointed.length > 0, "get_cve's text keeps no reference tagged Vendor Advisory or Patch for CVE-2021-44228");
+    const [answer] = Object.values(shapedAnswers(getCase));
+    const tagged = (refs) => (refs ?? []).filter((r) => (r.tags ?? []).some((tag) => tag === "Vendor Advisory" || tag === "Patch"));
+    const pointed = tagged(record.references);
+    t.diagnostic(`get_cve's text: ${record.references?.length ?? 0} of ${answer.references.length} references, ${pointed.length} tagged Vendor Advisory or Patch (${tagged(answer.references).length} in the answer)`);
+    assert.ok(tagged(answer.references).length > 0, "production's answer has no reference tagged Vendor Advisory or Patch for CVE-2021-44228, so this case does not test the pointer");
+    assert.equal(pointed.length, 0, "get_cve's text keeps a reference tagged Vendor Advisory or Patch for CVE-2021-44228 again: say which the Patch line points to here");
+    const advCase = caseOf("vendor_advisories_for_cve, CVE-2021-44228");
+    const advisories = JSON.parse(blocksOf(await call("vendor_advisories_for_cve", argsOf(advCase), shapedAnswers(advCase)))[0]).advisories ?? [];
+    t.diagnostic(`vendor_advisories_for_cve's text: ${advisories.length} advisories`);
+    assert.ok(advisories.length > 0, "vendor_advisories_for_cve's text keeps no advisory for CVE-2021-44228: the Patch line points to nothing in production's answers");
   });
 });

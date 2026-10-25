@@ -13,6 +13,7 @@ export const ORIGIN_REFUSED_CODE = -32000; // the SDK's own code for an Origin r
 export const RATE_LIMITED_CODE = -32029; // implementation-defined server error range (-32000..-32099); "429"
 export const BODY_TOO_LARGE_CODE = -32600; // Invalid Request
 export const BUSY_CODE = -32030; // implementation-defined server error range; "503": no large-body slot free (#2747), or the instance full (#2773)
+export const BODY_STALLED_CODE = -32600; // Invalid Request: "408", its body stopped coming before it ended (#3362)
 
 export function rpcError(code: number, message: string, data?: Record<string, unknown>): string {
   return JSON.stringify({ jsonrpc: "2.0", id: null, error: { code, message, ...(data ? { data } : {}) } });
@@ -159,6 +160,28 @@ export function resolveClient(xff: string | undefined, socketAddress: string | u
   return { forwardAddress: isPublic(peer) ? peer.text : undefined, key: isPublic(peer) ? keyOf(peer) : peer.text };
 }
 
+// ── Strict-Transport-Security (#3354) ──
+//
+// Every answer to a request that arrived over HTTPS carries HSTS_VALUE, error answers included (a 404, a 405, a 429,
+// a 503), so a client that has once reached the endpoint over TLS never sends a first request over plain HTTP that
+// could be downgraded before its redirect. "Arrived over HTTPS" is what the proxy in front of this process says in
+// X-Forwarded-Proto: Cloud Run's front end sets it, and in front of that the edge load balancer
+// (infrastructure/edge/create-edge-lb.sh). The edge also sets this header on its backend service; Google documents
+// that a header the load balancer adds replaces one of the same name from the backend, so a client sees exactly one,
+// which the edge's verify-pre counts. Sending it here as well means the endpoint keeps HSTS without the edge: before
+// its cutover, and after a rollback to the domain mapping. Over plain HTTP (a local run) nothing is sent: RFC 6797
+// 7.2, an HSTS host MUST NOT include it over non-secure transport. The last value of a comma-separated
+// X-Forwarded-Proto is read, the scheme the nearest proxy accepted the request on. No preload: that is a decision
+// for the apex domain, not this host.
+export const HSTS_VALUE = "max-age=31536000; includeSubDomains";
+
+/** The Strict-Transport-Security value for a request with this X-Forwarded-Proto, or undefined: see the section comment. */
+export function hstsFor(forwardedProto: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(forwardedProto) ? forwardedProto.join(",") : (forwardedProto ?? "");
+  const last = raw.split(",").pop()?.trim().toLowerCase();
+  return last === "https" ? HSTS_VALUE : undefined;
+}
+
 // ── Per-client limit ──
 //
 // A fixed one-minute window per client key, in this instance's memory. The default is derived
@@ -258,6 +281,47 @@ export const DEFAULT_MAX_SBOM_BODY_BYTES = 6 * 1024 * 1024;
 export const DEFAULT_LARGE_BODY_SLOTS = 2;
 export const DEFAULT_LARGE_BODY_WAIT_MS = 15_000;
 export const DEFAULT_LARGE_BODY_WAITERS = 2;
+// #3362: a body must keep coming. Measured 2026-10-25 on the hosted endpoint's 3.1.1 revision (h2c, two slots): of two
+// 2025-era check_sbom calls whose client aborted them, one never wrote its access line, and from then on one of the two
+// slots was gone, for the life of the instance. Through 3.1.1 nothing bounded a request, so one that never ended held
+// its slot for good. Which way that call hung the logs do not settle (one mcp_client_gone line was written, and it
+// does not say whose it was); this bound and the next each end one way. Here: a body that stops coming with no reset.
+// Behind Cloud Run the h2c connection is the front end's, kept open and shared, and on 2026-10-05 the resets of aborted
+// calls reached the container only once it wrote to their streams (15 and 34 s in), which a call still reading its
+// body has not; whether every mid-upload abort is passed on later or never is not known (docs/rate-limits.md).
+// node:http2's server has no request timeout (HTTP/1.1's requestTimeout ends such a socket, at 300 s), so the read
+// waited for an end, a close or a reset that never came, holding the slot it took at the request's headers. So a body
+// that sends no byte for DEFAULT_BODY_IDLE_MS while it is read (not while it waits for a slot, when it is not read) is
+// ended: answered 408, logged refused "body_stalled", its slot given back. Under DEFAULT_LARGE_BODY_WAIT_MS, so a
+// client that retries at once waits out the upload it abandoned and is served.
+export const DEFAULT_BODY_IDLE_MS = 10_000;
+// #3362: and no request outlives DEFAULT_REQUEST_TIMEOUT_MS, Cloud Run's own request timeout (deploy-all.sh
+// --timeout=60s), past which its front end has answered the client itself and nobody reads this answer. That ends the
+// other way: a call whose client's reset arrived (mcp_client_gone) but that did not stop. The request is then stopped
+// as one whose client went is (its body read, its waits, its tool's API calls), what it holds (its large-body slot,
+// its place) is given back, and its access line is written (refused "timeout"), once each, whether or not its handler
+// ever settles. http.ts serveMcp says which status that line has and when its stream is reset.
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
+/** #3362: what `run` settles with, or, if it has not settled within `ms`, what `overdue` answers then, at once: run's
+ *  signal is aborted first, and whatever run settles with afterwards (a value or an error) is dropped. A caller that
+ *  writes one line and gives back what it holds per answer does so once, by `ms`, whether or not run ever settles. */
+export async function settleBy<T>(ms: number, run: (deadline: AbortSignal) => Promise<T>, overdue: () => T): Promise<T> {
+  const deadline = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<T>((resolve) => {
+    timer = setTimeout(() => {
+      deadline.abort();
+      resolve(overdue());
+    }, ms);
+  });
+  try {
+    return await Promise.race([run(deadline.signal), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The requests whose body may pass DEFAULT_MAX_BODY_BYTES: JSON-RPC method → the tools or prompts it may name.
  *  #2835: scan_manifest takes a project's lockfiles as text, up to the same 5,000,000 characters as
  *  check_sbom's document (scan_manifest.ts MAX_MANIFEST_CHARS), so it is admitted the same way. */
@@ -283,39 +347,51 @@ export function isLargeBodyTarget(facts: BodyFacts): boolean {
   return name !== undefined && targetsOf(facts.rpc_method).includes(name);
 }
 
-/** A counting semaphore: tryAcquire answers at once; acquire (#2775) waits up to waitMs for a slot, first come first
- *  served, with at most maxWaiting waiting (past that it answers false at once). release hands a freed slot straight
- *  to the first waiter. */
+/** #3362: one slot taken, and when (Slots' now()). Only Slots makes one, and only release(hold) gives it back. */
+export type SlotHold = { readonly since: number };
+
+/** A semaphore of slots: tryAcquire answers at once; acquire (#2775) waits up to waitMs for a slot, first come first
+ *  served, with at most maxWaiting waiting (past that it answers undefined at once). Each slot taken is a SlotHold,
+ *  given back by release(hold), which hands the slot straight to the first waiter as a new hold.
+ *  #3362: each hold is its own, not a count. A second release of one hold frees nothing, so no holder can free
+ *  another's slot. And each hold's age is known: oldestHoldMs. A slot taken and never given back keeps its hold,
+ *  which then only grows older, whoever took it and whatever else is served. A slot given back and taken again, back
+ *  to back, is a new hold each time, so short holds never add up into a long one. */
 export class Slots {
-  private used = 0;
-  private readonly queue: Array<() => void> = [];
+  private readonly holds = new Set<SlotHold>();
+  private readonly queue: Array<(hold: SlotHold) => void> = [];
   constructor(
     readonly max: number,
     readonly maxWaiting = 0,
+    private readonly now: () => number = Date.now,
   ) {}
-  tryAcquire(): boolean {
-    if (this.used >= this.max) return false;
-    this.used++;
-    return true;
+  private take(): SlotHold {
+    const hold = { since: this.now() };
+    this.holds.add(hold);
+    return hold;
+  }
+  tryAcquire(): SlotHold | undefined {
+    return this.holds.size < this.max ? this.take() : undefined;
   }
   /** Whether acquire(waitMs) would wait for a slot, rather than answer at once (one is free, or none may wait). */
   wouldWait(waitMs: number): boolean {
-    return this.used >= this.max && waitMs > 0 && this.queue.length < this.maxWaiting;
+    return this.holds.size >= this.max && waitMs > 0 && this.queue.length < this.maxWaiting;
   }
-  acquire(waitMs: number, signal?: AbortSignal): Promise<boolean> {
-    if (this.tryAcquire()) return Promise.resolve(true);
-    if (signal?.aborted || waitMs <= 0 || this.queue.length >= this.maxWaiting) return Promise.resolve(false);
+  acquire(waitMs: number, signal?: AbortSignal): Promise<SlotHold | undefined> {
+    const free = this.tryAcquire();
+    if (free) return Promise.resolve(free);
+    if (signal?.aborted || waitMs <= 0 || this.queue.length >= this.maxWaiting) return Promise.resolve(undefined);
     return new Promise((resolve) => {
-      // admit is called by release(), which hands its slot straight over (used is unchanged).
-      const admit = (): void => {
+      // admit is called by release(), which hands its slot straight over as a hold of this waiter's own.
+      const admit = (hold: SlotHold): void => {
         done();
-        resolve(true);
+        resolve(hold);
       };
       const giveUp = (): void => {
         const i = this.queue.indexOf(admit);
         if (i >= 0) this.queue.splice(i, 1);
         done();
-        resolve(false);
+        resolve(undefined);
       };
       const timer = setTimeout(giveUp, waitMs);
       const done = (): void => {
@@ -326,16 +402,25 @@ export class Slots {
       this.queue.push(admit);
     });
   }
-  release(): void {
+  /** Gives `hold` back, once: a hold already given back, or none, frees nothing. */
+  release(hold: SlotHold | undefined): void {
+    if (hold === undefined || !this.holds.delete(hold)) return;
     const next = this.queue.shift();
-    if (next) next();
-    else if (this.used > 0) this.used--;
+    if (next) next(this.take());
   }
   get inUse(): number {
-    return this.used;
+    return this.holds.size;
   }
   get waiting(): number {
     return this.queue.length;
+  }
+  /** #3362: how long, at now(), the oldest hold still held has been held; 0 when no slot is. The access line's
+   *  large_body_oldest_hold_ms. Every hold ends by its request's deadline (DEFAULT_REQUEST_TIMEOUT_MS), so one far older
+   *  is a slot no request will give back (infrastructure/monitoring/create-mcp-remote-monitoring.sh alerts past 5 minutes). */
+  oldestHoldMs(): number {
+    let oldest: number | undefined;
+    for (const hold of this.holds) if (oldest === undefined || hold.since < oldest) oldest = hold.since;
+    return oldest === undefined ? 0 : Math.max(0, this.now() - oldest);
   }
 }
 

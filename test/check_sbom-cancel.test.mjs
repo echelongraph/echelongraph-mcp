@@ -167,6 +167,37 @@ describe("#2775: a cancelled check_sbom call stops", () => {
     await handler.close();
   });
 
+  // #3362: for a 2025-era request the SDK's teardown follows a clone of the Request, whose signal Node holds only weakly:
+  // after a garbage collection it no longer followed the client's reset (measured on dist/http.js, h2c, a 20 s
+  // Retry-After, GC forced every 5 ms: the call's access line came 19,481 ms after the reset, the slot held all along).
+  // Here the SDK's signal is one that never aborts and the request's own (runtime.ts withClient) is the client's, so
+  // only the request's signal can end the wait, as only it could there.
+  it("hosted: a Retry-After wait ends when the request's own signal aborts, though the SDK's signal never follows it", async () => {
+    reset({ 0: { status: 429, headers: { "retry-after": "20" } } });
+    const handler = createMcpHandler(I.createServer, { legacy: "stateless" });
+    const work = new Set();
+    const gone = new AbortController();
+    const request = new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "check_sbom", arguments: { purls: purls(3 * MAX_COMPONENTS) } } }),
+      signal: new AbortController().signal,
+    });
+    const response = R.withClient(undefined, () => handler.fetch(request), { signal: gone.signal, work });
+    await until(() => seen.length === 1);
+    await sleep(100);
+    assert.equal(work.size, 1, "the call is not held as its request's work");
+    const t0 = performance.now();
+    gone.abort();
+    const waited = await Promise.race([R.requestSettled(work).then(() => "settled"), sleep(3_000).then(() => "still waiting")]);
+    assert.equal(waited, "settled", "the 20 s Retry-After wait ran on after the request's own signal aborted");
+    assert.ok(performance.now() - t0 < 1_000, `the call stopped ${Math.round(performance.now() - t0)} ms after the abort`);
+    await sleep(100);
+    assert.equal(seen.length, 1, `${seen.length} batches were sent`);
+    await (await response).body?.cancel().catch(() => {});
+    await handler.close();
+  });
+
   it("control: the same call with no signal runs every batch", async () => {
     reset({});
     const res = await checkSbom(deps(undefined), { purls: purls(3 * MAX_COMPONENTS) });

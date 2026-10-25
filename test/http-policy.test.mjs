@@ -60,6 +60,39 @@ describe("resolveClient: the rightmost public X-Forwarded-For hop, else the sock
   });
 });
 
+// #3354: mcp.echelongraph.io moves behind a global external Application Load Balancer for its TLS 1.2 floor
+// (infrastructure/edge/create-edge-lb.sh). Left at its default the load balancer APPENDS "<client>,<forwarding-
+// rule IP>", a public address, so the rightmost public hop would be the load balancer for every client; its backend
+// service therefore REPLACES X-Forwarded-For with "{client_ip_address}". These rows pin resolveClient's side of
+// that, with no code change: the rewritten value resolves the client (and is what the API is told), the default
+// append would not (why the rewrite is required; verify-pre proves it in production before DNS moves), and on the
+// direct path during the cutover a client imitating the edge's shape still cannot choose its key.
+describe("resolveClient behind the #3354 edge load balancer", () => {
+  const client = "203.0.113.7";
+  const vip = "34.117.0.10"; // a forwarding rule's address: public, and not ours
+  for (const [name, xff] of [
+    ["the edge's rewritten value alone", client],
+    ["the rewritten value with the platform's non-public hops after it", `${client}, 169.254.169.126, 0.0.0.0`],
+  ]) {
+    it(`${name}: the client, forwarded to the API`, () => {
+      const c = P.resolveClient(xff, "169.254.169.126");
+      assert.equal(c.key, client);
+      assert.equal(c.forwardAddress, client);
+    });
+  }
+  it("the load balancer's default append would key every client on the load balancer (the rewrite prevents it)", () => {
+    const a = P.resolveClient(`${client},${vip}`, "169.254.169.126");
+    const b = P.resolveClient(`198.51.100.9, 203.0.113.8,${vip}, 169.254.169.126`, "169.254.169.126");
+    assert.equal(a.key, vip);
+    assert.equal(b.key, vip);
+  });
+  it("on the direct path, the edge's address written by the client cannot become the key", () => {
+    const c = P.resolveClient(`198.51.100.9, ${vip}, 192.0.2.66, 169.254.169.126`, "169.254.169.126");
+    assert.equal(c.key, "192.0.2.66");
+    assert.equal(c.forwardAddress, "192.0.2.66");
+  });
+});
+
 describe("FixedWindowLimiter", () => {
   it("admits max per window per key, refuses with a Retry-After, and resets with the window", () => {
     let t = 1_000_000;
@@ -87,16 +120,17 @@ describe("#2775: Slots.wouldWait says whether acquire would wait, so an at-once 
   it("free: no wait; full with room to wait: a wait; full with every place taken, or no wait configured: no wait", async () => {
     const s = new P.Slots(1, 2);
     assert.equal(s.wouldWait(1000), false, "a free slot");
-    assert.equal(s.tryAcquire(), true);
+    const held = s.tryAcquire();
+    assert.ok(held);
     assert.equal(s.wouldWait(1000), true, "full, none waiting");
     assert.equal(s.wouldWait(0), false, "no wait configured");
     const w1 = s.acquire(1000);
     const w2 = s.acquire(1000);
     assert.equal(s.wouldWait(1000), false, "two already wait");
-    assert.equal(await s.acquire(1000), false, "and acquire refuses at once, as wouldWait said");
-    s.release();
-    s.release();
-    assert.deepEqual(await Promise.all([w1, w2]), [true, true]);
+    assert.equal(await s.acquire(1000), undefined, "and acquire refuses at once, as wouldWait said");
+    s.release(held);
+    s.release(await w1);
+    assert.ok(await w2);
   });
 });
 
@@ -210,43 +244,48 @@ describe("#2747: the request-body caps and the large-body slots", () => {
   // #2775, decided 2026-10-18: a large body that finds every slot busy may wait for one, two waiters at most.
   it("Slots.acquire waits for a release, first come first served, at most maxWaiting; a timeout or an abort gives up", async () => {
     const s = new P.Slots(1, 2);
-    assert.equal(await s.acquire(1000), true, "a free slot is taken at once");
+    const first = await s.acquire(1000);
+    assert.ok(first, "a free slot is taken at once");
     const order = [];
-    const a = s.acquire(5000).then((ok) => order.push(["a", ok]));
-    const b = s.acquire(5000).then((ok) => order.push(["b", ok]));
+    const holds = {};
+    const a = s.acquire(5000).then((h) => ((holds.a = h), order.push(["a", h !== undefined])));
+    const b = s.acquire(5000).then((h) => ((holds.b = h), order.push(["b", h !== undefined])));
     assert.equal(s.waiting, 2);
-    assert.equal(await s.acquire(5000), false, "a third waiter is refused at once");
-    assert.equal(s.tryAcquire(), false, "tryAcquire does not jump the queue");
-    s.release();
+    assert.equal(await s.acquire(5000), undefined, "a third waiter is refused at once");
+    assert.equal(s.tryAcquire(), undefined, "tryAcquire does not jump the queue");
+    s.release(first);
     await a;
     assert.deepEqual(order, [["a", true]], "the first waiter gets the freed slot");
     assert.equal(s.inUse, 1, "a slot handed over is not counted twice");
     const ctl = new AbortController();
     const c = s.acquire(5000, ctl.signal);
     ctl.abort();
-    assert.equal(await c, false, "an aborted wait gives up");
-    s.release();
+    assert.equal(await c, undefined, "an aborted wait gives up");
+    s.release(holds.a);
     await b;
     assert.deepEqual(order, [["a", true], ["b", true]]);
     const t0 = Date.now();
-    assert.equal(await s.acquire(50), false, "a wait that runs out gives up");
+    assert.equal(await s.acquire(50), undefined, "a wait that runs out gives up");
     assert.ok(Date.now() - t0 >= 45);
     assert.equal(s.waiting, 0);
-    s.release();
+    s.release(holds.b);
     assert.equal(s.inUse, 0);
-    assert.equal(await new P.Slots(1).acquire(1000).then(() => new P.Slots(1, 0).acquire(1000)), true);
+    assert.ok(await new P.Slots(1).acquire(1000).then(() => new P.Slots(1, 0).acquire(1000)));
   });
-  it("Slots never waits: past max, tryAcquire is false until a release", () => {
+  it("Slots never waits: past max, tryAcquire is undefined until a release", () => {
     const s = new P.Slots(2);
-    assert.equal(s.tryAcquire(), true);
-    assert.equal(s.tryAcquire(), true);
-    assert.equal(s.tryAcquire(), false);
-    s.release();
+    const a = s.tryAcquire();
+    const b = s.tryAcquire();
+    assert.ok(a && b && a !== b, "two holds, each its own");
+    assert.equal(s.tryAcquire(), undefined);
+    s.release(a);
     assert.equal(s.inUse, 1);
-    assert.equal(s.tryAcquire(), true);
-    s.release();
-    s.release();
-    s.release();
+    const c = s.tryAcquire();
+    assert.ok(c);
+    s.release(b);
+    s.release(c);
+    s.release(c);
+    s.release(undefined);
     assert.equal(s.inUse, 0, "a release past zero went negative");
   });
 });
@@ -305,6 +344,133 @@ describe("#2773: Admission, the requests served at once per instance", () => {
     assert.deepEqual(await settled(b.acquire(1000, ac.signal)), { v: false });
     a.release();
     assert.equal(await waiting, true);
+  });
+});
+
+// #3362: on the hosted endpoint's 3.1.1 revision a body that stopped coming held one of the two large-body slots for the life of
+// the instance, and no line said so. The bounds that end every request, and the age of each hold the access line reads.
+describe("#3362: every request ends, gives back what it holds once, and a slot held far past that is seen", () => {
+  const clock = () => {
+    let t = 1_000;
+    const now = () => t;
+    now.at = (v) => (t = v);
+    return now;
+  };
+  it("the defaults: a body may send nothing for 10 s, under the 15 s a retry waits for a slot; a request takes at most 60 s, Cloud Run's timeout", () => {
+    assert.equal(P.DEFAULT_BODY_IDLE_MS, 10_000);
+    assert.ok(P.DEFAULT_BODY_IDLE_MS < P.DEFAULT_LARGE_BODY_WAIT_MS, "a retry sent at once would be refused before the upload it abandoned is ended");
+    assert.equal(P.DEFAULT_REQUEST_TIMEOUT_MS, 60_000);
+  });
+  it("Slots.oldestHoldMs: the age of the oldest hold still held, 0 with none; a slot handed over is a new hold", async () => {
+    const now = clock();
+    const s = new P.Slots(2, 1, now);
+    assert.equal(s.oldestHoldMs(), 0, "none held");
+    now.at(2_000);
+    const a = s.tryAcquire();
+    now.at(3_000);
+    const b = s.tryAcquire();
+    assert.deepEqual([a.since, b.since], [2_000, 3_000]);
+    now.at(5_000);
+    assert.equal(s.oldestHoldMs(), 3_000, "a's, the older");
+    const waiter = s.acquire(5_000);
+    now.at(6_000);
+    s.release(a);
+    const c = await waiter;
+    assert.equal(c.since, 6_000, "the waiter's hold starts when the slot is handed to it");
+    assert.equal(s.inUse, 2);
+    assert.equal(s.oldestHoldMs(), 3_000, "b's, now the older");
+    s.release(b);
+    now.at(6_500);
+    assert.equal(s.oldestHoldMs(), 500, "c's");
+    s.release(c);
+    assert.equal(s.oldestHoldMs(), 0);
+  });
+  // The review of #3362's first fix: an instance-wide clock ("slots held without a break, with nothing in flight") added
+  // up short holds that overlapped one after another, and restarted whenever any request was in flight, so a slot whose
+  // holder was in flight and hung read 0 on every line. A hold's own age does neither.
+  it("Slots.oldestHoldMs: holds that overlap one after another for minutes, each given back within 10 s, never read past 10 s", () => {
+    const now = clock();
+    const s = new P.Slots(2, 2, now);
+    let t = 1_000;
+    // A client whose large uploads keep stalling: each holds its slot to the 10 s idle bound, and it sends the next
+    // 5 s after the last, so one or two are held at every moment.
+    const holds = [s.tryAcquire()];
+    now.at((t += 5_000));
+    holds.push(s.tryAcquire());
+    let max = 0;
+    for (let i = 0; i < 240; i++) {
+      now.at((t += 5_000));
+      max = Math.max(max, s.oldestHoldMs());
+      s.release(holds.shift());
+      assert.equal(s.inUse, 1, "a slot was held all along");
+      const next = s.tryAcquire();
+      assert.ok(next, `upload ${i} found no slot`);
+      holds.push(next);
+    }
+    assert.ok(t > 20 * 60_000, "the run covered 20 minutes of slots held without a break");
+    assert.equal(max, 10_000, `the oldest hold read ${max} ms`);
+  });
+  it("Slots.oldestHoldMs: a hold never given back only grows older, whatever is taken and given back beside it", () => {
+    const now = clock();
+    const s = new P.Slots(2, 2, now);
+    now.at(10_000);
+    s.tryAcquire(); // never given back: whether its holder hangs (in flight or not) or has gone, the slot stays held
+    for (let t = 10_000; t <= 10_000 + 10 * 60_000; t += 60_000) {
+      now.at(t);
+      const other = s.tryAcquire();
+      assert.ok(other, "the other slot");
+      now.at(t + 2_000);
+      s.release(other);
+      assert.equal(s.oldestHoldMs(), t + 2_000 - 10_000);
+    }
+    assert.ok(s.oldestHoldMs() > 300_000, "past the alert's 5 minutes");
+  });
+  it("settleBy: run's answer when it settles first, and the deadline is never aborted", async () => {
+    let overdue = 0;
+    let signal;
+    const v = await P.settleBy(1_000, async (d) => ((signal = d), "ran"), () => (overdue++, "late"));
+    assert.deepEqual([v, overdue, signal.aborted], ["ran", 0, false]);
+    await assert.rejects(P.settleBy(1_000, async () => Promise.reject(new Error("ran and failed")), () => "late"), /ran and failed/);
+  });
+  it("settleBy: a run that never settles is answered at the deadline, once, its signal aborted first; what it settles with later is dropped", async () => {
+    const order = [];
+    let settle;
+    const unhandled = [];
+    const onUnhandled = (e) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const t0 = Date.now();
+      const v = await P.settleBy(
+        100,
+        (d) => {
+          d.addEventListener("abort", () => order.push("aborted"));
+          return new Promise((_, reject) => (settle = reject));
+        },
+        () => (order.push("overdue"), "timeout"),
+      );
+      assert.equal(v, "timeout");
+      assert.ok(Date.now() - t0 >= 90, `answered after ${Date.now() - t0} ms`);
+      assert.deepEqual(order, ["aborted", "overdue"]);
+      settle(new Error("too late"));
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(order, ["aborted", "overdue"], "the overdue answer was given twice");
+      assert.deepEqual(unhandled, [], "a late failure went unhandled");
+      const never = P.settleBy(50, () => new Promise(() => {}), () => "timeout");
+      assert.equal(await never, "timeout", "a run that never settles at all");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+  it("a second release of one hold frees nothing, so a third body never gets in past two slots", () => {
+    const s = new P.Slots(2);
+    const a = s.tryAcquire();
+    assert.ok(a, "A");
+    assert.ok(s.tryAcquire(), "B");
+    s.release(a);
+    s.release(a);
+    assert.ok(s.tryAcquire(), "C");
+    assert.equal(s.tryAcquire(), undefined, "D: with B and C holding the two slots");
+    assert.equal(s.inUse, 2);
   });
 });
 
@@ -470,5 +636,17 @@ describe("#2948: apiRoute, upstreamSeverity and networkFailureClass", () => {
     R.onUpstreamFailure(() => got++);
     R.upstreamFailed({ failureClass: "http", path: "/api/v1/public/cves/summary", status: 503, afterMs: 1 });
     assert.equal(got, 0, "a failure was reported on the stdio entrypoint");
+  });
+});
+
+// #3354: hstsFor, the value http.ts sets on every answer to a request that arrived over HTTPS.
+describe("#3354: hstsFor reads X-Forwarded-Proto's last value", () => {
+  it("https (any case, last in a list) gets the value; anything else, or nothing, gets none", () => {
+    assert.equal(P.HSTS_VALUE, "max-age=31536000; includeSubDomains");
+    for (const v of ["https", "HTTPS", " https ", "http,https", "http, https", ["http", "https"]]) assert.equal(P.hstsFor(v), P.HSTS_VALUE, JSON.stringify(v));
+    for (const v of [undefined, "", "http", "https,http", "https, http", "httpsx", "wss", ["https", "http"]]) assert.equal(P.hstsFor(v), undefined, JSON.stringify(v));
+  });
+  it("control: no preload (a decision for the apex domain, not this host)", () => {
+    assert.doesNotMatch(P.HSTS_VALUE, /preload/);
   });
 });

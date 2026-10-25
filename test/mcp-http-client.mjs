@@ -9,8 +9,9 @@
 //                        negotiated revision; the server is stateless, so there is no session id.
 //
 // HttpMcpClient (#2737) is the same wire behind StdioMcpClient's interface (open, listTools,
-// callTool, listPrompts, getPrompt, listResources, readResource, getServerVersion, close), so the
-// production synthetic probes the hosted endpoint with the code that probes the npm package.
+// callTool, listPrompts, getPrompt, listResources, listResourceTemplates, readResource,
+// getServerVersion, close), so the production synthetic probes the hosted endpoint with the code
+// that probes the npm package (#2781: listResourceTemplates, for the cve:// resource probe; #3097: the hosted-versus-npm catalog).
 import { CLIENT_CAPABILITIES_META_KEY, CLIENT_INFO_META_KEY, MODERN, PROTOCOL_VERSION_META_KEY, RpcError, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
 
 export const ACCEPT = "application/json, text/event-stream";
@@ -182,6 +183,10 @@ export class HttpMcpClient {
 
   listResources() {
     return this.listAll("resources/list", "resources");
+  }
+
+  listResourceTemplates() {
+    return this.listAll("resources/templates/list", "resourceTemplates");
   }
 
   readResource({ uri }) {

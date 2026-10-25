@@ -406,11 +406,115 @@ describe("#3266: no listing surface carries a phrase a tool's description has re
 // Smithery's "Link to Smithery" verification check scans this README (served from the public repo) for a
 // link to the server's page (#2723, 2026-10-05). Removing the line un-verifies the listing with no other
 // signal, so it is pinned here, with Glama beside it.
+// #3356: Smithery shuts its proxy (run.tools, server.smithery.ai), API and CLI on 2026-10-31 and stays a
+// registry (https://smithery.ai/future). The link stays (it is the registry entry, and verification is
+// what gives a page a direct URL); the line must also say what the entry is and that Smithery's own
+// URLs stop, dated and sourced, so no reader connects through one. The README is held under a ceiling
+// (readme.test.mjs, #3012), so the line says only that; listings/README.md, "Smithery", says the rest.
+const OUR_URL = "https://mcp.echelongraph.io/mcp";
+function smitheryLineProblems(readme) {
+  const flat = readme.replace(/\s+/g, " ");
+  const at = flat.indexOf("Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp)");
+  if (at < 0) return ["README lost the Smithery backlink that Smithery's verification looks for"];
+  const line = flat.slice(at, flat.indexOf("[Glama]", at) >>> 0);
+  const out = [];
+  if (!line.includes(`a registry entry for \`${OUR_URL}\``)) out.push(`the Smithery link does not say it is a registry entry for ${OUR_URL}`);
+  if (!/its proxy, API and CLI \[shut down on 2026-10-31\]/.test(line)) out.push("the Smithery link does not say Smithery's proxy, API and CLI shut down on 2026-10-31");
+  if (!line.includes("](https://smithery.ai/future)")) out.push("the 2026-10-31 shutdown is not sourced (https://smithery.ai/future)");
+  return out;
+}
 describe("README links the directories that list us", () => {
   it("links the Smithery server page and the Glama listing", () => {
     const readme = read("README.md");
     assert.ok(readme.includes("(https://smithery.ai/servers/echelongraph/echelongraph-mcp)"), "README lost the Smithery backlink that Smithery's verification looks for");
     assert.ok(readme.includes("(https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)"), "README lost the Glama link");
+  });
+  it("#3356: the Smithery link says it is a registry entry for our URL, and that Smithery's proxy, API and CLI shut down on 2026-10-31 (sourced)", () => {
+    assert.deepEqual(smitheryLineProblems(read("README.md")), []);
+  });
+  it("#3356 control: the line as it stood before #3356 is caught on each count; a README without the link on the first", () => {
+    const before = "- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp) ·\n  [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n";
+    assert.equal(smitheryLineProblems(before).length, 3, smitheryLineProblems(before).join(" | "));
+    assert.deepEqual(smitheryLineProblems("- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n"), ["README lost the Smithery backlink that Smithery's verification looks for"]);
+  });
+});
+
+// #3356: listings/README.md says, dated and sourced, that Smithery's proxy, API and CLI stop on
+// 2026-10-31 and the listing is a registry entry for our URL; release step 5 no longer publishes
+// unconditionally; and the listing check's Smithery row reads the page, not only the API.
+function smitheryShutdownProblems(text) {
+  const flat = text.replace(/\s+/g, " ");
+  const section = (flat.split(/ ## Smithery /)[1] ?? "").split(/ ## /)[0];
+  const out = [];
+  if (!flat.includes("**Smithery from 2026-10-31 (#3356), read 2026-10-25.** Smithery's notice (https://smithery.ai/future, read 2026-10-25)"))
+    out.push("no dated, sourced Smithery note under the status table");
+  if (!section.startsWith("**From 2026-10-31: a registry entry, nothing to publish (#3356).** Smithery's notice (https://smithery.ai/future, read 2026-10-25)"))
+    out.push('the Smithery section does not open with "From 2026-10-31: a registry entry", dated and sourced');
+  if (!section.includes(`a registry entry for \`${OUR_URL}\``)) out.push(`the Smithery section does not say the listing is a registry entry for ${OUR_URL}`);
+  const step5 = (flat.match(/ 5\. `scripts\/publish-smithery\.sh`.*? 6\. /) ?? [""])[0];
+  if (!step5) out.push("release step 5 (scripts/publish-smithery.sh) is gone");
+  else {
+    if (/^ 5\. `scripts\/publish-smithery\.sh`: Smithery re-scans/.test(step5)) out.push("release step 5 still says Smithery re-scans at every release, with no end date");
+    if (!/it publishes nothing and reads no key/.test(step5)) out.push("release step 5 does not say that, once Smithery's API is gone, it publishes nothing and reads no key");
+    // The review of d15e9f9e: "A Smithery outage never fails the release" was not true as shipped:
+    // before 2026-10-31 an API answering a 5xx runs the publish path, which can end FAILED (exit 1;
+    // publish-smithery-selftest.sh's 503-before case holds it). So the claim is scoped, and the
+    // exception is said.
+    if (/A Smithery outage never fails the release/.test(step5)) out.push("release step 5 says a Smithery outage never fails the release, unscoped: before 2026-10-31 an API answering a 5xx still runs the publish path, which can end FAILED (exit 1)");
+    if (!/From 2026-10-31, and before it once the API is observed gone or the CLI cannot be installed, nothing Smithery does fails the release\./.test(step5))
+      out.push("release step 5 does not say from when nothing Smithery does fails the release (from 2026-10-31, or once the API is observed gone or the CLI cannot be installed)");
+    if (!/Before 2026-10-31 an API that answers a 5xx or times out tells nothing, so the step publishes as before, and a publish or read-back that fails is FAILED \(exit 1\)/.test(step5))
+      out.push("release step 5 does not say that before 2026-10-31 an API answering a 5xx runs the publish path, which can end FAILED (exit 1)");
+  }
+  const row = flat.match(/\| Smithery[^|]*\| `[^`]*smithery\.ai[^|]*\|/)?.[0] ?? "";
+  if (/^\| Smithery \| `api\.smithery\.ai\//.test(row)) out.push("the listing check's Smithery row says it reads only Smithery's API");
+  return out;
+}
+describe("#3356: listings/README.md says Smithery's proxy, API and CLI stop on 2026-10-31", { skip: SKIP }, () => {
+  it("dated and sourced, under the status table and atop the Smithery section; step 5 and the check's row say what they do now", () => {
+    assert.deepEqual(smitheryShutdownProblems(read("listings/README.md")), []);
+  });
+  it("control: the README's lines before #3356 are caught on each count", () => {
+    const before = [
+      "Smithery by URL, Docker's remote entry and Anthropic's directory all connect to the hosted",
+      "endpoint, so the version they serve is the hosted endpoint's.",
+      "## Smithery",
+      "**Status as of 2026-10-05** (a dated record; the status table above has the latest): listed at",
+      "## mcp.so",
+      "5. `scripts/publish-smithery.sh`: Smithery re-scans the hosted endpoint, so its listing shows this",
+      "   release's tools and descriptions. It refuses until step 3 holds. It reads the publisher's",
+      "   Smithery API key from the deployment's secret store and checks that Smithery's API lists",
+      "   the release's tool count. Self-test: `scripts/publish-smithery-selftest.sh`.",
+      "6. docker/mcp-registry#5429, while it is open: move",
+      "| Smithery | `api.smithery.ai/servers/echelongraph/echelongraph-mcp` | displayName, description | none (a URL listing serves the hosted endpoint) |",
+    ].join("\n");
+    const got = smitheryShutdownProblems(before);
+    // 8: three for the notes and the section, four for step 5 (re-scans; no "publishes nothing"; no
+    // scoped "nothing Smithery does fails the release"; no 5xx exception), one for the check's row.
+    assert.equal(got.length, 8, got.join(" | "));
+  });
+  it("control: step 5 as d15e9f9e shipped it (\"A Smithery outage never fails the release.\", unscoped) is caught on the claim, its scope and its exception", () => {
+    const now = read("listings/README.md");
+    const step5 = [
+      "5. `scripts/publish-smithery.sh`. While Smithery's API answers (it shuts on 2026-10-31,",
+      "   https://smithery.ai/future): Smithery re-scans the hosted endpoint, so its listing shows this",
+      "   release's tools and descriptions; it refuses until step 3 holds, reads the publisher's Smithery",
+      "   API key from the deployment's secret store and checks that Smithery's API lists the release's",
+      "   tool count. Once the API is gone, as observed (refused, no such host, 410, an HTML page; a",
+      "   timeout or a 5xx only from 2026-10-31), or the CLI cannot be installed (#3356): it publishes",
+      "   nothing and reads no key; it reads Smithery's public page (as HTML and as the Markdown agent view)",
+      "   and exits 0 where the page names `https://mcp.echelongraph.io/mcp`, lists us without a URL, no",
+      "   longer lists us, or cannot be read (each a dated note, \"Smithery retired its API (2026-10-31…)\"),",
+      "   and 1 only where the page sends users to another URL or only to Smithery's proxy. A Smithery",
+      "   outage never fails the release. Self-test: `scripts/publish-smithery-selftest.sh` (it also runs",
+      "   the release runners' loop: \"smithery ok try 1\", no retry, with the API live and gone).",
+      "6. docker/mcp-registry#5429, while it is open: move",
+    ].join("\n");
+    const shipped = now.replace(/^5\. `scripts\/publish-smithery\.sh`[\s\S]*?^6\. docker\/mcp-registry#5429, while it is open: move/m, step5);
+    assert.notEqual(shipped, now, "the control's splice found no step 5 to replace");
+    const got = smitheryShutdownProblems(shipped);
+    assert.equal(got.length, 3, got.join(" | "));
+    assert.ok(got[0].startsWith("release step 5 says a Smithery outage never fails the release, unscoped"), got.join(" | "));
   });
 });
 

@@ -68,7 +68,7 @@
     "properties": {
       "cve_id": {
         "type": "string",
-        "description": "a CVE ID, e.g. CVE-2023-44487"
+        "description": "a CVE ID, e.g. CVE-2023-44487, or an ENISA EUVD (EUVD-2026-90503), GitHub GHSA, OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) or GCVE-0 (GCVE-0-2024-3094) ID, which EchelonGraph resolves to its CVE"
       },
       "full": {
         "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",

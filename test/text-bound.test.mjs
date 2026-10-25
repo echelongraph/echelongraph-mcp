@@ -326,7 +326,7 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     // get_cve CVE-2021-44228, the case #3013 reproduced in Claude Code: 65,540 characters there.
     const g = whole["get_cve, CVE-2021-44228"];
     assert.ok(structuredSize(g, stub.base) > 60_000, "get_cve CVE-2021-44228 with full: true is not the 65,540-character structured result #3013 reproduced");
-    assert.throws(() => assertStructuredUnderBudget("get_cve, CVE-2021-44228", structuredSize(g, stub.base)), /^Error: get_cve, CVE-2021-44228: structuredContent is \d{5} characters of JSON, past the 30000/);
+    assert.throws(() => assertStructuredUnderBudget("get_cve, CVE-2021-44228", structuredSize(g, stub.base)), /^Error: get_cve, CVE-2021-44228: structuredContent is \d{5,} characters of JSON, past the 30000/);
   });
 
   // #3013: full: true is the answer whole on every tool, schema-valid, and its text is the default's.
@@ -808,19 +808,60 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.ok(!blocksOf(few)[1].includes(ITEM_TEXT_ELSEWHERE), "the note says item texts are left out where data keeps them");
   });
 
-  it(`every case is within ${SHAPED_DRIFT * 100}% of production's text for the same call, as text-bound-live.mjs recorded it`, (t) => {
-    const cases = readLiveRecord().cases ?? {};
+  // #3273's review: what is wrong with a list of known drifts (TEXT_DRIFT_KNOWN,
+  // STRUCTURED_DRIFT_KNOWN) on a record: an entry for no recorded case, one moved more than MARGIN
+  // from its pin, one back within SHAPED_DRIFT, one that does not say why or what clears it.
+  const knownDriftProblems = (name, known, off, record, here, there) => {
+    const out = [];
+    for (const [label, k] of Object.entries(known)) {
+      const c = SHAPED.find((x) => x.label === label);
+      const r = record.cases?.[label];
+      if (!c || !r) {
+        out.push(`${name} names ${label}, which is not a recorded SHAPED case`);
+        continue;
+      }
+      if (Math.abs(here(c) - k.shaped) > MARGIN || Math.abs(there(r) - k.recorded) > MARGIN) out.push(`${label}: ${name} pins ${k.shaped} here and ${k.recorded} on record; they are ${here(c)} and ${there(r)} now: look at it again (re-sample, re-record, or re-pin with why), do not let a known drift grow unseen`);
+      if (!off.some((o) => o.label === label)) out.push(`${label}: back within ${SHAPED_DRIFT * 100}% of the record (${here(c)} / ${there(r)}): drop its ${name} entry`);
+      if (!(typeof k.why === "string" && k.why.length > 40 && typeof k.clears === "string" && k.clears.length > 20)) out.push(`${label}: a known drift in ${name} says why and what clears it`);
+    }
+    return out;
+  };
+
+  it(`every case is within ${SHAPED_DRIFT * 100}% of production's text for the same call, as text-bound-live.mjs recorded it, but the ones TEXT_DRIFT_KNOWN names (pinned)`, (t) => {
+    const record = readLiveRecord();
+    const cases = record.cases ?? {};
     let compared = 0;
     for (const c of SHAPED) {
       const r = cases[c.label];
       if (!r || /own text/.test(r.source)) continue;
       compared++;
       const drift = (c.size - r.total) / r.total;
-      t.diagnostic(`${c.label}: ${c.size} here, ${r.total} on production's answers (${r.measured_at}), ${drift >= 0 ? "+" : ""}${(drift * 100).toFixed(1)}%`);
-      assert.ok(Math.abs(drift) <= SHAPED_DRIFT, `${c.label}: its size here, ${c.size}, is ${(drift * 100).toFixed(1)}% from production's ${r.total} (${r.measured_at}): its fixture's rows are not cut as production's are; re-sample them`);
+      t.diagnostic(`${c.label}: ${c.size} here, ${r.total} on production's answers (${r.measured_at}), ${drift >= 0 ? "+" : ""}${(drift * 100).toFixed(1)}%${tb.TEXT_DRIFT_KNOWN[c.label] ? " (TEXT_DRIFT_KNOWN)" : ""}`);
     }
     for (const c of SHAPED.filter((x) => !x.live)) assert.ok(cases[c.label], `${c.label}: text-bound-live.mjs has no record of it: run npm run text-bound:live -- --record`);
-    assert.ok(compared > 0);
+    assert.ok(compared >= 15, `only ${compared} cases compared`);
+    const off = tb.textOffRecord(record);
+    assert.deepEqual(off.filter((o) => !o.known).map(tb.textDriftMessage), []);
+    assert.deepEqual(knownDriftProblems("TEXT_DRIFT_KNOWN", tb.TEXT_DRIFT_KNOWN, off, record, (c) => c.size, (r) => r.total), []);
+  });
+
+  it("control (#3273's review): a text drift no entry names fails, and a known one that moves past its pin, or comes back within SHAPED_DRIFT, fails", () => {
+    const record = readLiveRecord();
+    const at = (label, total) => ({ ...record, cases: { ...record.cases, [label]: { ...record.cases[label], total } } });
+    const problems = (rec) => knownDriftProblems("TEXT_DRIFT_KNOWN", tb.TEXT_DRIFT_KNOWN, tb.textOffRecord(rec), rec, (c) => c.size, (r) => r.total);
+    // get_cve's text as SHAPED held it through 3.1.1 (2.6.2's answer, repeated): +22.7% from
+    // production's 20,268 (hosted 3.1.1, 2026-10-25), named and not known.
+    const g = "get_cve, CVE-2021-44228";
+    const [old] = tb.textOffRecord(record, SHAPED.map((x) => (x.label === g ? { ...x, size: 24_876 } : x))).filter((o) => o.label === g);
+    assert.ok(old && !old.known, `${g} at 24,876 is not named`);
+    assert.match(tb.textDriftMessage(old), new RegExp(`^get_cve, CVE-2021-44228: its size here, 24876, is \\+\\d+\\.\\d% from production's ${record.cases[g].total} `));
+    // A known one moved past its pin (production's text MARGIN + 1 further), and one back within it.
+    const [label, k] = Object.entries(tb.TEXT_DRIFT_KNOWN)[0] ?? [];
+    assert.ok(label, "TEXT_DRIFT_KNOWN names no case, so this control holds nothing of it");
+    assert.deepEqual(problems(record), []);
+    assert.match(problems(at(label, k.recorded + MARGIN + 1)).join("\n"), /look at it again/);
+    const c = SHAPED.find((x) => x.label === label);
+    assert.match(problems(at(label, c.size)).join("\n"), /back within 10% of the record .*: drop its TEXT_DRIFT_KNOWN entry/);
   });
 
   // #3273: the same of the structured result, which #3140 recorded for every case and nothing
@@ -842,14 +883,7 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.ok(compared >= 15, `only ${compared} cases compared`);
     const off = tb.structuredOffRecord(record);
     assert.deepEqual(off.filter((o) => !o.known).map(tb.structuredDriftMessage), []);
-    for (const [label, k] of Object.entries(tb.STRUCTURED_DRIFT_KNOWN)) {
-      const c = SHAPED.find((x) => x.label === label);
-      const r = record.cases?.[label];
-      assert.ok(c && r, `STRUCTURED_DRIFT_KNOWN names ${label}, which is not a recorded SHAPED case`);
-      assert.ok(Math.abs(c.structured - k.shaped) <= MARGIN && Math.abs(r.structured - k.recorded) <= MARGIN, `${label}: STRUCTURED_DRIFT_KNOWN pins ${k.shaped} here and ${k.recorded} on record; they are ${c.structured} and ${r.structured} now: look at it again (re-sample, re-record, or re-pin with why), do not let a known drift grow unseen`);
-      assert.ok(off.some((o) => o.label === label), `${label}: back within ${SHAPED_DRIFT * 100}% of the record (${c.structured} / ${r.structured}): drop its STRUCTURED_DRIFT_KNOWN entry`);
-      assert.ok(typeof k.why === "string" && k.why.length > 40 && typeof k.clears === "string" && k.clears.length > 20, `${label}: a known drift says why and what clears it`);
-    }
+    assert.deepEqual(knownDriftProblems("STRUCTURED_DRIFT_KNOWN", tb.STRUCTURED_DRIFT_KNOWN, off, record, (c) => c.structured, (r) => r.structured), []);
   });
 
   it("control (#3273): a case's structured result moved past SHAPED_DRIFT from its record is named, one at it is not, and the hosted endpoint's own text is left out", () => {
@@ -867,24 +901,126 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     }
     // At it, either way: not named.
     for (const recorded of [Math.ceil(c.structured / (1 + SHAPED_DRIFT)), Math.floor(c.structured / (1 - SHAPED_DRIFT))]) assert.deepEqual(named(at(recorded)), [], `${label} with production at ${recorded}`);
-    // The ticket's own case: the default search_cves page as SHAPED held it through 3.0.2.
+    // The ticket's own case: the default search_cves page as SHAPED held it through 3.0.2, with its
+    // drift from whatever the record holds (+212.6% from the 9,064 of 2026-10-11; +195.8% from the
+    // 9,581 of hosted 3.1.1, 2026-10-25).
     const sc = "search_cves, default page (search openssl)";
     const [old] = tb.structuredOffRecord(record, SHAPED.map((x) => (x.label === sc ? { ...x, structured: 28_336 } : x))).filter((o) => o.label === sc);
     assert.ok(old, "the 28,336-character default page through 3.0.2 is not named");
-    assert.match(tb.structuredDriftMessage(old), /is \+212\.6% from production's 9064/);
+    const prod = record.cases[sc].structured;
+    assert.ok(prod < 28_336 / (1 + SHAPED_DRIFT), `the record's ${prod} for ${sc} is within ${SHAPED_DRIFT * 100}% of 28,336, so this control holds nothing`);
+    assert.ok(tb.structuredDriftMessage(old).includes(`is +${(((28_336 - prod) / prod) * 100).toFixed(1)}% from production's ${prod} (${record.cases[sc].measured_at})`), tb.structuredDriftMessage(old));
     // The hosted endpoint's own text is compared with nothing but the ceiling, as for the text.
     assert.deepEqual(named(at(1, "the hosted endpoint's own text (3.0.0), not this checkout's")), []);
   });
 
+  it("control (#3273's review): a structured drift STRUCTURED_DRIFT_KNOWN names is known only while it holds still: unnamed it fails, moved past its pin or back within SHAPED_DRIFT it fails", () => {
+    const record = readLiveRecord();
+    const [label, k] = Object.entries(tb.STRUCTURED_DRIFT_KNOWN)[0] ?? [];
+    assert.ok(label, "STRUCTURED_DRIFT_KNOWN names no case, so this control holds nothing of it");
+    const c = SHAPED.find((x) => x.label === label);
+    const at = (structured) => ({ ...record, cases: { ...record.cases, [label]: { ...record.cases[label], structured } } });
+    const problems = (rec) => knownDriftProblems("STRUCTURED_DRIFT_KNOWN", tb.STRUCTURED_DRIFT_KNOWN, tb.structuredOffRecord(rec), rec, (x) => x.structured, (r) => r.structured);
+    // On the committed record it is past SHAPED_DRIFT, and known: the review's case, which the first
+    // version of #3273 kept off this list by resetting its record by hand.
+    const [o] = tb.structuredOffRecord(record).filter((x) => x.label === label);
+    assert.ok(o?.known, `${label}: not past ${SHAPED_DRIFT * 100}% on the committed record, or not marked known`);
+    assert.match(tb.structuredDriftMessage(o), new RegExp(`^${label}: its structuredContent here, ${c.structured}, is -\\d+\\.\\d% from production's ${record.cases[label].structured} `));
+    assert.deepEqual(problems(record), []);
+    // Production's moved MARGIN + 1 further, either way: look at it again.
+    for (const d of [MARGIN + 1, -(MARGIN + 1)]) assert.match(problems(at(k.recorded + d)).join("\n"), /look at it again/, `${label} at ${k.recorded + d}`);
+    // Within MARGIN of the pin: still known, nothing to do.
+    assert.deepEqual(problems(at(k.recorded + MARGIN)), []);
+    // Back within SHAPED_DRIFT (production's at the case's own size): drop the entry.
+    assert.match(problems(at(c.structured)).join("\n"), /back within 10% of the record .*: drop its STRUCTURED_DRIFT_KNOWN entry/);
+  });
+
+  // #3273's review: truncated says a list was thinned, not to which level, so a size was all that
+  // told search_cves' default page's level (inferred, not measured). The record now keeps the fields
+  // each thinned list's entries keep (kept_fields, text-bound.mjs keptFields), and each case here is
+  // held to them: of the fields its own answer's entries have, its entries keep exactly the ones
+  // production's keep. A fixture whose rows are cut at another level than production's fails here
+  // whatever its size; a field only production's answer has (an API newer than the fixture) is not
+  // compared.
+  const fieldsAt = (data, list) => new Set((list.split(".").reduce((o, k) => o?.[k], data) ?? []).flatMap((r) => (r && typeof r === "object" && !Array.isArray(r) ? Object.keys(r) : [])));
+  const levelOff = (record, label, data, answer) => {
+    const r = record.cases?.[label];
+    if (!r?.kept_fields || /own text/.test(r.source)) return [];
+    const out = [];
+    for (const [list, prod] of Object.entries(r.kept_fields)) {
+      const has = fieldsAt(answer, list);
+      const here = fieldsAt(data, list);
+      const onlyHere = [...has].filter((f) => here.has(f) && !prod.includes(f));
+      const onlyThere = [...has].filter((f) => !here.has(f) && prod.includes(f));
+      if (onlyHere.length || onlyThere.length) out.push(`${label}: ${list}'s entries keep ${onlyHere.length ? `${onlyHere.join(", ")} here, which production's (${r.measured_at}) do not` : ""}${onlyHere.length && onlyThere.length ? ", and " : ""}${onlyThere.length ? `not ${onlyThere.join(", ")}, which production's keep` : ""}: this case is cut at another level than production's (re-sample its rows), or production's answer no longer has the field`);
+    }
+    return out;
+  };
+  it("#3273's review: where the record names the fields production's thinned entries keep (kept_fields), each case's entries keep the same ones, of the fields its answer has", (t) => {
+    const record = readLiveRecord();
+    const held = TOOL_CASES.filter((c) => record.cases?.[c.label]?.kept_fields && !/own text/.test(record.cases[c.label].source));
+    for (const c of held) t.diagnostic(`${c.label}: ${Object.entries(record.cases[c.label].kept_fields).map(([l, f]) => `${l} keeps ${f.length} fields on production, ${fieldsAt(measured[c.label].structuredContent.data, l).size} here`).join("; ")}`);
+    // The ticket's own case is among them.
+    assert.ok(held.some((c) => c.label === "search_cves, default page (search openssl)"), "the record does not say which fields search_cves' default page keeps: re-record (npm run text-bound:live -- --hosted --record)");
+    assert.ok(held.length >= 8, `only ${held.length} cases held to a level on record`);
+    assert.deepEqual(held.flatMap((c) => levelOff(record, c.label, measured[c.label].structuredContent.data, answerOf(c.label))), []);
+  });
+
+  it("control (#3273's review): search_cves' default page cut at the first level (every row's description kept), as SHAPED held it through 3.0.2, is named; production's own level is not", () => {
+    const record = readLiveRecord();
+    const label = "search_cves, default page (search openssl)";
+    const answer = answerOf(label);
+    const prod = record.cases[label].kept_fields?.cves;
+    assert.ok(prod, `${label}: no kept_fields on record`);
+    assert.ok(!prod.includes("description") && answer.cves.every((r) => typeof r.description === "string"), "production's default page keeps description, or this answer's rows have none, so this control holds nothing");
+    assert.deepEqual(levelOff(record, label, { ...answer, cves: answer.cves.map(({ cve_id, description, severity }) => ({ cve_id, description, severity })) }, answer).length, 1);
+    assert.match(levelOff(record, label, { cves: answer.cves.map((r) => ({ ...r })) }, answer)[0], /^search_cves, default page \(search openssl\): cves's entries keep [a-z0-9_, ]*\bdescription\b[a-z0-9_, ]* here, which production's \(2026-[^)]+\) do not/);
+    // The other polarity: a field production keeps, dropped here.
+    assert.match(levelOff(record, label, { cves: answer.cves.map(({ severity, ...r }) => r) }, answer).at(-1) ?? "", /not severity, which production's keep/);
+    // At production's level: not named.
+    assert.deepEqual(levelOff(record, label, measured[label].structuredContent.data, answer), []);
+    // A record with no kept_fields (before #3273's review) holds nothing to it.
+    assert.deepEqual(levelOff({ ...record, cases: { ...record.cases, [label]: { ...record.cases[label], kept_fields: undefined } } }, label, { cves: answer.cves }, answer), []);
+  });
+
   // #3273's trip-wire is any doc that claims what a default search_cves row keeps. Production's cut
-  // level for that page is not on record (the record of 2026-10-11 has no truncated): only its size
-  // is. So while the record holds none, every sentence of the CHANGELOG's unreleased section and of
-  // text-bound.mjs that speaks of production's level for search_cves says it is inferred.
-  it("#3273's review: while the record holds no truncated for search_cves' default page, no sentence states production's cut level for it as measured", () => {
+  // level for that page was not on record through the hosted 3.1.1 read of 2026-10-25 14:01Z: the
+  // record of 2026-10-11 had no truncated, and truncated ({"cves":{"total":20,"returned":20,
+  // "thinned":true}}) is written the same at the first thinned level (every row's description kept)
+  // and the second. Since #3273's review the record keeps kept_fields, the fields each thinned list's
+  // entries keep, and so the level: a row keeps description at the first and not at the second. So
+  // every sentence of the CHANGELOG's unreleased section and of text-bound.mjs that speaks of
+  // production's level for the default search_cves page says it is inferred while the record cannot
+  // tell, and once it can, says no such thing and names no level but the record's.
+  // #3273's review: the phrasing it reads is any case ("Production's", "On production the default
+  // search_cves page"): through the review it read "production's" and "default page" in lower case only.
+  const DEFAULT_PAGE = /default (?:search_cves )?page|default search_cves/i;
+  const SAYS_INFERRED = /inferred|not (?:yet )?(?:measured|on record)/i;
+  const sentencesOf = (text) => text.replace(/\s+/g, " ").split(/(?<=[.:;])\s+/);
+  const levelClaimProblems = (passages, level) => {
+    const out = [];
+    for (const [where, text] of passages) {
+      for (const s of sentencesOf(text)) {
+        if (!(DEFAULT_PAGE.test(s) && /production/i.test(s) && /\blevel\b|\bcuts? (?:it )?to\b/i.test(s))) continue;
+        const said = `${where}: ${s.slice(0, 240)}`;
+        if (level === null) {
+          if (!SAYS_INFERRED.test(s)) out.push(`${said} (production's level for the default search_cves page is not on record: say it is inferred)`);
+          continue;
+        }
+        if (SAYS_INFERRED.test(s)) out.push(`${said} (the record says production's level, the ${level}: it is measured, not inferred)`);
+        const named = new Set([...s.matchAll(/\b(first|second)(?: thinned)? level\b/gi)].map((m) => m[1].toLowerCase()));
+        if (named.size === 1 && !named.has(level)) out.push(`${said} (the record says production's level is the ${level})`);
+      }
+    }
+    return out;
+  };
+  const levelOnRecord = (rec) => (Array.isArray(rec?.kept_fields?.cves) ? (rec.kept_fields.cves.includes("description") ? "first" : "second") : null);
+  it("#3273's review: no sentence states production's cut level for search_cves' default page but as the record holds it (inferred while kept_fields does not say it; the level kept_fields says once it does)", (t) => {
     const label = "search_cves, default page (search openssl)";
     const rec = readLiveRecord().cases?.[label];
     assert.ok(rec, `control: the record has ${label}`);
-    if (Object.hasOwn(rec, "truncated")) return; // on record: a claim of it can be held to the record
+    const level = levelOnRecord(rec);
+    t.diagnostic(`production's level for ${label} on record: ${level ?? "none"}${rec.kept_fields ? ` (cves keeps ${rec.kept_fields.cves.join(", ")})` : ""}`);
     const changelog = fs.readFileSync(path.join(PKG_DIR, "CHANGELOG.md"), "utf8");
     const heads = [...changelog.matchAll(/^## .*$/gm)];
     const unreleased = changelog.slice(heads[0].index, heads[1]?.index ?? changelog.length);
@@ -896,14 +1032,27 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       .join(" ")
       .split("\u0000")
       .join(". ");
-    const sentences = (text) => text.replace(/\s+/g, " ").split(/(?<=[.:;])\s+/);
-    const claims = [];
-    for (const [where, text] of [["CHANGELOG.md, its newest section", unreleased], ["test/text-bound.mjs", source]]) {
-      for (const s of sentences(text)) {
-        if (/default page|default search_cves/.test(s) && /production's/.test(s) && /\blevel\b|\bcuts? (?:it )?to\b/.test(s) && !/inferred|not (?:yet )?(?:measured|on record)/.test(s)) claims.push(`${where}: ${s.slice(0, 240)}`);
-      }
-    }
-    assert.deepEqual(claims, [], "production's level for the default search_cves page is inferred, not measured: say so");
+    assert.deepEqual(levelClaimProblems([["CHANGELOG.md, its newest section", unreleased], ["test/text-bound.mjs", source]], level), []);
+  });
+
+  it("control (#3273's review): the trip-wire guard reads a claim of production's level however it is cased or phrased, and holds it to the record", () => {
+    const at = (s, level) => levelClaimProblems([["control", s]], level).length;
+    // Not on record: a claim of a level fails unless it says inferred.
+    for (const s of [
+      "The cut keeps no description: production's default page is cut at the second level.",
+      "Production's default page is cut at the second level.",
+      "On production the default search_cves page is cut at the second level, as measured.",
+      "PRODUCTION'S DEFAULT PAGE IS CUT AT THE SECOND LEVEL.",
+    ]) assert.equal(at(s, null), 1, s);
+    assert.equal(at("Production's level for the default page is inferred from its size, not measured.", null), 0);
+    // On record (the second level): the record's level passes, another fails, and inferred is stale.
+    assert.equal(at("Production's default page is cut at the second level.", "second"), 0);
+    assert.equal(at("On production the default search_cves page is cut at the first level.", "second"), 1);
+    assert.equal(at("Production's level for the default page is inferred from its size, not measured.", "second"), 1);
+    // The record's own reading of kept_fields: description kept is the first level, not kept the second.
+    assert.equal(levelOnRecord({ kept_fields: { cves: ["cve_id", "description", "severity"] } }), "first");
+    assert.equal(levelOnRecord({ kept_fields: { cves: ["cve_id", "severity"] } }), "second");
+    assert.equal(levelOnRecord({ truncated: { cves: { total: 20, returned: 20, thinned: true } } }), null);
   });
 
   // #2800: what each description says a row of the first text block keeps, held on every SHAPED
@@ -1101,7 +1250,10 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     };
     // get_cve, every level.
     const getCve = TOOL_CASES.find((c) => c.tool === "get_cve");
-    const summary = { fix_status: FIX_STATUS, vendor_remediation_kinds: { vendor_fix: 1 }, vendor_advisories: 20, vendors_not_parsed: ["cisco"], kev_required_action: getCve.set.kev_required_action, fixed_branches_count: 11, fixed_versions: [], fix_references: [], failed_sections: [], truncated: false, see: "cve_remediation" };
+    // #3273's review: the answer is production's whole (2026-10-25), which carries CISA's KEV text.
+    const [{ kev_required_action }] = Object.values(shapedAnswers(getCve));
+    assert.equal(typeof kev_required_action, "string", "get_cve's production-shaped answer carries no kev_required_action");
+    const summary = { fix_status: FIX_STATUS, vendor_remediation_kinds: { vendor_fix: 1 }, vendor_advisories: 20, vendors_not_parsed: ["cisco"], kev_required_action, fixed_branches_count: 11, fixed_versions: [], fix_references: [], failed_sections: [], truncated: false, see: "cve_remediation" };
     const wide = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, `${"w".repeat(299)}${i % 10}`]));
     const levels = new Map();
     const structuredLevels = new Set();
@@ -1398,6 +1550,7 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
         const c = written.cases[tool];
         assert.deepEqual([c.source, c.measured_at, c.read_ms, c.answers_age_ms], [tb.KEPT_SOURCE, was.measured_at, was.read_ms, was.answers_age_ms], `cases.${tool}: dated by the read, not the re-measure`);
         assert.equal(typeof c.data_truncated, "boolean", `cases.${tool}: #3273's data_truncated is not on record`);
+        assert.ok(Object.hasOwn(c, "kept_fields"), `cases.${tool}: #3273's review's kept_fields is not on record`);
       }
       assert.equal(written.about, tb.RECORD_ABOUT);
       assert.deepEqual(tb.datedAfterAnswers(written, fixture(a, "prod-answers")).map(tb.datedAfterAnswersMessage), []);
@@ -1781,18 +1934,28 @@ describe("#3013's review: the cve:// resource's envelope says what the resource 
   const [record] = Object.values(shapedAnswers(getCve));
   const asRead = (data) => ({ state: "measured", measured_at: data.updated_at ?? null, method: "m", coverage: null, freshness: null, notes: ["get_cve OK."], data_truncated: false, data });
 
-  it("cut: data_truncated true, and truncated names cpe_match and references with what the resource keeps of each", () => {
+  // #3273's review: the record is production's whole (hosted 3.1.1, 2026-10-25), with its 20
+  // cpe_configurations, whose nodes' cpeMatch lists run to 154 entries; through 3.1.1 it was 2.6.2's,
+  // whose only lists were cpe_match and references.
+  it("cut: data_truncated true, and truncated names cpe_match, cpe_configurations, the cpeMatch lists in them and references with what the resource keeps of each", () => {
     const s = JSON.parse(cveResourceText(asRead(record), noteSentences));
     assert.equal(s.data_truncated, true);
-    assert.deepEqual(s.truncated, { cpe_match: { total: 396, returned: s.data.cpe_match.length }, references: { total: 103, returned: s.data.references.length } });
-    assert.ok(s.data.cpe_match.length < 396 && s.data.references.length < 103);
+    const n = s.data.cpe_match.length;
+    const nested = "cpe_configurations[].nodes[].cpeMatch";
+    assert.deepEqual(s.truncated, { cpe_match: { total: 396, returned: n }, cpe_configurations: { total: 20, returned: n }, [nested]: { total: 154, returned: n }, references: { total: 103, returned: n } });
+    assert.ok(n < 20 && s.data.cpe_configurations.length === n && s.data.references.length === n);
     assertResourceTruncated("cve://CVE-2021-44228", s, record);
     assert.match(s.notes.at(-1), /each named with its full length\.$/);
+    assert.ok(s.notes.at(-1).includes(`${nested} (154)`), s.notes.at(-1));
+    // The record's longest cpeMatch list is in a configuration the cap leaves out: the ones kept run
+    // to fewer (63 at 8 kept), which is what the note and truncated said through 3.1.1.
+    const keptLongest = Math.max(...record.cpe_configurations.slice(0, n).flatMap((c) => c.nodes.map((x) => x.cpeMatch.length)));
+    assert.ok(keptLongest < 154, `the configurations kept hold the longest cpeMatch list (${keptLongest}), so this case does not test the length of one left out`);
     // In the envelope's order: data_truncated, then truncated, then data.
     assert.deepEqual(Object.keys(s).slice(-3), ["data_truncated", "truncated", "data"]);
   });
   it("whole: data_truncated false, no truncated, the structured result pretty-printed as read", () => {
-    const small = { ...record, cpe_match: record.cpe_match.slice(0, 3), references: record.references.slice(0, 3) };
+    const small = { ...record, cpe_match: record.cpe_match.slice(0, 3), cpe_configurations: record.cpe_configurations.slice(0, 3), references: record.references.slice(0, 3) };
     const text = cveResourceText(asRead(small), noteSentences);
     assert.equal(text, JSON.stringify(asRead(small), null, 2));
     assertResourceTruncated("cve:// small", JSON.parse(text), small);
@@ -1810,6 +1973,10 @@ describe("#3013's review: the cve:// resource's envelope says what the resource 
     assert.throws(() => assertResourceTruncated("cve://CVE-2021-44228, as through the review", old, record), /data_truncated is false and data is not the record whole/);
     // and a truncated that leaves out a list the resource cut.
     assert.throws(() => assertResourceTruncated("cve://, references unnamed", { ...s, truncated: { cpe_match: s.truncated.cpe_match } }, record), /truncated does not name it/);
+    // #3273's review: and the nested list's length as through 3.1.1, the longest in the configurations kept.
+    const nested = "cpe_configurations[].nodes[].cpeMatch";
+    const keptLongest = Math.max(...s.data.cpe_configurations.flatMap((c) => c.nodes.map((x) => x.cpeMatch.length)));
+    assert.throws(() => assertResourceTruncated("cve://, as through 3.1.1", { ...s, truncated: { ...s.truncated, [nested]: { ...s.truncated[nested], total: keptLongest } } }, record), new RegExp(`truncated\\.cpe_configurations\\[\\]\\.nodes\\[\\]\\.cpeMatch\\.total is ${keptLongest}`));
   });
 });
 
