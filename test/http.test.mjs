@@ -827,10 +827,16 @@ describe("#2773: at most MCP_MAX_IN_FLIGHT requests are served at once; the next
   });
 });
 
-// A 2026-07-28 subscriptions/listen on a connection of its own: the SSE stream the SDK keeps open
-// until the client leaves. Resolves on the server's first event (the acknowledgement), or on a
-// whole answer that is not a stream; close() is the client leaving.
-function openListen(url) {
+// A 2026-07-28 subscriptions/listen on a connection of its own. Resolves once the answer has ended,
+// with every SSE event it carried, or, if it is still open after `openMs`, with the events so far
+// and open: true; close() is the client leaving.
+//
+// #3345: since @modelcontextprotocol/server 2.2.0 (its #2651) the SDK ends a listen stream right
+// after the acknowledgement when it honours none of the notification types asked for, with a
+// resultType "complete" result. This server declares no listChanged (index.ts), so it honours none
+// and every listen ends that way, at once. Through 3.1.0 (SDK 2.1.0) the stream stayed open,
+// carrying only keepalives, until its client left, and was logged 499 then.
+function openListen(url, openMs = 3000) {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: modernMeta() } });
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -844,14 +850,21 @@ function openListen(url) {
         let text = "";
         const contentType = res.headers["content-type"] ?? "";
         const stream = /^text\/event-stream/.test(contentType);
-        const settle = (t) => resolve({ status: res.statusCode, contentType, stream, message: parseRpcBody(contentType, t), close: () => req.destroy() });
+        let timer;
+        const settle = (open) => {
+          clearTimeout(timer);
+          const events = stream
+            ? text
+                .split(/\r?\n/)
+                .filter((l) => l.startsWith("data:"))
+                .map((l) => JSON.parse(l.slice(5).trim()))
+            : [parseRpcBody(contentType, text)].filter(Boolean);
+          resolve({ status: res.statusCode, contentType, stream, open, events, message: events[0], close: () => req.destroy() });
+        };
+        timer = setTimeout(() => settle(true), openMs);
         res.setEncoding("utf8");
-        res.on("data", (d) => {
-          text += d;
-          const end = text.indexOf("\n\n");
-          if (end >= 0 && stream) settle(text.slice(0, end));
-        });
-        res.on("end", () => settle(text));
+        res.on("data", (d) => (text += d));
+        res.on("end", () => settle(false));
         res.on("error", () => {});
       },
     );
@@ -860,9 +873,9 @@ function openListen(url) {
   });
 }
 
-// #2773: a listen stream is open until its client leaves and carries only keepalives here (the
-// server declares no listChanged). It takes no place: held, MCP_MAX_IN_FLIGHT of them left every
-// other request waiting MCP_ADMISSION_WAIT_MS for a 503.
+// #2773: a listen takes no place and holds no work (httpPolicy.ts isListenStream): held open, as it
+// was through SDK 2.1.0, MCP_MAX_IN_FLIGHT of them left every other request waiting
+// MCP_ADMISSION_WAIT_MS for a 503. It still takes none, though it now ends at once (above).
 describe("#2773: subscriptions/listen streams take no place; the gate still bounds every other request", () => {
   const N = 2;
   let stub, srv;
@@ -883,84 +896,69 @@ describe("#2773: subscriptions/listen streams take no place; the gate still boun
     era === "modern" ? modern(srv.url, "server/discover") : legacy(srv.url, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
   // The access lines of 2026-era listens (a 2025-era body naming the method is not one).
   const listenLines = () => accessLines(srv).filter((l) => l.rpc_method === "subscriptions/listen" && l.protocol_version === MODERN);
-  // Opens `count` listen streams into `streams`, one after another, each acknowledged.
-  async function openAll(streams, count) {
+  // Opens `count` listens, one after another; each is acknowledged, then ends with its complete
+  // result, and its access line is written.
+  async function openAll(count) {
+    const logged = listenLines().length;
     for (let i = 0; i < count; i++) {
       const s = await openListen(srv.url);
-      streams.push(s);
-      assert.equal(s.status, 200, `listen ${i + 1} of ${count}: ${JSON.stringify(s.message)}`);
+      s.close();
+      assert.equal(s.status, 200, `listen ${i + 1} of ${count}: ${JSON.stringify(s.events)}`);
       assert.ok(s.stream, s.contentType);
-      assert.equal(s.message?.method, "notifications/subscriptions/acknowledged", JSON.stringify(s.message));
+      assert.equal(s.open, false, `listen ${i + 1} of ${count} is still open after 3 s: ${JSON.stringify(s.events)}`);
+      assert.equal(s.events[0]?.method, "notifications/subscriptions/acknowledged", JSON.stringify(s.events));
+      assert.deepEqual(s.events[0].params.notifications, {}, "the acknowledgement honours a notification type this server does not send");
+      assert.equal(s.events.at(-1)?.id, 1, JSON.stringify(s.events));
+      assert.equal(s.events.at(-1)?.result?.resultType, "complete", JSON.stringify(s.events));
     }
-  }
-  // The client leaves every stream; resolves once each one's access line is written, so no line
-  // of one case lands in the next.
-  async function closeAll(streams) {
-    const logged = listenLines().length;
-    const open = streams.filter((s) => s.stream);
-    for (const s of streams) s.close();
-    await waitFor(() => listenLines().length >= logged + open.length, "the closed streams' access lines");
+    await waitFor(() => listenLines().length >= logged + count, "the listens' access lines");
   }
 
-  for (const count of [N, N + 5]) {
-    for (const era of ["modern", "legacy"]) {
-      it(`${count} listen streams open, MCP_MAX_IN_FLIGHT ${N}: a ${era} tools/call, and the era's opening request, are answered 200 at once`, async () => {
-        stub.state.ms = 50;
-        const streams = [];
-        try {
-          await openAll(streams, count);
-          const before = accessLines(srv).length;
-          // "At once" is the server's own queued_ms below, not this test's clock: a call the streams
-          // held would wait MCP_ADMISSION_WAIT_MS and be refused 503 (the control that lets listens
-          // take places fails every case on that), while a wall-clock bound of 1 s failed 2 runs in 6
-          // on a loaded runner (2026-10-17) with nothing held.
-          const r = await summary(era);
-          assert.equal(r.status, 200, r.text);
-          assert.notEqual(r.message.result.isError, true, r.text);
-          assert.deepEqual(r.message.result.structuredContent.data, SUMMARY);
-          const o = await opening(era);
-          assert.equal(o.status, 200, o.text);
-          await sleep(100);
-          const line = accessLines(srv)
-            .slice(before)
-            .find((l) => l.rpc_method === "tools/call");
-          assert.deepEqual([line.status, line.in_flight, line.queued_ms <= 50], [200, 1, true], JSON.stringify(line));
-        } finally {
-          await closeAll(streams);
-        }
-      });
-    }
-  }
-
-  it("a listen stream is logged when its client ends it: 499 and client_closed, as #2775 logs a client that went, holding no place (in_flight 0)", async () => {
+  it("a listen is acknowledged and ends at once with its complete result: logged 200, holding no place (in_flight 0, queued_ms 0)", async () => {
     const before = listenLines().length;
-    const streams = [];
-    await openAll(streams, 1);
-    await sleep(200);
-    assert.equal(listenLines().length, before, "the line was written before the stream ended");
-    await closeAll(streams);
+    await openAll(1);
     const line = listenLines()[before];
     assert.deepEqual(
       [line.method, line.path, line.status, line.client_closed, line.refused, line.in_flight, line.queued_ms, line.protocol_version],
-      ["POST", "/mcp", 499, true, "", 0, 0, MODERN],
+      ["POST", "/mcp", 200, false, "", 0, 0, MODERN],
       JSON.stringify(line),
     );
-    assert.ok(line.body_bytes > 0 && line.duration_ms >= 200, JSON.stringify(line));
+    assert.ok(line.body_bytes > 0 && line.duration_ms < 3000, JSON.stringify(line));
   });
 
-  it(`control: with ${N + 5} listen streams open the gate still bounds ordinary calls of both eras, and a 2025-era body naming subscriptions/listen waits like one`, async () => {
-    const streams = [];
+  for (const era of ["modern", "legacy"]) {
+    it(`${N + 5} listens, MCP_MAX_IN_FLIGHT ${N}: a ${era} tools/call, and the era's opening request, are answered 200 at once`, async () => {
+      stub.state.ms = 50;
+      await openAll(N + 5);
+      const before = accessLines(srv).length;
+      // "At once" is the server's own queued_ms below, not this test's clock (a wall-clock bound of
+      // 1 s failed 2 runs in 6 on a loaded runner, 2026-10-17, with nothing held).
+      const r = await summary(era);
+      assert.equal(r.status, 200, r.text);
+      assert.notEqual(r.message.result.isError, true, r.text);
+      assert.deepEqual(r.message.result.structuredContent.data, SUMMARY);
+      const o = await opening(era);
+      assert.equal(o.status, 200, o.text);
+      await sleep(100);
+      const line = accessLines(srv)
+        .slice(before)
+        .find((l) => l.rpc_method === "tools/call");
+      assert.deepEqual([line.status, line.in_flight, line.queued_ms <= 50], [200, 1, true], JSON.stringify(line));
+    });
+  }
+
+  it(`control: with every place taken a 2026-era listen is answered at once, while ordinary calls of both eras, and a 2025-era body naming subscriptions/listen, wait like any request, then 503`, async () => {
     let release = () => {};
     try {
-      await openAll(streams, N + 5);
       stub.state.ms = 50;
       stub.state.maxOpen = 0;
       stub.state.gate = new Promise((resolve) => (release = resolve));
       const held = [summary("modern"), summary("legacy")];
       await waitFor(() => stub.state.open === N, `${N} calls at the API`);
-      // A listen opened now, with every place taken, is served at once.
+      // A listen opened now, with every place taken, is served at once: it is not admitted. Were it
+      // admitted, it would wait MCP_ADMISSION_WAIT_MS and be refused 503 like the requests below.
       const t0 = Date.now();
-      await openAll(streams, 1);
+      await openAll(1);
       assert.ok(Date.now() - t0 < 1000, `a listen waited ${Date.now() - t0} ms for a place`);
       // Every other request waits MCP_ADMISSION_WAIT_MS, then 503.
       const t1 = Date.now();
@@ -984,7 +982,6 @@ describe("#2773: subscriptions/listen streams take no place; the gate still boun
     } finally {
       stub.state.gate = undefined;
       release();
-      await closeAll(streams);
     }
   });
 });

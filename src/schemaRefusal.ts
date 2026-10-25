@@ -1,7 +1,7 @@
 // #3015: arguments that break a tool's inputSchema are answered like every other refusal: the full
 // envelope, state invalid_input, isError true, its notes naming each argument and the rule it broke.
 //
-// The SDK (@modelcontextprotocol/server 2.1.0, McpServer's tools/call handler) validates the
+// The SDK (@modelcontextprotocol/server 2.1.0, and 2.3.0 alike; McpServer's tools/call handler) validates the
 // arguments against the registered inputSchema before the tool's handler runs, and turns a failure
 // into a bare error result of its own: one text block ("Input validation error: Invalid arguments for
 // tool search_cves: limit: Too big: expected number to be <=50"), isError true, no structuredContent,
@@ -109,6 +109,8 @@ export function issueText(issue: Issue, input: unknown): string {
       const cmp = issue.inclusive === false ? (big ? "less than" : "more than") : big ? "at most" : "at least";
       if (issue.origin === "string") return `${name} must be ${cmp} ${n} ${n === "1" ? "character" : "characters"} long`;
       if (issue.origin === "array" || issue.origin === "set") return `${name} must hold ${cmp} ${n} ${n === "1" ? "entry" : "entries"}`;
+      // #3345: a record's bound (inputBounds.ts boundedRecord), counted in its own members.
+      if (issue.origin === "object" || issue.origin === "record") return `${name} must hold ${cmp} ${n} ${n === "1" ? "member" : "members"}`;
       return `${name} must be ${cmp} ${n}`;
     }
     case "invalid_value":
@@ -122,8 +124,13 @@ export function issueText(issue: Issue, input: unknown): string {
     case "invalid_format":
       return `${name} must be ${issue.format ? `a valid ${issue.format}` : "in the format the inputSchema gives"}`;
     case "invalid_union": {
+      // #3345: the value is of the type one branch takes and broke that branch's rule (an sbom
+      // object past its bound): name that branch's issues, at the union's path.
+      const ofType = (b: readonly Issue[]) => b.length === 1 && b[0].code === "invalid_type" && !b[0].path?.length;
+      const matched = (issue.errors ?? []).filter((b) => b.length > 0 && !ofType(b));
+      if (matched.length === 1) return matched[0].map((i) => issueText({ ...i, path: [...(issue.path ?? []), ...(i.path ?? [])] }, input)).join("; ");
       // Each branch refused only the value's type: name the types the branches take.
-      const types = (issue.errors ?? []).map((b) => (b.length === 1 && b[0].code === "invalid_type" && !b[0].path?.length ? TYPE_NAMES[b[0].expected ?? ""] : undefined));
+      const types = (issue.errors ?? []).map((b) => (ofType(b) ? TYPE_NAMES[b[0].expected ?? ""] : undefined));
       const named = types.length > 0 && types.every((t): t is string => t !== undefined) ? [...new Set(types)] : undefined;
       return named ? `${name} must be ${listOf(named)}, not ${jsonType(sent)}` : `${name} must take one of the forms the inputSchema allows, not ${jsonType(sent)}`;
     }

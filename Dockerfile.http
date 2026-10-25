@@ -26,6 +26,18 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22.23.3-alpine3.24@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 ENV NODE_ENV=production
+# #3345: the base image's own npm, npx and corepack leave the runtime stage. Nothing here runs them:
+# the CMD below is node on dist/http.js, Cloud Run's probe is an HTTP GET of /health
+# (deploy-all.sh), and the dependencies were installed and pruned in the build stage. The npm the
+# base bundles is not in package-lock.json and carried 10 of the 13 fixable HIGH vulnerabilities
+# #3018's Trivy gate refused the 3.1.0 image for (brace-expansion 2.0.2, ip-address 10.1.0, pacote
+# 19.0.2 and 20.0.1, picomatch 4.0.3, sigstore 3.1.0; the other 3 were the SDK's and zod's, fixed
+# by package-lock.json). The check after rm fails the build if a later base keeps any of them
+# elsewhere on PATH or in the global node_modules. test/dockerfile-base.test.mjs holds this stage
+# to it. The build stage keeps npm: it runs npm ci, build and prune.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+ && ! command -v npm && ! command -v npx && ! command -v corepack \
+ && [ -z "$(ls -A /usr/local/lib/node_modules 2>/dev/null)" ]
 WORKDIR /app
 # package.json is read at start-up: the server's name and version (serverInfo, /health and the
 # API User-Agent) come from it.

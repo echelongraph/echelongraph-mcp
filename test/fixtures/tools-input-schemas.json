@@ -193,7 +193,8 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "purls": {
-        "description": "package URLs to check, e.g. pkg:npm/lodash@4.17.20 or pkg:deb/debian/openssl@3.0.11-1~deb12u1?distro=debian-12 (up to 2,000 distinct, sent in batches of 200)",
+        "description": "package URLs to check, e.g. pkg:npm/lodash@4.17.20 or pkg:deb/debian/openssl@3.0.11-1~deb12u1?distro=debian-12 (up to 2,000 distinct, sent in batches of 200), in a list of at most 10,000 entries, repeats included",
+        "maxItems": 10000,
         "type": "array",
         "items": {
           "type": "string"
@@ -206,6 +207,7 @@
             "type": "string"
           },
           {
+            "maxProperties": 64,
             "type": "object",
             "propertyNames": {
               "type": "string"
@@ -225,6 +227,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "files": {
+        "maxItems": 20,
         "type": "array",
         "items": {
           "type": "object",

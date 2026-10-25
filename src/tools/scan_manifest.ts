@@ -354,6 +354,7 @@ export function registerScanManifest<F extends FailureLike>(server: McpServer, d
       title: SCAN_MANIFEST_TITLE,
       description: SCAN_MANIFEST_DESCRIPTION,
       inputSchema: z.object({
+        // #3345: at most MAX_FILES, checked before any file is parsed (inputBounds.ts says why).
         files: z
           .array(
             z.object({
@@ -362,6 +363,7 @@ export function registerScanManifest<F extends FailureLike>(server: McpServer, d
               format: formatEnum.optional().describe("the format to read the file as, when its name does not say"),
             }),
           )
+          .max(MAX_FILES)
           .describe(
             "1 to 20 files, up to 5,000,000 characters of content in all; read by this MCP server into purls, and only the purls are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the files are the request body",
           ),

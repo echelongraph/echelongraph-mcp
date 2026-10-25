@@ -9,6 +9,11 @@
 // deploy-all.sh's Trivy scan (#3018) refuses a base with a fixed HIGH or CRITICAL; the remedy is a
 // new digest here.
 //
+// #3345: a fixed HIGH in a tool the base bundles but the image never runs has another remedy: the
+// 3.1.0 image's 13 fixable HIGH included 10 in the base's own npm (pacote, sigstore, ip-address,
+// brace-expansion, picomatch), and Dockerfile.http's runtime stage now removes npm, npx and
+// corepack, which nothing in that stage runs (the last describe below holds it).
+//
 // Dockerfile.http is not in the npm package: where it is absent (the packed tarball's run) this is
 // skipped and says why.
 import { describe, it } from "node:test";
@@ -86,3 +91,97 @@ describe("#3018: the hosted image's base is pinned by digest, the stdio image's 
   });
 });
 
+
+// ── #3345: the runtime stage carries no npm, npx or corepack ─────────────────────
+//
+// Each instruction of a Dockerfile, continuations joined and comment lines dropped as docker reads
+// them, with the stage it is in (0 for the first FROM's).
+export function instructions(src) {
+  const out = [];
+  let stage = -1;
+  let acc = "";
+  let at = 0;
+  src.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (acc === "" && (line === "" || line.startsWith("#"))) return;
+    if (acc !== "" && line.startsWith("#")) return;
+    if (acc === "") at = i + 1;
+    if (/\\$/.test(line)) {
+      acc += `${line.slice(0, -1)} `;
+      return;
+    }
+    const text = (acc + line).trim();
+    acc = "";
+    const [kw, ...rest] = text.split(/\s+/);
+    const k = kw.toUpperCase();
+    if (k === "FROM") stage++;
+    out.push({ line: at, kw: k, args: rest.join(" "), stage });
+  });
+  return out;
+}
+
+// What the image's npm, npx and corepack are, in node's official images.
+export const BUNDLED_TOOLS = ["/usr/local/lib/node_modules/npm", "/usr/local/lib/node_modules/corepack", "/usr/local/bin/npm", "/usr/local/bin/npx", "/usr/local/bin/corepack"];
+const RUNS_A_TOOL = /(^|[\s"'\[,;&|(])(npm|npx|corepack)([\s"',\]);&|]|$)/;
+
+// Why the last stage of `src` may still carry or run the base's npm, npx or corepack; [] if not.
+export function runtimeNpmProblems(src) {
+  const all = instructions(src);
+  const last = Math.max(...all.map((x) => x.stage));
+  const stage = all.filter((x) => x.stage === last);
+  const out = [];
+  const removal = stage.findIndex((x) => x.kw === "RUN" && /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r/.test(x.args) && BUNDLED_TOOLS.every((p) => x.args.split(/\s+/).includes(p)));
+  if (removal < 0) out.push(`the runtime stage removes none or not all of ${BUNDLED_TOOLS.join(", ")} (one RUN rm -rf naming each)`);
+  const user = stage.findIndex((x) => x.kw === "USER" && !/^(0|root)(:|$)/.test(x.args));
+  if (removal >= 0 && user >= 0 && user < removal) out.push(`line ${stage[removal].line}: the removal runs after USER ${stage[user].args} (line ${stage[user].line}), which cannot delete root's files`);
+  for (const [i, x] of stage.entries()) {
+    if (i === removal) continue;
+    const runs = x.kw === "RUN" || x.kw === "CMD" || x.kw === "ENTRYPOINT" || x.kw === "HEALTHCHECK" || x.kw === "SHELL";
+    if (runs && RUNS_A_TOOL.test(x.args)) out.push(`line ${x.line}: ${x.kw} runs npm, npx or corepack in the runtime stage: ${x.args}`);
+    if (x.kw === "COPY" && /--from=/.test(x.args) && /node_modules\/(npm|corepack)\b|\/usr\/local\/(bin|lib)/.test(x.args)) out.push(`line ${x.line}: COPY brings a tool back: ${x.args}`);
+  }
+  const cmd = stage.filter((x) => x.kw === "CMD" || x.kw === "ENTRYPOINT").at(-1);
+  if (!cmd || !/^\[\s*"node"/.test(cmd.args)) out.push(`the runtime stage's ${cmd ? `${cmd.kw} (line ${cmd.line})` : "CMD"} is not an exec form starting node`);
+  return out;
+}
+
+describe("#3345: Dockerfile.http's runtime stage carries no npm, npx or corepack (pacote, sigstore, ip-address, brace-expansion, picomatch)", { skip }, () => {
+  it("its last stage removes the five paths before USER, and neither runs nor copies back any of them; the CMD is node", () => {
+    assert.deepEqual(runtimeNpmProblems(fs.readFileSync(HTTP, "utf8")), []);
+  });
+
+  it("the build stage still installs with npm ci, builds and prunes (the removal is the runtime stage's alone)", () => {
+    const build = instructions(fs.readFileSync(HTTP, "utf8")).filter((x) => x.stage === 0);
+    assert.ok(build.some((x) => x.kw === "RUN" && /\bnpm ci\b/.test(x.args)), "the build stage no longer runs npm ci");
+    assert.ok(build.some((x) => x.kw === "RUN" && /\bnpm prune --omit=dev\b/.test(x.args)), "the build stage no longer prunes the dev dependencies");
+  });
+
+  it("no HEALTHCHECK, and the CMD runs dist/http.js under node (Cloud Run's probe is an HTTP GET of /health)", () => {
+    const rt = instructions(fs.readFileSync(HTTP, "utf8"));
+    const last = rt.filter((x) => x.stage === Math.max(...rt.map((y) => y.stage)));
+    assert.equal(last.filter((x) => x.kw === "HEALTHCHECK").length, 0);
+    assert.match(last.filter((x) => x.kw === "CMD").at(-1).args, /^\["node",.*"dist\/http\.js"\]$/);
+  });
+
+  // The reader can fail. Each control is a Dockerfile.http a later edit could write.
+  it("control: no removal, a path left out, the removal after USER, a CMD or HEALTHCHECK that runs npm, and a COPY that brings it back are each refused", () => {
+    const src = fs.readFileSync(HTTP, "utf8");
+    const removal = instructions(src).find((x) => x.kw === "RUN" && x.args.includes("/usr/local/bin/npx"));
+    assert.ok(removal, "control: the removal is not found");
+    const lines = src.split("\n");
+    // The RUN and its continuation lines.
+    let end = removal.line - 1;
+    while (/\\\s*$/.test(lines[end])) end++;
+    const without = [...lines.slice(0, removal.line - 1), ...lines.slice(end + 1)].join("\n");
+    assert.ok(runtimeNpmProblems(without).some((p) => p.includes("removes none or not all")), runtimeNpmProblems(without).join("; "));
+    const partial = src.replace(" /usr/local/bin/npx", "");
+    assert.ok(runtimeNpmProblems(partial).some((p) => p.includes("removes none or not all")));
+    const late = [...lines.slice(0, removal.line - 1), ...lines.slice(end + 1)].join("\n").replace(/^USER node$/m, `USER node\n${lines.slice(removal.line - 1, end + 1).join("\n")}`);
+    assert.ok(runtimeNpmProblems(late).some((p) => p.includes("after USER node")), runtimeNpmProblems(late).join("; "));
+    assert.ok(runtimeNpmProblems(src.replace(/^CMD .*$/m, 'CMD ["npm", "run", "start:http"]')).some((p) => p.includes("runs npm")));
+    assert.ok(runtimeNpmProblems(`${src}\nHEALTHCHECK CMD npx -y wait-on http://localhost:8080/health\n`).some((p) => p.includes("HEALTHCHECK runs npm")));
+    assert.ok(runtimeNpmProblems(src.replace(/^COPY --from=build \/app\/dist \.\/dist$/m, "COPY --from=build /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\nCOPY --from=build /app/dist ./dist")).some((p) => p.includes("brings a tool back")));
+    // The other stage's npm ci is not the runtime stage's, and a word that merely contains npm is no tool.
+    assert.deepEqual(runtimeNpmProblems(src.replace("ENV NODE_ENV=production", "ENV NODE_ENV=production\nLABEL org.opencontainers.image.source=https://www.npmjs.com/package/echelongraph-mcp")), []);
+  });
+});

@@ -473,7 +473,17 @@ for (const era of [MODERN, "2025-06-18"]) {
       const cases = [
         ["neither argument", {}, /exactly one of purls/],
         ["both arguments", { purls: ["pkg:npm/a@1"], sbom: CDX }, /exactly one of purls/],
+        // #3345: a list past 10,000 entries (repeats included) is refused by the inputSchema's bound,
+        // before any is read; past 2,000 distinct purls, a list's or a document's, by check_sbom
+        // itself, as through 3.1.0 (#3345's review: the bound is not the distinct rule).
         ["2001 distinct purls", { purls: Array.from({ length: 2001 }, (_, i) => `pkg:npm/p${i}@1.0.0`) }, /2001 distinct purls; at most 2000 are checked per call \(in batches of 200, within the API's budget of 1200 components a minute\), and none is dropped silently: split the list/],
+        ["10001 purls, 1 distinct", { purls: new Array(10001).fill("pkg:npm/p@1.0.0") }, /purls must hold at most 10000 entries/],
+        [
+          "a document of 2001 distinct purls",
+          { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", components: Array.from({ length: 2001 }, (_, i) => ({ type: "library", name: `p${i}`, version: "1.0.0", purl: `pkg:npm/p${i}@1.0.0` })) } },
+          /2001 distinct purls; at most 2000 are checked per call \(in batches of 200, within the API's budget of 1200 components a minute\), and none is dropped silently: split the list/,
+        ],
+        ["an sbom object of 65 top-level members", { sbom: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`m${i}`, i])) }, /sbom must hold at most 64 members/],
         ["sbom that is not JSON", { sbom: "<bom xmlns='http://cyclonedx.org/schema/bom/1.5'/>" }, /sbom is not JSON/],
         ["a JSON object that is neither format", { sbom: { hello: "world" } }, /neither a CycloneDX JSON document .* nor an SPDX JSON document/],
         ["a CycloneDX document whose components carry no purl", { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "x", version: "1" }] } }, /holds 1 components and none carries a purl/],

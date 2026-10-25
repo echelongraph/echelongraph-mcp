@@ -34,7 +34,9 @@
 // unless the whole structured result would pass 30,000 characters of JSON: then, unless the call
 // says full: true, its lists are cut in the order the tool names (DATA CUT, #3013), data_truncated
 // is true and truncated gives each list cut (data_truncated is false otherwise). Each tool
-// advertises the envelope as its outputSchema, which `data` validates against cut or whole.
+// advertises the envelope as its outputSchema, which `data` validates against cut or whole. The
+// one result without it is the SDK's own refusal of arguments over MAX_TOOL_INPUT_ELEMENTS
+// (#3345), which no tool's handler sees.
 //
 // The envelope in the text (#2440, #2467). Many clients pass only `content` to the model, so the
 // last text block of every result is structuredContent serialized as JSON, less what an earlier
@@ -61,8 +63,8 @@ import * as z from "zod";
 import { registerKevRecent } from "./tools/kev_recent.js";
 import { registerEPSSHistory } from "./tools/epss_history.js";
 import { registerCheckAffected } from "./tools/check_affected.js";
-import { registerCheckSbom } from "./tools/check_sbom.js";
-import { registerScanManifest } from "./tools/scan_manifest.js";
+import { MAX_PURL_ENTRIES, MAX_SBOM_CHARS, registerCheckSbom } from "./tools/check_sbom.js";
+import { MAX_FILES, registerScanManifest } from "./tools/scan_manifest.js";
 import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerCveRemediation } from "./tools/cve_remediation.js";
 import { fixStatusSchema } from "./fixStatus.js";
@@ -3391,11 +3393,46 @@ const SCORE_ASSESSED_DESCRIPTION =
 // The shared helpers a tool in src/tools/ is handed (#2718), so its file holds its own logic.
 const TOOL_KIT = { api, succeeded, failed, badInput, crashed, checked, okHead, envelopeSchema, annotations: ANNOTATIONS, cveIdArg: CVE_ID_ARG, instant: Instant };
 
+// #3345 (CVE-2026-111768): the most array elements and object members, counted together at every
+// depth, that one tools/call's arguments may hold. The SDK (2.3.0, McpServer's
+// maxToolInputElements, off unless set) counts them before any inputSchema runs, and answers a
+// call over it with isError: true and one text block of its own, "Invalid arguments for tool
+// <name>: arguments contain more than the maximum of <n> elements", without structuredContent: its
+// tools/call handler offers no hook that would let badInput's envelope answer it
+// (test/input-elements.test.mjs holds that shape). Through 3.1.0 nothing bounded this on stdio,
+// and on the hosted endpoint only the 6 MiB body cap did (httpPolicy.ts), about 3,145,000 elements.
+//
+// The limit is the largest input a tool accepts, from each tool's own limits, so no call a tool
+// would answer is refused by it:
+//   - check_sbom { sbom: <object>, full }: the document is at most MAX_SBOM_CHARS (5,000,000)
+//     characters as JSON. There every element takes at least 2 characters (a one-character value
+//     and its comma, as in [0,0,…]) and an object document 4 more ({"":[ … ]}), so it holds at
+//     most (5,000,000 - 4) / 2 = 2,499,998 elements; with sbom and full, 2,500,000. One more is a
+//     document over 5,000,000 characters, which check_sbom refuses anyway.
+//   - check_sbom { purls: […], full }: MAX_PURL_ENTRIES (10,000) entries, the most its inputSchema
+//     takes, repeats included (it checks at most MAX_PURLS, 2,000, distinct): 10,002.
+//   - scan_manifest { files: […], full }: MAX_FILES (20) files of filename, content and format:
+//     2 + 20 x 4 = 82. A lockfile's lines and entries are inside its content, one string.
+//   - every other tool: at most 7 arguments, none of them a list or an object.
+// A purl list, a set of files or an SBOM's top level far smaller than this is refused by its own
+// inputSchema bound first (#3345), before zod reads an element of it.
+const SBOM_OBJECT_MAX_ELEMENTS = Math.floor((MAX_SBOM_CHARS - 4) / 2);
+export const MAX_TOOL_INPUT_ELEMENTS = Math.max(2 + SBOM_OBJECT_MAX_ELEMENTS, 2 + MAX_PURL_ENTRIES, 2 + MAX_FILES * 4);
+
 // One server, built per connection by serveStdio for whichever era the client opens with, and
-// per request by the hosted HTTP entrypoint (http.ts, #2316): one tool module for both.
+// per request by the hosted HTTP entrypoint (http.ts, #2316): one tool module for both. A server
+// serves one connection (SDK 2.3.0's fix for CVE-2026-111770), which this per-connection and
+// per-request factory never shares (test/per-request-server.test.mjs).
 // tools/list answers in registration order, which is the order below.
 export function createServer(): McpServer {
-  const server = new McpServer({ name: NAME, version: VERSION }, { instructions: INSTRUCTIONS, capabilities: { tools: { listChanged: false }, prompts: { listChanged: false }, resources: { listChanged: false } } });
+  const server = new McpServer(
+    { name: NAME, version: VERSION },
+    {
+      instructions: INSTRUCTIONS,
+      capabilities: { tools: { listChanged: false }, prompts: { listChanged: false }, resources: { listChanged: false } },
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
+    },
+  );
   // #3015: arguments that break a tool's inputSchema get badInput's envelope (state invalid_input,
   // notes naming each argument and its rule), not the SDK's bare "Input validation error" text.
   // Before the first registerTool, so every tool below and in src/tools/ is covered; tools/list's

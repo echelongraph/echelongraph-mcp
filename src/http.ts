@@ -213,8 +213,9 @@ function send(res: http.ServerResponse, status: number, body: string, headers: R
 // "client closed request" of nginx and of the SDK), whatever status line had already been sent.
 // inFlight / queuedMs (#2773): the requests in flight when this one was admitted, itself
 // included, and how long it waited for that. A subscriptions/listen stream is never admitted
-// (httpPolicy.ts isListenStream), so its line says 0 and 0; its status is 499 with clientClosed
-// when its client ends it, which is how a listen stream normally ends.
+// (httpPolicy.ts isListenStream), so its line says 0 and 0. Since SDK 2.2.0 (3.1.1, #3345) a listen
+// here ends at once, its status 200; through 3.1.0 it stayed open until its client ended it, logged
+// 499 with clientClosed.
 type Outcome = {
   status: number;
   body?: Buffer;
@@ -359,9 +360,10 @@ async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse
       // is held to that.
       if (body.length > MAX_BODY_BYTES && !isLargeBodyTarget(facts)) return { ...tooLarge(res, cors), body, facts };
 
-      // A 2026-era subscriptions/listen is a stream open until its client leaves, carrying only
-      // keepalives here: it takes no place and holds no work, or 64 idle ones would leave every
-      // other request waiting for a 503 (#2773; httpPolicy.ts isListenStream says what bounds it).
+      // A 2026-era subscriptions/listen is a stream that does no work here (since SDK 2.2.0 it ends
+      // right after its acknowledgement; through 2.1.0 it stayed open until its client left): it
+      // takes no place and holds no work, or 64 idle ones would leave every other request waiting
+      // for a 503 (#2773; httpPolicy.ts isListenStream says what bounds it).
       const standard = { protocolVersion: header(req, "mcp-protocol-version"), mcpMethod: header(req, "mcp-method"), mcpName: header(req, "mcp-name") };
       if (isListenStream(facts, body, standard)) return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal)), facts };
     }

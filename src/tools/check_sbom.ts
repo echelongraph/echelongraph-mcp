@@ -19,6 +19,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type Again, type DataCut, type LeaveLast, type RowKeep, type TextCut, type ThinLevel } from "../textBudget.js";
+import { boundedRecord } from "../inputBounds.js";
 import {
   CLEAN_NOTE,
   DISTRO_NOTE,
@@ -74,6 +75,27 @@ export const CHECK_SBOM = "check_sbom";
 // components) is 0.74 MB; this leaves room for a much larger one while bounding what this process
 // parses.
 export const MAX_SBOM_CHARS = 5_000_000;
+// #3345: the most top-level members an sbom passed as an object may have, checked before zod
+// reads any of them (inputBounds.ts boundedRecord). CycloneDX 1.6 defines 18 ($schema, bomFormat,
+// specVersion, serialNumber, version, metadata, components, services, externalReferences,
+// dependencies, compositions, properties, vulnerabilities, annotations, formulation, declarations,
+// definitions, signature), SPDX 2.3 16 and SPDX 3.0's JSON-LD 2; 64 leaves room for a later
+// version's and a generator's own. What a member holds is bounded by the document's character cap
+// above and by the arguments' element limit (index.ts MAX_TOOL_INPUT_ELEMENTS).
+export const MAX_SBOM_MEMBERS = 64;
+// #3345: the most entries purls may hold, repeats included, checked before zod reads any
+// (inputBounds.ts). Not MAX_PURLS, the most DISTINCT purls a call checks, counted after trimming
+// and dedupe (purlsRefusal): a list may repeat a purl, as a flattened SBOM does once per install
+// path, and through 3.1.0 such a list was checked with each purl sent once. Five times MAX_PURLS,
+// room for each of 2,000 distinct purls five times over; only a list past it, which 3.1.0 had no
+// bound for, is newly refused. It is reached over the hosted endpoint as on stdio (no body cap
+// there): a check_sbom call may be a large body (httpPolicy.ts, up to 6 MiB), and 10,000 entries
+// of realistic purls (22 to 120 characters, npm to rpm with qualifiers) are a 0.25 to 1.2 MB
+// tools/call body, of the longest the backend takes (MAX_PURL_LEN, 512) 5.15 MB
+// (test/input-bounds.test.mjs holds that under the cap). Its 10,002 elements are far below the
+// arguments' element limit (index.ts MAX_TOOL_INPUT_ELEMENTS), and the answer grows with the
+// distinct purls sent, not with this.
+export const MAX_PURL_ENTRIES = 10_000;
 // CycloneDX nests components; this bounds the walk.
 const MAX_DEPTH = 32;
 // The order in which extract() reads and counts the distinct purls (#2799 review): purls as listed;
@@ -94,7 +116,7 @@ export const CHECK_SBOM_ROUTING =
 export const CHECK_SBOM_DESCRIPTION =
   "Check a dependency list against EchelonGraph's advisory corpus, one verdict per component. " +
   CHECK_SBOM_ROUTING +
-  " Pass purls (package URLs, up to 2,000 distinct) or sbom (a CycloneDX or SPDX JSON document, up to 5,000,000 characters). This server reads the purls from the document; only they are sent to the API, in POST bodies of at most 200, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. data.results holds one row per component sent, in order, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids, matched_package and matched_via (a deb or apk purl's upstream qualifier matches as its source package); each match carries fixed_in (the next unaffected version) or null with fixed_in_reason. data.summary counts the verdicts. not_affected is the only clean verdict: not_assessed (no verdict, as for a deb, apk or rpm purl without a distro qualifier naming its release, which EchelonGraph does not guess) and undetermined are not, and the note counts both. The API allows 1,200 components a minute per caller; on a 429 the tool waits out Retry-After, up to 50 seconds a call, then answers what it has, the rest in data.not_sent_purls, unchecked and not clean. Input with more than 2,000 distinct purls is refused, not truncated." +
+  " Pass purls (package URLs, up to 2,000 distinct, 10,000 with repeats) or sbom (a CycloneDX or SPDX JSON document, up to 5,000,000 characters). This server reads the document's purls; only they are sent to the API, in POST bodies of at most 200, never in a URL; the document itself is not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the document is the request body, accepted up to 6 MiB. data.results holds one row per component sent, in order, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids, matched_package and matched_via (a deb or apk purl's upstream qualifier matches as its source package); each match carries fixed_in (the next unaffected version) or null with fixed_in_reason. data.summary counts the verdicts. not_affected is the only clean verdict: not_assessed (no verdict, as for a deb, apk or rpm purl without a distro qualifier naming its release, which EchelonGraph does not guess) and undetermined are not, and the note counts both. The API allows 1,200 components a minute per caller; on a 429 the tool waits out Retry-After, up to 50 seconds a call, then answers what it has, the rest in data.not_sent_purls, not clean. Input with more than 2,000 distinct purls is refused, not truncated." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
   " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least, each match its fixed_in while kept; not_affected rows leave the text first, then not_assessed ones; not_sent_purls keeps its first 10.";
@@ -653,9 +675,18 @@ export function registerCheckSbom<F extends FailureLike>(server: McpServer, deps
       title: CHECK_SBOM_TITLE,
       description: CHECK_SBOM_DESCRIPTION,
       inputSchema: z.object({
-        purls: z.array(z.string()).optional().describe("package URLs to check, e.g. pkg:npm/lodash@4.17.20 or pkg:deb/debian/openssl@3.0.11-1~deb12u1?distro=debian-12 (up to 2,000 distinct, sent in batches of 200)"),
+        // #3345: bounded before any element is parsed (inputBounds.ts): MAX_PURL_ENTRIES entries,
+        // repeats included (the MAX_PURLS distinct a call checks is checkSbom's own rule, above),
+        // and an object document's top level to MAX_SBOM_MEMBERS.
+        purls: z
+          .array(z.string())
+          .max(MAX_PURL_ENTRIES)
+          .optional()
+          .describe(
+            "package URLs to check, e.g. pkg:npm/lodash@4.17.20 or pkg:deb/debian/openssl@3.0.11-1~deb12u1?distro=debian-12 (up to 2,000 distinct, sent in batches of 200), in a list of at most 10,000 entries, repeats included",
+          ),
         sbom: z
-          .union([z.string(), z.record(z.string(), z.unknown())])
+          .union([z.string(), boundedRecord(z.unknown(), MAX_SBOM_MEMBERS)])
           .optional()
           .describe(
             "a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read by this MCP server and only they are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the document is the request body",

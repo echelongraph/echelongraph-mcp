@@ -431,7 +431,8 @@ for (const era of [MODERN, "2025-06-18"]) {
       const cases = [
         [{ files: [{ filename: "package.json", content: "{}" }] }, /no file could be read: package\.json: package\.json holds version ranges/],
         [{ files: [] }, /files holds no file/],
-        [{ files: Array.from({ length: 21 }, () => lock("lodash-4.17.15.package-lock.json")) }, /21 files; at most 20 are read per call/],
+        // #3345: past 20 files the inputSchema's bound refuses the call before any file is read.
+        [{ files: Array.from({ length: 21 }, () => lock("lodash-4.17.15.package-lock.json")) }, /files must hold at most 20 entries/],
         [{ files: [{ filename: "requirements.txt", content: "x".repeat(5_000_001) }] }, /5000001 characters in all; at most 5000000/],
         [{ files: [{ filename: "requirements.txt", content: Array.from({ length: 2001 }, (_, i) => `pkg${i}==1.0.0`).join("\n") }] }, /2001 distinct purls; at most 2000 are checked per call .* pass fewer files per call \(requirements\.txt: 2001\)/],
       ];
@@ -571,7 +572,9 @@ describe("#2835: a cancelled scan_manifest call sends no further batch", () => {
 // call, the time budget, and since #3100 the API's per-minute budget) as literals, and nothing read
 // them: changed to 999 / 9,999 / 99 seconds, the suite stayed green. Each number in either batch
 // tool's description, and in check_sbom's purls argument, is held here to the constant
-// match_batch.ts sends by; core-backend's guards hold MAX_COMPONENTS and API_COMPONENTS_PER_MINUTE
+// match_batch.ts sends by, or, for the entries purls may hold, to check_sbom.ts MAX_PURL_ENTRIES,
+// its inputSchema bound (#3345's review: 2,000 distinct and 10,000 entries are two rules, and each
+// is stated); core-backend's guards hold MAX_COMPONENTS and API_COMPONENTS_PER_MINUTE
 // to the route's own values (internal/cve/matchbatch_test.go, internal/waf/weighted_test.go, both of
 // which read scan_manifest.ts's description on its own since #3100).
 describe("#3100: both batch tools' descriptions state match_batch.ts's contract", () => {
@@ -595,13 +598,15 @@ describe("#3100: both batch tools' descriptions state match_batch.ts's contract"
       `The API allows ${n(MB.API_COMPONENTS_PER_MINUTE)} components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls`,
     ],
     check_sbom: [
-      `purls (package URLs, up to ${n(MB.MAX_PURLS)} distinct)`,
+      `purls (package URLs, up to ${n(MB.MAX_PURLS)} distinct, ${n(SB.MAX_PURL_ENTRIES)} with repeats) or sbom`,
       `POST bodies of at most ${MB.MAX_COMPONENTS}, never in a URL`,
       `The API allows ${n(MB.API_COMPONENTS_PER_MINUTE)} components a minute per caller`,
       `up to ${MB.TIME_BUDGET_MS / 1000} seconds a call`,
       `Input with more than ${n(MB.MAX_PURLS)} distinct purls is refused, not truncated.`,
     ],
   });
+  // What check_sbom's purls argument must say: both rules, from the same constants.
+  const purlsArgWant = () => `(up to ${n(MB.MAX_PURLS)} distinct, sent in batches of ${MB.MAX_COMPONENTS}), in a list of at most ${n(SB.MAX_PURL_ENTRIES)} entries, repeats included`;
   // A claim neither tool may make again: partial past the per-minute budget, whatever the window.
   const RETIRED = /so past [\d,]+ a call answers partial/;
   // 3.1.0's phase A review: nor scan_manifest the budget as the 429 wait's alone (fix C's wording).
@@ -614,6 +619,20 @@ describe("#3100: both batch tools' descriptions state match_batch.ts's contract"
 
   it("scan_manifest's and check_sbom's descriptions say every number as match_batch.ts holds it", () => {
     assert.deepEqual([...problems("scan_manifest", SM.SCAN_MANIFEST_DESCRIPTION), ...problems("check_sbom", SB.CHECK_SBOM_DESCRIPTION)], []);
+  });
+
+  // #3345's review control: either purls rule changed on its own fails check_sbom's description, as
+  // does the entry bound stated as the distinct rule's 2,000 (what f1a7d1cb enforced) or left out.
+  it("check_sbom's description fails with either purls rule changed, each on its own", () => {
+    const d = SB.CHECK_SBOM_DESCRIPTION;
+    for (const [from, to] of [
+      [`up to ${n(MB.MAX_PURLS)} distinct, ${n(SB.MAX_PURL_ENTRIES)}`, `up to 9,999 distinct, ${n(SB.MAX_PURL_ENTRIES)}`],
+      [`, ${n(SB.MAX_PURL_ENTRIES)} with repeats)`, `, ${n(MB.MAX_PURLS)} with repeats)`],
+      [`, ${n(SB.MAX_PURL_ENTRIES)} with repeats)`, ")"],
+    ]) {
+      assert.ok(d.includes(from), `control: the description says ${from}`);
+      assert.ok(problems("check_sbom", d.replace(from, to)).length > 0, `${from} -> ${to} passed`);
+    }
   });
 
   it("the issue's mutation of scan_manifest's description (999 / 9,999 / 99 seconds) fails it, each number on its own", () => {
@@ -650,7 +669,7 @@ describe("#3100: both batch tools' descriptions state match_batch.ts's contract"
       const { tools } = await client.listTools();
       const t = (name) => tools.find((x) => x.name === name);
       assert.deepEqual([...problems("scan_manifest", t("scan_manifest").description), ...problems("check_sbom", t("check_sbom").description)], []);
-      assert.ok(t("check_sbom").inputSchema.properties.purls.description.includes(`(up to ${n(MB.MAX_PURLS)} distinct, sent in batches of ${MB.MAX_COMPONENTS})`), t("check_sbom").inputSchema.properties.purls.description);
+      assert.ok(t("check_sbom").inputSchema.properties.purls.description.includes(purlsArgWant()), t("check_sbom").inputSchema.properties.purls.description);
     } finally {
       await client.close();
     }

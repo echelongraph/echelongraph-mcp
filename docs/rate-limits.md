@@ -38,8 +38,9 @@ once; a third waits up to 15 seconds for one to finish (two may wait at once), a
 HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`) only when that wait runs out, or at
 once when two are already waiting. Each
 instance serves at most 64 requests at once; the next waits up to 10 seconds for one to finish,
-and is then answered the same way. A `subscriptions/listen` stream, which stays open until its
-client leaves, is not one of the 64.
+and is then answered the same way. A `subscriptions/listen` stream is not one of the 64: the
+server sends no list-change notification, so since 3.1.1 the stream ends right after its
+acknowledgement, with a `complete` result (through 3.1.0 it stayed open until its client left).
 
 A call whose client goes away (its own timeout, a closed tab) is stopped only once the server
 learns of it. Its API calls are then cancelled, `check_sbom` and `scan_manifest` send no further batch, and its

@@ -53,3 +53,11 @@ made, with the same envelope as every other refusal: `state` `invalid_input`, `e
 `invalid_input`, `isError` true, and notes that name each argument and the rule it broke (by its
 JSON type, never by a value sent). Through 3.0.2 the MCP SDK answered those itself, with one
 `Input validation error` text block and no `structuredContent` (#3015).
+
+One call is refused before any tool sees it, so its result is not a tool's and carries no
+`structuredContent`: since 3.1.1, arguments that hold more than 2,500,000 list entries and object
+members in all, counted at every depth. That is the most any tool accepts, a `check_sbom` document
+passed as an object at its 5,000,000-character cap, so no call a tool would answer is refused. The
+MCP SDK counts them before any `inputSchema` is read (its `maxToolInputElements`, the fix for
+CVE-2026-111768) and answers `isError` true with one text block of its own, "Invalid arguments for
+tool <name>: arguments contain more than the maximum of 2500000 elements" (#3345).

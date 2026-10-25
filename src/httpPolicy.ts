@@ -448,14 +448,19 @@ export class Admission {
 // ── The request that is a stream: subscriptions/listen ──
 //
 // A 2026-07-28 client opens subscriptions/listen to hear of list changes, and the SDK answers it
-// with an SSE stream that stays open until the client leaves (or the server closes). This server
-// declares no listChanged (index.ts), so the stream carries the acknowledgement and then only
-// the SDK's keepalives: no work, no API call. Admitted like any other request, it held its place
+// with an SSE stream. Through @modelcontextprotocol/server 2.1.0 (echelongraph-mcp 3.1.0) the
+// stream stayed open until the client left (or the server closed), carrying the acknowledgement
+// and then only the SDK's keepalives, since this server declares no listChanged (index.ts): no
+// work, no API call. Since SDK 2.2.0 (its #2651; 3.1.1, #3345) a stream that honours none of the
+// notification types asked for ends right after the acknowledgement, with a resultType "complete"
+// result, so here every listen ends at once (test/http.test.mjs holds both). The rest of this
+// comment is why a listen still takes no place: a later listChanged: true would hold it open again.
+// Admitted like any other request, it held its place
 // for as long as it was open, so 64 idle listeners (under the per-client limit) left every
 // tools/call, initialize and server/discover on the instance waiting 10 s for a 503 (#2773). So it
 // is relayed without admission and without a work hold. What bounds the streams instead: the
 // per-client limit, which counts each one when it opens; the SDK's own cap of
-// DEFAULT_MAX_SUBSCRIPTIONS (1024 in @modelcontextprotocol/server 2.1.0) open per process, past
+// DEFAULT_MAX_SUBSCRIPTIONS (1024 in @modelcontextprotocol/server 2.1.0 and 2.3.0) open per process, past
 // which it answers JSON-RPC -32603 "Subscription limit reached" at once; and on Cloud Run the
 // instance's 250 requests at once and its 60 s request timeout, which ends every stream
 // (deploy-all.sh SVC_CONCURRENCY, --timeout). Measured 2026-10-04 on dist/http.js, Node 22.22,

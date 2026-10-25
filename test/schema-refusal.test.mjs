@@ -10,7 +10,11 @@
 // Against what 3.0.2 published, 15 of the 16 are: get_vendor_advisory's differs in its advisory_id
 // description, which #3011 (432239b2) rewrote to name vendor_advisory_id and warn off a row's UUID,
 // and re-recorded here. A later change to an inputSchema re-records it, on purpose:
-// UPDATE_INPUT_SCHEMA_SNAPSHOT=1, and review the diff.
+// UPDATE_INPUT_SCHEMA_SNAPSHOT=1, and review the diff. 3.1.1 (#3345) re-recorded it for its three
+// bounds (check_sbom purls maxItems and sbom maxProperties 64, scan_manifest files maxItems 20);
+// nothing else changed. Then #3345's review re-recorded check_sbom's purls: maxItems 2000 became
+// 10000 (MAX_PURL_ENTRIES, entries; the 2,000 is distinct purls, check_sbom's own rule), and its
+// description says both.
 //
 // Every API request goes to a stub on 127.0.0.1, which counts them: a refusal makes none.
 import { describe, it, before, after } from "node:test";

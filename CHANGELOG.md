@@ -6,6 +6,79 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.1.1 — 2026-10-25
+
+A security release (#3345). It moves the runtime dependencies past three advisories, bounds what
+a tool call's arguments may hold, and takes npm out of the hosted endpoint's image. The hosted
+endpoint's 3.1.0 image was refused by its deploy-time Trivy scan (#3018: 13 HIGH with a fixed
+version), so the endpoint kept serving 3.0.2. No `outputSchema` changes, so a client holding
+3.1.0's tool list does not need to reconnect; only the three `inputSchema` bounds below are new.
+
+### Security
+
+- **@modelcontextprotocol/server 2.1.0 to 2.3.0** (CVE-2026-111768, CVSS 7.5; CVE-2026-111770,
+  CVSS 7.7), with @modelcontextprotocol/core 2.3.0. Both stay exact pins, as does zod below.
+  - CVE-2026-111770 (a server or transport shared between connections delivered one client's
+    messages to another): **not affected**, on either transport. The hosted endpoint builds a new
+    server for each request (`createMcpHandler` with `createServer` as its factory), and stdio one
+    per connection (`serveStdio`), which the advisory names as not affected. 2.3.0 refuses a shared
+    server outright (`ALREADY_CONNECTED`); a test holds that 30 clients one after another and 30 at
+    once, in both protocol eras, over the hosted endpoint and over stdio, are each answered with
+    their own record.
+  - CVE-2026-111768 (validating an unbounded array or object in a tool call's arguments exhausts
+    memory): **mitigated, now fixed**. Through 3.1.0 only the hosted endpoint's request-body cap
+    (64 KiB, or 6 MiB for `check_sbom`, `scan_manifest` and `sbom_review`), the advisory's
+    stopgap, bounded it, and nothing did on stdio. The server now sets the SDK's new
+    `maxToolInputElements` to 2,500,000 list entries and object members per call, counted at every
+    depth: the most any tool accepts, a `check_sbom` document passed as an object at its
+    5,000,000-character cap, so no call a tool would answer is refused by it. A call over it is
+    refused by the SDK before any tool runs, with `isError` true and one text block of the SDK's
+    own ("Invalid arguments for tool <name>: arguments contain more than the maximum of 2500000
+    elements"), and without `structuredContent`: the SDK offers no way to answer it in the
+    envelope (docs/structured-results.md).
+  - A third advisory 2.3.0 fixes, GHSA-rvq5-wwqv-78pq (bearer authentication accepted a token
+    issued for another service), does not apply: this server uses no authentication.
+- **zod 4.6.5 to 4.6.6** (CVE-2023-54404, GHSA-mrhx-c7xc-m3w5, CVSS 7.5). 4.6.6 checks a list's
+  bound before it parses an element of it, but only where the list has a bound. Every list and
+  record in a tool's `inputSchema` now has one, published in `tools/list` as `maxItems` or
+  `maxProperties` and checked before any element is read: `check_sbom`'s `purls` at most 10,000
+  entries, its `sbom` passed as an object at most 64 top-level members
+  (CycloneDX 1.6 defines 18 and SPDX 2.3 16), and `scan_manifest`'s `files` at most 20 (the
+  README's 1 to 20). A call past one is refused with `state` `invalid_input` and a note naming the
+  bound: `purls must hold at most 10000 entries`, `sbom must hold at most 64 members`, `files must
+  hold at most 20 entries` (through 3.1.0, "21 files; at most 20 are read per call"). The
+  `purls` bound counts entries, repeats included, not distinct purls. The README's 2,000 is the
+  distinct purls a call checks: that rule is unchanged and still `check_sbom`'s own (more than
+  2,000 distinct, in a list or a document, is refused with the same message as through 3.1.0). A
+  list may repeat a purl, as a flattened SBOM does once per install path, so the entry bound is
+  five times the distinct one. Of `purls` lists, one kind 3.1.0 accepted is newly refused: a list
+  of more than 10,000 entries, which 3.1.0 checked when it held at most 2,000 distinct purls, each
+  sent once. That is inherent in bounding a list that had no bound. A list of up to 10,000
+  entries is answered as through 3.1.0. Over the hosted endpoint a `check_sbom` call may be a 6 MiB body,
+  which 10,000 entries of even the longest purl the API takes (512 characters) fit.
+- **Hosted endpoint only: its image carries no npm** (#3018). The node base bundles npm, npx and
+  corepack, which this server never runs, and its npm carried 10 of the 13 HIGH the scan refused
+  3.1.0's image for: brace-expansion 2.0.2 (5), ip-address 10.1.0, pacote 19.0.2 and 20.0.1,
+  picomatch 4.0.3 and sigstore 3.1.0; the other 3 were the SDK's two and zod's. The image's
+  runtime stage (Dockerfile.http) now removes npm, npx and corepack, and its build fails if any is
+  left; its base digest is unchanged. Trivy v0.75.0 (the scan's pinned scanner) finds the 13 on a
+  copy of 3.1.0's runtime file system and none on 3.1.1's (2026-10-25). The npm package and the
+  stdio image (Dockerfile, for the Docker MCP Catalog) are unchanged by this.
+
+### Changed
+
+- **Hosted endpoint only: a 2026-07-28 `subscriptions/listen` stream ends right after its
+  acknowledgement**, with a `complete` result. SDK 2.2.0 ends a listen stream that honours none of
+  the notification types asked for, and this server sends none (it declares no `listChanged`).
+  Through 3.1.0 the stream stayed open, carrying only keepalives, until the client left. A listen
+  still takes none of the 64 places an instance serves at once. Over stdio a listen is unchanged.
+- The SDK's packages declare the Apache-2.0 license since 2.3.0 (their LICENSE file carries the
+  MIT terms of earlier contributions too); echelongraph-mcp stays MIT.
+- **workload_triage's step 4 sends each purl once** (#3345): it has the agent pass several images'
+  purls in one `check_sbom` call, and images share packages, so such a list can repeat purls. The
+  step now says to send each purl once, and that a list holds at most 10,000 entries, the new
+  `purls` bound above.
+
 ## 3.1.0 — 2026-10-25
 
 - **cve_summary's `freshness` is the fleet's last completed NVD poll** (#3276). Since #3242 the
