@@ -236,7 +236,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const m = res.structuredContent.data.matches;
       assert.equal(m[0].fixed_in, "2.15.0");
       assert.equal(m[1].fixed_in, null);
-      assert.match(noteOf(res), /fixed_in, the first version above this one that no affected interval of the advisory holds: set on 1 of 2 matches; null on 1, where the advisory records no fix for this version \(fixed_in_reason says why\)\./);
+      assert.match(noteOf(res), /fixed_in, the first version above this one that no affected interval of the advisory holds: set on 1 of 2 matches; null on 1, where the CVE's advisory records show no version above this one to be unaffected \(fixed_in_reason says why; it is not a finding that no fix exists\)\./);
       const v = validator.getValidator(schema)(res.structuredContent);
       assert.ok(v.valid, v.errorMessage);
       const broken = structuredClone(res.structuredContent);
@@ -247,8 +247,67 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const res = await call({ product: "openssl", version: "3.0.0" }, withMatches(cpe, [OPENSSL_MATCH]));
       assert.doesNotMatch(noteOf(res), /fixed_in/);
     });
+    // #2834: a CPE match carries the end of the NVD range that matched in its own field, as
+    // core-backend sends it (cve/cpematch.go ProductMatch.CPEVersionEndExcluding/Including), never
+    // as fixed_in: the end of an NVD range is not a fix. The schema types both fields, so a number
+    // there is refused, and no fixed_in appears on the CPE path.
+    it("#2834: a CPE match's range end is relayed as cpe_version_end_excluding or cpe_version_end_including, typed by the schema, never as fixed_in", async () => {
+      const excl = { ...OPENSSL_MATCH, cpe_version_end_excluding: "3.0.7" };
+      const incl = { ...OPENSSL_MATCH, cve_id: "CVE-2099-30003", cpe_version_end_including: "3.0.12" };
+      const res = await call({ product: "openssl", version: "3.0.0" }, withMatches(cpe, [excl, incl]));
+      assert.notEqual(res.isError, true, textBlocks(res).join("\n"));
+      const m = res.structuredContent.data.matches;
+      assert.equal(m[0].cpe_version_end_excluding, "3.0.7");
+      assert.equal(m[1].cpe_version_end_including, "3.0.12");
+      for (const x of m) assert.equal("fixed_in" in x, false, `a CPE match gained fixed_in: ${JSON.stringify(x)}`);
+      assert.match(textBlocks(res)[0], /"cpe_version_end_excluding":\s*"3\.0\.7"/);
+      assert.doesNotMatch(noteOf(res), /fixed_in/);
+      const v = validator.getValidator(schema)(res.structuredContent);
+      assert.ok(v.valid, v.errorMessage);
+      for (const [i, k] of [[0, "cpe_version_end_excluding"], [1, "cpe_version_end_including"]]) {
+        const broken = structuredClone(res.structuredContent);
+        broken.data.matches[i][k] = 3.07;
+        assert.equal(validator.getValidator(schema)(broken).valid, false, `the schema does not type ${k}`);
+      }
+    });
     // A source read: npm packs dist/ only, so a run inside the unpacked tarball skips this one.
     const CUT_SRC = new URL("../src/tools/check_affected.ts", import.meta.url);
+    it("#2834: the first cut level of the text keeps a CPE match's range end, and the first thinned level of the data keeps it", { skip: existsSync(CUT_SRC) ? false : "no src/ here (npm does not pack it)" }, () => {
+      const src = readFileSync(CUT_SRC, "utf8");
+      const text = src.slice(src.indexOf("const CHECK_AFFECTED_TEXT"), src.indexOf("sides:", src.indexOf("const CHECK_AFFECTED_TEXT")));
+      const data = src.slice(src.indexOf("const CHECK_AFFECTED_DATA"), src.indexOf("async function checkAffected"));
+      const first = text.match(/keep: \[[^\]]*\]/)[0];
+      const thin = data.match(/thin: \[\s*\[[^\]]*\]/)[0];
+      for (const k of ["cpe_version_end_excluding", "cpe_version_end_including"]) {
+        assert.match(first, new RegExp(`"${k}"`), `the first text level drops ${k}`);
+        assert.match(thin, new RegExp(`"${k}"`), `the first thinned data level drops ${k}`);
+      }
+    });
+    // 3.1.0's phase A review: docs/tools.md said a CPE match "carries that end in its own field" with
+    // no condition, while only the first text level and the first thinned data level keep the two
+    // fields (so a CPE answer cut past them, as typical ones are, carries them only with full: true),
+    // and only once the API serves them, as the CHANGELOG says. The page now says both, and the
+    // levels after the first are held to leaving them out.
+    it("3.1.0's phase A review: docs/tools.md says the CPE end fields are kept at the first text and data levels alone, and the later levels leave them out", { skip: existsSync(CUT_SRC) ? false : "no src/ here (npm does not pack it)" }, () => {
+      const src = readFileSync(CUT_SRC, "utf8");
+      const text = src.slice(src.indexOf("const CHECK_AFFECTED_TEXT"), src.indexOf("sides:", src.indexOf("const CHECK_AFFECTED_TEXT")));
+      const data = src.slice(src.indexOf("const CHECK_AFFECTED_DATA"), src.indexOf("async function checkAffected"));
+      const later = text.match(/keep: \[[^\]]*\]/g).slice(1);
+      const thins = data.slice(data.indexOf("thin: [")).match(/\[\s*"cve_id"[^\]]*\]/g);
+      assert.ok(later.length >= 1 && thins.length === 2, `re-aim this check: ${later.length} later text levels, ${thins.length} data levels`);
+      for (const k of ["cpe_version_end_excluding", "cpe_version_end_including"]) {
+        for (const l of later) assert.doesNotMatch(l, new RegExp(`"${k}"`), `a later text level keeps ${k}, so the docs' "first level alone" is wrong`);
+        assert.match(thins[0], new RegExp(`"${k}"`));
+        assert.doesNotMatch(thins[1], new RegExp(`"${k}"`), `the second data level keeps ${k}`);
+      }
+      const docs = readFileSync(new URL("../docs/tools.md", import.meta.url), "utf8").replace(/\s+/g, " ");
+      assert.ok(
+        docs.includes(
+          "Once EchelonGraph's API serves it, a CPE match carries that end in its own field, as NVD states it, `cpe_version_end_excluding` (the first version the matched range no longer holds) or `cpe_version_end_including` (the last one it holds), absent where the range sets no end. Only the first cut level of the text and the first thinned level of `data` keep them, so a CPE answer cut past those levels, as typical ones are, carries them only with `full: true`.",
+        ),
+        "docs/tools.md does not say when a CPE match carries its range end",
+      );
+    });
     it("every cut level of the text keeps each match's fixed_in", { skip: existsSync(CUT_SRC) ? false : "no src/ here (npm does not pack it)" }, () => {
       const src = readFileSync(CUT_SRC, "utf8");
       const block = src.slice(src.indexOf("const CHECK_AFFECTED_TEXT"), src.indexOf("sides:", src.indexOf("const CHECK_AFFECTED_TEXT")));
@@ -265,7 +324,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       assert.equal(sc.coverage.not_affected_count, 10);
       const n = noteOf(res);
       assert.match(n, /0 CVEs match this version, a measured result \(we looked and found nothing that matches\), not a lookup failure\./);
-      assert.match(n, /10 advisories were decided not to affect this version \(not_affected_count\), and only those are cleared\./);
+      assert.match(n, /10 CVEs were decided not to affect this version \(not_affected_count, one per CVE however many of its advisory records are stored\), and only those are cleared\./);
       assert.doesNotMatch(n, /NOT ASSESSED|AFFECTED:/);
     });
     it("assessed with 0 matches on the CPE path is measured too", async () => {
@@ -301,7 +360,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const res = await call({ ecosystem: "npm", package: "lodash", version: "4.17.15" }, REASONS.no_decidable_advisory);
       assert.equal(res.structuredContent.coverage.undetermined_count, 2);
       assert.equal(res.structuredContent.data.undetermined.length, 2);
-      assert.match(noteOf(res), /UNDETERMINED: 2 advisories name this package .* report them as undetermined, never as safe\./);
+      assert.match(noteOf(res), /UNDETERMINED: 2 CVEs with advisories naming this package could not be decided at this version \(undetermined_count, one per CVE, listed in undetermined\): report them as undetermined, never as safe\./);
     });
     it("a reason this version does not know is still not_assessed, and named", async () => {
       const res = await call({ product: "openssl", version: "3.0.0" }, cpe({ assessed: false, not_assessed_reason: "some_future_reason" }));
@@ -347,7 +406,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
         withMatches(registry, [LODASH_MATCH], { undetermined_count: 1, undetermined: [{ cve_id: "CVE-2099-30012", package: "lodash", ecosystem: "npm", reason: "collapsed_fix_boundary" }] }),
       );
       assert.equal(res.structuredContent.state, "measured");
-      assert.match(noteOf(res), /UNDETERMINED: 1 advisory names this package .* report it as undetermined, never as safe\./);
+      assert.match(noteOf(res), /UNDETERMINED: 1 CVE with advisories naming this package could not be decided at this version \(undetermined_count, one per CVE, listed in undetermined\): report it as undetermined, never as safe\./);
     });
     it("excluded_count above 0 is named", async () => {
       const res = await call({ product: "openssl", version: "3.0.0" }, withMatches(cpe, [OPENSSL_MATCH], { excluded_count: 3 }));

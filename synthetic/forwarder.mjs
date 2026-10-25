@@ -16,6 +16,14 @@
 // Everything else is relayed as is: method, path and query, the X-EG-* headers that carry typed
 // values (#1983), the body, the status and the answer. Nothing is logged per request, and no
 // header or body value is ever logged.
+//
+// ITS BASE IS AS LONG AS THE UPSTREAM'S (#2781). The package quotes its API base in every answer
+// (src/index.ts SHOWN_BASE, in the OK note and in structuredContent.notes), and the cut fills its
+// budget to the character (src/textBudget.ts), so a package pointed at http://127.0.0.1:<port> (22
+// characters) would answer the synthetic in other sizes than a client of https://app.echelongraph.io
+// (27) gets, and could cut at another place. So the forwarder serves under a path that makes its base
+// as long as the upstream's (`/pppp`, as test/text-bound.mjs prefixFor does for its stub), and takes
+// that path off before it sends the request on. A request outside it is answered 404, never relayed.
 import http from "node:http";
 
 // Hop-by-hop headers, and the ones fetch sets itself.
@@ -33,13 +41,24 @@ export function identify(ua, token) {
   return { ua: ua ? `${token} ${ua}` : token, identified: false };
 }
 
+// The path a forwarder at `origin` serves under, so that its base is as long as `upstream`'s: none
+// when it is already as long, or one character shorter (a path of one character is "/" alone).
+export const prefixFor = (origin, upstream) => (upstream.length - origin.length > 1 ? `/${"p".repeat(upstream.length - origin.length - 1)}` : "");
+
 export async function startForwarder({ upstream, token, timeoutMs = 60_000 }) {
   const base = upstream.replace(/\/+$/, "");
   const stats = { requests: 0, identified: 0, rewritten: 0, upstream_errors: 0 };
+  let prefix = "";
   const server = http.createServer(async (req, res) => {
     stats.requests++;
     const chunks = [];
     for await (const c of req) chunks.push(c);
+    if (prefix && !req.url.startsWith(`${prefix}/`)) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "synthetic forwarder: not under its base" }));
+      return;
+    }
+    const url = req.url.slice(prefix.length);
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (!DROP_REQUEST.has(k) && k !== "user-agent" && v !== undefined) headers[k] = Array.isArray(v) ? v.join(", ") : v;
@@ -49,7 +68,7 @@ export async function startForwarder({ upstream, token, timeoutMs = 60_000 }) {
     if (who.identified) stats.identified++;
     else stats.rewritten++;
     try {
-      const up = await fetch(`${base}${req.url}`, {
+      const up = await fetch(`${base}${url}`, {
         method: req.method,
         headers,
         body: chunks.length && req.method !== "GET" && req.method !== "HEAD" ? Buffer.concat(chunks) : undefined,
@@ -72,8 +91,11 @@ export async function startForwarder({ upstream, token, timeoutMs = 60_000 }) {
     }
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  prefix = prefixFor(origin, base);
   return {
-    base: `http://127.0.0.1:${server.address().port}`,
+    base: `${origin}${prefix}`,
+    upstream: base,
     stats,
     close: () => {
       server.closeAllConnections();

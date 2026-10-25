@@ -9,7 +9,7 @@
 // the SDK as InvalidParams (-32602) before any text is built. A prompt makes no API request.
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { MAX_COMPONENTS, MAX_PURLS, MAX_SBOM_CHARS } from "./tools/check_sbom.js";
+import { MAX_COMPONENTS, MAX_PURLS, MAX_SBOM_CHARS, RECHECK_CALLS } from "./tools/check_sbom.js";
 
 // What the prompts are handed by createServer: the CVE ID pattern the CVE tools validate with.
 export type PromptKit = { cveId: RegExp };
@@ -58,20 +58,31 @@ const text = (t: string) => ({ messages: [{ role: "user" as const, content: { ty
 // cve/fixed_branches.go), so the line gives those, range by range, and gives fixed_version only
 // where a row has no fixed_branches, as what cve_intel records for the package, never as the fix
 // for every affected branch, sending the reader to get_cve's references tagged Vendor Advisory or
-// Patch for a branch's fix.
+// Patch for a branch's fix. #3285 (3.1.0's lane P): cve_intel lists a package once per stored
+// ecosystem string, so CVE-2025-48013 has drupal/quick_node_block under
+// Packagist:https://packages.drupal.org/8 ([0, 2.0.1)) and Packagist ([0, 2.0.0)), and a line
+// giving each row's ranges apart called 2.0.0 the Packagist fix, which the Drupal row still holds
+// affected. The line now reads such rows as one package, as the matcher does (core-backend
+// registryRecordKey, src/tools/packageRecords.ts) and as cve_intel's note says, and never a
+// release suffix so.
 //
 // Its remediation (#2840, #2841): cve_remediation gives, for one CVE, each vendor advisory's
 // remediation as the vendor categorises it (remediation_kinds, remediation_state) and the record's
 // references tagged Patch or Mitigation, each text relayed as its source states it. The Patch line
 // gives them as the vendor's, untested, and a not_parsed or none_in_source state as no finding that
 // the vendor lists no fix. vendor_advisories_for_cve rows carry remediation_kinds too, so step 4
-// sends the model to get_vendor_advisory where a row lists a workaround or a mitigation.
+// sends the model to get_vendor_advisory where a row lists a workaround or a mitigation. #3011: it
+// names the field to pass, the row's vendor_advisory_id. It named none, and a row's advisory_id is
+// EchelonGraph's internal UUID, which get_vendor_advisory does not take (the API answered 404).
 //
 // Its exploit lines (#3039): cve_intel's exploits hold Nuclei detection templates beside exploit
 // code, and a template checks whether a system is affected; it is not necessarily exploit code
 // (core-backend egkev.ExploitCodeKinds, #3038). Until #3039 step 2 called the whole list "public
 // exploit code" and the template asked for "public exploit code on record", so an agent reported
-// exploit code for the ~2,800 CVEs EchelonGraph holds only a template for.
+// exploit code for the ~2,800 CVEs EchelonGraph holds only a template for. #3221: a github_checker
+// row, a GitHub repository named or described as a checker or scanner (#3040), is the other
+// detection kind, and the Exploited? line's "GitHub or vendor proofs of concept" read as taking
+// one in; both lines now name it beside the template, in /pulse's words.
 // #3013's review: the Patch line has the model state a vendor's workaround or mitigation step,
 // whose wording is each item's text, and cve_remediation's cut can leave that text out of data
 // (its second thinning level) or shorten it in the text (its TEXT CUT); no string is shortened in
@@ -82,17 +93,17 @@ export function triageCveText(cve: string): string {
   return [
     `Triage ${cve} using the EchelonGraph MCP tools. Call them in this order, each with cve_id ${cve}:`,
     "1. get_cve: the record. Read score_assessed before echelongraph_score (false: not yet scored, which is not a score of 0); read severity, cvss_v3_score, epss_score and epss_percentile, and the CISA-KEV fields kev_listed, kev_added_date, kev_due_date and kev_ransomware, and, where the record carries it, kev_required_action, CISA's own text.",
-    "2. cve_intel: weaknesses (cwes), public exploit code and detection templates (exploits, exploits_total and exploits_by_kind; a nuclei_template row is a Nuclei detection template, which checks whether a system is affected and is not necessarily exploit code; verified_status is the label stored with each reference, not a guarantee that it works, and an empty list is not evidence that no exploit exists), affected_packages (each package's affected ranges with their fixes in fixed_branches) and fixed_versions.",
+    "2. cve_intel: weaknesses (cwes), public exploit code and detection checks (exploits, exploits_total and exploits_by_kind; a nuclei_template row is a Nuclei detection template, and a github_checker row a GitHub repository named or described as a checker or scanner: each checks whether a system is affected and is not necessarily exploit code; verified_status is the label stored with each reference, not a guarantee that it works, and an empty list is not evidence that no exploit exists), affected_packages (each package's affected ranges with their fixes in fixed_branches) and fixed_versions.",
     "3. cve_remediation: how it is fixed, as its sources state it: fixed_branches (each affected package's ranges with their fixes), vendor_remediations (each vendor advisory naming the CVE, with its vendor, vendor_advisory_id, remediation_state and remediation_kinds, each kind the vendor's own category) and fix_references (the record's references tagged Patch or Mitigation).",
-    "4. vendor_advisories_for_cve: the vendor advisories that name it, with remediation_kinds and remediation_state where a row carries them. Call get_vendor_advisory for one whose remediation you need in full, such as one whose remediation_kinds include workaround or mitigation.",
+    "4. vendor_advisories_for_cve: the vendor advisories that name it, with remediation_kinds and remediation_state where a row carries them. Call get_vendor_advisory with a row's vendor and its vendor_advisory_id as advisory_id (never the row's advisory_id, EchelonGraph's internal ID) for one whose remediation you need in full, such as one whose remediation_kinds include workaround or mitigation.",
     "5. epss_history: how its EPSS score changed, one point per recorded change (series_kind change_only): before series_starts_at a missing point means not recorded, not unchanged.",
     "6. cve_exposure: internet exposure on record. exposure_state says what the count is; exposed_hosts counts distinct ip:port services, not machines; the result is not_assessed with measured_at null, so present any count as undated and on record, and exposure_state not_assessed as not assessed.",
     ENVELOPE_RULES,
     "Then answer with this template, one line each, naming the tool and the measured_at behind every line:",
-    "- Exploited? CISA-KEV listing and its date, known ransomware use, and public exploit code on record (Metasploit modules, Exploit-DB entries, GitHub or vendor proofs of concept); give Nuclei detection templates apart, as detection checks, never as exploit code.",
+    "- Exploited? CISA-KEV listing and its date, known ransomware use, and public exploit code on record (Metasploit modules, Exploit-DB entries, GitHub or vendor proofs of concept); give Nuclei detection templates and GitHub checker repositories apart, as detection checks, never as exploit code.",
     "- Likelihood: EPSS score and percentile, and how it has moved.",
     "- Reachable? exposure_state and the count on record, or not assessed.",
-    `- Patch: fixed versions, vendor remediation and fix references; where the results hold none, write "none on record", which is not a finding that no fix exists. For each affected package whose cve_intel row carries fixed_branches, give every range with its fix: from introduced ("0" is the first version) up to its fixed, or up to and including last_affected, where no fix is on record for that range; never one range's fix as the fix for every affected branch or the version every install should move to. cve_intel keeps one fixed_version per ecosystem and package, its advisory's last range's as a rule, which need not be the fix for every affected version of the package: where a row has no fixed_branches (null or absent), give fixed_version as the fixed version cve_intel records for that package, never as the fix for every affected branch, and for the fix on a given branch point to get_cve's references tagged Vendor Advisory or Patch, where it has them, and to the vendor advisories. From cve_remediation, give each vendor_remediations advisory by vendor and vendor_advisory_id with its remediation_kinds, a workaround or mitigation as the step that vendor states, which EchelonGraph has not tested and which is not a fix, and its fix_references; a remediation_state of not_parsed or none_in_source is not a finding that the vendor lists no fix. ${VENDOR_STEP_ELSEWHERE}`,
+    `- Patch: fixed versions, vendor remediation and fix references; where the results hold none, write "none on record", which is not a finding that no fix exists. For each affected package whose cve_intel row carries fixed_branches, give every range with its fix: from introduced ("0" is the first version) up to its fixed, or up to and including last_affected, where no fix is on record for that range; never one range's fix as the fix for every affected branch or the version every install should move to. cve_intel rows of one package_name under Packagist or Maven, bare or with a repository URL after ":" (such as Packagist and Packagist:https://packages.drupal.org/8), are one package, as cve_intel's note says: give their ranges together, and never a range's fixed that another of those ranges still holds as a fix, since that version is still affected; rows of two releases (Debian:11 and Debian:12) are two packages. cve_intel keeps one fixed_version per ecosystem and package, its advisory's last range's as a rule, which need not be the fix for every affected version of the package: where a row has no fixed_branches (null or absent), give fixed_version as the fixed version cve_intel records for that package, never as the fix for every affected branch, and for the fix on a given branch point to get_cve's references tagged Vendor Advisory or Patch, where it has them, and to the vendor advisories. From cve_remediation, give each vendor_remediations advisory by vendor and vendor_advisory_id with its remediation_kinds, a workaround or mitigation as the step that vendor states, which EchelonGraph has not tested and which is not a fix, and its fix_references; a remediation_state of not_parsed or none_in_source is not a finding that the vendor lists no fix. ${VENDOR_STEP_ELSEWHERE}`,
     "- Deadline: get_cve's kev_due_date when the CVE is KEV-listed (CISA's due date for US federal civilian agencies); otherwise write that the results give no CISA deadline. Where get_cve carries kev_required_action, quote it, attributed to CISA, as the action CISA requires of those agencies, not as EchelonGraph's advice.",
     "- Decision: patch now, schedule, or monitor, with a one-line reason drawn from the lines above.",
   ].join("\n");
@@ -161,7 +172,13 @@ export function amIAffectedText(a: AffectedArgs): string {
 // walks, as core-backend's fixed_in does: while another range holds the fixed version, it moves to
 // that range's fixed, and a range on the way with no fixed ends it with none. So the version given
 // is the first one above the installed version that no range of the row holds, never simply the
-// fixed of the range that holds it.
+// fixed of the range that holds it. #3285 (3.1.0's lane P): the row "for the component's ecosystem
+// and package" was one row, while cve_intel lists a package once per stored ecosystem string:
+// CVE-2025-48013's Packagist drupal/quick_node_block row ([0, 2.0.0)) gave 1.0.0 the fix 2.0.0,
+// which its Packagist:https://packages.drupal.org/8 row ([0, 2.0.1)) still holds affected. For a
+// Packagist or Maven component the rule now takes those rows as one, their ranges together, as
+// the matcher does (core-backend registryRecordKey; packageRecords.ts) and cve_intel's note says,
+// which gives 2.0.1; rows of two releases (Debian:11, Debian:12) never are.
 // A cut text keeps index, purl, verdict, not_assessed_reason and cve_ids on a row, not its
 // ecosystem, package or version, so the model reads those from the purl, as core-backend's
 // matcher does (cve/matchbatch.go purlNameVersion, shared/pkg/purlosv): step 2 lists every type
@@ -182,12 +199,18 @@ export function amIAffectedText(a: AffectedArgs): string {
 // #2834 replaced with fixed_in, so the rule no longer reads it (and since #3074 a "[A, B)" names one
 // interval's B, which another can still hold). The cve_intel rule is for a component whose matches
 // the cut text leaves out (its leanest level keeps cve_ids, not matches), and for a match without
-// fixed_in (an API before #2834). fixed_in_reason, which says why fixed_in is null, and
-// fixed_in_detail (#3074), which names the overlapping intervals fixed_in moved past, are not
-// named yet: through 2.7.x check_sbom's cut levels kept fixed_in and neither of them; since #3013
-// they keep fixed_in_reason too (check_sbom.ts sbomText, as the structured result's thinned rows
-// do), so the rule can name it, and still not fixed_in_detail. test/prompt-fields.test.mjs holds
-// every field a prompt names to the text its tools return.
+// fixed_in (an API before #2834). fixed_in_reason says why fixed_in is null: through 2.7.x
+// check_sbom's cut levels kept fixed_in alone; since #3013 every level of the text that keeps a
+// match keeps fixed_in_reason too (check_sbom.ts sbomText), so a null fixed_in is written with its
+// fixed_in_reason, relayed as given and never read for a version (#2834's last review: the rule
+// named no reason). The structured result's compact level (#3269, check_sbom.ts SBOM_ROW_COMPACT)
+// keeps fixed_in without fixed_in_reason: kept, the reason cost the 201-purl probe a row and the
+// image mixes affected rows at their floor (test/check_sbom-large-rows.test.mjs). So the clause
+// applies where a match carries fixed_in_reason, and a null fixed_in without it is read as a
+// reason the cut left out, never as no fix: the agent checks the purl again with full: true, or
+// reads the CVE's fix from cve_remediation or get_cve. fixed_in_detail (#3074), which names the
+// overlapping intervals fixed_in moved past, is not named: no cut level of check_sbom's text keeps
+// it. test/prompt-fields.test.mjs holds every field a prompt names to the text its tools return.
 //
 // Upstream rows (#2836): a deb, apk or alpine purl with an upstream qualifier is matched by the
 // source package it names, which is how Debian and Alpine file advisories (core-backend
@@ -197,22 +220,40 @@ export function amIAffectedText(a: AffectedArgs): string {
 // purl. The leanest cut leaves matched_package and matched_via out of a row, and step 2 says how to
 // read both from the purl.
 //
+// The rows a DATA CUT leaves out (#3269's third review): sbom_review had no step for the affected
+// and undetermined rows the structured cut leaves out of data (Claude Code reads data, not the
+// text), so a cut SBOM's fix list lacked them unsaid. Step 1 now checks them again by index, as
+// workload_triage's step 6 does, at most RECHECK_CALLS calls, and lists the rest as unchecked.
+//
+// #3269's fourth review: step 1's index rule counted the purls check_sbom reads, and said nothing of
+// metadata.component, which fromCycloneDX does not walk (Trivy puts the image's pkg:oci purl there),
+// so an agent counting it had every index one off; it now says the subject is not counted and has
+// the agent check its mapping against the rows data keeps, which carry index and purl, before any
+// re-check call. 3.1.0's phase B review: read as general, "the document's own subject is not
+// counted" had an agent skip an SPDX image SBOM's root package, which fromSPDX counts (it walks
+// doc.packages, every package with a purl): the clause now says an SPDX document has no
+// metadata.component and its root package is counted. And past 30 distinct CVEs step 3 looked up "30 of them", any 30, so on a large SBOM
+// the KEV-listed ones could be among those not looked up, while the matches already say which they
+// are: it now takes those whose matches carry kev_listed true, or that matches_truncated's
+// kev_listed_cve_ids names, first, then the highest epss_score, read from the matches, not a
+// get_cve per CVE.
+//
 // Remediation (#2841): for the first CVEs of the list, cve_remediation gives each vendor's own
 // remediation, as the vendor categorises it; the list gives it as the vendor's, untested, and reads
 // a step whose text a cut leaves out from get_vendor_advisory (VENDOR_STEP_ELSEWHERE, #3013's review).
 export function sbomReviewText(sbom: string): string {
   return [
     "Review the SBOM below for known vulnerabilities, using the EchelonGraph MCP tools.",
-    `1. Call check_sbom with sbom set to the document below, as given. It reads the document's purls and checks up to ${MAX_PURLS} distinct purls per call, sending them in batches of ${MAX_COMPONENTS}; a document with more is refused, not truncated. If it is refused, say why from the result and do not guess at the components. If coverage.not_sent is above 0, the API's rate limit or the call's time budget stopped it early: say how many purls were not sent and coverage.not_sent_reason, and that they are not checked (never clean). After a minute, call check_sbom once more with purls set to the purls not sent, and merge what it returns. data.not_sent_purls lists them whole with full: true; where the note says the first text block cuts not_sent_purls to its first entries, or a DATA CUT cuts that list in data, rebuild the list from the document instead, as the note says: the document's distinct purls from the position the note gives on, counted in the order it gives.`,
+    `1. Call check_sbom with sbom set to the document below, as given. It reads the document's purls and checks up to ${MAX_PURLS} distinct purls per call, sending them in batches of ${MAX_COMPONENTS}; a document with more is refused, not truncated. If it is refused, say why from the result and do not guess at the components. If coverage.not_sent is above 0, the API's rate limit or the call's time budget stopped it early: say how many purls were not sent and coverage.not_sent_reason, and that they are not checked (never clean). After a minute, call check_sbom once more with purls set to the purls not sent, and merge what it returns. data.not_sent_purls lists them whole with full: true; where the note says the first text block cuts not_sent_purls to its first entries, or a DATA CUT cuts that list in data, rebuild the list from the document instead, as the note says: the document's distinct purls from the position the note gives on, counted in the order it gives. Where a DATA CUT sentence names affected or undetermined rows of results left out of data, by index, those with a KEV-listed or ransomware match first and apart, call check_sbom again with purls set to the purls at those indices (each index the position, from 0, of a purl among the document's distinct purls, counted in the order check_sbom reads them: components or packages in document order, each component's nested components right after it, each purl at its first place; metadata.component, the document's own subject, is not counted, so its purl, such as an image's pkg:oci, has no index; an SPDX document has no metadata.component: each of its packages with a purl is counted, its root package among them; check your mapping against the rows data keeps, each of which carries its index and its purl, before you send these calls), in the order the note names them and in calls of the sizes its re-check sentence gives ("Re-check these K purls in this order, in calls of …"; a purl it sends to a call of its own goes alone), at most ${RECHECK_CALLS} such calls, and review their rows with the others; list the affected and undetermined rows not checked again, by index and by count, as unchecked, never as clean.`,
     "2. Read each component's ecosystem, package and version from its purl, which every row of data.results in the text carries (the leanest cut of the text leaves out the row's own ecosystem, package and version), as check_sbom maps them. A purl is pkg:type/namespace/name@version?qualifiers, each part percent-decoded (%40 is @), its type and distro qualifier in any case. The version is what follows the last @, up to any ? or #. The ecosystem follows from the type: npm is npm, pypi PyPI, maven Maven, golang Go, cargo crates.io, gem RubyGems, nuget NuGet, composer Packagist, hex Hex, pub Pub, swift SwiftURL, hackage Hackage, cran CRAN, bitnami Bitnami, conan ConanCenter and githubact GitHub Actions. For deb, apk, alpine and rpm it is the release the distro qualifier names, which must be one of these three kinds: distro=debian-N is Debian:N, the major release alone (debian-12 and debian-12.5 are Debian:12); distro=ubuntu-V is Ubuntu:V as given (ubuntu-22.04 is Ubuntu:22.04); distro=alpine-X.Y is Alpine:vX.Y, cut to major.minor (alpine-3.20 and alpine-3.20.10 are Alpine:v3.20; alpine-3 names none). For any other type, and a deb, apk, alpine or rpm purl without such a qualifier, the ecosystem is unknown: check_sbom does not check the component (not_assessed, never clean), and the fix list gives no version for it. The package is namespace:name for maven (pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1 is the package org.apache.logging.log4j:log4j-core in Maven, at version 2.14.1), namespace/name for npm, golang, composer, swift and githubact, and the name alone for every other type (pkg:deb/debian/openssl@3.0.15-1~deb12u1?distro=debian-12 is openssl in Debian:12). A deb, apk or alpine purl with an upstream qualifier (upstream=name, or upstream=name@version) is checked as the source package it names, which is how Debian and Alpine file advisories: its package is that name, and its version is the qualifier's where it gives one, else the purl's, and its row says matched_via upstream, with that name as matched_package (pkg:apk/alpine/libcrypto3@3.3.6-r0?distro=alpine-3.20&upstream=openssl is openssl in Alpine:v3.20, at 3.3.6-r0). For any other purl check_sbom checks, matched_via is purl_name and matched_package is the package read as above.",
-    "3. For each distinct cve_id on a component whose verdict is affected, call get_cve, to read kev_listed, epss_score, score_assessed, echelongraph_score and cvss_v3_score, and cve_intel, to read fixed_branches and fixed_version from its affected_packages rows, and fixed_version from its fixed_versions rows, for the component's ecosystem and package (package_name). If there are more than 30 distinct CVEs, do this for 30 of them and list the rest as not looked up, unranked.",
+    "3. For each distinct cve_id on a component whose verdict is affected, call get_cve, to read kev_listed, epss_score, score_assessed, echelongraph_score and cvss_v3_score, and cve_intel, to read fixed_branches and fixed_version from its affected_packages rows, and fixed_version from its fixed_versions rows, for the component's ecosystem and package (package_name). If there are more than 30 distinct CVEs, do this for 30 of them, chosen KEV-listed first: those whose check_sbom matches carry kev_listed true, or that a row's matches_truncated.kev_listed_cve_ids names, then the others by highest epss_score, each read for this choice from the check_sbom matches where the text or data keeps them, not from a get_cve call per CVE; list the rest as not looked up, unranked.",
     ENVELOPE_RULES,
     "Read each component's verdict: not_affected is the one clean verdict; undetermined and not_assessed are not clean, and not_assessed_reason says why (for example distro_release_unknown: a deb, apk or rpm purl without a distro qualifier, which EchelonGraph does not guess).",
     "Then write a prioritised fix list of the affected components. State the ordering keys, in this order: 1. CISA-KEV listed (kev_listed true) first; 2. then EPSS score, highest first; 3. then echelongraph_score where score_assessed is true, else cvss_v3_score, highest first. A CVE with no value for a key sorts after those with one, and its line says which key was missing.",
-    "For each line give the component (its purl, and, where its row's matched_via is upstream, its matched_package: the source package its CVEs were matched by), its cve_ids, the key values used, and for each CVE a fixed version where the results support one, by this rule. Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component and write \"no fix on record\", which is not a finding that no fix exists. Where the text keeps no match for the component (a cut text can keep its cve_ids alone), or the match has no fixed_in field, the rest of this rule applies. Never give a fixed version that is not strictly greater than the component's installed version (its version, as step 2 reads it from the purl), compared in the ecosystem's version order: release numbers part by part, as numbers, not as text (2.9.1 is below 2.12.2, and 2.12.2 is below 2.14.1); where you are not sure of the order (pre-releases, qualifiers and distro revisions have their own rules), say so and do not give it. Where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches, give the fixed of the range that holds the installed version: at or above its introduced (\"0\" is the first version) and below its fixed, or at or below its last_affected, in the same version order; while another range of the row holds that fixed version, it is still affected, so move to that range's fixed; a range on the way with last_affected and no fixed, or with no end, has no fix on record, so give none, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used. Where it is not (null or absent), give cve_intel's fixed_version for the component's ecosystem and package: cve_intel keeps one fixed_version per package, its advisory's last range's, which need not be the fix on the component's branch, so say so beside it. Where no version meets the rule, write that the results give no fixed version for the component's branch, which is not a finding that no fix exists, and point to the CVE's advisory for it: get_cve's references tagged Vendor Advisory or Patch, where it has them.",
+    "For each line give the component (its purl, and, where its row's matched_via is upstream, its matched_package: the source package its CVEs were matched by), its cve_ids, the key values used, and for each CVE a fixed version where the results support one, by this rule. Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write \"no fix on record\" and that fixed_in_reason, which says why, as given (a version it names is not a fix); this is not a finding that no fix exists. A null fixed_in on a match without fixed_in_reason is one whose reason a DATA CUT left out for size (its matches keep fixed_in, not fixed_in_reason): never write \"no fix\" for it; say its reason was cut, and call check_sbom again for that purl with full: true, or read the CVE's fix from cve_remediation or get_cve. Where the text or data keeps no match for that CVE on the component (a cut can keep a row's cve_ids alone, or fewer matches than cve_ids), or the match has no fixed_in field, the rest of this rule applies. Never give a fixed version that is not strictly greater than the component's installed version (its version, as step 2 reads it from the purl), compared in the ecosystem's version order: release numbers part by part, as numbers, not as text (2.9.1 is below 2.12.2, and 2.12.2 is below 2.14.1); where you are not sure of the order (pre-releases, qualifiers and distro revisions have their own rules), say so and do not give it. Where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches (for a Packagist or Maven component, the rows of its package_name under that ecosystem, bare and with a repository URL after \":\", such as Packagist and Packagist:https://packages.drupal.org/8, are one row, their ranges all together, as cve_intel's note says; rows of two releases, such as Debian:11 and Debian:12, never are), give the fixed of the range that holds the installed version: at or above its introduced (\"0\" is the first version) and below its fixed, or at or below its last_affected, in the same version order; while another range of the row holds that fixed version, it is still affected, so move to that range's fixed; a range on the way with last_affected and no fixed, or with no end, has no fix on record, so give none, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used. Where it is not (null or absent), give cve_intel's fixed_version for the component's ecosystem and package: cve_intel keeps one fixed_version per package, its advisory's last range's, which need not be the fix on the component's branch, so say so beside it. Where no version meets the rule, write that the results give no fixed version for the component's branch, which is not a finding that no fix exists, and point to the CVE's advisory for it: get_cve's references tagged Vendor Advisory or Patch, where it has them.",
     `Then, for the first 5 CVEs of the list (fewer if it has fewer), call cve_remediation with the CVE's cve_id, and under the CVE's line give each vendor_remediations advisory by vendor and vendor_advisory_id with its remediation_kinds, a workaround or mitigation as the step that vendor states, which EchelonGraph has not tested and which is not a fix; a remediation_state of not_parsed or none_in_source is not a finding that the vendor lists no fix. ${VENDOR_STEP_ELSEWHERE}`,
     "After the list, give data.summary's counts, and list the undetermined and not_assessed components with their reasons as not checked, never as clean.",
-    "Where the note says that rows of data.results are left out of the first text block, list the components its rows carry, say how many affected components the text leaves out (data.summary.affected, less those listed), and give the undetermined and not_assessed components it leaves out as data.summary's counts, by not_assessed_reason, as not checked, never as clean.",
+    "Where the note says that rows of data.results are left out of the first text block, list the components its rows carry, say how many affected components the text leaves out (data.summary.affected, less those listed), and give the undetermined and not_assessed components it leaves out as data.summary.undetermined and data.summary.not_assessed (by not_assessed_by_reason), less those listed, as not checked, never as clean. The components with a KEV-listed or ransomware match leave the text last, and the note names by index each of them it leaves out (\"Of the rows left out of it, K have a KEV-listed or ransomware match: at index …\"): list those as KEV-bearing components not checked, by index, never as clean.",
     "",
     "SBOM:",
     "```json",
@@ -234,10 +275,66 @@ export function sbomReviewText(sbom: string): string {
 // What it reads is what check_sbom's text keeps: kev_listed, ransomware, epss_score,
 // effective_score, score_assessed and fixed_in on each match while matches are kept; past its
 // leanest cut a row keeps cve_ids alone, so the agent reads those CVEs from get_cve
-// (test/prompt-fields.test.mjs). OS packages: a deb or apk purl without an upstream qualifier is
+// (test/prompt-fields.test.mjs). #3270: the structured result's cut (3.0.2, #3132) can also keep a
+// row's matches capped, which step 5 read as the row's whole: a KEV-listed CVE past the cap was
+// named only in matches_truncated.kev_listed_cve_ids, which no prompt read, and the rows still had
+// matches, so the get_cve fallback never fired. Step 5 now reads matches_truncated's KEV-listed and
+// ransomware IDs, and calls get_cve for every CVE kept without its match and every match without a
+// field it ranks by (check_sbom.ts keeps them at every level that keeps matches, and its capped
+// rows keep KEV-listed and ransomware matches first). #3269's review: at the leanest cut
+// matches_truncated keeps total and returned alone, so step 5 says that neither list is there and
+// the get_cve fallback reads those CVEs; and since #3269 the clean and not-assessed rows leave data
+// before an affected row's matches are capped, so a workload's counts of not_affected and
+// not_assessed rows can lack rows the cut left out: step 6 takes the call's totals from
+// data.summary, which no cut touches. #3269's second review: round 2's step 6 then had the agent
+// check every purl left out again, at the page size the note names, which is often small (332 calls
+// on a realistic Debian SBOM, nearly all of them for not_affected rows). Now the counts are
+// data.summary's, a call per image where several images' rows were left out; a left-out
+// not_affected or not_assessed row is not checked again (summary counts it, and it holds no CVE);
+// only the affected and undetermined rows that left data, which the DATA CUT sentence names by
+// index, are checked again, in calls of those purls alone, and past RECHECK_CALLS (check_sbom.ts)
+// such calls the agent stops and reports the rest as unchecked. #3269's third review: round 3's
+// step 6 checked them again in index order, at the page sentence's N, and both were wrong for it:
+// on old unpatched Debian images the rows with a KEV-listed match came last, so 119 of 255 were in
+// view after its 5 calls, and N holds for the first N purls sent, while the rows left out are the
+// heavy ones, so its calls dropped 504 of 2,540 rows on realistic images. The note now names the
+// rows with a KEV-listed or ransomware match first and apart, and gives the sizes of calls of them
+// that keep every row, counted for those rows (textBudget.ts PageAt.againFit): 238 of 255 in view,
+// none dropped. sbom_review checks the same rows again the same way. #3269's fourth review: the
+// first text block cuts its rows on its own terms (textBudget.ts dataText: rows leave from the end,
+// in input order), while data keeps the KEV-bearing rows first, so a client that reads the text
+// alone lost the rows the text left out, KEV-bearing ones among them, unsaid: workload_triage had no
+// step for them. Its last line now says, as sbom_review's does, that they are in
+// structuredContent.data, and, read from the text alone, has them counted from data.summary as
+// unchecked. 3.1.0's phase B review: "those rows are in structuredContent.data" was false where a
+// DATA CUT applies too, the large-image case the line is for (the text is cut from the whole
+// answer, FIRST_TEXT_BLOCK_BESIDE_A_CUT): through the stdio server, 700 affected purls with the
+// KEV-listed ones late kept 186 rows in the text and 56 in data, and 458 of the 514 the text left
+// out were not in default data, 44 of them with a KEV-listed match. The line now says such rows
+// are named in the note by index for step 6's re-check, and sends the agent to steps 5 and 6.
+// The same review: read from the text alone, it gave the undetermined and not_assessed rows the
+// text leaves out "as data.summary's counts", which count every such row, those the text still
+// lists among them (undetermined rows leave from the end mixed with affected ones); it now gives
+// data.summary.undetermined and data.summary.not_assessed less those listed, as it gives the
+// affected count, and sbom_review's last line does the same. #3284: the first text block now keeps
+// the rows with a KEV-listed or ransomware match last to leave, as data does, and names by index
+// each of them it leaves out (textBudget.ts leaveOutLast), so a reader of the text alone no longer
+// loses them unsaid (on the reviewer's 36 realistic images, 95 of 413 KEV-bearing rows at
+// d42d4697, none since): both last lines quote that sentence and list those rows as KEV-bearing and
+// not checked, where the line said a row the text leaves out "can hold a KEV-listed CVE that the
+// text does not name". OS packages: a deb or apk purl without an upstream qualifier is
 // looked up by its binary name while Debian and Alpine file advisories under the source package, so
 // such rows can come back not_assessed (production, 2026-10-05: libssl3 at Debian:12 answers
 // package_not_in_advisory_corpus); the prompt has the agent count and state them, never as clean.
+// #3283: the kubernetes exposure rule named neither of two standard paths to a pod: a container's
+// hostPort (spec.containers[].ports[].hostPort, which binds the port on the node's IP: a hostPort
+// ingress controller or agent DaemonSet) and a Service's spec.externalIPs (nodes accept the
+// Service's traffic on them whatever its type, ClusterIP included). An agent that read the pod's
+// spec and found none of the listed conditions wrote "not exposed (caller-asserted)", not
+// "unknown", and the pod sorted last within its KEV group. Both are now exposed, and "not exposed"
+// requires having read the containers' ports and the Services' externalIPs. The blog's "Triage
+// your pods" section states the same rule (marketing-site lib/mcpPromptClaims.test.ts holds it to
+// this text).
 export const WORKLOAD_SOURCES = ["kubernetes", "github_actions", "images"] as const;
 export type WorkloadSource = (typeof WORKLOAD_SOURCES)[number];
 // A CVE count past which the agent stops calling get_cve, as in sbom_review.
@@ -253,7 +350,7 @@ const WORKLOAD_LIST: Record<WorkloadSource, string> = {
 };
 const WORKLOAD_EXPOSURE: Record<WorkloadSource, string> = {
   kubernetes:
-    "In a cluster, exposed means a Service of type LoadBalancer or NodePort selects the pod, an Ingress (or a Gateway route) sends traffic to a Service that selects it, or the pod sets hostNetwork: true; not exposed means you read the pod's spec and the cluster's Services, Ingresses and routes, and none of these holds; unknown means you could not read them, or the user tells you of a path you cannot see (a load balancer outside the cluster, for example).",
+    "In a cluster, exposed means a Service of type LoadBalancer or NodePort selects the pod, a Service that selects it lists externalIPs (spec.externalIPs, on which nodes accept its traffic whatever its type, ClusterIP included), an Ingress (or a Gateway route) sends traffic to a Service that selects it, a container of the pod sets a hostPort (spec.containers[].ports[].hostPort, which binds that port on the node's IP), or the pod sets hostNetwork: true; not exposed means you read the pod's spec, its containers' ports among it, and the cluster's Services, with their type and externalIPs, Ingresses and routes, and none of these holds; unknown means you could not read them, or the user tells you of a path you cannot see (a load balancer outside the cluster, for example).",
   github_actions:
     "For a CI job's container and services, exposure is unknown unless the user tells you otherwise; write what the user told you, as caller-asserted.",
   images:
@@ -275,12 +372,14 @@ export function workloadTriageText(source?: WorkloadSource): string {
     `2. Decide each workload's exposure yourself, from the same data, as exposed, not exposed or unknown, and label it caller-asserted. ${each(WORKLOAD_EXPOSURE)} Unknown is never treated as not exposed. EchelonGraph measured none of this: no EchelonGraph tool reports the exposure of your workloads.`,
     "3. Make an SBOM of each distinct digest with your own tools, for example syft <image>@sha256:<digest> -o cyclonedx-json, or trivy image --format cyclonedx <image>@sha256:<digest>. Take the purls of its components, leave out the purl of the image itself (pkg:oci or pkg:docker), and keep your own map from each purl to the images that carry it.",
     `4. Call check_sbom with purls set to one image's purls, or to several images' purls together, up to ${MAX_PURLS} distinct purls per call. Pass purls, not the SBOM document: a document's metadata can name the image. data.results holds one row per purl sent, each with its purl, which your map ties to its images. If coverage.not_sent is above 0, say how many purls were not sent and coverage.not_sent_reason, and that they are not checked (never clean); after a minute, call check_sbom once more with purls set to the purls not sent: data.not_sent_purls, or, where the note says the first text block cuts that list or a DATA CUT cuts it in data, the distinct purls you sent from the position the note gives on, in the order you sent them.`,
-    `5. For each affected row, read kev_listed, ransomware, epss_score, effective_score, score_assessed and fixed_in from its matches where the text keeps them. Where the text keeps a row's cve_ids without its matches, call get_cve for each of those CVEs, to read kev_listed, kev_ransomware, epss_score, score_assessed, echelongraph_score and cvss_v3_score; past ${WORKLOAD_GET_CVE_MAX} such CVEs, list the rest as not looked up, unranked.`,
+    `5. For each affected row, read kev_listed, ransomware, epss_score, effective_score, score_assessed and fixed_in from its matches where the text or data keeps them. A row whose matches a DATA CUT shortened or left out carries matches_truncated. Where matches_truncated has kev_listed_cve_ids and ransomware_cve_ids, they name every KEV-listed and every ransomware CVE among all of the row's matches, those cut included, so count each of them as a KEV-listed (or ransomware) CVE of the row; where it has total and returned and neither list (the leanest cut), nothing in the answer names the row's KEV-listed or ransomware CVEs, and the get_cve calls below read them. Call get_cve for each CVE of an affected row that the text or data keeps without its match (a row with cve_ids and no matches, or with fewer matches than cve_ids, as matches_truncated says), and for each match that leaves out one of the fields above, to read kev_listed, kev_ransomware, epss_score, score_assessed, echelongraph_score and cvss_v3_score; past ${WORKLOAD_GET_CVE_MAX} such CVEs, list the rest as not looked up, unranked.`,
+    `6. data.summary counts every row of a call whatever the cut: affected, not_affected, undetermined and not_assessed, and not_assessed_by_reason. Take each image's counts from it, and a workload's from its images': where the note says rows of results are left out of data (a DATA CUT sentence saying "results keeps K of its N entries") and the call carried several images' purls, call check_sbom with one image's purls per call for its counts. A row left out whose verdict is not_affected or not_assessed is not checked again: data.summary counts it, and it holds no CVE; where not_assessed rows are left out, state the image's not_assessed count and not_assessed_by_reason from data.summary instead of its OS-package rows, and say so. The affected and undetermined rows that left data are the ones checked again: the DATA CUT sentence names them by index, those with a KEV-listed or ransomware match first and apart ("affected or undetermined rows: the K with a KEV-listed or ransomware match at index …; the other K at index …"), each index the position, from 0, of a purl among the distinct purls you sent, in the order you sent them. Call check_sbom again with those purls alone as purls, in the order the note names them, so those with a KEV-listed or ransomware match first, in calls of the sizes its re-check sentence gives ("Re-check these K purls in this order, in calls of …"; a purl it sends to a call of its own goes alone), not of the page sentence's N, which holds for the first N purls you sent and not for these; read their rows as in step 5; each call's own note says what its data leaves out. If that takes more than ${RECHECK_CALLS} calls, stop after ${RECHECK_CALLS} and report the affected and undetermined rows not checked again, by purl where the note names them and by count, as unchecked, never as clean.`,
     ENVELOPE_RULES,
     "Read each row's verdict: not_affected is the one clean verdict; undetermined and not_assessed are not clean, and not_assessed_reason says why. Packages from an image's operating system (deb, apk and rpm purls) can come back not_assessed: one without a distro qualifier (distro_release_unknown), and a deb or apk purl without an upstream qualifier, which is looked up by its binary package name while Debian and Alpine file advisories under the source package. For each image, state how many of its OS-package rows are not_assessed, and never count them as clean.",
     `Then write one row per workload (${sources.map((k) => WORKLOAD_ROW[k]).join("; ")}), with: the image digests it runs; its KEV-listed CVEs, each with RANSOMWARE where ransomware (or get_cve's kev_ransomware) is true, and the match's fixed_in where it is a version (null or absent: the results give no fixed version for that branch, which is not a finding that no fix exists); its highest epss_score; its exposure, labelled caller-asserted, with the line of the user's data you read it from; and its counts of affected, undetermined and not_assessed rows.`,
     "Order the rows by these keys, and state them: 1. a workload with a KEV-listed CVE (kev_listed true) first; 2. then exposure: exposed, then unknown, then not exposed; 3. then the highest epss_score, highest first; 4. then the highest score: effective_score, or get_cve's echelongraph_score, where score_assessed is true, else cvss_v3_score, highest first. A workload with no value for a key sorts after those with one, and its row says which key was missing.",
     "Say plainly that every exposure label is caller-asserted: it came from the user's own cluster or CI data, read by you, and EchelonGraph measured none of it. List the images you could not resolve, scan or check, with why, as not checked, never as clean.",
+    "Where the note says that rows of data.results are left out of the first text block, those rows are in structuredContent.data, or, where a DATA CUT leaves rows out of data too, named there by index for step 6's re-check (the note says data holds them whole with full: true): where you can read it, read them there as in steps 5 and 6. Where you read the text alone, list the rows it carries, say how many affected rows it leaves out (data.summary.affected, less those listed), and give the undetermined and not_assessed rows it leaves out as data.summary.undetermined and data.summary.not_assessed (by not_assessed_by_reason), less those listed, as unchecked, never as clean. The rows with a KEV-listed or ransomware match leave the text last, and the note names by index each of them it leaves out (\"Of the rows left out of it, K have a KEV-listed or ransomware match: at index …\"): list those as KEV-bearing rows not checked, by index, never as clean.",
   ].join("\n");
 }
 

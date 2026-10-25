@@ -34,6 +34,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { StdioMcpClient, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG, PKG_DIR, serverCommand, readPkgFile, DOC_PAGES, readDocs } from "./server-under-test.mjs";
 import { DENIAL_VARIANTS, documentDenials } from "./document-denials.mjs";
+import { versioningClaims } from "./schema-openness.mjs";
+import { HOSTED_ROLLING_OUT, WAIT_FOR_HEALTH } from "./barred-claims.mjs";
 
 const README = readPkgFile("README.md");
 const SERVER_JSON = JSON.parse(readPkgFile("server.json"));
@@ -71,6 +73,141 @@ for (const era of [MODERN, "2025-06-18"]) {
       // #3012: and so does every page of docs/, the reference the README links.
       for (const [page, text] of readDocs()) for (const m of text.matchAll(/\b(\d+) (?:read-only )?tools\b/g)) assert.equal(Number(m[1]), tools.length, `${page}: "${m[0]}"`);
       assert.ok(README.includes(`${tools.length} tools`), "the README no longer says how many tools there are");
+    });
+    // #3257: Versioning said each tool's `data` schema stays closed, while `data` was open at its
+    // root for 14 of 16 tools and 86 objects below a success's root, in and outside `data`, were
+    // closed. Its sentences on what is open and what is closed are now derived from tools/list
+    // (schema-openness.mjs versioningClaims), so they cannot drift from the schemas again.
+    // A claim may open a sentence or follow "Since 3.1.0, ", so its first letter is read either case.
+    const says = (text, claim) => text.includes(claim) || text.includes(`${claim[0].toLowerCase()}${claim.slice(1)}`);
+    it("#3257: Versioning says what tools/list's schemas leave open and closed, in the words derived from them", () => {
+      const versioning = (README.split(/^## Versioning$/m)[1]?.split(/^## /m)[0] ?? "").replace(/\s+/g, " ");
+      assert.ok(versioning, "the README has no Versioning section");
+      for (const claim of versioningClaims(tools)) assert.ok(says(versioning, claim), `README Versioning lacks: ${claim}`);
+      // #3268's review: the open-schema promise holds from the release that made it, not before:
+      // 3.0.2 and older published success branches closed below the root and null-only slots.
+      const [success] = versioningClaims(tools);
+      assert.ok(versioning.includes(`Since 3.1.0, ${success[0].toLowerCase()}${success.slice(1)}`), `README Versioning does not anchor "${success}" to "Since 3.1.0"`);
+      assert.match(versioning, /listed the tools under 3\.0\.2 or older must reconnect once/);
+      assert.doesNotMatch(versioning, /`data` schema stays closed/);
+      const log = readPkgFile("CHANGELOG.md").replace(/\s+/g, " ");
+      assert.doesNotMatch(log, /each tool's `data` schema stay closed, so a field added inside `data` still needs a reconnect/, "CHANGELOG 3.0.2 still says data stays closed");
+      for (const claim of versioningClaims(tools)) assert.ok(says(log, claim), `CHANGELOG lacks: ${claim}`);
+    });
+    // 3.1.0's phase A review: #2879 (3d4abb3f) typed eg_severity, eg_likelihood and eg_priority on
+    // get_cve's data and search_cves' rows, and added componentsNote's sentences, and was the one
+    // src change since 3.0.2 with no CHANGELOG bullet. The 3.1.0 section (Unreleased until the release
+    // commit renamed it) names each component the two outputSchemas type, under #2879, and that the
+    // change is additive.
+    const release310 = () => {
+      const log = readPkgFile("CHANGELOG.md");
+      const at = log.search(/^## 3\.1\.0 — \d{4}-\d{2}-\d{2}$/m);
+      const from = at >= 0 ? at : log.search(/^## Unreleased$/m);
+      if (from < 0) return "";
+      return (log.slice(from).split("\n").slice(1).join("\n").split(/^## /m)[0] ?? "").replace(/\s+/g, " ");
+    };
+    const componentsOf = (list) => {
+      const out = new Set();
+      for (const name of ["get_cve", "search_cves"]) {
+        const t = list.find((x) => x.name === name);
+        const ok = (t?.outputSchema?.oneOf ?? []).find((b) => b.properties?.state?.enum?.includes("measured"));
+        const data = ok?.properties?.data;
+        const props = name === "get_cve" ? data?.properties : data?.properties?.cves?.items?.properties;
+        for (const k of Object.keys(props ?? {})) if (/^eg_/.test(k)) out.add(`${name}:${k}`);
+      }
+      return [...out];
+    };
+    const componentsProblems = (log, list) => {
+      const found = componentsOf(list);
+      const bullet = log.split(/ - \*\*/).find((b) => b.includes("(#2879)")) ?? "";
+      return [
+        ...(found.length ? [] : ["re-aim: neither outputSchema types an eg_ component"]),
+        ...(bullet ? [] : ["no 3.1.0 bullet cites #2879"]),
+        ...[...new Set(found.map((f) => f.split(":")[1]))].filter((k) => !bullet.includes(`\`${k}\``)).map((k) => `the #2879 bullet does not name ${k}`),
+        ...(/additive/i.test(bullet) ? [] : ["the #2879 bullet does not say the change is additive"]),
+      ];
+    };
+    // #2841: the 2.7.0 entry gave cve_remediation's CVE-2021-44228 text as "20,644 characters
+    // (assembled before the route was deployed; re-measure live)". Measured live on 2026-10-18:
+    // 22,571 characters on the hosted endpoint and on npm 3.0.2, 18,293 with an installed version.
+    // No entry is left waiting for a measurement.
+    it("#2841: the CHANGELOG holds no \"re-measure live\" placeholder, and 2.7.0's cve_remediation size is the live one", () => {
+      const log = readPkgFile("CHANGELOG.md").replace(/\s+/g, " ");
+      assert.doesNotMatch(log, /re-measure live/, "an entry still waits for a live measurement");
+      const e270 = log.split("## 2.7.0 — ")[1]?.split(" ## ")[0] ?? "";
+      assert.ok(e270.includes("measured live on 2026-10-18, 22,571 characters on the hosted endpoint and on npm 3.0.2, and 18,293 with an installed version"), e270.slice(e270.indexOf("New tool cve_remediation"), e270.indexOf("New tool cve_remediation") + 900));
+    });
+    // 3.1.0's phase C review (nit): the #3272 bullet's "only where one range a package does not fit
+    // do references, then patches, then packages leave" did not parse. It reads "only where even one
+    // range per package does not fit".
+    const bullet3272 = (log) => log.split(/ - \*\*/).find((b) => b.startsWith("cve_remediation's first text block keeps every advisory")) ?? "";
+    const capWhenProblems = (log) => {
+      const b = bullet3272(log);
+      if (!b) return ["no 3.1.0 bullet on cve_remediation's first text block (#3272)"];
+      return [
+        ...(b.includes("only where even one range per package does not fit do references, then patches, then packages leave") ? [] : ["the #3272 bullet does not say references, patches and packages leave only where even one range per package does not fit"]),
+        ...(/one range a package does not fit/.test(b) ? ["the #3272 bullet still reads \"one range a package does not fit\""] : []),
+      ];
+    };
+    it("3.1.0's phase C review: the #3272 bullet says when references, patches and packages leave, in a sentence that parses", () => {
+      assert.deepEqual(capWhenProblems(release310()), []);
+    });
+    it("3.1.0's phase C review control: 0ee20f11's clause fails", () => {
+      const log = release310();
+      const old = log.replace("only where even one range per package does not fit", "only where one range a package does not fit");
+      assert.notEqual(old, log, "re-aim this control: the clause is gone");
+      assert.equal(capWhenProblems(old).length, 2, capWhenProblems(old).join("\n"));
+    });
+    it("3.1.0's phase A review: CHANGELOG 3.1.0 has a #2879 bullet naming each eg_ component get_cve and search_cves type, as additive", () => {
+      assert.deepEqual(componentsOf(tools).sort(), ["get_cve:eg_likelihood", "get_cve:eg_priority", "get_cve:eg_severity", "search_cves:eg_likelihood", "search_cves:eg_priority", "search_cves:eg_severity"]);
+      assert.deepEqual(componentsProblems(release310(), tools), []);
+    });
+    it("3.1.0's phase A review control: the 3.1.0 section without the #2879 bullet, or with one component unnamed, fails", () => {
+      const log = release310();
+      const bullet = log.split(/ - \*\*/).find((b) => b.includes("(#2879)"));
+      assert.ok(bullet, "re-aim this control: no #2879 bullet");
+      assert.deepEqual(componentsProblems(log.replace(bullet, ""), tools), ["no 3.1.0 bullet cites #2879", "the #2879 bullet does not name eg_severity", "the #2879 bullet does not name eg_likelihood", "the #2879 bullet does not name eg_priority", "the #2879 bullet does not say the change is additive"]);
+      assert.deepEqual(componentsProblems(log.replace(bullet, bullet.replaceAll("`eg_priority`", "the priority")), tools), ["the #2879 bullet does not name eg_priority"]);
+    });
+    it("#3257 control: one tool's object re-closed, or one failure branch opened, changes the derived sentence, which the README then lacks", () => {
+      const versioning = (README.split(/^## Versioning$/m)[1]?.split(/^## /m)[0] ?? "").replace(/\s+/g, " ");
+      const edit = (name, f) => tools.map((t) => (t.name === name ? { ...t, outputSchema: f(structuredClone(t.outputSchema)) } : t));
+      const success = (s) => s.oneOf.find((b) => b.properties.state.enum.includes("measured"));
+      const failure = (s) => s.oneOf.find((b) => b.properties.state.enum.includes("failed"));
+      const reclosed = versioningClaims(
+        edit("exposure_radar", (s) => {
+          success(s).properties.data.properties.kev_exposure.additionalProperties = false;
+          return s;
+        }),
+      );
+      assert.equal(reclosed[0], "A success's `outputSchema` is closed in 1 place: exposure_radar data.kev_exposure: additionalProperties false");
+      assert.ok(!versioning.includes(reclosed[0]));
+      const opened = versioningClaims(
+        edit("get_cwe", (s) => {
+          failure(s).additionalProperties = {};
+          return s;
+        }),
+      );
+      assert.equal(opened[1], "The failure branch admits fields it does not name: get_cwe (root): admits fields it does not name.");
+      assert.ok(!versioning.includes(opened[1]));
+      // #3268's review: a success slot put back to null alone, as 3.0.2 published it, is a closed place.
+      const nullSlot = versioningClaims(
+        edit("get_cwe", (s) => {
+          success(s).properties.freshness = { type: "null" };
+          return s;
+        }),
+      );
+      assert.equal(nullSlot[0], "A success's `outputSchema` is closed in 1 place: get_cwe freshness: admits only null");
+      assert.ok(!says(versioning, nullSlot[0]));
+      // A fifth failure-branch enum opened changes the count the README gives.
+      const fifth = versioningClaims(
+        edit("get_cwe", (s) => {
+          failure(s).properties.error.properties.kind = { anyOf: [failure(s).properties.error.properties.kind, { type: "string" }] };
+          return s;
+        }),
+      );
+      assert.match(fifth[1], /but five, which already accept any string/);
+      assert.ok(!says(versioning, fifth[1]));
     });
   });
 }
@@ -142,11 +279,28 @@ describe("README hosted-endpoint state (#2739)", () => {
   const PAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "marketing-site", "app", "pulse", "mcp", "page.tsx");
   const remoteBlock = () => README.split(/^### Remote \(no install\)$/m)[1]?.split(/^##+ /m)[0] ?? "";
 
-  it("never says the hosted endpoint is being rolled out, and names server.json's remote URL in its Remote section", () => {
-    assert.doesNotMatch(README, /being rolled out/i);
-    assert.doesNotMatch(README, /until [^.]*\/health[^.]* answers/i, "the README still tells readers to wait for /health");
+  // #3246: over README.md and every docs/ page (readDocs): #3012 moved the rate limits, which describe the hosted
+  // endpoint, to docs/rate-limits.md, and this read the README alone. The patterns are barred-claims.mjs's, which
+  // test/barred-claims.test.mjs holds on every other surface; WAIT_FOR_HEALTH reads through a URL's dots, which the
+  // README-only pattern's [^.]* stopped at.
+  const rolloutProblems = (pages) =>
+    pages.flatMap(([page, text]) => [
+      ...(HOSTED_ROLLING_OUT.test(text) ? [`${page} says the hosted endpoint is being rolled out`] : []),
+      ...(WAIT_FOR_HEALTH.test(text.replace(/\s+/g, " ")) ? [`${page} tells readers to wait for /health`] : []),
+    ]);
+  it("no page of the package's documentation says the hosted endpoint is being rolled out, and the README names server.json's remote URL in its Remote section", () => {
+    assert.deepEqual(rolloutProblems(readDocs()), []);
     assert.ok(remoteBlock().includes(REMOTE), `the Remote section does not name ${REMOTE}`);
     assert.match(remoteBlock(), /The hosted endpoint is in service/);
+  });
+  it("control (#3246): the rollout sentence on a docs/ page fails as it does on the README", () => {
+    const docs = readDocs();
+    assert.ok(docs.some(([p]) => p === "docs/rate-limits.md"), "docs/rate-limits.md is not read: re-aim this control");
+    for (const target of ["README.md", "docs/rate-limits.md", "docs/exposure-radar.md"]) {
+      const with_ = (s) => docs.map(([p, t]) => [p, p === target ? `${t}\n${s}\n` : t]);
+      assert.deepEqual(rolloutProblems(with_("The hosted endpoint is being rolled out.")), [`${target} says the hosted endpoint is being rolled out`]);
+      assert.deepEqual(rolloutProblems(with_("Use npx until https://mcp.echelongraph.io/health\nanswers.")), [`${target} tells readers to wait for /health`]);
+    }
   });
   it("agrees with /pulse/mcp's REMOTE_SERVING switch", (t) => {
     if (!fs.existsSync(PAGE)) return t.skip("no marketing-site beside this package (public repo or tarball)");
@@ -595,6 +749,93 @@ describe("CHANGELOG.md", () => {
     assert.ok(preamble.includes(CAVEAT), preamble);
     const listings = path.join(PKG_DIR, "listings", "README.md");
     if (fs.existsSync(listings)) assert.ok(fs.readFileSync(listings, "utf8").replace(/\s+/g, " ").includes(CAVEAT), "listings/README.md's Release notes section lost the caveat");
+  });
+  // #3018's review: the bullet on the hosted endpoint's Trivy scan said "scanned ... before each deploy", where only a
+  // production deploy-all.sh run of mcp-remote (or all) scans, refusing only a HIGH or CRITICAL with a fixed version, with
+  // MCP_REMOTE_SCAN_OK as its bypass, and its summary names the image config ID, not the registry digest a revision reports.
+  // 3.1.0's final review (low): that check lived in infrastructure/cloudrun/deploy-all-mcp-scan.test.sh, a production
+  // preflight of `deploy-all.sh mcp-remote` and `all`, and read the section of package.json's version first: a 3.1.1 whose
+  // own bullet said "the deploy-time vulnerability scan moves to Trivy v0.76.0 (#3500)" failed it 6 ways and refused every
+  // production `all`, core-backend included. The wording is the release's, so it is held here, to the section that
+  // introduced the scan (3.1.0): no later section, released or not, is read.
+  const SCAN_SECTION = /^## 3\.1\.0 — \d{4}-\d{2}-\d{2}$/m;
+  const scanBullet = (log) => {
+    const at = log.search(SCAN_SECTION);
+    if (at < 0) return undefined;
+    const section = log.slice(at).split("\n").slice(1).join("\n").split(/^## /m)[0];
+    const b = section.split(/\n(?=- )/).find((x) => x.includes("Trivy") && x.includes("vulnerabilit"));
+    return b === undefined ? undefined : b.replace(/\s+/g, " ");
+  };
+  const SCAN_SAYS = [
+    ["the production deploy only", /production deploy/],
+    ["deploy-all.sh", /deploy-all\.sh/],
+    ["a HIGH or CRITICAL with a fixed version refused", /HIGH or CRITICAL[^.]*fixed version/],
+    ["one with no fix not refused", /no fix(ed version)?[^.]*(not|named)/],
+    ["the bypass, MCP_REMOTE_SCAN_OK=1", /MCP_REMOTE_SCAN_OK=1/],
+    ["that the summary names the image config ID, not the registry digest", /config ID[^.]*not the registry digest/],
+    // This review's item 3: another scanner than the pin only with a reason, labelled override; 0.69.4 to 0.69.6 refused.
+    ["that another binary runs only with MCP_REMOTE_TRIVY_OVERRIDE_REASON, labelled mcp-trivy=override", /MCP_REMOTE_TRIVY_OVERRIDE_REASON[^.]*mcp-trivy=override/],
+    ["that Trivy 0.69.4, 0.69.5 and 0.69.6 are refused", /Trivy 0\.69\.4, 0\.69\.5 or 0\.69\.6 \(the releases GHSA-69fq-xp46-6x23 names\) is refused/],
+  ];
+  const scanBulletProblems = (log) => {
+    if (log.search(SCAN_SECTION) < 0) return ["no 3.1.0 section: re-aim this check"];
+    const b = scanBullet(log);
+    if (b === undefined) return ["no 3.1.0 bullet names the Trivy scan"];
+    return [
+      ...(b.includes("before each deploy") ? ["says the image is scanned before each deploy: only a production deploy-all.sh run of mcp-remote or all scans it"] : []),
+      ...SCAN_SAYS.filter(([, rx]) => !rx.test(b)).map(([what]) => `does not say ${what}`),
+    ];
+  };
+  it("3.1.0's bullet on the hosted endpoint's Trivy scan says what runs it, what it refuses, its bypass and its pin", () => {
+    assert.deepEqual(scanBulletProblems(readPkgFile("CHANGELOG.md")), []);
+  });
+  it("control: the bullet as it read before fails; a later section's Trivy bullet (the review's 3.1.1) or a later Unreleased passes", () => {
+    const log = readPkgFile("CHANGELOG.md");
+    const b = log.slice(log.search(SCAN_SECTION)).split(/^## /m)[1]?.split(/\n(?=- )/).find((x) => x.includes("Trivy") && x.includes("vulnerabilit"));
+    assert.ok(b, "re-aim this control: no 3.1.0 Trivy bullet");
+    const OLD = "- Hosted endpoint only: the image is pinned. The hosted image is also scanned for\n  vulnerabilities (Trivy) before each deploy, which refuses a HIGH or CRITICAL with a fixed version.\n";
+    assert.ok(scanBulletProblems(log.replace(b, OLD)).some((p) => p.includes("before each deploy")), "the old bullet passes");
+    assert.deepEqual(scanBulletProblems(log.replace(b, "")), ["no 3.1.0 bullet names the Trivy scan"]);
+    const top = log.search(SCAN_SECTION);
+    for (const later of [
+      "## 3.1.1 — 2026-10-25\n\n- Hosted endpoint only: the deploy-time vulnerability scan moves to Trivy v0.76.0 (#3500).\n\n",
+      "## Unreleased\n\n- A later fix (#9999).\n\n",
+      "## Unreleased\n\n",
+    ]) {
+      assert.deepEqual(scanBulletProblems(log.slice(0, top) + later + log.slice(top)), [], `a later section fails it: ${later.split("\n")[0]}`);
+    }
+  });
+  // 3.1.0's final review (nit): the #2775 bullet said "A waiter holds at most the 64 KiB it read before it needed the
+  // slot". src/http.ts readBodyHolding: a chunked body (no Content-Length) waits holding what it read past
+  // MAX_BODY_BYTES, the chunk that crossed it included; readBody: a body that declares a Content-Length over it waits
+  // before reading anything.
+  const bullet2775 = (log) => {
+    const at = log.search(/^## 3\.1\.0 — \d{4}-\d{2}-\d{2}$/m);
+    if (at < 0) return "";
+    const section = log.slice(at).split("\n").slice(1).join("\n").split(/^## /m)[0];
+    return (section.split(/\n(?=- )/).find((b) => b.includes("(#2775)")) ?? "").replace(/\s+/g, " ");
+  };
+  const holdProblems = (log) => {
+    const b = bullet2775(log);
+    if (!b) return ["no 3.1.0 bullet cites #2775"];
+    return [
+      ...(b.includes("A body that declares its `Content-Length` waits holding nothing") ? [] : ["the #2775 bullet does not say a body with a Content-Length waits holding nothing"]),
+      ...(b.includes("a chunked body (no `Content-Length`) waits holding at most the 64 KiB general cap (`MCP_MAX_BODY_BYTES`) plus the chunk that crossed it") ? [] : ["the #2775 bullet does not say a chunked body holds the general cap plus the chunk that crossed it"]),
+      ...(/holds at most the 64 KiB it read/.test(b) ? ["the #2775 bullet still says a waiter holds at most the 64 KiB it read"] : []),
+    ];
+  };
+  it("3.1.0's #2775 bullet says what a waiting body holds: nothing with a Content-Length, the cap plus one chunk without", () => {
+    assert.deepEqual(holdProblems(readPkgFile("CHANGELOG.md")), []);
+  });
+  it("control: the #2775 bullet as it read at the 3.1.0 release commit fails", () => {
+    const log = readPkgFile("CHANGELOG.md");
+    const b = log.slice(log.search(/^## 3\.1\.0 — /m)).split(/\n(?=- )/).find((x) => x.includes("(#2775)"));
+    assert.ok(b, "re-aim this control: no #2775 bullet");
+    const at = b.search(/A body that\s+declares/);
+    assert.ok(at >= 0, "re-aim this control: the bullet's holding sentence moved");
+    const tail = b.slice(at);
+    const old = log.replace(tail, "A waiter holds\n  at most the 64 KiB it read before it needed the slot, so memory stays bounded as before.\n");
+    assert.equal(holdProblems(old).length, 3, holdProblems(old).join("\n"));
   });
   it("has an entry for package.json's version, and the README links it", () => {
     const log = readPkgFile("CHANGELOG.md");

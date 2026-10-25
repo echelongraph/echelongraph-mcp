@@ -330,6 +330,57 @@ export function sendingSentences(g: Sending, distinct: number, readOrder: string
   return out;
 }
 
+// One affected component as the note names it: its purl, and its first NOTE_CVES_MAX cve_ids.
+const affectedNamed = (r: unknown): string => {
+  const who = (typeof field(r, "purl") === "string" && (field(r, "purl") as string)) || `${field(r, "ecosystem") ?? ""} ${field(r, "package") ?? ""} ${field(r, "version") ?? ""}`.trim();
+  const ids = field(r, "cve_ids");
+  const list = Array.isArray(ids) ? ids.filter((i): i is string => typeof i === "string") : [];
+  const shown = list.slice(0, NOTE_CVES_MAX).join(", ");
+  return `${who} (${shown}${list.length > NOTE_CVES_MAX ? `, and ${list.length - NOTE_CVES_MAX} more` : ""})`;
+};
+const affectedTail = (more: number): string => (more > 0 ? `; and ${more} more affected components in data.results (whole with full: true)` : "");
+// The note's sentence naming the affected components, the first NOTE_AFFECTED_MAX of `hits`.
+function affectedSaid(hits: readonly unknown[]): string {
+  return `Affected: ${hits.slice(0, NOTE_AFFECTED_MAX).map(affectedNamed).join("; ")}${affectedTail(hits.length - NOTE_AFFECTED_MAX)}.`;
+}
+// #3269's third review: the characters, as a JSON string, of each row's name in that sentence,
+// measured once per row object (the structured cut asks of the same rows many times).
+const namedChars = new WeakMap<object, number>();
+const namedCharsOf = (r: unknown): number => {
+  if (!isObj(r)) return JSON.stringify(affectedNamed(r)).length - 2;
+  let c = namedChars.get(r);
+  if (c === undefined) namedChars.set(r, (c = JSON.stringify(affectedNamed(r)).length - 2));
+  return c;
+};
+const isAffected = (r: unknown) => field(r, "verdict") === "affected";
+// The sentence's characters in the answer being cut, once per answer's rows.
+const saidChars = new WeakMap<readonly unknown[], number>();
+/**
+ * #3269's third review: for a call of `m` of `rows` alone, the most characters (as JSON) the note's
+ * Affected sentence can take there, less what it takes in the answer of `all` (the call being cut;
+ * negative where a call of m of them names fewer or shorter components). A call of other purls
+ * names other components there, so a call that re-checks the rows a cut left out can carry a longer
+ * note than this one; it names at most NOTE_AFFECTED_MAX of its affected rows, so at most that many,
+ * or m, of these rows' longest names, and the tail counting the rest.
+ */
+export function affectedSaidOver(rows: readonly unknown[], all: readonly unknown[]): (m: number) => number {
+  const longest = rows.filter(isAffected).map(namedCharsOf).sort((a, b) => b - a);
+  const top: number[] = [0];
+  for (const c of longest.slice(0, NOTE_AFFECTED_MAX)) top.push(top[top.length - 1] + c);
+  let now = saidChars.get(all);
+  if (now === undefined) {
+    const own = all.filter(isAffected);
+    saidChars.set(all, (now = own.length ? JSON.stringify(affectedSaid(own)).length - 2 : 0));
+  }
+  const was = now;
+  return (m) => {
+    const hits = Math.min(m, longest.length);
+    if (hits === 0) return -was;
+    const named = Math.min(hits, NOTE_AFFECTED_MAX);
+    return "Affected: ".length + top[named] + 2 * (named - 1) + affectedTail(hits - NOTE_AFFECTED_MAX).length + 1 - was;
+  };
+}
+
 // The verdict counts, the not-assessed reasons, the affected components by name, and the
 // upstream-matched rows, from the (merged) answer.
 export function verdictSentences(d: object, g: Sending): { sentences: string[]; assessed: number } {
@@ -359,17 +410,10 @@ export function verdictSentences(d: object, g: Sending): { sentences: string[]; 
   if (Array.isArray(rows)) {
     const hits = rows.filter((r) => field(r, "verdict") === "affected");
     if (hits.length) {
-      const named = hits.slice(0, NOTE_AFFECTED_MAX).map((r) => {
-        const who = (typeof field(r, "purl") === "string" && (field(r, "purl") as string)) || `${field(r, "ecosystem") ?? ""} ${field(r, "package") ?? ""} ${field(r, "version") ?? ""}`.trim();
-        const ids = field(r, "cve_ids");
-        const list = Array.isArray(ids) ? ids.filter((i): i is string => typeof i === "string") : [];
-        const shown = list.slice(0, NOTE_CVES_MAX).join(", ");
-        return `${who} (${shown}${list.length > NOTE_CVES_MAX ? `, and ${list.length - NOTE_CVES_MAX} more` : ""})`;
-      });
-      out.push(`Affected: ${named.join("; ")}${hits.length > NOTE_AFFECTED_MAX ? `; and ${hits.length - NOTE_AFFECTED_MAX} more affected components in data.results` : ""}.`);
+      out.push(affectedSaid(hits));
       // Said only when the answer carries fixed_in (an API before #2834 sends none).
       if (hits.some((r) => (Array.isArray(field(r, "matches")) ? (field(r, "matches") as unknown[]) : []).some((m) => isObj(m) && "fixed_in" in m))) {
-        out.push("Each match's fixed_in is the first version above the component's that no affected interval of the advisory holds; null, with fixed_in_reason, where the advisory records no fix for that version.");
+        out.push("Each match's fixed_in is the first version above the component's that no affected interval of the advisory holds; null, with fixed_in_reason, where no higher version is shown to be unaffected.");
       }
     }
     // #2836: rows matched by the source package their purl's upstream qualifier names.
@@ -469,7 +513,7 @@ export const Row = z.looseObject({
     })
     .optional()
     .describe(
-      "Present only on a row whose matches the structured result's cut (DATA CUT) shortened or left out: total, the row's matches in the answer; returned, the ones data keeps (its first, highest effective_score first); and, while they fit, of all its matches, the CVE IDs KEV-listed (kev_listed_cve_ids) or used in ransomware (ransomware_cve_ids), and the distinct fixed_in versions (fixed_in_versions). The same call with full: true returns every match.",
+      "Present only on a row whose matches the structured result's cut (DATA CUT) shortened or left out: total, the row's matches in the answer; returned, the ones data keeps (chosen used in ransomware first, then the other KEV-listed ones, then highest effective_score, and listed in the API's order); and, while they fit, of all its matches, the CVE IDs KEV-listed (kev_listed_cve_ids) or used in ransomware (ransomware_cve_ids), and the distinct fixed_in versions (fixed_in_versions). The same call with full: true returns every match.",
     ),
 });
 

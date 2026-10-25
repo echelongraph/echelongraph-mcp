@@ -14,7 +14,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 // #3121: answers are validated against the closed success branch (strict-output.mjs).
-import { StrictOutputValidator } from "./strict-output.mjs";
+import { StrictOutputValidator, strictOutputSchema } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { readPkgFile, serverCommand } from "./server-under-test.mjs";
 
@@ -36,6 +36,7 @@ const COVERAGE = {
   days_held: 2,
   days_partial: ["2026-10-07"],
   days_missing: ["2026-10-08"],
+  days_in_progress: [],
   runs_undated: 0,
   refresh_runs_truncated: false,
 };
@@ -94,6 +95,40 @@ const CLAIMS_COMPLETE_BODY = (({ complete_since: _c, ...rest }) => ({
 const GAPPY = "CVE-2020-1476";
 const MANY = Array.from({ length: 14 }, (_, i) => `2026-11-${String(i + 1).padStart(2, "0")}`);
 const GAPPY_BODY = { ...SEVERAL_BODY, cve_id: GAPPY, coverage: { ...COVERAGE, last_day: "2026-11-15", days_missing: MANY } };
+// #3143: production's coverage from 2026-10-08 on (prod-shaped/epss_history.json): one refresh,
+// killed by a deploy, left undated; every day between first_day and last_day held, none missing.
+const UNDATED = "CVE-2017-5651";
+const UNDATED_BODY = {
+  ...SEVERAL_BODY,
+  cve_id: UNDATED,
+  coverage: { ...COVERAGE, last_day: "2026-10-11", days_held: 6, days_partial: [], days_missing: [], runs_undated: 1 },
+};
+// Several undated refreshes, and a run log read only in part.
+const UNDATED_MANY = "CVE-2017-5652";
+const UNDATED_MANY_BODY = { ...SEVERAL_BODY, cve_id: UNDATED_MANY, coverage: { ...COVERAGE, runs_undated: 3, refresh_runs_truncated: true } };
+// #3143: a healthy refresh, mid-run. core-backend dates its row at the file's header, so its date
+// is listed while it runs: in days_in_progress, not in days_partial.
+const IN_PROGRESS = "CVE-2023-44487";
+const IN_PROGRESS_BODY = {
+  ...SEVERAL_BODY,
+  cve_id: IN_PROGRESS,
+  coverage: { ...COVERAGE, last_day: "2026-10-10", days_partial: [], days_missing: [], days_in_progress: ["2026-10-10"] },
+};
+// #3143's review: a retry of a date whose first refresh failed part-way, mid-run. core-backend lists
+// the date in days_partial AND days_in_progress (TestEPSSRunLog_ARetryAfterAPartWayFailureReadsPartialAndInProgress).
+const RETRYING = "CVE-2023-44489";
+const RETRYING_BODY = {
+  ...SEVERAL_BODY,
+  cve_id: RETRYING,
+  coverage: { ...COVERAGE, last_day: "2026-10-10", days_partial: ["2026-10-10"], days_missing: [], days_in_progress: ["2026-10-10"] },
+};
+// The same answer from an API older than #3143: no days_in_progress. Not read as "none running".
+const NO_PROGRESS_FIELD = "CVE-2023-44488";
+const NO_PROGRESS_FIELD_BODY = {
+  ...SEVERAL_BODY,
+  cve_id: NO_PROGRESS_FIELD,
+  coverage: (({ days_in_progress: _d, ...rest }) => rest)(COVERAGE),
+};
 const NO_EPSS = "CVE-2019-0708";
 const NO_EPSS_BODY = {
   cve_id: NO_EPSS,
@@ -127,6 +162,11 @@ const ANSWERS = {
   [PATH(LEGACY)]: { status: 200, body: LEGACY_BODY },
   [PATH(CLAIMS_COMPLETE)]: { status: 200, body: CLAIMS_COMPLETE_BODY },
   [PATH(GAPPY)]: { status: 200, body: GAPPY_BODY },
+  [PATH(UNDATED)]: { status: 200, body: UNDATED_BODY },
+  [PATH(UNDATED_MANY)]: { status: 200, body: UNDATED_MANY_BODY },
+  [PATH(IN_PROGRESS)]: { status: 200, body: IN_PROGRESS_BODY },
+  [PATH(RETRYING)]: { status: 200, body: RETRYING_BODY },
+  [PATH(NO_PROGRESS_FIELD)]: { status: 200, body: NO_PROGRESS_FIELD_BODY },
   [PATH(NO_EPSS)]: { status: 200, body: NO_EPSS_BODY },
   [PATH(MISSED)]: { status: 200, body: MISSED_BODY },
   [PATH(UNKNOWN)]: { status: 404, body: { error: `CVE not found: ${UNKNOWN}` } },
@@ -180,7 +220,10 @@ for (const era of ERAS) {
       assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
       const data = branchOf(schema, "measured").properties.data;
       for (const k of ["cve_id", "series_kind", "series_starts_at", "current", "points"]) assert.ok(data.required.includes(k), `data does not require ${k}`);
-      assert.deepEqual(data.properties.series_kind.enum, ["change_only"]);
+      // #3268: published open (a kind added later must not fail a client holding this list), with
+      // change_only listed; the closed copy this server checks its answers against admits only it.
+      assert.deepEqual(data.properties.series_kind.anyOf, [{ type: "string", enum: ["change_only"] }, { type: "string" }]);
+      assert.deepEqual(branchOf(strictOutputSchema(schema), "measured").properties.data.properties.series_kind.enum, ["change_only"]);
     });
 
     it("the description says change-only, never a daily series, and what series_starts_at means", () => {
@@ -214,6 +257,9 @@ for (const era of ERAS) {
         days_held: 2,
         days_partial: ["2026-10-07"],
         days_missing: ["2026-10-08"],
+        days_in_progress: [],
+        runs_undated: 0,
+        refresh_runs_truncated: false,
       });
       assert.equal(sc.freshness, null);
       assert.ok(sc.notes.some((n) => n.startsWith("series_kind is change_only:") && n.includes("no point here is interpolated")), sc.notes.join(" | "));
@@ -231,6 +277,8 @@ for (const era of ERAS) {
         note,
       );
       assert.doesNotMatch(note, /The record is complete \(/);
+      // #3143: zero and false are relayed in coverage, and not named in the note.
+      assert.doesNotMatch(note, /runs_undated|refresh_runs_truncated/);
       assert.ok(
         note.includes(
           "FIRST score dates in EchelonGraph's run log (run log since 2026-10-06T13:40:00Z; earlier dates are not listed): 2026-10-06 to 2026-10-09, 2 held; not held: 2026-10-08; held for some CVEs only (a refresh failed part-way): 2026-10-07.",
@@ -259,6 +307,10 @@ for (const era of ERAS) {
       assert.equal(sc.coverage.first_day, null);
       assert.equal(sc.coverage.days_held, null);
       assert.deepEqual(sc.coverage.days_missing, []);
+      // #3143: an API that does not say is not read as 0 undated runs or an untruncated log.
+      assert.equal(sc.coverage.runs_undated, null);
+      assert.equal(sc.coverage.refresh_runs_truncated, null);
+      assert.equal(sc.coverage.days_in_progress, null);
       const note = textBlocks(res)[1];
       assert.doesNotMatch(note, /a measured empty series/);
       assert.ok(note.includes("The answer does not say from when the record is complete, so the empty series is not evidence that the score held still."), note);
@@ -279,6 +331,84 @@ for (const era of ERAS) {
       assert.deepEqual(res.structuredContent.coverage.days_missing, MANY);
       const note = textBlocks(res)[1];
       assert.ok(note.includes(`not held: ${MANY.slice(0, 10).join(", ")} and 4 more (coverage.days_missing)`), note);
+    });
+
+    it("an undated refresh is relayed in coverage and named in the note, never hidden behind 'none missing' (#3143)", async () => {
+      const res = await call(UNDATED);
+      const sc = res.structuredContent;
+      assert.equal(sc.coverage.runs_undated, 1);
+      assert.equal(sc.coverage.refresh_runs_truncated, false);
+      assert.deepEqual(sc.coverage.days_missing, []);
+      const note = textBlocks(res)[1];
+      assert.ok(
+        note.includes(
+          "1 logged refresh has no FIRST score date (coverage.runs_undated: its file named none, or it stopped before recording it). The day it applied is not counted, so a day listed missing, or not listed, may be held for the CVEs it changed, and the points it wrote carry no score_date.",
+        ),
+        note,
+      );
+      assert.doesNotMatch(note, /refresh_runs_truncated/);
+    });
+
+    it("several undated refreshes and a truncated run log are both named (#3143)", async () => {
+      const res = await call(UNDATED_MANY);
+      const sc = res.structuredContent;
+      assert.equal(sc.coverage.runs_undated, 3);
+      assert.equal(sc.coverage.refresh_runs_truncated, true);
+      const note = textBlocks(res)[1];
+      assert.ok(
+        note.includes(
+          "3 logged refreshes have no FIRST score date (coverage.runs_undated: their files named none, or they stopped before recording it). The days they applied are not counted, so a day listed missing, or not listed, may be held for the CVEs they changed, and the points they wrote carry no score_date.",
+        ),
+        note,
+      );
+      assert.ok(
+        note.includes("refresh_runs_truncated is true: only the newest refreshes of the run log were read, so first_day is not where the run log starts, and earlier score dates are not listed."),
+        note,
+      );
+    });
+
+    it("a refresh not finished: its date is in progress, relayed and named so, never partial (#3143)", async () => {
+      const res = await call(IN_PROGRESS);
+      assert.notEqual(res.isError, true);
+      const sc = res.structuredContent;
+      assert.deepEqual(sc.coverage.days_in_progress, ["2026-10-10"]);
+      assert.deepEqual(sc.coverage.days_partial, []);
+      assert.deepEqual(sc.coverage.days_missing, []);
+      const note = textBlocks(res)[1];
+      assert.ok(
+        note.includes(
+          "FIRST score dates in EchelonGraph's run log (run log since 2026-10-06T13:40:00Z; earlier dates are not listed): 2026-10-06 to 2026-10-10, 2 held; none missing; being applied by a refresh that has not finished, so held for some CVEs so far: 2026-10-10.",
+        ),
+        note,
+      );
+      assert.doesNotMatch(note, /failed part-way|held for some CVEs only/);
+      // The API reads "not finished" off the row's status and age: a refresh killed minutes ago
+      // looks the same, so the note claims neither that one is running nor that nothing failed.
+      assert.doesNotMatch(note, /nothing failed|still running/);
+    });
+
+    it("a retry after a part-way failure: its date is named partial AND in progress, never 'nothing failed' (#3143)", async () => {
+      const res = await call(RETRYING);
+      assert.notEqual(res.isError, true);
+      const sc = res.structuredContent;
+      assert.deepEqual(sc.coverage.days_in_progress, ["2026-10-10"]);
+      assert.deepEqual(sc.coverage.days_partial, ["2026-10-10"]);
+      assert.deepEqual(sc.coverage.days_missing, []);
+      const note = textBlocks(res)[1];
+      assert.ok(
+        note.includes(
+          "FIRST score dates in EchelonGraph's run log (run log since 2026-10-06T13:40:00Z; earlier dates are not listed): 2026-10-06 to 2026-10-10, 2 held; none missing; held for some CVEs only (a refresh failed part-way): 2026-10-10; being applied by a refresh that has not finished, so held for some CVEs so far: 2026-10-10.",
+        ),
+        note,
+      );
+      assert.doesNotMatch(note, /nothing failed|still running/);
+    });
+
+    it("an API that does not report days_in_progress: relayed as null, not as none running (#3143)", async () => {
+      const res = await call(NO_PROGRESS_FIELD);
+      assert.notEqual(res.isError, true);
+      assert.equal(res.structuredContent.coverage.days_in_progress, null);
+      assert.doesNotMatch(textBlocks(res)[1], /being applied now/);
     });
 
     it("the latest point equals current.epss_score, as the API states it", async () => {
@@ -376,6 +506,9 @@ for (const era of ERAS) {
         ["a point without a score", { ...ok, data: { ...ok.data, points: [{ at: "2026-06-01T03:00:00Z" }] } }],
         ["a success without data", (({ data: _d, ...rest }) => rest)(ok)],
         ["coverage with an unnamed field", { ...ok, coverage: { ...ok.coverage, interpolated: true } }],
+        ["coverage without runs_undated", { ...ok, coverage: (({ runs_undated: _r, ...rest }) => rest)(ok.coverage) }],
+        ["a negative runs_undated", { ...ok, coverage: { ...ok.coverage, runs_undated: -1 } }],
+        ["coverage without days_in_progress", { ...ok, coverage: (({ days_in_progress: _d, ...rest }) => rest)(ok.coverage) }],
       ]) {
         assert.equal(isValid(schema, mutant), false, `the validator accepted ${label}`);
       }

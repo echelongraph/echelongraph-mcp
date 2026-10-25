@@ -21,6 +21,21 @@
 //   - coverage.first_day / last_day / days_held / days_partial / days_missing are FIRST score
 //     dates from the fetcher's run log (epss_refresh_runs), which starts at run_log_since; each
 //     point's score_date is that of the logged refresh that wrote it, null where none covers it.
+//   - coverage.runs_undated counts logged refreshes with no score date, and
+//     refresh_runs_truncated says only the newest of the run log was read (#3143). Both are
+//     relayed in the envelope's coverage, and named in the note when non-zero: an undated refresh
+//     applied a date the days do not count, so a day listed missing may be held for the CVEs it
+//     changed, and its points carry no score_date. Production served runs_undated 1 from
+//     2026-10-08 (a refresh killed by a deploy, its row left undated) while the note said
+//     "none missing" and named nothing.
+//   - coverage.days_in_progress (#3143) lists the score dates a refresh that has not finished is
+//     applying: some CVEs hold the date so far. Since #3143 core-backend dates a refresh's row as
+//     soon as it reads the file's header, so without this list every daily refresh would have
+//     read as "failed part-way" (days_partial) for the minutes it runs. Relayed in the envelope's
+//     coverage (null when the API does not say) and named in the note. The note never says
+//     nothing failed: a retry of a date whose earlier refresh failed part-way is in days_partial
+//     AND days_in_progress, and the note names it in both clauses; and the API reads "has not
+//     finished" off the row's status and age, so a refresh killed minutes ago looks the same.
 //   - The value in force before a CVE's first point is not in the series.
 //   - latest_point_matches_current false says a change is missing for this CVE.
 //   - measured_at is current.epss_updated_at: when EchelonGraph last wrote a changed EPSS value
@@ -98,10 +113,11 @@ const ApiCoverage = (instant: z.ZodString) =>
     first_day: opt(Day).describe("The earliest score date in the run log."),
     last_day: opt(Day).describe("The latest score date in the run log."),
     days_held: opt(z.number().int().min(0)).describe("Score dates from first_day to last_day that a refresh applied completely."),
-    days_partial: opt(z.array(Day)).describe("Score dates whose refreshes all failed part-way: some CVEs hold that day, some do not."),
+    days_partial: opt(z.array(Day)).describe("Score dates no refresh completed and one failed part-way: some CVEs hold that day, some do not. Also in days_in_progress while a retry of it has not finished."),
     days_missing: opt(z.array(Day)).describe("Score dates from first_day to last_day that no refresh applied."),
-    runs_undated: opt(z.number().int().min(0)),
-    refresh_runs_truncated: opt(z.boolean()),
+    days_in_progress: opt(z.array(Day)).describe("Score dates no refresh completed and one that has not finished is applying: some CVEs hold that day so far. Not counted held or missing; also in days_partial when an earlier refresh of it failed part-way."),
+    runs_undated: opt(z.number().int().min(0)).describe("Logged refreshes with no score date: the days they applied are not counted held, partial or in progress, and their points carry no score_date."),
+    refresh_runs_truncated: opt(z.boolean()).describe("True when only the newest refreshes of the run log were read, so the earliest score dates are not listed."),
   });
 const data = (instant: z.ZodString) =>
   z.looseObject({
@@ -135,14 +151,29 @@ export function epssHistoryOutput<F extends { ok: false }>(kit: ToolKit<F>): z.Z
       first_day: z.string().nullable().describe("The earliest FIRST score date the run log lists; null when it lists none."),
       last_day: z.string().nullable(),
       days_held: z.number().int().min(0).nullable().describe("Score dates from first_day to last_day the record holds; null when none are listed."),
-      days_partial: z.array(z.string()).describe("Score dates held for some CVEs only."),
+      days_partial: z.array(z.string()).describe("Score dates held for some CVEs only, because their refreshes failed part-way."),
       days_missing: z.array(z.string()).describe("Score dates from first_day to last_day the record does not hold."),
+      days_in_progress: z
+        .array(z.string())
+        .nullable()
+        .describe("Score dates a refresh that has not finished is applying (#3143): held for some CVEs so far. A date an earlier refresh failed part-way on is in days_partial too. Null when the API did not say."),
+      runs_undated: z
+        .number()
+        .int()
+        .min(0)
+        .nullable()
+        .describe("Logged refreshes with no score date (#3143): the days they applied are not counted, so a day in days_missing may be held for the CVEs they changed, and their points carry no score_date. Null when the API did not say."),
+      refresh_runs_truncated: z
+        .boolean()
+        .nullable()
+        .describe("True when only the newest refreshes of the run log were read, so the earliest score dates are not listed; null when the API did not say."),
     }),
     freshness: null,
   });
 }
 
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const realInstant = (v: unknown): v is string => typeof v === "string" && Date.parse(v) > 0;
 const isDay = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -162,7 +193,13 @@ type Completeness = {
   daysHeld: number | undefined;
   daysPartial: string[];
   daysMissing: string[];
+  // #3143: undefined when the API did not say (an API older than #3143), never read as none.
+  daysInProgress: string[] | undefined;
   runLogSince: string | undefined;
+  // #3143: undefined when the API did not say (an API older than #2867, or a value that is not a
+  // whole number / a boolean), never read as 0 or false.
+  runsUndated: number | undefined;
+  runsTruncated: boolean | undefined;
   hasCoverage: boolean;
 };
 
@@ -184,7 +221,10 @@ function completeness(d: Record<string, unknown>, points: Record<string, unknown
     daysHeld: firstDay && isNum(cov.days_held) ? cov.days_held : undefined,
     daysPartial: dayList(cov.days_partial),
     daysMissing: dayList(cov.days_missing),
+    daysInProgress: Array.isArray(cov.days_in_progress) ? dayList(cov.days_in_progress) : undefined,
     runLogSince: realInstant(cov.run_log_since) ? cov.run_log_since : undefined,
+    runsUndated: isCount(cov.runs_undated) ? cov.runs_undated : undefined,
+    runsTruncated: typeof cov.refresh_runs_truncated === "boolean" ? cov.refresh_runs_truncated : undefined,
     hasCoverage: isObj(d.coverage),
   };
 }
@@ -238,10 +278,26 @@ function note(head: string, id: string, d: Record<string, unknown>, c: Completen
     const held = c.daysHeld === undefined ? "" : `, ${c.daysHeld} held`;
     const missing = c.daysMissing.length ? `; not held: ${sayDays(c.daysMissing, "days_missing")}` : "; none missing";
     const partial = c.daysPartial.length ? `; held for some CVEs only (a refresh failed part-way): ${sayDays(c.daysPartial, "days_partial")}` : "";
+    // #3143: never "nothing failed". A retry of a date whose earlier refresh failed part-way is in
+    // days_partial too, so it is named in both clauses, each true of it.
+    const applying = c.daysInProgress?.length
+      ? `; being applied by a refresh that has not finished, so held for some CVEs so far: ${sayDays(c.daysInProgress, "days_in_progress")}`
+      : "";
     const since = c.runLogSince ? ` (run log since ${c.runLogSince}; earlier dates are not listed)` : "";
-    s.push(`FIRST score dates in EchelonGraph's run log${since}: ${c.firstDay} to ${c.lastDay}${held}${missing}${partial}.`);
+    s.push(`FIRST score dates in EchelonGraph's run log${since}: ${c.firstDay} to ${c.lastDay}${held}${missing}${partial}${applying}.`);
   } else if (c.hasCoverage) {
     s.push("The run log lists no FIRST score date yet, so this answer does not say which days the record holds, and no point carries a score_date.");
+  }
+  // #3143: said only when non-zero; coverage carries the value either way. "Not counted": in no
+  // list, held, partial or in progress.
+  if (c.runsUndated) {
+    const one = c.runsUndated === 1;
+    s.push(
+      `${c.runsUndated} logged refresh${one ? " has" : "es have"} no FIRST score date (coverage.runs_undated: ${one ? "its file named none, or it" : "their files named none, or they"} stopped before recording it). The day${one ? " it" : "s they"} applied ${one ? "is" : "are"} not counted, so a day listed missing, or not listed, may be held for the CVEs ${one ? "it" : "they"} changed, and the points ${one ? "it" : "they"} wrote carry no score_date.`,
+    );
+  }
+  if (c.runsTruncated) {
+    s.push("refresh_runs_truncated is true: only the newest refreshes of the run log were read, so first_day is not where the run log starts, and earlier score dates are not listed.");
   }
   if (d.points_truncated === true) s.push("points_truncated is true: only the newest records were read, so the earliest changes are missing from this series.");
   if (d.latest_point_matches_current === false) {
@@ -281,6 +337,9 @@ export async function epssHistory<F extends { ok: false }>(kit: ToolKit<F>, cve_
         days_held: c.daysHeld ?? null,
         days_partial: c.daysPartial,
         days_missing: c.daysMissing,
+        days_in_progress: c.daysInProgress ?? null,
+        runs_undated: c.runsUndated ?? null,
+        refresh_runs_truncated: c.runsTruncated ?? null,
       },
       freshness: null,
       notes: [

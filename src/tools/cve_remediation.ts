@@ -41,6 +41,7 @@ import { ANNOTATIONS, CVE_ID, SHOWN_BASE, api, badInput, checked, crashed, envel
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type RowKeep, type TextCut } from "../textBudget.js";
 import { fixStatusSchema } from "../fixStatus.js";
 import { MATCH_HEADERS } from "./check_affected.js";
+import { ONE_PACKAGE_RULE, packagesListedTwice } from "./packageRecords.js";
 
 const TOOL = "cve_remediation";
 const SECTIONS = ["cisa", "fixed_branches", "vendor_remediations", "fix_references", "patches"] as const;
@@ -183,16 +184,6 @@ function schemas() {
 let built: ReturnType<typeof schemas> | undefined;
 const schemasOnce = () => (built ??= schemas());
 
-// The text cut: vendor texts go first, the kinds, states and URLs stay.
-const CUT: TextCut = {
-  rows: "vendor_remediations",
-  levels: [
-    { keep: ["vendor", "vendor_advisory_id", "withdrawn", "remediation_state", "remediation_kinds", "items_total", ["items", ["kind", "source_category", "text", "url", "fixed_build"]]], clip: 400, cap: 16 },
-    { keep: ["vendor", "vendor_advisory_id", "remediation_state", "remediation_kinds", ["items", ["kind", "url"]]], clip: 2048, cap: 8 },
-  ],
-  whole:
-    "get_vendor_advisory returns any one of these advisories by its vendor and vendor_advisory_id, whole in its structuredContent.data with full: true, with every remediation item it lists.",
-};
 // #3013: the structured result's cut. CVE-2021-44228's answer is 75,963 characters of structured
 // result, 61,248 of them its 20 vendor_remediations, whose items carry the vendor's text (about 550
 // characters an item, the payload) and its product_ids (about 550, the vendor's own identifiers).
@@ -248,6 +239,22 @@ const ADVISORY_FIELDS = ["vendor", "vendor_display_name", "vendor_advisory_id", 
 const ITEM_TEXT_ELSEWHERE =
   "No item in data keeps its text, the vendor's own wording of the step (a workaround or mitigation among them): get_vendor_advisory, given an advisory's vendor and its vendor_advisory_id as advisory_id, returns it among that advisory's remediations, whole in its structuredContent.data with full: true.";
 const FIXED_BRANCHES_THIN: RowKeep = ["ecosystem", "package_name", "version_range", "fixed_version", ["fixed_branches", ["introduced", "fixed", "last_affected"]]];
+// A package whose ranges a cut keeps the first `cap` of: fixed_branches_truncated with its total
+// and returned. The structured cut's step 2 marks them so, and (3.1.0's phase A review) the text's.
+const rangesTruncated = (row: Record<string, unknown>, cap: number): Record<string, unknown> => {
+  const n = Array.isArray(row.fixed_branches) ? row.fixed_branches.length : 0;
+  return n > cap ? { fixed_branches_truncated: { total: n, returned: cap } } : {};
+};
+// 3.1.0's phase C review: the note's fix walk ("the first fixed above it that no range of its
+// package holds", branchSentence below), over a capped package's kept ranges alone, can name a
+// version a range left out still holds (test/cve_remediation.test.mjs: a package whose every fix
+// the next range holds walks to c.0.0 over its first c ranges, to N.0.0 over all N). Both notes say
+// so of a capped package, and where its fix is read: data with full: true (the text beside a cut
+// data, and data itself), or data as it is (the text beside a data the call asked whole).
+const CAPPED_FIX_DATA = "its fix, walked over its kept ranges alone, can be wrong (read that package's fix with full: true)";
+const cappedFixText = (full: boolean): string =>
+  `A capped package's fix, walked over its kept ranges alone, can be wrong: read that package's fix ${full ? "with full: true" : "from structuredContent.data"}.`;
+const PATCHES_THIN: RowKeep = ["vendor", "patch_url", "published_at"];
 const CVE_REMEDIATION_DATA: DataCut = {
   steps: [
     {
@@ -266,11 +273,9 @@ const CVE_REMEDIATION_DATA: DataCut = {
           keep: FIXED_BRANCHES_THIN,
           capped: "fixed_branches",
           least: 1,
-          mark: (row, cap) => {
-            const n = Array.isArray(row.fixed_branches) ? row.fixed_branches.length : 0;
-            return n > cap ? { fixed_branches_truncated: { total: n, returned: cap } } : {};
-          },
-          said: (cap) => `each package's fixed_branches keeping at most its first ${cap} ranges, a package with more carrying fixed_branches_truncated with its total and returned`,
+          mark: rangesTruncated,
+          said: (cap) =>
+            `each package's fixed_branches keeping at most its first ${cap} range${cap === 1 ? "" : "s"}, a package with more carrying fixed_branches_truncated with its total and returned, and ${CAPPED_FIX_DATA}`,
         },
       ],
       keepAll: true,
@@ -279,21 +284,81 @@ const CVE_REMEDIATION_DATA: DataCut = {
     // #3139 round 3: every patch row stays, thinned (keepAll), while the step after it (any other
     // list at the top of data: fix_references) is cut; patch rows leave only after that, and
     // before any fixed_branches row or advisory (the last keepAll step's entries leave first).
-    { lists: ["patches"], thin: [["vendor", "patch_url", "published_at"]], keepAll: true },
+    { lists: ["patches"], thin: [PATCHES_THIN], keepAll: true },
   ],
   // Said where the advisories kept are thinned to a level whose items keep no text, and (#3139)
   // wherever an advisory is left out.
   page: (t, _d, at) => {
     const items = at.keeps.vendor_remediations?.find((x): x is readonly [string, readonly string[]] => typeof x !== "string" && x[0] === "items");
     const v = t.vendor_remediations;
-    return [items && !items[1].includes("text") ? ITEM_TEXT_ELSEWHERE : "", v && v.returned < v.total ? advisoriesElsewhere(v.total - v.returned) : ""].filter(Boolean).join(" ");
+    return [items && !items[1].includes("text") ? ITEM_TEXT_ELSEWHERE : "", v && v.returned < v.total ? advisoriesElsewhere(v.total - v.returned, "data") : ""].filter(Boolean).join(" ");
   },
 };
 // #3139: where the advisories a cut leaves out are read. vendor_advisories_for_cve lists every one
 // naming the CVE, with its vendor and vendor_advisory_id (CVE-2023-44487's 20 at 15,505
-// characters on hosted 3.0.0), and get_vendor_advisory then returns any one whole.
-const advisoriesElsewhere = (n: number): string =>
-  `vendor_advisories_for_cve, given this CVE, lists every vendor advisory naming it, the ${n} left out of data among them, each with its vendor and vendor_advisory_id.`;
+// characters on hosted 3.0.0), and get_vendor_advisory then returns any one whole. #3272: the
+// first text block's cut says it too, of the advisories it leaves out.
+const advisoriesElsewhere = (n: number, of: string): string =>
+  `vendor_advisories_for_cve, given this CVE, lists every vendor advisory naming it, the ${n} left out of ${of} among them, each with its vendor and vendor_advisory_id.`;
+
+// The text cut: vendor texts go first, the kinds, states and URLs stay.
+// #3272: through 3.0.2 the first text block was still cut the 3.0.0 way, which #3139 fixed only in
+// structuredContent.data: CUT named no list beside the advisories, so once its leanest level did not
+// fit, advisories left the text from the end while fixed_branches, patches and fix_references stayed
+// whole beside them. On the recorded CVE-2023-44487 answer (test/fixtures/cve_remediation-
+// CVE-2023-44487.json) the text kept 19 of 20 advisories beside 50/50 fixed_branches and 30/30
+// patches, and the same answer with 1, 5, 10 and 16 more fixed_branches packages 18, 13, 8 and 2
+// (from 18 more, the text fell through to step 4's every-list cap and kept 20 again); the TEXT CUT
+// note named get_vendor_advisory, which needs the advisory's ID, and never vendor_advisories_for_cve.
+// Now the text follows the structured cut's order (beforeRows, textBudget.ts step 3): the advisories
+// are cut level by level with every list beside them whole; once the leanest level does not fit,
+// fixed_branches is cut to FIXED_BRANCHES_THIN's fields, then patches to PATCHES_THIN's, every row
+// kept; then fix_references, then patches, then fixed_branches lose rows from the end, each emptied
+// before the next loses any; only then do advisories leave, from the end, and the note names
+// vendor_advisories_for_cve as where the rest are. The recorded answer now keeps all 20 advisories
+// beside every fixed_branches row (thinned), patch and fix_reference.
+// 3.1.0's phase A review: the text kept every range of each fixed_branches row it kept, capping no
+// package's ranges as the structured cut's step 2 does, so a package too long to fit alone left the
+// text with every package after it, and the lists emptied before it stayed empty: CVE-2023-44487's
+// answer with one package of N ranges put first among 51 kept 11 of 20 references at 150 ranges, 51
+// packages, 14 patches and no reference at 200, 43 packages and no patch at 250, and, from 400
+// ranges, no package, patch or reference in 6,347 characters, where 3.0.2's every-list cap kept 32
+// packages, 30 patches and 20 references at every size. Now, once fixed_branches and patches are
+// thinned and the text still does not fit, each package's ranges are cut to its first c, the most
+// that fit with patches and references as they stand (at least 1), every package kept and marked
+// fixed_branches_truncated as data marks it; only if 1 does not fit do references, then patches,
+// then packages leave from the end, and the room they leave goes back to c. The note names the
+// packages so cut and says data holds every range.
+const CUT: TextCut = {
+  rows: "vendor_remediations",
+  levels: [
+    { keep: ["vendor", "vendor_advisory_id", "withdrawn", "remediation_state", "remediation_kinds", "items_total", ["items", ["kind", "source_category", "text", "url", "fixed_build"]]], clip: 400, cap: 16 },
+    { keep: ["vendor", "vendor_advisory_id", "remediation_state", "remediation_kinds", ["items", ["kind", "url"]]], clip: 2048, cap: 8 },
+  ],
+  sides: [
+    {
+      list: "fixed_branches",
+      keep: FIXED_BRANCHES_THIN,
+      beforeRows: true,
+      capped: {
+        list: "fixed_branches",
+        least: 1,
+        mark: rangesTruncated,
+        name: (e) => `${strAt(e, "package_name") ?? "?"} (${strAt(e, "ecosystem") ?? "?"})`,
+        said: (cap, names, full) =>
+          `In it, each package's fixed_branches keeps at most its first ${cap} range${cap === 1 ? "" : "s"}: ${names.length <= 3 ? listed(names) : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`} ${names.length === 1 ? "has more, carrying" : "have more, each carrying"} fixed_branches_truncated with its total and returned, and structuredContent.data holds every range${full ? " with full: true" : ""}. ${cappedFixText(full)}`,
+      },
+    },
+    { list: "patches", keep: PATCHES_THIN, beforeRows: true },
+    { list: "fix_references", beforeRows: true },
+  ],
+  whole:
+    "get_vendor_advisory returns any one of these advisories by its vendor and vendor_advisory_id, whole in its structuredContent.data with full: true, with every remediation item it lists.",
+  page: (inText, rows) => advisoriesElsewhere(rows - inText, "the first text block"),
+};
+
+// The text cut, for the tests that replay it (test/cve_remediation.test.mjs).
+export { CUT as CVE_REMEDIATION_TEXT_CUT };
 
 const listed = (xs: readonly string[]): string => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 const arr = (v: unknown): unknown[] | null => (Array.isArray(v) ? v : null);
@@ -326,6 +391,22 @@ function vendorSentences(cve: string, rows: unknown[]): string[] {
   return out;
 }
 
+// #3285: the ecosystems whose ":" suffix is a repository, not a release (core-backend
+// cve/pkgecosystem.go baseTokenMatchableEcosystems): an entry of one package_name under
+// "Packagist:https://packages.drupal.org/8" and one under "Packagist" are one package to the
+// matcher (cve/pkgmatch_fixedin.go registryRecordKey), which walks their ranges together; a
+// release suffix (Debian:12, Alpine:v3.20) is never folded. CVE-2025-48013's fixed_branches lists
+// drupal/quick_node_block under both (fixed 2.0.1 and fixed 2.0.0, each from 0): read entry by
+// entry, the rule gave a Packagist 1.0.0 the fix 2.0.0, which the Drupal advisory still holds
+// affected; as one package it gives 2.0.1, the matcher's fixed_in. packageRecords.ts holds the
+// reading, which cve_intel's note states of affected_packages too.
+// The packages fixed_branches lists under more than one such ecosystem, each as its package_name
+// with the ecosystems it is listed under, and how many entries fold into another so.
+function onePackageListedTwice(rows: unknown[]): { named: string[]; folded: number } {
+  const { twice, folded } = packagesListedTwice(rows);
+  return { named: twice.map((g) => `${g.name} (${listed(g.ecosystems)})`), folded };
+}
+
 function branchSentence(rows: unknown[]): string {
   if (rows.length === 0) return "fixed_branches is empty: no affected package range is on record, which is not a finding that no fix exists.";
   let ranges = 0;
@@ -336,7 +417,13 @@ function branchSentence(rows: unknown[]): string {
       if (strAt(b, "fixed")) fixed++;
     }
   }
-  return `fixed_branches lists ${rows.length} affected package${rows.length === 1 ? "" : "s"} with ${ranges} affected range${ranges === 1 ? "" : "s"}, ${fixed} with a fix on record; an installed version's fix is the first fixed above it that no range of its package holds (the fixed of the range that holds it, or, while another range still holds that version, that range's fixed), compared in the ecosystem's version order.`;
+  const twice = onePackageListedTwice(rows);
+  const packages = rows.length - twice.folded;
+  const listedAs = twice.folded === 0 ? `${rows.length} affected package${rows.length === 1 ? "" : "s"}` : `${rows.length} entries, ${packages} affected package${packages === 1 ? "" : "s"},`;
+  const rule = `fixed_branches lists ${listedAs} with ${ranges} affected range${ranges === 1 ? "" : "s"}, ${fixed} with a fix on record; an installed version's fix is the first fixed above it that no range of its package holds (the fixed of the range that holds it, or, while another range still holds that version, that range's fixed), compared in the ecosystem's version order.`;
+  if (twice.named.length === 0) return rule;
+  const few = twice.named.length <= 3 ? listed(twice.named) : `${twice.named.slice(0, 3).join(", ")} and ${twice.named.length - 3} more`;
+  return `${rule} ${ONE_PACKAGE_RULE("Entries")}: here ${few}.`;
 }
 
 // fix_status's sentence: what the API's rule says, relayed. Nothing about the fix is inferred here.

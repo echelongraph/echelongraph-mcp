@@ -27,10 +27,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 // #3121: answers are validated against the closed success branch (strict-output.mjs).
 import { StrictOutputValidator } from "./strict-output.mjs";
-import { connect, MODERN, SERVER_INFO_META_KEY } from "./mcp-stdio-client.mjs";
+import { connect, MODERN, SERVER_INFO_META_KEY, StdioMcpClient } from "./mcp-stdio-client.mjs";
 import { ACCEPT, legacy, modern, modernHeaders, modernMeta, parseRpcBody, post } from "./mcp-http-client.mjs";
 import { PKG, PKG_DIR, readPkgFile, serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
+import { REQUIRED, cutProblems } from "./client-cut.mjs";
 
 const HTTP_ENTRY = path.join(PKG_DIR, "dist", "http.js");
 const FIVE = ["cve_summary", "search_cves", "get_cve", "cve_exposure", "exposure_radar"];
@@ -40,6 +41,17 @@ const MARKER = "zzmarkerterm2316";
 // The platform's chain for a direct client at `addr` (core-backend ratelimitkey_test.go).
 const chain = (addr) => `${addr}, 169.254.169.126, 0.0.0.0`;
 const validator = new StrictOutputValidator();
+
+// A bound on this whole file (M1's review of #2775): a large-body slot held forever (a wait that never times out)
+// hung the file until the CI job's own 20-minute limit killed it, a hang and not a failure. The two describes that
+// wait for a slot carry their own timeouts below; this catches a hang anywhere else. The file runs in about a minute
+// alone and a few beside the rest of npm test. Each test file runs in its own process (node --test), so exiting fails
+// this file only; unref()'d, it never keeps the process alive.
+const FILE_BOUND_MS = 10 * 60_000;
+setTimeout(() => {
+  process.stderr.write(`http.test.mjs: still running after ${FILE_BOUND_MS / 60_000} minutes, so a test hangs: failing the file\n`);
+  process.exit(1);
+}, FILE_BOUND_MS).unref();
 
 // ── the stub API ──
 let stub;
@@ -74,8 +86,9 @@ after(() => new Promise((resolve) => stub.close(resolve)));
 const stubBase = () => `http://127.0.0.1:${stub.address().port}`;
 
 // ── the server under test ──
-// Every stdout line of every server this file starts, for #2863's key-set check at the end.
+// Every stdout line of every server this file starts, and each one's stderr, for #2863's checks at the end.
 const EVERY_LINE = [];
+const EVERY_STDERR = [];
 // Spawns dist/http.js on an ephemeral port and resolves once it logs that it is listening.
 // stdout is kept line by line: it is the access log the tests read.
 async function startHttp(extraEnv = {}) {
@@ -92,6 +105,7 @@ async function startHttp(extraEnv = {}) {
   const lines = [];
   let stderr = "";
   proc.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
+  EVERY_STDERR.push(() => stderr);
   const exited = new Promise((resolve) => proc.once("exit", (code) => resolve(code)));
   const port = await new Promise((resolve, reject) => {
     let buf = "";
@@ -179,6 +193,28 @@ describe("#2316: the hosted endpoint over Streamable HTTP", () => {
       for (const n of FIVE) assert.ok(names.includes(n), `${n} missing from ${names}`);
       for (const t of r.message.result.tools) assert.ok(t.outputSchema && t.annotations, t.name);
     });
+  });
+
+  // #2842 (step 5): the client cut, over the hosted transport. tools.test.mjs holds stdio to it and
+  // its controls show cutProblems failing; this holds the HTTP entry to the same check in both eras,
+  // so a text the hosted build serves differently (instructions on server/discover, tools/list over
+  // POST) cannot pass stdio and fail here unseen.
+  describe(`#2842: the client ${REQUIRED.CLIENT_DESCRIPTION_CUT.toLocaleString("en-US")}-character cut over HTTP`, () => {
+    for (const era of ["modern", "legacy 2025-06-18"]) {
+      it(`${era}: the instructions and every description fit the cut, and each head holds its required sentences`, async () => {
+        const opening = era === "modern"
+          ? (await modern(srv.url, "server/discover")).message.result
+          : (await legacy(srv.url, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } })).message.result;
+        const list = era === "modern" ? await modern(srv.url, "tools/list") : await legacy(srv.url, "tools/list", {}, { revision: "2025-06-18" });
+        assert.equal(list.status, 200, list.text);
+        const served = { instructions: opening.instructions, tools: list.message.result.tools };
+        assert.equal(typeof served.instructions, "string", "the opening exchange carries no instructions");
+        assert.deepEqual(cutProblems(served), []);
+        // The check can fail here too: the same served text with one description past the cut.
+        const grown = { ...served, tools: served.tools.map((t) => (t.name === "get_cwe" ? { ...t, description: `${t.description} ${"y".repeat(REQUIRED.CLIENT_DESCRIPTION_CUT)}` } : t)) };
+        assert.ok(cutProblems(grown).some((p) => p.startsWith("(b) get_cwe")), "control: a get_cwe description past the cut was not caught");
+      });
+    }
   });
 
   describe("done means 3: tools/call cve_summary relays the API's answer", () => {
@@ -500,10 +536,12 @@ describe("#2835: scan_manifest takes a lockfile past 64 KiB over the hosted endp
   });
 });
 
-describe("#2747: the large-body cap and slots", () => {
+// #2775's waits run out at 300 ms here, and the describe takes about 3 s: a slot held forever fails it at 60 s.
+describe("#2747: the large-body cap and slots", { timeout: 60_000 }, () => {
   let srv;
   before(async () => {
-    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_SBOM_BODY_BYTES: "300000", MCP_LARGE_BODY_SLOTS: "1" });
+    // #2775: a large body waits MCP_LARGE_BODY_WAIT_MS for a slot (15 s by default) before it is refused; 300 ms here.
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000", MCP_MAX_SBOM_BODY_BYTES: "300000", MCP_LARGE_BODY_SLOTS: "1", MCP_LARGE_BODY_WAIT_MS: "300" });
   });
   after(() => srv?.stop());
   // 2,000 purls of ~45 bytes: a body past 64 KiB that is not a document.
@@ -533,10 +571,32 @@ describe("#2747: the large-body cap and slots", () => {
       release = () => req.end(body.slice(body.length - 10));
     });
     await new Promise((r) => setTimeout(r, 200));
+    const linesBefore = accessLines(srv).length;
     const busy = await post(srv.url, body, { "MCP-Protocol-Version": "2025-06-18" });
     assert.equal(busy.status, 503, busy.text);
     assert.equal(busy.message.error.code, -32030);
     assert.equal(busy.headers.get("retry-after"), "5");
+    // #2775: refused only once its wait for the slot ran out, and its line says how long it waited.
+    await waitFor(() => accessLines(srv).slice(linesBefore).some((l) => l.refused === "large_body_busy"), "the refusal's access line");
+    const refusedLine = accessLines(srv).slice(linesBefore).find((l) => l.refused === "large_body_busy");
+    assert.ok(refusedLine.slot_wait_ms >= 300 && refusedLine.slot_wait_ms < 2000, JSON.stringify(refusedLine));
+    // #2775: a chunked body (no Content-Length) that crosses 64 KiB while the slot is held waits too, and is refused
+    // once its wait runs out, promptly, with what it had not sent discarded.
+    const chunkedAt = Date.now();
+    const chunked = await new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18", "Transfer-Encoding": "chunked" } },
+        (res) => {
+          let t = "";
+          res.setEncoding("utf8").on("data", (d) => (t += d)).on("end", () => resolve({ status: res.statusCode, text: t }));
+        },
+      );
+      req.on("error", (e) => resolve({ status: 0, text: String(e) }));
+      for (let i = 0; i < body.length; i += 8192) req.write(body.slice(i, i + 8192));
+      req.end();
+    });
+    assert.equal(chunked.status, 503, chunked.text.slice(0, 300));
+    assert.ok(Date.now() - chunkedAt < 3000, `the chunked refusal took ${Date.now() - chunkedAt} ms`);
     // A small request is never held behind the slot.
     assert.equal((await modern(srv.url, "tools/list")).status, 200);
     release();
@@ -1133,6 +1193,12 @@ describe("#2775: over h2c (MCP_H2C=1), a stream reset is a client that went", ()
     const health = await h2Get(session, "/health");
     assert.equal(health.status, 200);
     assert.equal(JSON.parse(health.text).status, "ok");
+    // The server writes each access line to its stdout as it answers, and this process reads that
+    // pipe on its own schedule, so a line can arrive after its response. Under load (the whole
+    // suite, load 9) the /health line arrived after `before` was taken and was read as a third
+    // line, [undefined, 200, false]: a GET has no tool. Wait for it, and for the two calls' lines,
+    // rather than for a fixed 50 ms.
+    await waitFor(() => accessLines(srv).some((l) => l.method === "GET" && l.path === "/health"), "the /health request's access line");
     stub.state.ms = 10;
     const before = accessLines(srv).length;
     for (const era of ["modern", "legacy"]) {
@@ -1140,6 +1206,7 @@ describe("#2775: over h2c (MCP_H2C=1), a stream reset is a client that went", ()
       assert.equal(r.status, 200, r.text.slice(0, 300));
       assert.deepEqual(r.message.result.structuredContent.data, SUMMARY, `${era}: ${r.text.slice(0, 300)}`);
     }
+    await waitFor(() => accessLines(srv).length >= before + 2, "the two calls' access lines");
     await sleep(50);
     const lines = accessLines(srv).slice(before);
     assert.deepEqual(
@@ -1149,6 +1216,25 @@ describe("#2775: over h2c (MCP_H2C=1), a stream reset is a client that went", ()
         ["cve_summary", 200, false],
       ],
     );
+  });
+
+  // The flake above, made to happen: this process stops reading the server's stdout across the
+  // /health request, as a loaded box can, so its access line is read after `before` is taken. It is
+  // then the third line the flake showed, [undefined, 200, false], a GET of /health.
+  it("control: an access line read after its response lands after `before`, as the flake's [undefined, 200, false] did", async () => {
+    srv.proc.stdout.pause();
+    let before;
+    try {
+      const health = await h2Get(session, "/health");
+      assert.equal(health.status, 200);
+      before = accessLines(srv).length;
+    } finally {
+      srv.proc.stdout.resume();
+    }
+    await waitFor(() => accessLines(srv).length > before, "the /health line, read late");
+    const late = accessLines(srv).slice(before);
+    assert.deepEqual(late.map((l) => [l.tool, l.status, l.client_closed]), [[undefined, 200, false]]);
+    assert.deepEqual([late[0].method, late[0].path], ["GET", "/health"]);
   });
 
   it("a refusal that would close an HTTP/1.1 connection is answered on its stream, with no connection header", async () => {
@@ -1195,6 +1281,44 @@ describe("#2775: over h2c (MCP_H2C=1), a stream reset is a client that went", ()
       assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
     });
   }
+
+  // The HTTP/1.1 waiter test below sends only 8 KiB of its body: there a close that sits behind bytes the server has
+  // not read is seen only once they are read, at the waiter's turn. This is the same waiter over production's
+  // protocol, its whole body sent: h2 flow control lets 65,535 bytes of it out (the stream window, unread while it
+  // waits; Node 20, 22 and 24 alike) and holds the rest. Its stream is then reset: the reset is a frame the session
+  // reads whatever the stream holds, so the waiter leaves the queue then, not at its turn. Without this test no h2c
+  // test had a waiter: with readBody's slot wait deaf to its client (Slots.acquire without the signal), all passed.
+  it("a waiter whose stream is reset leaves the queue while the slot is held: 499, and the next waiter gets the slot", async () => {
+    stub.state.batchMs = 500;
+    await waitFor(() => stub.state.open === 0, "the API to be idle");
+    const before = accessLines(srv).length;
+    const batches = stub.state.batches;
+    let holderDone = false;
+    const held = h2Call(session, "modern", purls).answer.finally(() => (holderDone = true));
+    await waitFor(() => stub.state.batches > batches, "the holder's first batch at the API");
+    // Ten batches of 500 ms: the holder holds the slot for 5 s at least. The waits below are as the HTTP/1.1 test's.
+    const waiter = h2Call(session, "modern", probe);
+    await sleep(600);
+    const next = h2Call(session, "modern", probe).answer;
+    await sleep(600);
+    assert.ok(!holderDone, "the holder was done before the waiter's stream was reset: nothing would be tested");
+    waiter.stream.close(http2.constants.NGHTTP2_CANCEL);
+    await waitFor(() => accessLines(srv).slice(before).some((l) => l.status === 499), "the reset waiter's access line", 20_000);
+    // It left when its stream was reset, while the slot was held: its line comes before the holder's. The server's
+    // own lines say so, not the holder's answer reaching this client: with the waiter made deaf to its reset, the
+    // holder's stream closed here only after the server had logged the waiter leaving at its turn.
+    const atGone = accessLines(srv).slice(before);
+    assert.ok(!atGone.some((l) => l.body_bytes > 80_000), `the reset waiter left only at its turn, after the holder: ${JSON.stringify(atGone)}`);
+    const gone = atGone.find((l) => l.status === 499);
+    assert.deepEqual([gone.refused, gone.client_closed, gone.body_bytes], ["client_closed", true, 0], JSON.stringify(gone));
+    assert.ok(gone.slot_wait_ms > 0, `it never waited for the slot: ${JSON.stringify(gone)}`);
+    const [n, h] = await Promise.all([next, held]);
+    assert.deepEqual([n.status, h.status], [200, 200], n.text.slice(0, 300));
+    assert.ok(!session.closed && !session.destroyed, "the connection stayed open, as Cloud Run's does");
+    await waitFor(() => accessLines(srv).length >= before + 3, "3 access lines");
+    const served = accessLines(srv).slice(before).filter((l) => l.status === 200 && l.body_bytes < 80_000);
+    assert.ok(served.some((l) => l.slot_wait_ms > 0), `the next waiter did not wait for the slot: ${JSON.stringify(served)}`);
+  });
 
   it("a stream reset mid-upload frees its slot, and held no place: the next request is admitted alone", async () => {
     const before = accessLines(srv).length;
@@ -1319,6 +1443,24 @@ describe("#2775: a check_sbom call waiting out a 429's Retry-After stops when it
     assert.deepEqual([line.status, line.client_closed], [499, true], JSON.stringify(line));
   });
 
+  // 3.1.0's final panel: under h2c rst_code was the client's own RST_STREAM code, any 32-bit number (0x7a71c0de logged
+  // 2054275294). It is a code HTTP/2 defines, else (other).
+  it("h2c: a reset whose code HTTP/2 does not define logs rst_code (other), never the client's number", async () => {
+    stub.state.retryAfter = 20;
+    const batchesBefore = stub.state.batches;
+    const goneBefore = goneLines(h2).length;
+    const { stream } = h2Call(session, "modern", purls);
+    await waitFor(() => stub.state.batches > batchesBefore, "the first batch at the API (answered 429)");
+    await sleep(300);
+    stream.close(0x7a71c0de);
+    stub.state.retryAfter = undefined;
+    await waitFor(() => goneLines(h2).length > goneBefore, "its mcp_client_gone line", 1500);
+    const gone = goneLines(h2).slice(goneBefore);
+    assert.equal(gone.length, 1, JSON.stringify(gone));
+    assert.equal(gone[0].rst_code, "(other)", JSON.stringify(gone[0]));
+    assert.ok(!h2.lines.some((l) => l.includes(String(0x7a71c0de))), "the client's reset code reached a log line");
+  });
+
   it("an answer that is written is no client gone: no mcp_client_gone line, over either protocol", async () => {
     stub.state.retryAfter = undefined;
     stub.state.ms = 10;
@@ -1329,6 +1471,564 @@ describe("#2775: a check_sbom call waiting out a 429's Retry-After stops when it
     await sleep(200);
     assert.equal(goneLines(h1).length, g1, JSON.stringify(goneLines(h1).slice(g1)));
     assert.equal(goneLines(h2).length, g2, JSON.stringify(goneLines(h2).slice(g2)));
+  });
+});
+
+// ── #2775, decided 2026-10-18: a large body that finds every slot busy waits for one ──
+// Behind the Google Frontend a client's close reaches the container too late to free its slot (the 2026-10-18 probe:
+// both follow-up bodies sent 1 s after two aborted check_sbom calls were refused 503 large_body_busy while those calls
+// ran on to 200). So the retry is made to succeed instead: a large body that finds both slots busy waits up to
+// DEFAULT_LARGE_BODY_WAIT_MS (15 s) for one, at most DEFAULT_LARGE_BODY_WAITERS (2) at once, first come first served,
+// and is refused as before only when its wait runs out, or at once when two already wait. The access line records the
+// wait (slot_wait_ms); mcp_large_body_busy is written only on a real refusal.
+// M1's review: with Slots.acquire's wait made endless, this describe hung the file (killed at 300 s, no failure). Its
+// four tests take about 15 s together; a slot held forever now fails it at 90 s.
+describe("#2775: a large body that finds every slot busy waits up to 15 s for one, two at most", { timeout: 90_000 }, () => {
+  let stub;
+  let srv;
+  before(async () => {
+    stub = await slowStub();
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: stub.base, MCP_RATE_LIMIT_PER_MIN: "1000", MCP_LARGE_BODY_SLOTS: "1", MCP_MAX_IN_FLIGHT: "8" });
+  });
+  after(async () => {
+    await srv?.stop();
+    await stub?.close();
+  });
+  const purls = { name: "check_sbom", arguments: { purls: Array.from({ length: 2000 }, (_, i) => `pkg:npm/a-longer-package-name-${i}@1.0.0`) } };
+  // A body past 64 KiB that needs the slot and makes no API call: a document that is not JSON.
+  const probe = { name: "check_sbom", arguments: { sbom: "x".repeat(70 * 1024) } };
+  const busyLines = () => srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_large_body_busy");
+  // A request's access line is written once it has settled, after its answer: wait for this test's n lines.
+  const settled = (before, n) => waitFor(() => accessLines(srv).length >= before + n, `${n} access lines`);
+  // In each test the 2,000-purl call (~85 KB) holds the only slot for its ten batches, 300 ms each.
+  it("a retry while the slot is held waits, then is served: 200, slot_wait_ms > 0, no mcp_large_body_busy", async () => {
+    const before = accessLines(srv).length;
+    const busyBefore = busyLines().length;
+    stub.state.batchMs = 300;
+    const batches = stub.state.batches;
+    const held = modern(srv.url, "tools/call", purls);
+    await waitFor(() => stub.state.batches > batches, "the holder's first batch at the API");
+    const t0 = Date.now();
+    const retry = await modern(srv.url, "tools/call", probe);
+    const waited = Date.now() - t0;
+    assert.equal(retry.status, 200, retry.text.slice(0, 300));
+    assert.equal(retry.message.result.structuredContent.state, "invalid_input");
+    const h = await held;
+    assert.equal(h.status, 200, h.text.slice(0, 300));
+    assert.ok(waited > 500, `the retry was answered in ${waited} ms, so it never waited for the slot`);
+    await settled(before, 2);
+    const line = accessLines(srv).slice(before).find((l) => l.tool === "check_sbom" && l.body_bytes < 80_000);
+    assert.ok(line, JSON.stringify(accessLines(srv).slice(before)));
+    assert.deepEqual([line.status, line.refused], [200, ""], JSON.stringify(line));
+    assert.ok(line.slot_wait_ms > 0 && line.slot_wait_ms < 15_000, `slot_wait_ms ${line.slot_wait_ms}`);
+    const holder = accessLines(srv).slice(before).find((l) => l.tool === "check_sbom" && l.body_bytes > 80_000);
+    assert.equal(holder.slot_wait_ms, 0, "the holder found the slot free");
+    assert.equal(busyLines().length, busyBefore, "mcp_large_body_busy was written for a body that was served");
+  });
+
+  it("with two already waiting, a third large body is refused at once: 503 -32030, slot_wait_ms 0, one mcp_large_body_busy", async () => {
+    const before = accessLines(srv).length;
+    const busyBefore = busyLines().length;
+    stub.state.batchMs = 300;
+    const batches = stub.state.batches;
+    const held = modern(srv.url, "tools/call", purls);
+    await waitFor(() => stub.state.batches > batches, "the holder's first batch at the API");
+    const w1 = modern(srv.url, "tools/call", probe);
+    const w2 = modern(srv.url, "tools/call", probe);
+    await sleep(300);
+    const t0 = Date.now();
+    const third = await modern(srv.url, "tools/call", probe);
+    const took = Date.now() - t0;
+    assert.equal(third.status, 503, third.text.slice(0, 300));
+    assert.equal(third.message.error.code, -32030);
+    assert.equal(third.headers.get("retry-after"), "5");
+    assert.ok(took < 1000, `the third waited ${took} ms`);
+    const [a, b, h] = await Promise.all([w1, w2, held]);
+    assert.deepEqual([a.status, b.status, h.status], [200, 200, 200], "a waiter or the holder was not served");
+    await settled(before, 4);
+    const lines = accessLines(srv).slice(before);
+    const refused = lines.filter((l) => l.refused === "large_body_busy");
+    assert.equal(refused.length, 1, JSON.stringify(lines));
+    assert.equal(refused[0].slot_wait_ms, 0, JSON.stringify(refused[0]));
+    assert.equal(lines.filter((l) => l.tool === "check_sbom" && l.body_bytes < 80_000 && l.status === 200 && l.slot_wait_ms > 0).length, 2, JSON.stringify(lines));
+    assert.equal(busyLines().length - busyBefore, 1, "mcp_large_body_busy is not written once, for the one refusal");
+  });
+
+  // 3.1.0's release dry run (2026-10-25) failed this under load: "timed out waiting for the gone waiter's access
+  // line". The gone waiter had sent its whole ~72 KB body. Over HTTP/1.1 a client's close is read only after the bytes
+  // it sent, and a waiting body is not read on: once the request's read buffer is full the close sits unread until the
+  // waiter gets the slot, and the waiter was then read and answered 200, with no 499. The buffer is 16 KiB on Node 20,
+  // so there it failed every run; from Node 22 it is 64 KiB, so it failed when the server's first read of the body
+  // ended past 64 KiB, before the rest came (a write split there fails it every run). So this waiter sends 8 KiB of
+  // its body, as a client whose upload is held does, and its close is read when it comes. (Over h2c, production's
+  // protocol, a reset is read whatever its stream holds: the h2c test "a waiter whose stream is reset leaves the
+  // queue while the slot is held", above, sends its whole body.)
+  it("a waiter whose client goes leaves the queue: it is 499, and the next waiter gets the slot", async () => {
+    const before = accessLines(srv).length;
+    // Ten batches of 500 ms: the holder holds the slot for 5 s at least, across the waits below.
+    stub.state.batchMs = 500;
+    const batches = stub.state.batches;
+    let holderDone = false;
+    const held = modern(srv.url, "tools/call", purls).finally(() => (holderDone = true));
+    await waitFor(() => stub.state.batches > batches, "the holder's first batch at the API");
+    const sock = await rawRequest(srv.url, "modern", probe, { bytes: 8192 });
+    // rawRequest resolves once its bytes are written, not once the server has them, and the server says nothing when
+    // a body starts to wait: these waits are long enough for a loaded machine to queue each waiter in turn.
+    await sleep(600);
+    const next = modern(srv.url, "tools/call", probe);
+    await sleep(600);
+    assert.ok(!holderDone, "the holder was done before the waiter's client went: nothing would be tested");
+    sock.destroy();
+    await waitFor(() => accessLines(srv).slice(before).some((l) => l.status === 499), "the gone waiter's access line", 20_000);
+    // It left the queue when its client went, while the slot was still held: not at its turn, after the holder.
+    assert.ok(!holderDone, "the gone waiter's line came only after the holder's answer");
+    const gone = accessLines(srv).slice(before).find((l) => l.status === 499);
+    assert.deepEqual([gone.refused, gone.client_closed], ["client_closed", true], JSON.stringify(gone));
+    assert.ok(gone.slot_wait_ms > 0, `it never waited for the slot: ${JSON.stringify(gone)}`);
+    const [n, h] = await Promise.all([next, held]);
+    assert.deepEqual([n.status, h.status], [200, 200]);
+    // The slot is free again: a large body is served at once.
+    const t0 = Date.now();
+    assert.equal((await modern(srv.url, "tools/call", probe)).status, 200);
+    assert.ok(Date.now() - t0 < 1000, "the gone waiter kept a slot");
+    await settled(before, 4);
+    const served = accessLines(srv).slice(before).filter((l) => l.status === 200 && l.body_bytes < 80_000);
+    assert.ok(served.some((l) => l.slot_wait_ms > 0), `the next waiter did not wait for the slot: ${JSON.stringify(served)}`);
+  });
+
+  it("a chunked large body (no Content-Length) that crosses 64 KiB while the slot is held waits too, and is served", async () => {
+    const before = accessLines(srv).length;
+    stub.state.batchMs = 300;
+    const batches = stub.state.batches;
+    const held = modern(srv.url, "tools/call", purls);
+    await waitFor(() => stub.state.batches > batches, "the holder's first batch at the API");
+    const u = new URL(srv.url);
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: probe });
+    const chunked = await new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18", "Transfer-Encoding": "chunked" } },
+        (res) => {
+          let t = "";
+          res.setEncoding("utf8").on("data", (d) => (t += d)).on("end", () => resolve({ status: res.statusCode, text: t }));
+        },
+      );
+      req.on("error", reject);
+      for (let i = 0; i < body.length; i += 8192) req.write(body.slice(i, i + 8192));
+      req.end();
+    });
+    assert.equal(chunked.status, 200, chunked.text.slice(0, 300));
+    assert.equal((await held).status, 200);
+    await settled(before, 2);
+    const line = accessLines(srv).slice(before).find((l) => l.tool === "check_sbom" && l.body_bytes < 80_000);
+    assert.ok(line && line.slot_wait_ms > 0, JSON.stringify(accessLines(srv).slice(before)));
+  });
+});
+
+// ── #2948: every upstream failure writes one line ──
+// On 2026-10-07 a hosted get_cve answered "EchelonGraph at https://app.echelongraph.io could not be
+// reached for GET /api/…" in 460 ms, core-backend logged no request for it, and the hosted service
+// logged only mcp_request status=200: the cause (reset, timeout, DNS or a status) went to the client
+// and nowhere else. The 2.7.1 audit found the same for the synthetic's 10-08 state=failed answers
+// (vendor_advisories_for_cve, epss_history: core-backend 503s). Each API call that fails now writes
+// one mcp_upstream_failed line: the failure class, the API route as a template (core-backend's own
+// route names, no ID and no query string) and the tool, never an argument. WARNING, except for the
+// API's own answer about the input (a 400, or a 404 for a named record), which the tool reports as
+// invalid input or no record and which is INFO. A call cancelled because its client went is no
+// upstream failure: mcp_client_gone says so. This stub fails each way on purpose.
+async function failingStub() {
+  // mode, per request: state.byPath[pathname] ?? state.mode. ok: the JSON a 200 carries.
+  const state = { mode: "503", byPath: {}, ok: {}, urls: [], headers: [] };
+  const sockets = new Set();
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://stub");
+    state.urls.push(req.url);
+    state.headers.push(req.headers);
+    req.resume();
+    const mode = state.byPath[u.pathname] ?? state.mode;
+    const json = (status, v) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(v));
+    };
+    if (mode === "hang") return; // never answers: the API timeout fires
+    if (mode === "reset") return void req.socket.resetAndDestroy(); // TCP RST: ECONNRESET
+    if (mode === "close") return void req.socket.destroy(); // closed before any answer: undici's "other side closed"
+    if (mode === "midbody") {
+      res.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+      res.write('{"cve_id":');
+      setTimeout(() => req.socket.resetAndDestroy(), 30);
+      return;
+    }
+    if (mode === "html") {
+      res.writeHead(200, { "content-type": "text/html" });
+      return void res.end("<html><title>Just a moment...</title></html>");
+    }
+    if (mode === "ok") return json(200, state.ok[u.pathname] ?? {});
+    const status = Number(mode);
+    json(status, { error: `stub ${status}` });
+  });
+  server.on("connection", (s) => {
+    sockets.add(s);
+    s.on("close", () => sockets.delete(s));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    state,
+    base: `http://127.0.0.1:${server.address().port}`,
+    close: () =>
+      new Promise((resolve) => {
+        for (const s of sockets) s.destroy();
+        server.close(resolve);
+      }),
+  };
+}
+
+const CVE_MARK = "CVE-2099-29480";
+const TERM_2948 = "zzterm2948upstream";
+const PRODUCT_2948 = "zzproduct2948";
+const VERSION_2948 = "9.29.48";
+const VENDOR_2948 = "zzvendor2948";
+const ADVISORY_2948 = "ZZ-ADV-2948-0001";
+const MARKS_2948 = [CVE_MARK, TERM_2948, PRODUCT_2948, VERSION_2948, VENDOR_2948, ADVISORY_2948];
+const UPSTREAM_KEYS = ["after_ms", "failure_class", "message", "route", "rpc_method", "severity", "status", "synthetic", "tool"];
+const parsedLines = (lines) => lines.map((l) => JSON.parse(l));
+const upstreamOf = (lines) => parsedLines(lines).filter((j) => j.message === "mcp_upstream_failed");
+
+describe("#2948: every upstream failure of the hosted endpoint writes one mcp_upstream_failed line", () => {
+  let fs2948, srv;
+  before(async () => {
+    fs2948 = await failingStub();
+    srv = await startHttp({ ECHELONGRAPH_API_BASE: fs2948.base, ECHELONGRAPH_API_TIMEOUT_MS: "500", MCP_RATE_LIMIT_PER_MIN: "1000" });
+  });
+  after(async () => {
+    await srv?.stop();
+    await fs2948?.close();
+  });
+
+  // One hosted call and every line it wrote. Its upstream lines are written before its answer and
+  // its access line after, so once the access line is in, every line of the call is.
+  async function call(server, method, params, { headers } = {}) {
+    const from = server.lines.length;
+    const r = await modern(server.url, method, params, { headers });
+    const mine = (j) => j.message === "mcp_request" && j.rpc_method === method && (method !== "tools/call" || j.tool === params.name);
+    await waitFor(() => parsedLines(server.lines.slice(from)).some(mine), `the access line of ${method} ${params.name ?? params.uri ?? ""}`);
+    const raw = server.lines.slice(from);
+    return { r, result: r.message?.result, upstream: upstreamOf(raw), raw };
+  }
+  const tool = (name, args, opts) => call(srv, "tools/call", { name, arguments: args }, opts);
+  // Nothing typed reaches any line the call wrote, in any case.
+  const noMarks = (raw) => {
+    for (const line of raw) for (const m of MARKS_2948) assert.ok(!line.toLowerCase().includes(m.toLowerCase()), `a log line carries ${m}: ${line}`);
+  };
+  const one = (got) => {
+    assert.equal(got.upstream.length, 1, `want one mcp_upstream_failed line, got ${JSON.stringify(got.upstream)}`);
+    const [line] = got.upstream;
+    assert.deepEqual(Object.keys(line).sort(), UPSTREAM_KEYS, JSON.stringify(line));
+    noMarks(got.raw);
+    return line;
+  };
+  const without = (line, ...keys) => Object.fromEntries(Object.entries(line).filter(([k]) => !keys.includes(k)));
+
+  it("an HTTP 5xx: one WARNING line with the class, the status, the route template and the tool, and no argument", async () => {
+    fs2948.state.mode = "503";
+    const before = fs2948.state.urls.length;
+    const got = await tool("get_cve", { cve_id: CVE_MARK });
+    // Controls: the failure reached the client as a failure, and the CVE ID was in the API URL.
+    assert.equal(got.result?.isError, true, got.r.text);
+    assert.equal(got.result.structuredContent.state, "failed");
+    assert.equal(got.result.structuredContent.error.status, 503);
+    assert.ok(fs2948.state.urls.slice(before).some((u) => u.includes(CVE_MARK)), "control: the CVE ID never reached the stub's URL");
+    const line = one(got);
+    assert.deepEqual(without(line, "after_ms"), {
+      severity: "WARNING",
+      message: "mcp_upstream_failed",
+      tool: "get_cve",
+      rpc_method: "tools/call",
+      route: "/api/v1/public/cves/:id",
+      failure_class: "http",
+      status: 503,
+      synthetic: false,
+    });
+    assert.ok(Number.isInteger(line.after_ms) && line.after_ms >= 0 && line.after_ms < 5000, `after_ms ${line.after_ms}`);
+  });
+
+  for (const [mode, cls, why] of [
+    ["hang", "timeout", "no answer within ECHELONGRAPH_API_TIMEOUT_MS"],
+    ["reset", "reset", "a TCP reset before any answer (ECONNRESET)"],
+    ["close", "reset", "the connection closed before any answer (undici: other side closed)"],
+    ["midbody", "reset", "a reset after the status line, while the body was read"],
+  ]) {
+    it(`${why}: failure_class ${cls}, status null`, async () => {
+      fs2948.state.mode = mode;
+      const got = await tool("get_cve", { cve_id: CVE_MARK });
+      assert.equal(got.result?.isError, true, got.r.text);
+      const line = one(got);
+      assert.deepEqual(without(line, "after_ms"), { severity: "WARNING", message: "mcp_upstream_failed", tool: "get_cve", rpc_method: "tools/call", route: "/api/v1/public/cves/:id", failure_class: cls, status: null, synthetic: false });
+      if (cls === "timeout") assert.ok(line.after_ms >= 450, `a 500 ms timeout logged after ${line.after_ms} ms`);
+    });
+  }
+
+  it("a 2xx that is not JSON (an edge challenge page): failure_class not_json, with its status", async () => {
+    fs2948.state.mode = "html";
+    const line = one(await tool("get_cve", { cve_id: CVE_MARK }));
+    assert.deepEqual([line.severity, line.failure_class, line.status, line.route], ["WARNING", "not_json", 200, "/api/v1/public/cves/:id"]);
+  });
+
+  it("search_cves: the route carries no query string, and neither the search term nor a filter is in any line", async () => {
+    fs2948.state.mode = "503";
+    const before = fs2948.state.urls.length;
+    const got = await tool("search_cves", { search: TERM_2948, severity: "CRITICAL", limit: 7 });
+    assert.ok(fs2948.state.urls.slice(before).some((u) => u.includes("?") && u.includes("CRITICAL")), "control: the filters never reached the stub's query string");
+    assert.ok(fs2948.state.headers.slice(before).some((h) => decodeURIComponent(h["x-eg-search"] ?? "") === TERM_2948), "control: the term never reached the stub");
+    const line = one(got);
+    assert.deepEqual([line.tool, line.route, line.status], ["search_cves", "/api/v1/public/cves/", 503]);
+    for (const raw of got.raw) assert.ok(!raw.includes("CRITICAL") && !raw.includes("?"), `a line carries the query: ${raw}`);
+  });
+
+  it("check_affected and get_vendor_advisory: product, version, vendor and advisory ID are in no line", async () => {
+    fs2948.state.mode = "503";
+    const a = one(await tool("check_affected", { product: PRODUCT_2948, version: VERSION_2948 }));
+    assert.deepEqual([a.tool, a.route, a.status], ["check_affected", "/api/v1/public/cves/match", 503]);
+    const v = await tool("get_vendor_advisory", { vendor: VENDOR_2948, advisory_id: ADVISORY_2948 });
+    noMarks(v.raw);
+    const routes = v.upstream.map((l) => l.route).sort();
+    assert.ok(routes.includes("/api/v1/public/vendor-advisories/:vendor/:advisory_id"), JSON.stringify(v.upstream));
+    for (const l of v.upstream) assert.deepEqual([l.tool, l.severity, l.status], ["get_vendor_advisory", "WARNING", 503]);
+  });
+
+  it("exposure_radar: one line per radar whose call failed, each its own route (ai-exposure's without ?service=mcp)", async () => {
+    fs2948.state.mode = "503";
+    const got = await tool("exposure_radar", {});
+    noMarks(got.raw);
+    assert.deepEqual(got.upstream.map((l) => l.route).sort(), [
+      "/api/v1/public/ai-exposure/stats",
+      "/api/v1/public/exposed-databases/stats",
+      "/api/v1/public/kev-exposure/stats",
+      "/api/v1/public/leaked-credentials/stats",
+      "/api/v1/public/shadow-ai-radar/stats",
+    ]);
+    for (const l of got.upstream) assert.deepEqual([l.tool, l.failure_class, l.status], ["exposure_radar", "http", 503]);
+  });
+
+  it("the API's answer about the input is INFO: a 404 for a named record and a 400; a 404 on a route with no ID is WARNING", async () => {
+    fs2948.state.mode = "404";
+    const missing = one(await tool("get_cve", { cve_id: CVE_MARK }));
+    assert.deepEqual([missing.severity, missing.failure_class, missing.status, missing.route], ["INFO", "http", 404, "/api/v1/public/cves/:id"]);
+    const gone = one(await tool("cve_summary", {}));
+    assert.deepEqual([gone.severity, gone.status, gone.route], ["WARNING", 404, "/api/v1/public/cves/summary"]);
+    fs2948.state.mode = "400";
+    const refused = one(await tool("get_cve", { cve_id: CVE_MARK }));
+    assert.deepEqual([refused.severity, refused.status], ["INFO", 400]);
+    fs2948.state.mode = "429";
+    const limited = one(await tool("get_cve", { cve_id: CVE_MARK }));
+    assert.deepEqual([limited.severity, limited.status], ["WARNING", 429]);
+  });
+
+  it("a 2xx the tool cannot use is unexpected_shape: cve_intel with none of its sections, exposure_radar's mcp_servers without its counts", async () => {
+    fs2948.state.mode = "ok";
+    fs2948.state.ok = {};
+    const intel = await tool("cve_intel", { cve_id: CVE_MARK });
+    assert.equal(intel.result.structuredContent.error.kind, "unexpected_shape", intel.r.text);
+    const i = one(intel);
+    assert.deepEqual(without(i, "message"), { severity: "WARNING", tool: "cve_intel", rpc_method: "tools/call", route: "/api/v1/public/cves/:id/enrichment", failure_class: "unexpected_shape", status: 200, after_ms: null, synthetic: false });
+    const radar = await tool("exposure_radar", {});
+    const r = one(radar);
+    assert.deepEqual([r.tool, r.route, r.failure_class, r.status], ["exposure_radar", "/api/v1/public/ai-exposure/stats", "unexpected_shape", 200]);
+    // An answer refused against the tool's own outputSchema (index.ts checked()) has no path at hand. #2948's review: it
+    // is this server's fault (its schema, or an envelope it built), not the API's: class output_schema, at ERROR, which
+    // the upstream metric (WARNING lines) and its alert do not count. The client's error kind is unchanged.
+    fs2948.state.ok = { "/api/v1/public/cves/summary": { summary: { total: "ten" } } };
+    const shape = await tool("cve_summary", {});
+    assert.equal(shape.result.structuredContent.error.kind, "unexpected_shape", shape.r.text);
+    const c = one(shape);
+    assert.deepEqual([c.severity, c.tool, c.route, c.failure_class, c.status, c.after_ms], ["ERROR", "cve_summary", "(none)", "output_schema", null, null]);
+  });
+
+  it("a refused connection and a failed DNS lookup: failure_class refused and dns", async () => {
+    const closed = await new Promise((resolve) => {
+      const s = net.createServer().listen(0, "127.0.0.1", () => {
+        const { port } = s.address();
+        s.close(() => resolve(port));
+      });
+    });
+    for (const [base, cls] of [
+      [`http://127.0.0.1:${closed}`, "refused"],
+      // .invalid never resolves (RFC 6761 6.4).
+      ["http://upstream-2948.invalid", "dns"],
+    ]) {
+      const other = await startHttp({ ECHELONGRAPH_API_BASE: base, ECHELONGRAPH_API_TIMEOUT_MS: "5000" });
+      try {
+        const got = await call(other, "tools/call", { name: "get_cve", arguments: { cve_id: CVE_MARK } });
+        assert.equal(got.result?.isError, true, got.r.text);
+        const line = one(got);
+        assert.deepEqual([line.severity, line.failure_class, line.status, line.route, line.tool], ["WARNING", cls, null, "/api/v1/public/cves/:id", "get_cve"], JSON.stringify(line));
+      } finally {
+        await other.stop();
+      }
+    }
+  });
+
+  it("the synthetic's call is marked synthetic; a resources/read names no tool", async () => {
+    fs2948.state.mode = "503";
+    const syn = one(await tool("get_cve", { cve_id: CVE_MARK }, { headers: { "User-Agent": "echelongraph-mcp-synthetic/1.0 (+https://echelongraph.io)" } }));
+    assert.equal(syn.synthetic, true);
+    const res = await call(srv, "resources/read", { uri: "echelongraph://sources" });
+    assert.ok(res.upstream.length >= 1, `no line for the resource's failed reads: ${JSON.stringify(res.raw)}`);
+    for (const l of res.upstream) assert.deepEqual([l.tool, l.rpc_method, l.severity], ["(none)", "resources/read", "WARNING"]);
+  });
+
+  it("controls: a call that succeeds writes none, and a call whose client went writes none (mcp_client_gone does)", async () => {
+    fs2948.state.mode = "ok";
+    fs2948.state.ok = { "/api/v1/public/cves/summary": SUMMARY };
+    const ok = await tool("cve_summary", {});
+    assert.equal(ok.result?.isError, undefined, ok.r.text);
+    assert.deepEqual(ok.upstream, []);
+    fs2948.state.mode = "hang";
+    const from = srv.lines.length;
+    const ac = new AbortController();
+    const pending = fetch(srv.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: ACCEPT, ...modernHeaders("tools/call", { name: "get_cve" }) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2948, method: "tools/call", params: { name: "get_cve", arguments: { cve_id: CVE_MARK }, _meta: modernMeta() } }),
+      signal: ac.signal,
+    }).catch(() => undefined);
+    await sleep(150);
+    ac.abort();
+    await pending;
+    await waitFor(() => parsedLines(srv.lines.slice(from)).some((j) => j.message === "mcp_request" && j.tool === "get_cve"), "the abandoned call's access line");
+    const raw = srv.lines.slice(from);
+    assert.ok(parsedLines(raw).some((j) => j.message === "mcp_client_gone"), `control: the client's going was not seen: ${raw.join("\n")}`);
+    assert.deepEqual(upstreamOf(raw), [], "a cancelled call was logged as an upstream failure");
+  });
+
+  it("stdio: the npm package writes no such line, on stdout (the protocol) or stderr", async () => {
+    fs2948.state.mode = "503";
+    const env = { ...process.env, ECHELONGRAPH_API_BASE: fs2948.base, ECHELONGRAPH_API_TIMEOUT_MS: "10000" };
+    const client = new StdioMcpClient({ ...serverCommand(), env, stderr: "pipe" });
+    let out = "";
+    let err = "";
+    client.proc.stdout.on("data", (d) => (out += d));
+    client.proc.stderr.setEncoding("utf8").on("data", (d) => (err += d));
+    try {
+      await client.open(MODERN);
+      const res = await client.callTool({ name: "get_cve", arguments: { cve_id: CVE_MARK } });
+      assert.equal(res.isError, true, "control: the stdio call did not fail");
+      assert.equal(res.structuredContent.error.status, 503);
+    } finally {
+      await client.close();
+    }
+    assert.equal(client.protocolViolation, undefined);
+    for (const line of out.split("\n").filter(Boolean)) {
+      const j = JSON.parse(line);
+      assert.equal(j.jsonrpc, "2.0", `stdout carries a line that is not JSON-RPC: ${line}`);
+    }
+    assert.ok(!out.includes("mcp_upstream_failed") && !err.includes("mcp_upstream_failed"), `stdio wrote the line: ${out}\n${err}`);
+  });
+});
+
+// #2923: each mcp_handler_error says which request it arose in, by fixed labels only: the request's JSON-RPC method
+// (bodyFacts: one of MCP_METHODS, else "(other)") and its MCP-Protocol-Version label (revisionLabel), read from the request's
+// AsyncLocalStorage scope (runtime.ts requestLabels), since the SDK's onerror is handed only the error. Never a param.
+describe("#2923: mcp_handler_error names its request's JSON-RPC method and protocol version, never its params", () => {
+  let srv;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000" });
+  });
+  after(() => srv?.stop());
+  const errorLines = () => srv.lines.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_handler_error");
+  const SECRET = "zzsecret2923";
+  const meta = (v) => ({ "io.modelcontextprotocol/protocolVersion": v, "io.modelcontextprotocol/clientInfo": { name: SECRET, version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
+  for (const [what, headers, body, want] of [
+    ["a crawler's server/discover naming 1999-01-01", { "MCP-Protocol-Version": "1999-01-01" }, { jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: meta("1999-01-01") } }, { rpc_method: "server/discover", protocol_version: "1999-01-01", error_class: "unsupported_protocol_version", error_code: -32022 }],
+    ["the same with no header", {}, { jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: meta("1999-01-01") } }, { rpc_method: "server/discover", protocol_version: "(none)", error_class: "unsupported_protocol_version", error_code: -32022 }],
+    ["a 2025-era initialize under a 2026-07-28 header", { "MCP-Protocol-Version": "2026-07-28" }, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: SECRET, version: "1" } } }, { rpc_method: "initialize", protocol_version: "2026-07-28", error_class: "rejected_inbound_request" }],
+    ["a header that is no revision", { "MCP-Protocol-Version": `${SECRET} 2026` }, { jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: meta("2099-01-01") } }, { rpc_method: "tools/list", protocol_version: "(other)" }],
+  ]) {
+    it(`${what}: ${JSON.stringify(want)}`, async () => {
+      const before = errorLines().length;
+      const r = await post(srv.url, body, headers);
+      assert.ok(r.status >= 400, `${r.status} ${r.text.slice(0, 200)}`);
+      await waitFor(() => errorLines().length > before, "the mcp_handler_error line");
+      const line = errorLines().slice(before)[0];
+      for (const [k, v] of Object.entries(want)) assert.equal(line[k], v, `${k}: ${JSON.stringify(line)}`);
+      assert.ok(!JSON.stringify(line).includes(SECRET), `the line holds a request value: ${JSON.stringify(line)}`);
+    });
+  }
+  // #2923's review (nit): the method is a label from a closed set (httpPolicy.ts MCP_METHODS). A string MCP does not
+  // define, however well shaped, is "(other)" on every line that names the request; the old shape check logged it.
+  // Letters only, so the old shape check (/^[a-z][a-z/_]{0,39}$/i) passed each.
+  for (const method of ["zzsecretmethod/list", "sampling/createMessage"]) {
+    it(`a method MCP does not define for a client (${method}) is (other) on its lines, never its own string`, async () => {
+      const before = srv.lines.length;
+      // Its own User-Agent family tells its access line from an earlier test's, which is written once that request
+      // has settled and can land after `before`.
+      const ua = method.startsWith("zz") ? "probe2923own" : "probe2923sdk";
+      const r = await post(srv.url, { jsonrpc: "2.0", id: 9, method, params: { _meta: meta("2026-07-28") } }, { "MCP-Protocol-Version": "2026-07-28", "User-Agent": `${ua}/1.0` });
+      assert.ok(r.status >= 200, `${r.status}`);
+      const mine = () => srv.lines.slice(before).map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.ua_family === ua);
+      await waitFor(() => mine().length > 0, "the access line");
+      assert.equal(mine().length, 1, JSON.stringify(mine()));
+      assert.equal(mine()[0].rpc_method, "(other)", JSON.stringify(mine()[0]));
+      // And no line of any kind (an mcp_handler_error among them) holds the client's string.
+      assert.ok(!srv.lines.slice(before).join("\n").includes(method), `a line holds the client's method: ${srv.lines.slice(before).join("\n")}`);
+    });
+  }
+});
+
+// 3.1.0's final review (low): the access line's `method` was req.method as sent. Over HTTP/1.1 Node's parser admits only
+// its own method list (a request with method ZZCANARYMETHOD got a 400 and wrote no line), but over h2c, which deploy-all.sh
+// makes production's protocol, any :method token reached the log verbatim: "JOHN.DOE-SSN-123-45-6789" and an
+// 8,000-character token, each on /health with status 405. It is now one of the nine HTTP methods (httpPolicy.ts
+// HTTP_METHODS), else "(other)", as the README and /privacy Section 11 say.
+describe("over h2c (MCP_H2C=1), the access line's method is one of nine HTTP methods, else (other), never the client's token", () => {
+  let srv, session;
+  before(async () => {
+    srv = await startHttp({ MCP_RATE_LIMIT_PER_MIN: "1000", MCP_H2C: "1" });
+    session = http2.connect(srv.base);
+    session.on("error", () => {});
+  });
+  after(async () => {
+    session?.close();
+    await srv?.stop();
+  });
+  /** One h2 request with this :method, no body; resolves its status (or the stream's error code when it is reset). */
+  const h2Method = (method, p, ua) =>
+    new Promise((resolve) => {
+      const stream = session.request({ ":method": method, ":path": p, "user-agent": `${ua}/1.0` }, { endStream: true });
+      let status;
+      stream.on("response", (h) => (status = h[":status"]));
+      stream.on("error", () => {});
+      stream.resume();
+      stream.on("close", () => resolve(status ?? `reset ${stream.rstCode}`));
+    });
+  const mine = (before, ua) => srv.lines.slice(before).map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request" && j.ua_family === ua);
+  const CANARIES = [["JOHN.DOE-SSN-123-45-6789", "ssn"], ["ZZCANARYMETHOD", "zz"], ["get", "lower"], ["Q".repeat(8000), "long"]];
+  for (const [canary, tag] of CANARIES) {
+    for (const p of ["/health", "/mcp", "/elsewhere"]) {
+      const shown = canary.length > 40 ? `a ${canary.length}-character token` : canary;
+      it(`:method ${shown} on ${p} is logged (other), and no line holds it`, async () => {
+        const ua = `probe3101meth-${tag}-${p.slice(1)}`;
+        const before = srv.lines.length;
+        const status = await h2Method(canary, p, ua);
+        assert.ok(typeof status === "number" && status >= 400, `${shown} on ${p}: ${status}`);
+        await waitFor(() => mine(before, ua).length > 0, "the access line");
+        await sleep(50);
+        assert.equal(mine(before, ua).length, 1, JSON.stringify(mine(before, ua)));
+        assert.equal(mine(before, ua)[0].method, "(other)", JSON.stringify(mine(before, ua)[0]).slice(0, 300));
+        const written = srv.lines.slice(before).join("\n");
+        assert.ok(!written.includes(JSON.stringify(canary)), `a line holds the client's :method as a value: ${written.slice(0, 400)}`);
+        if (canary.length >= 8) assert.ok(!written.includes(canary), `a line holds the client's :method: ${written.slice(0, 400)}`);
+      });
+    }
+  }
+  it("each HTTP method an h2 client can send without a body is logged as itself", async () => {
+    // CONNECT is one of the nine (httpPolicy.ts HTTP_METHODS) but takes no :path over h2, so it is held in http-policy.test.mjs.
+    for (const m of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"]) {
+      const ua = `probe3101std-${m.toLowerCase()}`;
+      const before = srv.lines.length;
+      await h2Method(m, "/health", ua);
+      await waitFor(() => mine(before, ua).length > 0, `${m}'s access line`);
+      assert.equal(mine(before, ua)[0].method, m, JSON.stringify(mine(before, ua)[0]));
+    }
   });
 });
 
@@ -1365,81 +2065,276 @@ describe("the npm stdio entry never sends the forward headers (no-telemetry prom
 });
 
 // #2863: /privacy Section 11 lists what the hosted endpoint's access line records (the first word of
-// the client's User-Agent and nothing else of it; no client address), and only a marketing-site
-// test (privacyMcpEndpoint.test.ts) held http.ts's log calls to that list. That test runs in the
-// marketing deploy alone, so adding the client address and the whole User-Agent to mcp_request
-// passed this suite, the npm publish (scripts/npm-publish-mcp.sh runs only this suite) and the
-// mcp-remote deploy, and made Section 11 false until an unrelated marketing deploy. Here every line
-// the servers above wrote, whatever made it, has exactly its reviewed keys, as mcp_client_gone's
-// test above holds its own. A new key, or a new line, fails here first: say it in Section 11, then
-// add it below and to privacyMcpEndpoint.test.ts's ACCESS_FIELDS / OTHER_LINES.
-describe("#2863: every stdout line carries exactly the keys /privacy Section 11 was reviewed against", () => {
-  const ENVELOPE = ["message", "severity"];
-  // The access line: http.ts finish(), plus BodyFacts (httpPolicy.ts bodyFacts), which adds tool for
-  // a tools/call and prompt for a prompts/get, and nothing else.
-  const ACCESS = [
-    "body_bytes",
-    "client_closed",
-    "client_public",
-    "duration_ms",
-    "in_flight",
-    "method",
-    "origin_present",
-    "path",
-    "protocol_version",
-    "queued_ms",
-    "refused",
-    "rpc_method",
-    "status",
-    "throttled",
-    "ua_family",
-  ];
-  const BODY_FACTS = { "tools/call": ["tool"], "prompts/get": ["prompt"] };
-  const LINES = {
-    mcp_remote_refusing_to_start: ["reason"],
-    mcp_remote_heap_unbounded: ["heap_limit_mb", "memory_limit_mb", "reason"],
-    // #2923: a fixed-vocabulary class, never the SDK message (which can quote the client).
-    mcp_handler_error: ["error_class", "error_name"],
-    mcp_request_failed: ["error_name"],
-    mcp_large_body_busy: ["slots"],
-    mcp_busy: ["max_in_flight", "waiting"],
-    mcp_rate_limited: ["client", "limit"],
-    mcp_client_gone: ["after_ms", "answer_started", "rst_code"],
-  };
-  // Keys a line may carry or omit: a ProtocolError's numeric JSON-RPC code (#2923).
-  const OPTIONAL = { mcp_handler_error: ["error_code"] };
-  // The lines this file's servers are driven to write; a reviewed line it never makes is no check.
-  const MUST_SEE = ["mcp_request", "mcp_remote_listening", "mcp_busy", "mcp_large_body_busy", "mcp_rate_limited", "mcp_client_gone"];
-  const sorted = (xs) => [...xs].sort();
+// the client's User-Agent and nothing else of it; no client address), and only a marketing-site test
+// (privacyMcpEndpoint.test.ts) held http.ts's log calls to that list. That test runs in the marketing
+// deploy alone, so adding the client address and the whole User-Agent to mcp_request passed this
+// suite, the npm publish (scripts/npm-publish-mcp.sh runs only this suite) and the mcp-remote deploy,
+// and made Section 11 false until an unrelated marketing deploy. Since 07d94fc8 the lines below were
+// held to keys this file kept; a line its servers never wrote (a heap warning, a request that threw)
+// had no check at all, and a new one would have had none either.
+//
+// Now the lines and their keys are src/logLines.ts LOG_LINES, one exported list. http.ts's log() is
+// typed against it, so a new line or key does not build (npm test builds first) until it is added
+// there; and here: every stdout line this file's servers wrote has exactly its listed keys, every
+// listed line is written by them (or is one of NOT_DRIVEN, with the reason), dist/ has no other
+// stdout or stderr writer, their stderr is empty, and the README's privacy section names every
+// access-line key. A new line, or a key, is a change to what EchelonGraph logs: say it in Section 11
+// and the README (README_ACCESS_PHRASES), then in privacyMcpEndpoint.test.ts's ACCESS_FIELDS / OTHER_LINES.
+const { LOG_LINES } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "logLines.js")).href);
 
-  it("mcp_request has exactly the access-line keys, plus tool or prompt for the methods that name one", () => {
-    const access = EVERY_LINE.map((l) => JSON.parse(l)).filter((j) => j.message === "mcp_request");
-    assert.ok(access.length > 0, "no mcp_request line was written");
-    assert.ok(access.some((j) => j.tool !== undefined), "control: no access line for a tools/call");
-    for (const j of access) {
-      const want = sorted([...ENVELOPE, ...ACCESS, ...(BODY_FACTS[j.rpc_method] ?? [])]);
-      assert.deepEqual(sorted(Object.keys(j)), want, `an access line's keys are not the ones /privacy Section 11 names: ${JSON.stringify(j)}`);
-      // Section 11: "the first word of your client's User-Agent ... not the rest of it".
-      assert.match(j.ua_family, /^[^\s/]+$/, `ua_family is more than the User-Agent's first word: ${JSON.stringify(j)}`);
+describe("#2863: every line the hosted endpoint writes is one of LOG_LINES, with exactly its keys", () => {
+  const ENVELOPE = ["message", "severity"];
+  const sorted = (xs) => [...xs].sort();
+  // Which of the access line's optional keys each JSON-RPC method brings (httpPolicy.ts bodyFacts).
+  const BODY_FACTS = { "tools/call": ["tool"], "prompts/get": ["prompt"] };
+  // The lines no request to this file's servers can make. log()'s type holds their keys at build time.
+  const NOT_DRIVEN = {
+    mcp_remote_heap_unbounded:
+      "written only where Node reads a container memory limit below V8's heap limit; http-memory.test.mjs runs Dockerfile.http's flags and asserts it is absent",
+    mcp_request_failed: "written only when serveMcp throws, which no request this file sends makes it do",
+  };
+  // A key naming a client or a request's content. The access line's keys are each named in the README
+  // (README_ACCESS_PHRASES); on any other line only CLIENT_KEYS' are allowed, which the README names too.
+  // (A body is read only as its size: max_body_bytes, a start-up setting, names none.)
+  const CLIENTISH = /client|addr|address|^ip$|user_agent|^ua$|header|origin|body$|params|arguments|query|url/;
+  const CLIENT_KEYS = { mcp_rate_limited: { client: "Past the per-client limit it logs that client's address key." } };
+  // Each access-line key → the words of the README's hosted-endpoint paragraph that say it.
+  const README_ACCESS_PHRASES = {
+    // 3.1.0's final review: and that it is a closed set (httpPolicy.ts HTTP_METHODS).
+    method: "the HTTP method (GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, CONNECT or TRACE, else `(other)`)",
+    path: "and path, the status",
+    status: "the status",
+    duration_ms: "the duration",
+    queued_ms: "its wait for a place",
+    slot_wait_ms: "and for a large-body slot",
+    in_flight: "the requests served at once",
+    body_bytes: "the body size",
+    rpc_method: "the JSON-RPC method",
+    tool: "the tool or prompt name",
+    prompt: "the tool or prompt name",
+    protocol_version: "the protocol version",
+    origin_present: "whether an `Origin` header was sent",
+    ua_family: "the first word of your client's User-Agent",
+    client_public: "whether your address is public (not the address)",
+    client_closed: "whether your client closed early",
+    throttled: "whether it was throttled or refused",
+    refused: "throttled or refused, and why",
+  };
+  // #2948: each key of the upstream-failure line → the words of the same paragraph that say it.
+  const README_UPSTREAM_PHRASES = {
+    tool: "it logs the tool and JSON-RPC method",
+    rpc_method: "it logs the tool and JSON-RPC method",
+    route: "the call's route without the ID or query",
+    failure_class: "what failed (such as",
+    status: "the status the API answered",
+    after_ms: "how long it took",
+    synthetic: "whether the request was our monitor's",
+  };
+  // #2923: each key of a handler error's line → its words in the same paragraph.
+  const README_HANDLER_ERROR_PHRASES = {
+    error_name: "An error it logs by its type",
+    error_class: "a fixed cause label",
+    error_code: "and its code",
+    rpc_method: "with its request's JSON-RPC method and protocol version",
+    protocol_version: "with its request's JSON-RPC method and protocol version",
+  };
+  // The lines the README's hosted-endpoint paragraph names field by field.
+  const README_LINE_PHRASES = { mcp_request: README_ACCESS_PHRASES, mcp_upstream_failed: README_UPSTREAM_PHRASES, mcp_handler_error: README_HANDLER_ERROR_PHRASES };
+  const linesOf = (lines) => Object.entries(lines).map(([m, l]) => [m, [...l.keys], [...(l.optional ?? [])]]);
+
+  /** What is wrong with stdout `raw` lines, held to `lines` (LOG_LINES, or a control's copy); and which messages were seen. */
+  function lineProblems(raw, lines) {
+    const out = [];
+    const seen = new Set();
+    const want = new Map(linesOf(lines).map(([m, keys, opt]) => [m, { keys, opt }]));
+    for (const line of raw) {
+      let j;
+      try {
+        j = JSON.parse(line);
+      } catch {
+        out.push(`a stdout line that is not JSON: ${line}`);
+        continue;
+      }
+      seen.add(j.message);
+      const w = want.get(j.message);
+      if (!w) {
+        out.push(`a line logLines.ts does not list: ${line}`);
+        continue;
+      }
+      const present = w.opt.filter((k) => k in j);
+      if (j.message === "mcp_request") {
+        if (sorted(present).join() !== sorted(BODY_FACTS[j.rpc_method] ?? []).join()) out.push(`an access line's ${present.join(", ") || "no"} optional key for ${j.rpc_method}: ${line}`);
+        // Section 11: "the first word of your client's User-Agent ... not the rest of it".
+        if (!/^[^\s/]+$/.test(String(j.ua_family))) out.push(`ua_family is more than the User-Agent's first word: ${line}`);
+      }
+      const got = sorted(Object.keys(j)).join();
+      const exact = sorted([...ENVELOPE, ...w.keys, ...present]).join();
+      if (got !== exact) out.push(`${j.message}'s keys are ${got}, not the listed ${exact}: ${line}`);
+    }
+    return { out, seen };
+  }
+
+  /** Lines LOG_LINES lists that `seen` lacks, beyond NOT_DRIVEN; and NOT_DRIVEN entries it does not list. */
+  const unseenProblems = (lines, seen) => [
+    ...Object.keys(lines).filter((m) => !seen.has(m) && !(m in NOT_DRIVEN)).map((m) => `no ${m} line was written by this file's servers, so its keys are not checked`),
+    ...Object.keys(NOT_DRIVEN).filter((m) => !(m in lines)).map((m) => `NOT_DRIVEN names ${m}, which logLines.ts does not list`),
+    ...Object.keys(NOT_DRIVEN).filter((m) => seen.has(m)).map((m) => `NOT_DRIVEN names ${m}, which this file's servers did write: take it out there`),
+  ];
+
+  /** What the README's privacy section fails to say of `lines`' keys. */
+  function readmeProblems(lines, readme) {
+    const section = (readme.split(/^## Privacy: what is sent where$/m)[1] ?? "").split(/^## /m)[0];
+    const hosted = (section.split("**The hosted endpoint.**")[1] ?? "").replace(/\s+/g, " ");
+    if (hosted.length < 500) return ["the README has no hosted-endpoint paragraph under \"## Privacy: what is sent where\": re-aim this check"];
+    const out = [];
+    for (const [m, phrases] of Object.entries(README_LINE_PHRASES)) {
+      if (!lines[m]) {
+        out.push(`README_LINE_PHRASES names ${m}, which logLines.ts no longer lists: take it out of the README and here`);
+        continue;
+      }
+      const keys = [...lines[m].keys, ...(lines[m].optional ?? [])];
+      for (const k of keys) {
+        const phrase = phrases[k];
+        if (!phrase) out.push(`${m} logs ${k}, and README_LINE_PHRASES has no README phrase for it: say it in the README's privacy section (and /privacy Section 11) first`);
+        else if (!hosted.includes(phrase)) out.push(`${m} logs ${k}, and the README's hosted-endpoint paragraph no longer says "${phrase}"`);
+      }
+      for (const k of Object.keys(phrases)) if (!keys.includes(k)) out.push(`README_LINE_PHRASES names ${k} for ${m}, which that line no longer logs: take it out of the README and here`);
+    }
+    for (const [m, keys] of linesOf(lines).map(([m, k, o]) => [m, [...k, ...o]])) {
+      if (m in README_LINE_PHRASES) continue;
+      for (const k of keys.filter((x) => CLIENTISH.test(x))) {
+        const said = CLIENT_KEYS[m]?.[k];
+        if (!said) out.push(`${m} logs ${k}, which names a client or a request: review it for /privacy Section 11, say it in the README, and add it to CLIENT_KEYS`);
+        else if (!hosted.includes(said)) out.push(`${m} logs ${k}, and the README no longer says "${said}"`);
+      }
+    }
+    return out;
+  }
+
+  /** Every stdout or stderr writer in `files` ([path, js] pairs) but the three reviewed ones. */
+  const REVIEWED_WRITERS = [
+    // http.ts log(), the one writer of the hosted endpoint's stdout.
+    ["http.js", "process.stdout.write(`${JSON.stringify({ severity, message, ...fields })}\\n`)"],
+    // index.ts: the ECHELONGRAPH_MCP_UA notice (its length, never its text) and the stdio start-up banner.
+    ["index.js", "process.stderr.write(`echelongraph-mcp: ECHELONGRAPH_MCP_UA ignored: not a single product token (${v.length} characters)\\n`)"],
+    ["index.js", "console.error(`EchelonGraph CVE MCP server ${NAME}@${VERSION} running (API: ${SHOWN_BASE}, timeout ${TIMEOUT_MS} ms)`)"],
+  ];
+  function writerProblems(files) {
+    const out = [];
+    for (const [rel, js] of files) {
+      // #2863's review: any reference to process.stdout or process.stderr (so a writer by another name is read), a
+      // destructured one, a console method, a process warning, or a write to fd 1 or 2.
+      for (const m of js.matchAll(/\bprocess\.(?:stdout|stderr)\b|\{\s*(?:stdout|stderr)\b[^}]*\}\s*=\s*process\b|\bconsole\.\w+\(|\bemitWarning\(|\b(?:writeSync|write)\(\s*[12]\s*,/g)) {
+        const call = js.slice(m.index, js.indexOf("\n", m.index)).replace(/;\s*$/, "");
+        if (!REVIEWED_WRITERS.some(([f, c]) => rel === f && call === c)) out.push(`a writer of stdout or stderr nobody reviewed for /privacy Section 11, in dist/${rel}: ${call}`);
+      }
+    }
+    return out;
+  }
+  const distFiles = () => {
+    const out = [];
+    const walk = (dir, rel) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) walk(path.join(dir, e.name), `${rel}${e.name}/`);
+        else if (e.name.endsWith(".js")) out.push([`${rel}${e.name}`, fs.readFileSync(path.join(dir, e.name), "utf8")]);
+      }
+    };
+    walk(path.join(PKG_DIR, "dist"), "");
+    return out;
+  };
+
+  it("LOG_LINES is what dist/http.js writes: each log() call names a listed line, and each listed line has a call", () => {
+    const http = fs.readFileSync(HTTP_ENTRY, "utf8");
+    // A severity is a literal or one call of a helper (#2948's upstreamSeverity(...)); the message is always a literal.
+    const calls = [...http.matchAll(/\blog\((?:"(?:INFO|WARNING|ERROR)"|[A-Za-z_$][\w$]*\([^()]*\)), "([a-z_]+)"/g)];
+    const called = new Set(calls.map((m) => m[1]));
+    assert.ok(called.size >= 8, `dist/http.js: ${called.size} log() calls read: re-aim this check`);
+    // Every log( call site but the definition is one read above: a call this pattern cannot read is not unchecked.
+    const sites = [...http.matchAll(/\blog\(/g)].length - [...http.matchAll(/\bfunction log\(/g)].length;
+    assert.equal(calls.length, sites, `dist/http.js has ${sites} log() calls and ${calls.length} are read: re-aim this check`);
+    assert.deepEqual(sorted(called), sorted(Object.keys(LOG_LINES)), "dist/http.js's log() messages are not logLines.ts's LOG_LINES");
+    assert.deepEqual(sorted(LOG_LINES.mcp_request.optional), sorted(Object.values(BODY_FACTS).flat()), "the access line's optional keys are not BodyFacts' tool and prompt");
+  });
+
+  it("dist/ writes to stdout and stderr only through log() and the two reviewed stdio-side lines", () => {
+    const files = distFiles();
+    assert.ok(files.some(([f]) => f === "http.js") && files.some(([f]) => f === "logLines.js"), "dist/ lacks http.js or logLines.js: re-aim this check");
+    assert.deepEqual(writerProblems(files), []);
+  });
+
+  it("every stdout line this file's servers wrote has exactly its listed keys, and every listed line was written", () => {
+    const { out, seen } = lineProblems(EVERY_LINE, LOG_LINES);
+    assert.deepEqual(out, []);
+    assert.ok(seen.has("mcp_request") && EVERY_LINE.some((l) => JSON.parse(l).tool !== undefined), "no access line for a tools/call was written");
+    assert.deepEqual(unseenProblems(LOG_LINES, seen), []);
+  });
+
+  // Node's own process warnings name an API, never a request; anything else on stderr is a writer to review.
+  const NODE_WARNING = /^\(node:\d+\) [A-Za-z]*Warning: |^\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)$/;
+  it("every server this file started wrote nothing to stderr but Node's own warnings", () => {
+    assert.ok(EVERY_STDERR.length >= 10, `only ${EVERY_STDERR.length} servers' stderr kept`);
+    for (const err of EVERY_STDERR) {
+      const other = err().split("\n").filter((l) => l !== "" && !NODE_WARNING.test(l));
+      assert.deepEqual(other, [], "a hosted server wrote to stderr");
     }
   });
 
-  it("every other line has exactly its reviewed keys, and no line is one nobody reviewed", () => {
-    const seen = new Set();
-    for (const line of EVERY_LINE) {
-      const j = JSON.parse(line);
-      seen.add(j.message);
-      if (j.message === "mcp_request") continue;
-      if (j.message === "mcp_remote_listening") {
-        // Start-up configuration, written before any request: no key may name a client or a request.
-        for (const k of Object.keys(j)) assert.doesNotMatch(k, /client_|addr|address|^ip$|user_agent|^ua$|header|origin|body$|params|arguments/, `mcp_remote_listening carries ${k}: ${line}`);
-        continue;
-      }
-      const want = LINES[j.message];
-      assert.ok(want, `http.ts writes a line nobody reviewed for /privacy Section 11: ${line}`);
-      const opt = (OPTIONAL[j.message] ?? []).filter((k) => k in j);
-      assert.deepEqual(sorted(Object.keys(j)), sorted([...ENVELOPE, ...want, ...opt]), `${j.message}'s keys are not the reviewed ones: ${line}`);
-    }
-    for (const m of MUST_SEE) assert.ok(seen.has(m), `no ${m} line was written by this file's servers, so its keys are not checked`);
+  it("the README's privacy section names every key of the access line and the upstream-failure line, and the one other line that names a client", () => {
+    assert.deepEqual(readmeProblems(LOG_LINES, readPkgFile("README.md")), []);
+  });
+
+  it("control: the two-field edit (#2863), a new line, a line nobody wrote, a client key on another line and a new writer each fail", () => {
+    const access = EVERY_LINE.find((l) => JSON.parse(l).message === "mcp_request" && JSON.parse(l).tool !== undefined);
+    assert.ok(access, "no tools/call access line to mutate: re-aim this control");
+    const j = JSON.parse(access);
+    // #2863's edit: the client address from X-Forwarded-For and the whole User-Agent on mcp_request.
+    const twoField = JSON.stringify({ ...j, client_addr: "203.0.113.9", user_agent: "claude-code/2.1.0 (darwin; arm64)" });
+    assert.equal(lineProblems([twoField], LOG_LINES).out.length, 1, "the two-field edit's access line passes");
+    assert.equal(lineProblems([JSON.stringify({ ...j, ua_family: "claude-code/2.1.0 (darwin)" })], LOG_LINES).out.length, 1, "a whole User-Agent in ua_family passes");
+    // ... and with the two keys added to LOG_LINES too (the build then passes), the README check fails on both.
+    const listed = { ...LOG_LINES, mcp_request: { ...LOG_LINES.mcp_request, keys: [...LOG_LINES.mcp_request.keys, "client_addr", "user_agent"] } };
+    assert.deepEqual(lineProblems([twoField], listed).out, []);
+    assert.equal(readmeProblems(listed, readPkgFile("README.md")).length, 2, "the two keys pass the README check");
+    // A new line, unlisted; and listed but written by no server here.
+    const upstream = JSON.stringify({ severity: "WARNING", message: "mcp_upstream_slow", status: 502 });
+    assert.match(lineProblems([upstream], LOG_LINES).out.join(), /does not list/);
+    const withUpstream = { ...LOG_LINES, mcp_upstream_slow: { keys: ["status"] } };
+    assert.deepEqual(unseenProblems(withUpstream, lineProblems(EVERY_LINE, withUpstream).seen), ["no mcp_upstream_slow line was written by this file's servers, so its keys are not checked"]);
+    // The client address on another line, and a key dropped from a listed line.
+    const busyClient = { ...LOG_LINES, mcp_busy: { keys: [...LOG_LINES.mcp_busy.keys, "client_addr"] } };
+    assert.equal(readmeProblems(busyClient, readPkgFile("README.md")).length, 1, "a client address on mcp_busy passes the README check");
+    const gone = EVERY_LINE.find((l) => JSON.parse(l).message === "mcp_client_gone");
+    assert.ok(gone, "no mcp_client_gone line to mutate: re-aim this control");
+    const { rst_code: _dropped, ...lessGone } = JSON.parse(gone);
+    assert.equal(lineProblems([JSON.stringify(lessGone)], LOG_LINES).out.length, 1, "mcp_client_gone without rst_code passes");
+    // The README's old list (through 3.0.2): it named neither queued_ms nor in_flight, the prompt or tool name as such,
+    // ua_family as the first word, client_public, client_closed, throttled or refused (#2863's 2.7.1 audit comment); nor
+    // slot_wait_ms, which came with #2775's wait for a large-body slot; nor the HTTP method as a closed set (3.1.0's
+    // final review).
+    const old = readPkgFile("README.md").replace(/Per request it logs the HTTP method[\s\S]*?and why\.\s/, "Per request it logs the HTTP method and path, the status, the duration, the body size, the JSON-RPC method and (for `tools/call`) the tool name, the protocol version, whether an `Origin` header was sent, and the family of your client's User-Agent. ");
+    assert.notEqual(old, readPkgFile("README.md"), "the README's access-line sentence moved: re-aim this control");
+    assert.deepEqual(
+      readmeProblems(LOG_LINES, old).map((p) => p.match(/logs (\w+)/)?.[1]).sort(),
+      ["client_closed", "client_public", "in_flight", "method", "prompt", "queued_ms", "refused", "slot_wait_ms", "throttled", "tool", "ua_family"],
+      "the README's old access-line list passes",
+    );
+    // #2948: without its upstream-failure sentence, the README fails on each of that line's keys.
+    const noUpstream = readPkgFile("README.md").replace(/When one of its API calls fails,[\s\S]*?monitor's\.\s/, "");
+    assert.notEqual(noUpstream, readPkgFile("README.md"), "the README's upstream-failure sentence moved: re-aim this control");
+    assert.deepEqual(
+      readmeProblems(LOG_LINES, noUpstream).map((p) => p.match(/^mcp_upstream_failed logs (\w+)/)?.[1]).sort(),
+      ["after_ms", "failure_class", "route", "rpc_method", "status", "synthetic", "tool"],
+      "the README passes without its upstream-failure sentence",
+    );
+    // A console.log added to a tool, and the reviewed log() rewritten to spread the request.
+    assert.equal(writerProblems([["tools/get_cve.js", "    console.log(`get_cve ${args.cve_id}`);\n"]]).length, 1);
+    assert.equal(writerProblems([["http.js", "    process.stdout.write(`${JSON.stringify({ severity, message, ...fields, ...req.headers })}\\n`);\n"]]).length, 1);
+    // #2863's review: a writer reached by another name, a process warning, a write to fd 1 or 2 (all of them unreviewed).
+    for (const js of [
+      "    const out = process.stdout;\n    out.write(String(req.headers[\"x-forwarded-for\"]));\n",
+      "    process.emitWarning(`client ${req.headers[\"user-agent\"]}`);\n",
+      "    fs.writeSync(2, String(body));\n",
+      "    const { stderr } = process; stderr.write(String(body));\n",
+    ]) assert.equal(writerProblems([["tools/x.js", js]]).length, 1, `an unreviewed writer passes: ${js.trim()}`);
   });
 });

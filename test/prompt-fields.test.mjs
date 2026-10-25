@@ -50,8 +50,9 @@
 // Runs against dist/index.js, so build first; `npm test` does.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 import { SHAPED, argsOf, cutPairs, readShaped, shapedAnswers, startStub } from "./text-bound.mjs";
@@ -74,8 +75,10 @@ const PLAIN = {
 };
 // Snake_case words a prompt uses as values, not fields. purl_name is matched_via's value for a purl
 // matched by its own name (sbom_review's step 2); an upstream row also carries a purl_name field,
-// which heldTo still holds to the text wherever the answer has it.
-const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source", "purl_name"]);
+// which heldTo still holds to the text wherever the answer has it. github_checker is a value of an
+// exploit's kind (#3221), named by triage_cve's step 2 beside nuclei_template; production's
+// CVE-2021-44228 answer (prod-shaped/cve_intel.json) holds no such row, so no call here carries it.
+const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source", "purl_name", "github_checker"]);
 
 // sbom_review's step 2: a component's ecosystem, package and version read from its purl, as the
 // prompt says (and as core-backend's matcher maps a purl: cve/matchbatch.go purlNameVersion,
@@ -283,7 +286,14 @@ function fixedBranchesWalk(branches, installed) {
   }
   return undefined;
 }
-function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
+// #3285 (3.1.0's lane P): for a Packagist or Maven component, the rule reads the rows of its
+// package_name under that ecosystem, bare and with a repository URL after ":", as one row, their
+// ranges together, as the matcher does (core-backend registryRecordKey); a release suffix is never
+// folded. oneRow false is the rule as it read through d42d4697: the row of the component's own
+// ecosystem string alone.
+const REPOSITORY_BASES = ["packagist", "maven"];
+const ecoBase = (e) => e.trim().toLowerCase().split(":")[0];
+function fixRule(row, cve, intel, { ecosystem, pkg, installed }, { oneRow = true } = {}) {
   const above = (v, floor) => releaseOrder(v, floor) === 1;
   // #2834: a match that has a fixed_in field decides: a version is the fix, null is none, and the
   // rest of the rule is not read for that CVE.
@@ -296,9 +306,11 @@ function fixRule(row, cve, intel, { ecosystem, pkg, installed }) {
   // #2817: the fixed of the cve_intel range (fixed_branches) that holds the installed version,
   // walked past any range that still holds it (#3074); a range closed by last_affected has no fix
   // on record.
-  const branchRows = (intel.affected_packages ?? []).filter((r) => r.ecosystem === ecosystem && r.package_name === pkg && Array.isArray(r.fixed_branches));
-  for (const r of branchRows) {
-    const fix = fixedBranchesWalk(r.fixed_branches, installed);
+  const folds = oneRow && REPOSITORY_BASES.includes(ecoBase(ecosystem));
+  const ofComponent = (r) => (folds ? ecoBase(r.ecosystem) === ecoBase(ecosystem) && r.package_name.toLowerCase() === pkg.toLowerCase() : r.ecosystem === ecosystem && r.package_name === pkg);
+  const branchRows = (intel.affected_packages ?? []).filter((r) => ofComponent(r) && Array.isArray(r.fixed_branches));
+  for (const branches of folds && branchRows.length ? [branchRows.flatMap((r) => r.fixed_branches)] : branchRows.map((r) => r.fixed_branches)) {
+    const fix = fixedBranchesWalk(branches, installed);
     if (fix !== undefined) candidates.push({ from: "fixed_branches", version: fix });
   }
   if (candidates.length === 0 && branchRows.length === 0) {
@@ -497,7 +509,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify(doc);
     const prompt = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } }));
     const named = namedFields("sbom_review", prompt);
-    for (const f of ["verdict", "purl", "cve_ids", "not_assessed_reason", "summary", "not_sent", "not_sent_reason", "not_sent_purls", "fixed_in", "fixed_version", "ecosystem", "package", "version", "vendor_remediations", "remediation_kinds", "matched_package", "matched_via"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
+    for (const f of ["verdict", "purl", "cve_ids", "not_assessed_reason", "summary", "not_sent", "not_sent_reason", "not_sent_purls", "fixed_in", "fixed_version", "ecosystem", "package", "version", "vendor_remediations", "remediation_kinds", "matched_package", "matched_via", "fixed_in_reason"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
     // #2834's last review: no fixed version is read from match_reason's prose.
     assert.ok(!named.includes("match_reason"), "sbom_review names match_reason again");
     // The prompt passes the document as given.
@@ -569,6 +581,20 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
       const c = caseOf(label);
       for (const f of heldTo(label, await call(c.tool, argsOf(c), shapedAnswers(c)), named, derived)) carried.add(f);
     }
+    // #3269's fourth review: past 30 CVEs, step 3 takes the KEV-listed ones first, read from the
+    // matches and from matches_truncated's kev_listed_cve_ids, which only the structured result's
+    // data carries, on a row whose matches its cut capped: a default call (no full) on Juice Shop
+    // 11.1.2 with magento/community-edition 2.3.0, as workload_triage's case below.
+    for (const f of ["matches_truncated", "kev_listed_cve_ids"]) assert.ok(named.includes(f), `sbom_review no longer names ${f}`);
+    const capped = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "check_sbom-large-rows.json"), "utf8")).juiceShopMagento;
+    stub.state.answers = { "/api/v1/public/cves/match/batch": capped };
+    stub.state.limited = undefined;
+    stub.state.requests = 0;
+    const sc = (await client.callTool({ name: "check_sbom", arguments: { purls: capped.results.map((r) => r.purl) } })).structuredContent;
+    const marks = sc.data.results.filter((r) => r.matches_truncated).map((r) => r.matches_truncated);
+    assert.ok(marks.some((m) => Array.isArray(m.kev_listed_cve_ids)), "the default call capped no row's matches with kev_listed_cve_ids, so this case holds nothing");
+    for (const f of named) if (marks.some((m) => Object.hasOwn(m, f))) carried.add(f);
+    carried.add("matches_truncated");
     allCarried(t, "sbom_review", named, carried, ["check_sbom", "get_cve", "cve_intel", "cve_remediation", "get_vendor_advisory"]);
   });
 
@@ -792,7 +818,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
     assert.match(own, /cve_intel, to read fixed_branches and fixed_version from its affected_packages rows, and fixed_version from its fixed_versions rows/);
     // #3074: the range's fixed, walked past any other range of the row that still holds it.
-    assert.match(own, /Where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches, give the fixed of the range that holds the installed version: at or above its introduced \("0" is the first version\) and below its fixed, or at or below its last_affected, in the same version order; while another range of the row holds that fixed version, it is still affected, so move to that range's fixed; a range on the way with last_affected and no fixed, or with no end, has no fix on record, so give none, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used\./);
+    assert.match(own, /Where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches \(for a Packagist or Maven component, the rows of its package_name under that ecosystem, bare and with a repository URL after ":", such as Packagist and Packagist:https:\/\/packages\.drupal\.org\/8, are one row, their ranges all together, as cve_intel's note says; rows of two releases, such as Debian:11 and Debian:12, never are\), give the fixed of the range that holds the installed version: at or above its introduced \("0" is the first version\) and below its fixed, or at or below its last_affected, in the same version order; while another range of the row holds that fixed version, it is still affected, so move to that range's fixed; a range on the way with last_affected and no fixed, or with no end, has no fix on record, so give none, and a version in no range is given no fixed version from them; where fixed_branches is there, fixed_version is not used\./);
     const [row] = JSON.parse(blocksOf(await call("check_sbom", { sbom }, shapedAnswers(LOG4J)))[0]).results;
     const { ecosystem, package: pkg, version: installed } = fromPurl(row.purl);
     const c = caseOf(INTEL_2817);
@@ -806,6 +832,26 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     // Another branch, by the same rule: 2.10.0 is fixed in 2.12.2; and a version past every range.
     assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed: "2.10.0" }).offered, [{ from: "fixed_branches", version: "2.12.2" }]);
     assert.deepEqual(fixRule(row, "CVE-2021-44228", intel, { ecosystem, pkg, installed: "2.15.0" }).offered, [], "2.15.0 is in no range, and is given no fixed version");
+  });
+
+  // #3285 follow-up (3.1.0's lane P): cve_intel lists a package once per stored ecosystem string;
+  // CVE-2025-48013's rows for drupal/quick_node_block (the fixture the remediation route served,
+  // 2026-10-18) are Packagist:https://packages.drupal.org/8 [0, 2.0.1) and Packagist [0, 2.0.0).
+  // By the rule, a composer purl at 1.0.0 with no match kept is given 2.0.1, the matcher's
+  // fixed_in; control: the row of its own ecosystem string alone (d42d4697's rule) gives the
+  // still-affected 2.0.0. A release suffix stays apart.
+  it("sbom_review's fix rule reads CVE-2025-48013's Packagist rows as one (#3285): drupal/quick_node_block 1.0.0 is given 2.0.1, never 2.0.0", async () => {
+    const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: "{}" } })).split("\nSBOM:\n")[0];
+    assert.match(own, /for a Packagist or Maven component, the rows of its package_name under that ecosystem, bare and with a repository URL after ":"/);
+    const rows = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "cve_remediation-CVE-2025-48013.json"), "utf8")).data.fixed_branches;
+    const { ecosystem, package: pkg, version: installed } = fromPurl("pkg:composer/drupal/quick_node_block@1.0.0");
+    assert.deepEqual([ecosystem, pkg, installed], ["Packagist", "drupal/quick_node_block", "1.0.0"]);
+    const intel = { affected_packages: rows, fixed_versions: [] };
+    const target = { ecosystem, pkg, installed };
+    assert.deepEqual(fixRule({ matches: [] }, "CVE-2025-48013", intel, target).offered, [{ from: "fixed_branches", version: "2.0.1" }]);
+    assert.deepEqual(fixRule({ matches: [] }, "CVE-2025-48013", intel, target, { oneRow: false }).offered, [{ from: "fixed_branches", version: "2.0.0" }], "control: row by row gives 2.0.0");
+    const deb = { affected_packages: [{ ecosystem: "Debian:11", package_name: "openssl", fixed_branches: [{ introduced: "0", fixed: "1.1.1" }] }, { ecosystem: "Debian:12", package_name: "openssl", fixed_branches: [{ introduced: "0", fixed: "3.0.1" }] }], fixed_versions: [] };
+    assert.deepEqual(fixRule({ matches: [] }, "CVE-2099-1", deb, { ecosystem: "Debian:12", pkg: "openssl", installed: "1.0.0" }).offered, [{ from: "fixed_branches", version: "3.0.1" }]);
   });
 
   // #3074: a range's fixed can lie inside another range of the same row. Production's CVE-2026-4800
@@ -845,8 +891,8 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
     const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
     // #3074: fixed_in is the first version above the installed one that no affected interval holds.
-    assert.match(own, /Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component and write "no fix on record", which is not a finding that no fix exists\./);
-    assert.match(own, /Where the text keeps no match for the component \(a cut text can keep its cve_ids alone\), or the match has no fixed_in field, the rest of this rule applies\./);
+    assert.match(own, /Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\./);
+    assert.match(own, /Where the text or data keeps no match for that CVE on the component \(a cut can keep a row's cve_ids alone, or fewer matches than cve_ids\), or the match has no fixed_in field, the rest of this rule applies\./);
     const shown = async (answers) => JSON.parse(blocksOf(await call("check_sbom", LOG4J.args, answers))[0]).results[0];
     const row = await shown(withFixedIn(shapedAnswers(LOG4J)));
     const { ecosystem, package: pkg, version: installed } = fromPurl(row.purl);
@@ -860,6 +906,8 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const nulled = await shown(withFixedIn(shapedAnswers(LOG4J), {}));
     const m = nulled.matches.find((x) => x.cve_id === "CVE-2021-44228");
     assert.ok(Object.hasOwn(m, "fixed_in") && m.fixed_in === null, JSON.stringify(m));
+    // #2834's last review: the rule gives a null fixed_in's reason, so the text keeps it beside it.
+    assert.ok(typeof m.fixed_in_reason === "string" && m.fixed_in_reason.length > 0, `check_sbom's text drops fixed_in_reason beside a null fixed_in: ${JSON.stringify(m)}`);
     t.diagnostic(`fixed_in null: ${JSON.stringify(fixRule(nulled, "CVE-2021-44228", intel, target))}`);
     assert.deepEqual(fixRule(nulled, "CVE-2021-44228", intel, target), { candidates: [], offered: [] }, "a null fixed_in still gives a fixed version");
     // Control: the same row without the fixed_in field reads the rest of the rule, and cve_intel's
@@ -888,7 +936,82 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     for (const f of heldTo(LOG4J_2834.label, await call("check_sbom", LOG4J.args, withFixedIn(shapedAnswers(LOG4J))), named)) carried.add(f);
     const g = caseOf("get_cve, CVE-2021-44228");
     for (const f of heldTo(g.label, await call(g.tool, argsOf(g), shapedAnswers(g)), named)) carried.add(f);
+    // #3270: step 5 reads matches_truncated's kev_listed_cve_ids and ransomware_cve_ids, which only
+    // the structured result's data carries, on a row whose matches its cut capped: a default call
+    // (no full) on Juice Shop 11.1.2 with magento/community-edition 2.3.0, whose 200 matches are.
+    for (const f of ["matches_truncated", "kev_listed_cve_ids", "ransomware_cve_ids"]) assert.ok(named.includes(f), `workload_triage no longer names ${f}`);
+    const capped = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "check_sbom-large-rows.json"), "utf8")).juiceShopMagento;
+    stub.state.answers = { "/api/v1/public/cves/match/batch": capped };
+    stub.state.limited = undefined;
+    stub.state.requests = 0;
+    const sc = (await client.callTool({ name: "check_sbom", arguments: { purls: capped.results.map((r) => r.purl) } })).structuredContent;
+    const marks = sc.data.results.filter((r) => r.matches_truncated).map((r) => r.matches_truncated);
+    assert.ok(marks.length > 0, "the default call capped no row's matches, so this case holds nothing");
+    for (const f of named) if (marks.some((m) => Object.hasOwn(m, f))) carried.add(f);
+    carried.add("matches_truncated");
     allCarried(t, "workload_triage", named, carried, ["check_sbom", "get_cve"]);
+  });
+
+  // #3269's third review: workload_triage's step 6 and sbom_review's step 1 quote two shapes of
+  // check_sbom's DATA CUT note, the clause naming the rows left out (those with a KEV-listed or
+  // ransomware match first and apart) and the sentence giving the sizes of the calls that check
+  // them again. Each quote (K a count, … the rest) is held to the note of a default call that
+  // leaves rows of both kinds out: 24 Debian 12 rows of 50 matches (libssl3's, recorded), every
+  // other one with a KEV-listed match. Control: round 3's quotes ("K affected or undetermined rows
+  // at index …", "A call of the first N of these purls" as the re-check size) fail it.
+  it("#3269's third review: the note shapes workload_triage and sbom_review quote for the rows a DATA CUT leaves out are check_sbom's", async () => {
+    const rec = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "check_sbom-large-rows.json"), "utf8")).debian12;
+    const ssl = rec.results.find((r) => r.purl.includes("libssl3"));
+    const results = Array.from({ length: 24 }, (_, i) => ({
+      ...ssl,
+      index: i,
+      purl: `pkg:deb/debian/libssl3-${i}@3.0.11-1~deb12u1?arch=amd64&upstream=openssl&distro=debian-12`,
+      matches: ssl.matches.map((m, j) => ({ ...m, kev_listed: i % 2 === 1 && j === 3 })),
+    }));
+    stub.state.answers = { "/api/v1/public/cves/match/batch": { ...rec, results, summary: { ...rec.summary, components: 24, affected: 24 } } };
+    stub.state.limited = undefined;
+    stub.state.requests = 0;
+    const note = (await client.callTool({ name: "check_sbom", arguments: { purls: results.map((r) => r.purl) } })).structuredContent.notes.join(" ");
+    assert.match(note, /the \d+ with a KEV-listed or ransomware match at index .*; the other \d+ at index /, "this call leaves out no rows of both kinds, so it holds nothing");
+    const quoteOf = (q) => new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\bK\b/g, "\\d+").replace(/…/g, ".*?"));
+    for (const name of ["workload_triage", "sbom_review"]) {
+      const text = textOf(await client.getPrompt({ name, arguments: name === "sbom_review" ? { sbom: '{"bomFormat":"CycloneDX","components":[]}' } : {} }));
+      const quotes = [...text.matchAll(/\("([^"]*…[^"]*)"/g)].map((m) => m[1]).filter((q) => /affected or undetermined rows|Re-check/.test(q));
+      assert.ok(quotes.length >= (name === "workload_triage" ? 2 : 1), `${name} quotes ${quotes.length} of the note's shapes`);
+      for (const q of quotes) assert.match(note, quoteOf(q), `${name} quotes "${q}", which check_sbom's note does not say`);
+    }
+    for (const was of ["K affected or undetermined rows at index …", "A call of the first N of these purls, at most as many per call …"]) assert.doesNotMatch(note, quoteOf(was), `round 3's quote "${was}"`);
+  });
+
+  // #3284: the first text block keeps the rows with a KEV-listed or ransomware match last to leave
+  // and names by index each of them it leaves out; workload_triage's and sbom_review's last lines
+  // quote that sentence. The quote (K a count, … the rest) is held to the note of a default call
+  // whose text leaves such rows out: 80 Debian 12 rows of 50 matches (libssl3's, recorded), each
+  // with a KEV-listed match. Control: the clause d42d4697's workload_triage line had in its place
+  // is no shape of that note.
+  it("#3284: the note shape workload_triage and sbom_review quote for the KEV-bearing rows the first text block leaves out is check_sbom's", async () => {
+    const rec = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "check_sbom-large-rows.json"), "utf8")).debian12;
+    const ssl = rec.results.find((r) => r.purl.includes("libssl3"));
+    const results = Array.from({ length: 80 }, (_, i) => ({
+      ...ssl,
+      index: i,
+      purl: `pkg:deb/debian/libssl3-${i}@3.0.11-1~deb12u1?arch=amd64&upstream=openssl&distro=debian-12`,
+      matches: ssl.matches.map((m, j) => ({ ...m, kev_listed: j === 3 })),
+    }));
+    stub.state.answers = { "/api/v1/public/cves/match/batch": { ...rec, results, summary: { ...rec.summary, components: 80, affected: 80 } } };
+    stub.state.limited = undefined;
+    stub.state.requests = 0;
+    const res = await client.callTool({ name: "check_sbom", arguments: { purls: results.map((r) => r.purl) } });
+    const note = res.structuredContent.notes.join(" ");
+    assert.ok(JSON.parse(res.content[0].text).results.length < 80, "the text keeps every row, so this call holds nothing");
+    const quoteOf = (q) => new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\bK\b/g, "\\d+").replace(/…/g, ".*?"));
+    for (const name of ["workload_triage", "sbom_review"]) {
+      const text = textOf(await client.getPrompt({ name, arguments: name === "sbom_review" ? { sbom: '{"bomFormat":"CycloneDX","components":[]}' } : {} }));
+      const quotes = [...text.matchAll(/\("([^"]*…[^"]*)"/g)].map((m) => m[1]).filter((q) => /^Of the rows left out of it/.test(q));
+      assert.equal(quotes.length, 1, `${name} quotes ${quotes.length} shapes of the sentence`);
+      for (const q of quotes) assert.match(note, quoteOf(q), `${name} quotes "${q}", which check_sbom's note does not say`);
+      assert.doesNotMatch(text, /can hold a KEV-listed CVE that the text does not name/, `${name} still says the text leaves KEV-bearing rows out unnamed`);
+    }
   });
 
   // #3013's review: past the budget, check_sbom's and scan_manifest's structured result thins each
@@ -901,8 +1024,14 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
   // (matchFieldsRead) is in SBOM_ROW_THIN's matches, and in every thinned match of a default call
   // (Juice Shop's 50 components, every row thinned, and scan_manifest's package-lock of 64).
   // Control: the review's thinned match fails, naming the three fields.
+  //
+  // #3270: the guard read SBOM_ROW_THIN alone, and 3.0.2 (#3132) added levels after it: its
+  // SBOM_ROW_COMPACT kept cve_id, kev_listed, ransomware, fixed_in and effective_score, so the
+  // 201-purl probe's default answer kept 54 rows and not one match with epss_score or
+  // score_assessed, and this test passed. Now each level of SBOM_ROW_LEVELS that keeps matches is
+  // held to every field read; control: 3.0.2's SBOM_ROW_COMPACT fails, naming the two.
   it("#3013's review: every match field a prompt reads from check_sbom's or scan_manifest's matches survives SBOM_ROW_THIN, in the list and in a default call's thinned data", async (t) => {
-    const { SBOM_ROW_THIN } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
+    const { SBOM_ROW_THIN, SBOM_ROW_LEVELS } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
     const juice = caseOf("check_sbom, Juice Shop 11.1.2 (50 components)");
     const lockCase = caseOf("scan_manifest, package-lock.json (64 packages)");
     // Every field a check_sbom match carries in the answers this file serves, fixed_in among them.
@@ -919,11 +1048,13 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const listed = (await client.listPrompts()).prompts.map((x) => x.name).sort();
     assert.deepEqual(Object.keys(args).sort(), listed, "prompts/list lists another prompt: give it arguments here, so what it reads from a match is held");
     const read = {};
+    const said = {};
     for (const [name, list] of Object.entries(args)) {
       for (const a of list) {
         const prompt = textOf(await client.getPrompt({ name, arguments: a }));
         if (!/\b(check_sbom|scan_manifest)\b/.test(prompt.split("\nSBOM:\n")[0])) continue;
         read[name] = [...new Set([...(read[name] ?? []), ...matchFieldsRead(name, prompt, toolNames, matchKeys)])];
+        said[name] = `${said[name] ?? ""}\n${prompt.split("\nSBOM:\n")[0]}`;
       }
     }
     t.diagnostic(`match fields read: ${JSON.stringify(read)}`);
@@ -932,9 +1063,33 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     for (const f of ["kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in"]) assert.ok(read.workload_triage.includes(f), `workload_triage: ${f} is not found as read from a match`);
     assert.ok(read.sbom_review.includes("fixed_in"), "sbom_review: fixed_in is not found as read from a match");
     for (const [name, fields] of Object.entries(read)) assert.deepEqual(thinProblems(fields, SBOM_ROW_THIN), [], `${name} reads from a match fields SBOM_ROW_THIN leaves out`);
+    // #3270: every level of the structured cut that keeps matches (a level that keeps none sends
+    // the row's CVEs to get_cve, as workload_triage's step 5 and sbom_review's step 3 say).
+    const keeps = SBOM_ROW_LEVELS.map((l) => (Array.isArray(l) ? l : l.keep)).filter((keep) => keep.some((k) => Array.isArray(k) && k[0] === "matches"));
+    assert.ok(keeps.length >= 3, `${keeps.length} levels of SBOM_ROW_LEVELS keep matches: the guard holds fewer than it did`);
+    // #2834 beside #3269: sbom_review relays a null fixed_in's fixed_in_reason, and SBOM_ROW_COMPACT
+    // keeps fixed_in without it (kept, it costs the 201-purl probe a row: check_sbom-large-rows).
+    // A level may leave fixed_in_reason out only where the prompt reads it where a match carries it
+    // and says what a null fixed_in without it is: a reason the cut left out, never "no fix".
+    // Every other field read, and fixed_in_reason at SBOM_ROW_THIN (above), is held as before.
+    const READ_WITHOUT = { fixed_in_reason: /where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason\b[^]*?A null fixed_in on a match without fixed_in_reason is one whose reason a DATA CUT left out for size \(its matches keep fixed_in, not fixed_in_reason\): never write "no fix" for it/ };
+    const leftOut = (name, fields, keep, text = said[name]) => thinProblems(fields, keep).filter((f) => !READ_WITHOUT[f]?.test(text));
+    for (const [i, keep] of keeps.entries()) {
+      for (const [name, fields] of Object.entries(read)) assert.deepEqual(leftOut(name, fields, keep), [], `${name} reads from a match fields level ${i} of SBOM_ROW_LEVELS (of those keeping matches) leaves out`);
+    }
+    // Control: before it said so (the #2834 clause as phase A merged it), sbom_review read the
+    // compact level's null fixed_in as "no fix on record" with a fixed_in_reason it does not keep.
+    const compact = keeps.find((keep) => thinProblems(["fixed_in_reason"], keep).length > 0);
+    assert.ok(compact, "no level that keeps matches leaves out fixed_in_reason: this guard's exception is unused");
+    const MERGED_2834 = said.sbom_review.replace(/where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\. A null fixed_in on a match without fixed_in_reason [^]*?get_cve\./, 'write "no fix on record" and the match\'s fixed_in_reason, which says why, as given (a version it names is not a fix); this is not a finding that no fix exists.');
+    assert.notEqual(MERGED_2834, said.sbom_review, "the control did not find sbom_review's clause");
+    assert.deepEqual(leftOut("sbom_review", read.sbom_review, compact, MERGED_2834), ["fixed_in_reason"]);
     // Control: the review's thinned match leaves out three of workload_triage's.
     const REVIEWED = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids", "matched_package", "matched_via", ["matches", ["cve_id", "kev_listed", "epss_score", "fixed_in", "fixed_in_reason"]]];
     assert.deepEqual(thinProblems(read.workload_triage, REVIEWED).sort(), ["effective_score", "ransomware", "score_assessed"]);
+    // Control (#3270): 3.0.2's compact level leaves out two.
+    const COMPACT_302 = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids", "matched_package", "matched_via", "matched_version_from", "purl_name", ["matches", ["cve_id", "kev_listed", "ransomware", "fixed_in", "effective_score"]]];
+    assert.deepEqual(thinProblems(read.workload_triage, COMPACT_302).sort(), ["epss_score", "score_assessed"]);
     // And in data: a default call (no full), every row thinned, each match keeping each field read
     // wherever the answer's match has it.
     const all = [...new Set(Object.values(read).flat())];
@@ -951,9 +1106,11 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
       let held = 0;
       for (const r of sc.data.results) {
         for (const [i, m] of (r.matches ?? []).entries()) {
+          // #3270: a capped row keeps its KEV-listed matches first: the answer's match by cve_id.
+          const am = byIndex.get(r.index).matches.find((x) => x.cve_id === m.cve_id);
           for (const f of all) {
-            if (!Object.hasOwn(byIndex.get(r.index).matches[i], f)) continue;
-            assert.ok(Object.hasOwn(m, f), `${c.label}: row ${r.index}, match ${i}: a prompt reads ${f} from it, and the thinned match leaves it out`);
+            if (!Object.hasOwn(am, f)) continue;
+            assert.ok(Object.hasOwn(m, f), `${c.label}: row ${r.index}, match ${i} (${m.cve_id}): a prompt reads ${f} from it, and the thinned match leaves it out`);
             held++;
           }
         }

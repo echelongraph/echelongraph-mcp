@@ -566,3 +566,118 @@ describe("#2835: a cancelled scan_manifest call sends no further batch", () => {
     assert.deepEqual(requests, [200, 200, 200, 200, 200, 200, 200]);
   });
 });
+
+// #3100: scan_manifest's description states the batch contract (the POST body size, the purls per
+// call, the time budget, and since #3100 the API's per-minute budget) as literals, and nothing read
+// them: changed to 999 / 9,999 / 99 seconds, the suite stayed green. Each number in either batch
+// tool's description, and in check_sbom's purls argument, is held here to the constant
+// match_batch.ts sends by; core-backend's guards hold MAX_COMPONENTS and API_COMPONENTS_PER_MINUTE
+// to the route's own values (internal/cve/matchbatch_test.go, internal/waf/weighted_test.go, both of
+// which read scan_manifest.ts's description on its own since #3100).
+describe("#3100: both batch tools' descriptions state match_batch.ts's contract", () => {
+  let MB, SB;
+  before(async () => {
+    MB = await import(dist("tools/match_batch.js"));
+    SB = await import(dist("tools/check_sbom.js"));
+  });
+  const n = (x) => x.toLocaleString("en-US");
+  // What each description must say, from the constants.
+  const wants = () => ({
+    // #3100's review: "so past 1,200 a call answers partial" claimed more than the code does (a
+    // fixed-window limiter, whose window a call can start anywhere in, and a 50-second wait for its
+    // Retry-After), so scan_manifest now says what check_sbom says: the budget, the wait, then partial.
+    scan_manifest: [
+      `POST bodies of at most ${MB.MAX_COMPONENTS}, never in a URL`,
+      // 3.1.0's phase A review: the budget bounds the whole call (match_batch.ts TIME_BUDGET_MS: a
+      // slow batch cut off, time_budget; a 429 refused or a batch failed after the first, partial
+      // too), not the 429 wait alone, as fix C's wording had it.
+      `At most ${n(MB.MAX_PURLS)} distinct purls and ${MB.TIME_BUDGET_MS / 1000} seconds a call.`,
+      `The API allows ${n(MB.API_COMPONENTS_PER_MINUTE)} components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls`,
+    ],
+    check_sbom: [
+      `purls (package URLs, up to ${n(MB.MAX_PURLS)} distinct)`,
+      `POST bodies of at most ${MB.MAX_COMPONENTS}, never in a URL`,
+      `The API allows ${n(MB.API_COMPONENTS_PER_MINUTE)} components a minute per caller`,
+      `up to ${MB.TIME_BUDGET_MS / 1000} seconds a call`,
+      `Input with more than ${n(MB.MAX_PURLS)} distinct purls is refused, not truncated.`,
+    ],
+  });
+  // A claim neither tool may make again: partial past the per-minute budget, whatever the window.
+  const RETIRED = /so past [\d,]+ a call answers partial/;
+  // 3.1.0's phase A review: nor scan_manifest the budget as the 429 wait's alone (fix C's wording).
+  const WAIT_ONLY = /on a 429 it waits out Retry-After, up to \d+ seconds a call, then answers what it has/;
+  const problems = (tool, description) => [
+    ...wants()[tool].filter((w) => !description.includes(w)).map((w) => `${tool}: no longer says ${JSON.stringify(w)}`),
+    ...(RETIRED.test(description) ? [`${tool}: says a call past the per-minute budget answers partial, which holds only from a fresh minute`] : []),
+    ...(tool === "scan_manifest" && WAIT_ONLY.test(description) ? [`${tool}: bounds only the 429 wait by the call's budget`] : []),
+  ];
+
+  it("scan_manifest's and check_sbom's descriptions say every number as match_batch.ts holds it", () => {
+    assert.deepEqual([...problems("scan_manifest", SM.SCAN_MANIFEST_DESCRIPTION), ...problems("check_sbom", SB.CHECK_SBOM_DESCRIPTION)], []);
+  });
+
+  it("the issue's mutation of scan_manifest's description (999 / 9,999 / 99 seconds) fails it, each number on its own", () => {
+    const d = SM.SCAN_MANIFEST_DESCRIPTION;
+    for (const [from, to] of [
+      [`at most ${MB.MAX_COMPONENTS},`, "at most 999,"],
+      [`At most ${n(MB.MAX_PURLS)} distinct`, "At most 9,999 distinct"],
+      [`and ${MB.TIME_BUDGET_MS / 1000} seconds a call`, "and 99 seconds a call"],
+      [`allows ${n(MB.API_COMPONENTS_PER_MINUTE)} components`, "allows 9,999 components"],
+    ]) {
+      assert.ok(d.includes(from), `control: the description says ${from}`);
+      assert.ok(problems("scan_manifest", d.replace(from, to)).length > 0, `${from} -> ${to} passed`);
+    }
+    // #3100's review control: the sentence the lane shipped is refused.
+    // 3.1.0's phase A review control: fix C's sentence (the budget bounding the 429 wait alone) fails.
+    const fixC = d.replace(
+      /At most [\d,]+ distinct purls and \d+ seconds a call\. The API allows ([\d,]+) components a minute per caller;.*?not clean\./,
+      "At most 2,000 distinct purls a call. The API allows $1 components a minute per caller; on a 429 it waits out Retry-After, up to 50 seconds a call, then answers what it has, the rest in data.not_sent_purls, unchecked, not clean.",
+    );
+    assert.notEqual(fixC, d, "control: the description no longer carries the budget sentence");
+    assert.ok(problems("scan_manifest", fixC).some((p) => p.includes("bounds only the 429 wait")), problems("scan_manifest", fixC).join("\n"));
+    const lane = d.replace(
+      /At most [\d,]+ distinct purls and \d+ seconds a call\. The API allows ([\d,]+) components a minute per caller;.*?not clean\./,
+      "At most 2,000 distinct purls per call, within 50 seconds. The API allows $1 components a minute per caller, so past $1 a call answers partial; data.not_sent_purls lists any not sent, unchecked and not clean.",
+    );
+    assert.notEqual(lane, d, "control: the description no longer carries the budget sentence");
+    assert.ok(lane.includes("so past 1,200 a call answers partial; data.not_sent_purls lists any not sent, unchecked and not clean."), lane.slice(-300));
+    assert.ok(problems("scan_manifest", lane).some((p) => p.includes("answers partial")), problems("scan_manifest", lane).join("\n"));
+  });
+
+  it("on the wire too: tools/list serves those descriptions, and check_sbom's purls argument says the same purls and batch size", async () => {
+    const client = await connect({ era: MODERN, ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    try {
+      const { tools } = await client.listTools();
+      const t = (name) => tools.find((x) => x.name === name);
+      assert.deepEqual([...problems("scan_manifest", t("scan_manifest").description), ...problems("check_sbom", t("check_sbom").description)], []);
+      assert.ok(t("check_sbom").inputSchema.properties.purls.description.includes(`(up to ${n(MB.MAX_PURLS)} distinct, sent in batches of ${MB.MAX_COMPONENTS})`), t("check_sbom").inputSchema.properties.purls.description);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// 3.1.0's phase C review (nit): to make room for #3100's budget sentence, "This server reads the files
+// into purls" became "This server reads them into purls", right after "go.sum is refused: it lists
+// versions the build does not select.", where the nearest plural is go.sum's versions, not the
+// files. The sentence names the files again, and the description stays within its 1,948 characters.
+describe("scan_manifest's description says what the server reads into purls: the files", () => {
+  const READS_FILES = /go\.sum is refused: it lists versions the build does not select\. The server reads the files into purls; only the purls are sent to the API/;
+  const problems = (d) => [
+    ...(READS_FILES.test(d) ? [] : ["does not say, after go.sum's refusal, that the server reads the files into purls"]),
+    ...(/reads them into purls/.test(d) ? ["says the server reads \"them\" into purls, after go.sum's versions"] : []),
+    ...(d.length <= 1948 ? [] : [`${d.length} characters: the budget is 1,948`]),
+  ];
+  it("names the files, within 1,948 characters", () => {
+    assert.deepEqual(problems(SM.SCAN_MANIFEST_DESCRIPTION), []);
+  });
+  it("control: 0ee20f11's wording (\"This server reads them into purls\") fails", () => {
+    const d = SM.SCAN_MANIFEST_DESCRIPTION;
+    const old = d.replace("The server reads the files into purls", "This server reads them into purls");
+    assert.notEqual(old, d, "control: the description no longer carries the sentence");
+    assert.deepEqual(problems(old), [
+      "does not say, after go.sum's refusal, that the server reads the files into purls",
+      'says the server reads "them" into purls, after go.sum\'s versions',
+    ]);
+  });
+});

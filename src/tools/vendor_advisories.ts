@@ -84,6 +84,8 @@ export type VendorAdvisoryKit = {
   // index.ts's one sentence for a failure: quoted when the vendors' windows cannot be read.
   describeFailure: (f: Failure) => string;
   badInput: (tool: string, why: string) => ToolResult;
+  // #3011: a refusal worded by this file (index.ts failure), for the one the API's answer decides.
+  failure: (state: "failed" | "invalid_input", message: string, error: { kind: "invalid_input"; path: string | null; status: number | null; message: string }) => ToolResult;
   crashed: (tool: string, e: unknown) => ToolResult;
   succeeded: (data: object, note: string, env: SuccessEnv, cut?: TextCut) => ToolResult;
   checked: (tool: string, schema: z.ZodType, r: ToolResult) => ToolResult;
@@ -110,6 +112,20 @@ const CVE_ID = /^CVE-\d{4}-\d{4,}$/i;
 const VENDOR_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 // No control characters (a header or log line could carry them), at most 200 characters.
 const ADVISORY_ID = /^[^\x00-\x1f\x7f]{1,200}$/;
+// #3011: a row's advisory_id is EchelonGraph's own ID for the advisory, a UUID (vendor_advisories,
+// migration 063). The detail route is keyed on the vendor's ID, vendor_advisory_id (handler.go
+// Detail, store.go GetAdvisoryByVendorAndID: WHERE v.slug = $1 AND va.vendor_advisory_id = $2), and
+// the API has no route by the UUID, so get_vendor_advisory given a row's advisory_id answered a
+// 404, worded as no record, for an advisory the API holds (CVE-2024-3400's Palo Alto row,
+// a68d033b-5d1e-4537-8190-5e37897a27e8, 2026-10-10). A vendor's own ID could have that shape too, so
+// the API is still asked; only its 404 for an ID of that shape is answered as the refusal it is.
+const INTERNAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// What a row's two IDs are, in the outputSchema of all three tools (the detail echoes advisory_id).
+// Facts only, naming no other tool (test/description-policy.test.mjs: the MCP Directory policy).
+const ROW_ADVISORY_ID_FIELD =
+  "EchelonGraph's internal ID for this advisory, a UUID. It is not the vendor's advisory ID (vendor_advisory_id), and an advisory's detail is not looked up by it: the detail is keyed on vendor and vendor_advisory_id.";
+const VENDOR_ADVISORY_ID_FIELD =
+  "The vendor's own ID for the advisory (e.g. RHSA-2024:1234, GHSA-xxxx-xxxx-xxxx, or the CVE ID for Microsoft and Palo Alto Networks). With vendor, it is the key an advisory's detail is looked up by, as its advisory_id argument.";
 
 const METHOD =
   "EchelonGraph's vendor-advisory feed: advisories as each vendor published them in its own feed (for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA), each feed polled on a schedule; advisories of a feed EchelonGraph has disabled are left out.";
@@ -309,10 +325,10 @@ const REMEDIATION_KINDS_FIELD =
 const REMEDIATION_KINDS = ["vendor_fix", "workaround", "mitigation", "no_fix_planned", "none_available", "other"] as const;
 const REMEDIATION_STATES = ["parsed", "none_in_source", "not_parsed", "withdrawn"] as const;
 const AdvisoryRow = z.looseObject({
-  advisory_id: opt(z.string()),
+  advisory_id: opt(z.string()).describe(ROW_ADVISORY_ID_FIELD),
   vendor: opt(z.string()),
   vendor_display_name: opt(z.string()),
-  vendor_advisory_id: opt(z.string()),
+  vendor_advisory_id: opt(z.string()).describe(VENDOR_ADVISORY_ID_FIELD),
   cve_ids: opt(z.array(z.string())),
   title: opt(z.string()),
   severity: opt(z.string()),
@@ -600,6 +616,18 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
   }
 
   // ── get_vendor_advisory ──
+  // #3011: advisory_id was a row's advisory_id (a UUID), not its vendor_advisory_id. The API was
+  // asked (a vendor's own ID could be shaped so) and holds no advisory of the vendor under it, which
+  // is the wrong ID passed, not a missing advisory: invalid_input, naming the field to pass.
+  function internalIdRefusal(vendor: string, id: string, path: string): ToolResult {
+    const why = `advisory_id ${id} has the shape of a row's advisory_id, EchelonGraph's internal ID for an advisory (a UUID), which this tool does not take, and EchelonGraph holds no ${vendor} advisory whose vendor_advisory_id it is (HTTP 404)`;
+    return kit.failure(
+      "invalid_input",
+      `get_vendor_advisory FAILED (state: invalid_input): ${why}. Call get_vendor_advisory again with the row's vendor and its vendor_advisory_id as advisory_id (e.g. CVE-2024-3400 for Palo Alto Networks, RHSA-2024:1234 for Red Hat). This says nothing about whether the advisory exists, and it is not a finding.`,
+      { kind: "invalid_input", path, status: 404, message: `${why}; pass the row's vendor_advisory_id as advisory_id` },
+    );
+  }
+
   async function detail(vendorArg: string, idArg: string): Promise<ToolResult> {
     const tool = "get_vendor_advisory";
     const vendor = vendorArg.trim();
@@ -611,6 +639,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     try {
       const windowsRead = readWindows();
       const r = await kit.api(`/api/v1/public/vendor-advisories/${encodeURIComponent(vendor)}/${encodeURIComponent(id)}`);
+      if (!r.ok && r.kind === "http" && r.status === 404 && INTERNAL_ID.test(id)) return internalIdRefusal(vendor, id, r.path);
       if (!r.ok) return kit.failed(tool, r);
       const w = await windowsRead;
       const firstSeen = field(r.data, "our_first_seen_at");
@@ -761,10 +790,12 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "get_vendor_advisory",
     {
       title: "Vendor advisory detail",
-      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id of a vendor advisory row): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations lists each remediation the vendor lists, with kind (the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), source_category, text, url and the cve_ids and product_ids it covers; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state is parsed, none_in_source, not_parsed or withdrawn: none_in_source and not_parsed are not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_HEAD}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
+      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id of a vendor advisory row, never its advisory_id, EchelonGraph's internal UUID): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations lists each remediation the vendor lists, with kind (the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), source_category, text, url and the cve_ids and product_ids it covers; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state is parsed, none_in_source, not_parsed or withdrawn: none_in_source and not_parsed are not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_HEAD}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
       inputSchema: z.object({
         vendor: z.string().describe("the vendor slug, e.g. microsoft, redhat, github"),
-        advisory_id: z.string().describe("the vendor's advisory ID, e.g. RHSA-2024:1234 or GHSA-xxxx-xxxx-xxxx"),
+        advisory_id: z
+          .string()
+          .describe("the vendor's own advisory ID, a row's vendor_advisory_id, e.g. RHSA-2024:1234, GHSA-xxxx-xxxx-xxxx or CVE-2024-3400; not a row's advisory_id, EchelonGraph's internal UUID"),
         full: FULL_ARG,
       }),
       outputSchema: DETAIL_OUTPUT,

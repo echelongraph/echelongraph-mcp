@@ -129,6 +129,37 @@ const HUGE = {
 // default answer kept 2 of 20 advisories while fixed_branches (13,581 characters, 50 rows) and
 // patches (7,471, 30) stayed whole.
 const RAPID_RESET = JSON.parse(fs.readFileSync(new URL("./fixtures/cve_remediation-CVE-2023-44487.json", import.meta.url), "utf8")).data;
+// #3285: CVE-2025-48013 as the public API served it (2026-10-18): drupal/quick_node_block listed
+// under Packagist:https://packages.drupal.org/8 (fixed 2.0.1) and under Packagist (fixed 2.0.0).
+const DRUPAL_48013 = JSON.parse(fs.readFileSync(new URL("./fixtures/cve_remediation-CVE-2025-48013.json", import.meta.url), "utf8")).data;
+// The note's fix rule, applied as it reads: an installed version's fix is the first fixed above it
+// that no range of its package holds, walked from the range that holds it. Its package is the entry
+// of the component's ecosystem and package_name, or, where the note says entries of one
+// package_name under Packagist or Maven, bare or with a repository URL, are one package, all of
+// those entries. Versions here are plain release numbers.
+const ONE_PACKAGE = 'Entries of one package_name under Packagist or Maven, bare or with a repository URL after ":", are one package, its ranges all of theirs together';
+const relNum = (a, b) => {
+  const [pa, pb] = [a, b].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0) ? -1 : 1;
+  return 0;
+};
+const rangeHolds = (r, v) => relNum(v, r.introduced) >= 0 && (r.fixed ? relNum(v, r.fixed) < 0 : r.last_affected ? relNum(v, r.last_affected) <= 0 : true);
+function fixByNoteRule(note, fixedBranches, { ecosystem, pkg, installed }) {
+  const base = (e) => e.toLowerCase().split(":")[0];
+  const grouped = note.includes(ONE_PACKAGE) && ["packagist", "maven"].includes(base(ecosystem));
+  const entries = fixedBranches.filter((e) => e.package_name.toLowerCase() === pkg.toLowerCase() && (grouped ? base(e.ecosystem) === base(ecosystem) : e.ecosystem === ecosystem));
+  const ranges = entries.flatMap((e) => e.fixed_branches ?? []);
+  let r = ranges.find((x) => rangeHolds(x, installed));
+  const walked = new Set();
+  while (r) {
+    if (!r.fixed || walked.has(r)) return null;
+    walked.add(r);
+    const v = r.fixed;
+    r = ranges.find((x) => rangeHolds(x, v));
+    if (!r) return v;
+  }
+  return null;
+}
 const SUMMARY = {
   fix_status: FIX_STATUS,
   vendor_remediation_kinds: { vendor_fix: 1, workaround: 1 },
@@ -219,6 +250,17 @@ const ANSWERS = {
   [REM("CVE-2099-30003")]: PARTIAL,
   [REM("CVE-2099-30004")]: HUGE,
   [REM("CVE-2023-44487")]: RAPID_RESET,
+  [REM("CVE-2025-48013")]: DRUPAL_48013,
+  [REM("CVE-2099-48014")]: {
+    ...DRUPAL_48013,
+    cve_id: "CVE-2099-48014",
+    fixed_branches: [
+      { ecosystem: "Debian:11", package_name: "openssl", fixed_version: "1.1.1", fixed_branches: [BRANCH("0", "1.1.1")] },
+      { ecosystem: "Debian:12", package_name: "openssl", fixed_version: "3.0.1", fixed_branches: [BRANCH("0", "3.0.1")] },
+      { ecosystem: "Maven:https://repo.spring.io/release", package_name: "org.example:lib", fixed_version: "1.2.0", fixed_branches: [BRANCH("0", "1.2.0")] },
+      { ecosystem: "Maven", package_name: "org.example:lib", fixed_version: "1.1.0", fixed_branches: [BRANCH("0", "1.1.0")] },
+    ],
+  },
   [REM("CVE-2099-44487")]: { ...RAPID_RESET, cve_id: "CVE-2099-44487", fix_references: [] },
   [REM("CVE-2099-30005")]: { status: 500, body: { error: "boom" } },
   [REM("CVE-2099-30006")]: { cve_id: "CVE-2099-30006" },
@@ -330,6 +372,47 @@ for (const era of ERAS) {
       assert.doesNotMatch(note, /upgrade to|deny all|apply (?:the )?patch|we recommend/i);
       for (const t of textsOf(sc.data)) assert.ok(!note.includes(t), "a vendor text is in the note");
       assert.deepEqual(textsOf(sc.data), [RH_FIX, RH_WORKAROUND], "every text is the API's, byte for byte");
+    });
+
+    // #3285 item 2: the note's rule read "no range of its package holds", and fixed_branches lists
+    // a package once per stored ecosystem string, so read entry by entry it gave a Packagist
+    // drupal/quick_node_block 1.0.0 the Packagist entry's 2.0.0, which the Drupal advisory's
+    // entry (Packagist:https://packages.drupal.org/8, [0, 2.0.1)) still holds affected. The matcher
+    // reads both entries as one package (core-backend registryRecordKey) and answers 2.0.1. The
+    // note now says those entries are one package and names them. Control: the note as it read
+    // before (no such sentence), applied the same way, gives 2.0.0.
+    it("#3285: CVE-2025-48013's two Packagist entries for drupal/quick_node_block are one package to the note's rule: 1.0.0's fix is 2.0.1, not 2.0.0", async () => {
+      const res = await call("cve_remediation", { cve_id: "CVE-2025-48013" });
+      assert.ok(!res.isError, noteOf(res));
+      assert.deepEqual(res.structuredContent.data, DRUPAL_48013, "data is the API's JSON whole");
+      const note = noteOf(res);
+      const said = "fixed_branches lists 2 entries, 1 affected package, with 2 affected ranges, 2 with a fix on record; an installed version's fix is the first fixed above it that no range of its package holds (the fixed of the range that holds it, or, while another range still holds that version, that range's fixed), compared in the ecosystem's version order.";
+      assert.ok(note.includes(said), note);
+      assert.ok(note.includes(`${ONE_PACKAGE}: here drupal/quick_node_block (Packagist:https://packages.drupal.org/8 and Packagist).`), note);
+      const component = { ecosystem: "Packagist", pkg: "drupal/quick_node_block", installed: "1.0.0" };
+      assert.equal(fixByNoteRule(note, DRUPAL_48013.fixed_branches, component), "2.0.1");
+      // Control: the note before (the rule alone, each listed entry its own package).
+      const before = note
+        .replace(said, said.replace("2 entries, 1 affected package,", "2 affected packages"))
+        .replace(` ${ONE_PACKAGE}: here drupal/quick_node_block (Packagist:https://packages.drupal.org/8 and Packagist).`, "");
+      assert.ok(before.includes("fixed_branches lists 2 affected packages with 2 affected ranges, 2 with a fix on record; an installed version's fix is the first fixed above it that no range of its package holds"), before);
+      assert.ok(!before.includes(ONE_PACKAGE));
+      assert.equal(fixByNoteRule(before, DRUPAL_48013.fixed_branches, component), "2.0.0");
+      // A release suffix is never one package with its base: Debian:11 and Debian:12 stay apart.
+      const distro = [
+        { ecosystem: "Debian:11", package_name: "openssl", fixed_branches: [{ introduced: "0", fixed: "1.1.1" }] },
+        { ecosystem: "Debian:12", package_name: "openssl", fixed_branches: [{ introduced: "0", fixed: "3.0.1" }] },
+      ];
+      assert.equal(fixByNoteRule(note, distro, { ecosystem: "Debian:12", pkg: "openssl", installed: "1.0.0" }), "3.0.1");
+    });
+
+    it("#3285: a release suffix is not folded: Debian:11 and Debian:12 entries of one package stay two packages, while Maven and Maven:<repository URL> are one", async () => {
+      const res = await call("cve_remediation", { cve_id: "CVE-2099-48014" });
+      assert.ok(!res.isError, noteOf(res));
+      const note = noteOf(res);
+      assert.match(note, /fixed_branches lists 4 entries, 3 affected packages, with 4 affected ranges, 4 with a fix on record;/);
+      assert.ok(note.includes(`${ONE_PACKAGE}: here org.example:lib (Maven:https://repo.spring.io/release and Maven).`), note);
+      assert.doesNotMatch(note, /openssl \(Debian/);
     });
 
     it("#2841: an installed version travels in the X-EG-* headers, never the URL; fixed_in and installed are relayed, and what was asked is echoed", async () => {
@@ -535,6 +618,207 @@ for (const era of ERAS) {
       assert.match(noteOf(res), /fixed_branches keeps all 50 entries, each cut to ecosystem, package_name, version_range, fixed_version and fixed_branches \(each with introduced, fixed and last_affected\).*; with the room left, 1 of the entries kept take back detail \(by position among those kept, in their order in data\): entry 1 cut to /);
       assert.deepEqual(big.fixed_branches, fb[0].fixed_branches.slice(0, big.fixed_branches.length).map(({ introduced, fixed, last_affected }) => ({ introduced, fixed, last_affected })));
       assert.ok(sc.data.vendor_remediations.length === 20);
+    });
+
+    // #3272: the first text block (what a client that passes only `content` reads) was still cut
+    // the 3.0.0 way: advisories left it from the end while fixed_branches, patches and
+    // fix_references stayed whole beside them. Replayed on 3.0.2 (2026-10-17): the recorded answer
+    // kept 19 of its 20 advisories in the text, and with 1, 5, 10 and 16 more fixed_branches packages
+    // (real rows copied and renamed) 18, 13, 8 and 2; from 18 more the text fell to the every-list cap
+    // and kept 20 again. A substring count reads 20 there (RHEA-2024:0556 is also in a patch_url),
+    // so this counts parsed rows. Larger answers then lose fix_references, patches and fixed_branches
+    // rows, in that order, before any advisory, as the structured cut does.
+    const TEXT_LADDER = [0, 1, 5, 10, 16, 18, 60, 100];
+    const ladderAnswer = (more) => ({
+      ...RAPID_RESET,
+      cve_id: `CVE-2099-${46000 + more}`,
+      fixed_branches: [
+        ...RAPID_RESET.fixed_branches,
+        ...Array.from({ length: more }, (_, i) => {
+          const r = RAPID_RESET.fixed_branches[i % RAPID_RESET.fixed_branches.length];
+          return { ...r, package_name: `${r.package_name}-copy${i}` };
+        }),
+      ],
+    });
+    const textCutOf = (note) => note.slice(note.indexOf("TEXT CUT: "), note.includes("DATA CUT: ") ? note.indexOf("DATA CUT: ") : undefined);
+    it("#3272: the first text block keeps every advisory, as parsed rows, on CVE-2023-44487 and with 1, 5, 10, 16, 18, 60 and 100 more packages; beside lists lose rows first, fix_references, then patches, then fixed_branches", async (t) => {
+      const seenCounts = [];
+      for (const more of TEXT_LADDER) {
+        const answer = ladderAnswer(more);
+        ANSWERS[REM(answer.cve_id)] = answer;
+        const res = await call("cve_remediation", { cve_id: answer.cve_id });
+        const [first] = textBlocks(res);
+        const note = noteOf(res);
+        assert.ok(first.length <= 30_000, `+${more}: ${first.length} characters`);
+        const shown = JSON.parse(first);
+        const n = (k) => shown[k]?.length ?? 0;
+        seenCounts.push(`+${more}: ${n("vendor_remediations")}/20 advisories, ${n("fixed_branches")}/${answer.fixed_branches.length} fixed_branches, ${n("patches")}/30 patches, ${n("fix_references")}/20 fix_references, ${first.length} characters`);
+        // Every advisory, each the answer's, in order, with its state and kinds.
+        assert.deepEqual(
+          shown.vendor_remediations.map((a) => [a.vendor, a.vendor_advisory_id, a.remediation_state, a.remediation_kinds]),
+          answer.vendor_remediations.map((a) => [a.vendor, a.vendor_advisory_id, a.remediation_state, a.remediation_kinds]),
+          `+${more}: ${seenCounts.at(-1)}`,
+        );
+        // The order the structured cut leaves lists in: fix_references before any patch row,
+        // patches before any fixed_branches row, and no advisory before them.
+        if (n("patches") < 30) assert.equal(n("fix_references"), 0, `+${more}: a patch row left the text before fix_references: ${seenCounts.at(-1)}`);
+        if (n("fixed_branches") < answer.fixed_branches.length) assert.equal(n("patches"), 0, `+${more}: a fixed_branches row left the text before the patches: ${seenCounts.at(-1)}`);
+        // The rows kept are the answer's first, thinned, never another's.
+        assert.deepEqual(shown.fixed_branches.map((r) => r.package_name), answer.fixed_branches.slice(0, n("fixed_branches")).map((r) => r.package_name));
+        for (const r of shown.fixed_branches) assert.deepEqual(Object.keys(r).filter((k) => !["ecosystem", "package_name", "version_range", "fixed_version", "fixed_branches"].includes(k)), [], `+${more}: a fixed_branches row in the text keeps more than the structured cut's thinned fields`);
+        const cut = textCutOf(note);
+        assert.match(cut, /^TEXT CUT: /);
+        // The patches kept are the answer's first, whole, or each cut to the structured cut's fields
+        // once fixed_branches thinned does not make room (the note then says so).
+        const patchesThinned = /Each entry of patches in it leaves out /.test(cut);
+        assert.deepEqual(shown.patches, answer.patches.slice(0, n("patches")).map((p) => (patchesThinned ? { vendor: p.vendor, patch_url: p.patch_url, published_at: p.published_at } : p)), `+${more}`);
+        assert.ok(!patchesThinned || /Each entry of fixed_branches in it leaves out /.test(cut), `+${more}: patches were cut before fixed_branches`);
+        if (n("fix_references") < 20) {
+          assert.match(cut, /In it, fix_references keeps (none of its 20 entries|its first \d+ of 20 entries)[^.]*, before any row of vendor_remediations is left out\./, `+${more}: ${cut}`);
+        }
+        assert.doesNotMatch(cut, /Only \d+ of the 20 rows of vendor_remediations are in it/, `+${more}`);
+        assert.doesNotMatch(cut, /Every list in it keeps at most its first/, `+${more}: the text fell through to the every-list cap`);
+      }
+      t.diagnostic(seenCounts.join("; "));
+      // The recorded answer and the issue's +16 keep every list whole beside the 20 advisories.
+      for (const more of [0, 16]) {
+        const res = results.findLast(([n, a]) => n === "cve_remediation" && a.cve_id === `CVE-2099-${46000 + more}`)[2];
+        const shown = JSON.parse(textBlocks(res)[0]);
+        assert.deepEqual([shown.vendor_remediations.length, shown.fixed_branches.length, shown.patches.length, shown.fix_references.length], [20, 50 + more, 30, 20], `+${more}`);
+      }
+    });
+
+    // 3.1.0's phase A review (decided 2026-10-18: build the cap): through d42d4697 the text capped no
+    // package's ranges and gave no room back to a list emptied before, so one package of N ranges
+    // first among CVE-2023-44487's 51 cost the text its fix data from about 150 ranges on: 11 of 20
+    // references at 150, no reference at 200, no patch at 250, 25 packages at 300, and from 400 no
+    // package, patch or reference in 6,347 characters (3.0.2's every-list cap kept 32 packages, 30
+    // patches and 20 references at every size). Now the text caps each package's ranges at the
+    // most that fit, as data does, every package, patch and reference kept, the capped package
+    // marked fixed_branches_truncated and named in the note. Control: the same TextCut without the
+    // cap (d42d4697's) keeps none of the 51 at 600.
+    const giantAnswer = (n) => {
+      const base = RAPID_RESET.fixed_branches[0];
+      const giant = { ...base, package_name: "giant", fixed_branches: Array.from({ length: n }, (_, i) => ({ ...(base.fixed_branches?.[0] ?? {}), introduced: `${i}.0.0`, fixed: `${i}.0.1` })) };
+      return { ...RAPID_RESET, cve_id: `CVE-2099-${46000 + n}`, fixed_branches: [giant, ...RAPID_RESET.fixed_branches] };
+    };
+    it("3.1.0's phase A review: one 600-range package first among 51: the text keeps all 51 packages (the large one's ranges capped and marked), 30 patches and 20 references, and data keeps all 51 capped; d42d4697's cut kept none", async () => {
+      const answer = giantAnswer(600);
+      ANSWERS[REM(answer.cve_id)] = answer;
+      const res = await call("cve_remediation", { cve_id: answer.cve_id });
+      const [first] = textBlocks(res);
+      assert.ok(first.length <= 30_000, `${first.length} characters`);
+      const shown = JSON.parse(first);
+      assert.deepEqual([shown.vendor_remediations.length, shown.fixed_branches.length, shown.patches.length, shown.fix_references.length], [20, 51, 30, 20], `${first.length} characters`);
+      const [g, ...rest] = shown.fixed_branches;
+      const c = g.fixed_branches.length;
+      assert.ok(c >= 1 && c < 600, `${c} ranges kept of the large package`);
+      assert.deepEqual(g.fixed_branches_truncated, { total: 600, returned: c });
+      assert.deepEqual(g.fixed_branches.map((b) => b.introduced), answer.fixed_branches[0].fixed_branches.slice(0, c).map((b) => b.introduced), "the large package keeps its first ranges");
+      // Every other package keeps every range, unmarked.
+      for (const [i, r] of rest.entries()) {
+        assert.equal((r.fixed_branches ?? []).length, (RAPID_RESET.fixed_branches[i].fixed_branches ?? []).length, r.package_name);
+        assert.equal(r.fixed_branches_truncated, undefined, r.package_name);
+      }
+      const cut = textCutOf(noteOf(res));
+      assert.ok(cut.includes(`In it, each package's fixed_branches keeps at most its first ${c} ranges: giant (${answer.fixed_branches[0].ecosystem}) has more, carrying fixed_branches_truncated with its total and returned, and structuredContent.data holds every range with full: true.`), cut);
+      assert.doesNotMatch(cut, /keeps none of its/, cut);
+      const data = res.structuredContent.data;
+      assert.equal(data.fixed_branches.length, 51);
+      assert.ok(data.fixed_branches[0].fixed_branches_truncated?.total === 600, JSON.stringify(data.fixed_branches[0]).slice(0, 300));
+      // Control: d42d4697's TextCut, without the cap, on the same answer.
+      const { dataText } = await import(new URL("../dist/textBudget.js", import.meta.url).href);
+      const { CVE_REMEDIATION_TEXT_CUT: CUT } = await import(new URL("../dist/tools/cve_remediation.js", import.meta.url).href);
+      assert.equal(dataText(answer, CUT).text, first, "the replay is not the server's cut");
+      const old = JSON.parse(dataText(answer, { ...CUT, sides: CUT.sides.map(({ capped, ...side }) => side) }).text);
+      assert.deepEqual([old.fixed_branches.length, old.patches.length, old.fix_references.length], [0, 0, 0], "the control does not show d42d4697's cut");
+    });
+    it("3.1.0's phase A review: from 50 to 600 ranges in one package, the text keeps every package, patch and reference, and caps the large package's ranges only past the room", async (t) => {
+      const seen = [];
+      for (const n of [50, 100, 150, 200, 250, 300, 400, 600]) {
+        const answer = giantAnswer(n);
+        ANSWERS[REM(answer.cve_id)] = answer;
+        const res = await call("cve_remediation", { cve_id: answer.cve_id });
+        const [first] = textBlocks(res);
+        const shown = JSON.parse(first);
+        const g = shown.fixed_branches[0];
+        seen.push(`${n}: ${shown.fixed_branches.length} packages, ${g.fixed_branches.length} ranges of the large one, ${shown.patches.length} patches, ${shown.fix_references.length} references, ${first.length} characters`);
+        assert.ok(first.length <= 30_000, seen.at(-1));
+        assert.deepEqual([shown.vendor_remediations.length, shown.fixed_branches.length, shown.patches.length, shown.fix_references.length], [20, 51, 30, 20], seen.at(-1));
+        if (g.fixed_branches.length < n) assert.deepEqual(g.fixed_branches_truncated, { total: n, returned: g.fixed_branches.length }, seen.at(-1));
+        else assert.equal(g.fixed_branches_truncated, undefined, seen.at(-1));
+      }
+      t.diagnostic(seen.join("; "));
+    });
+
+    // 3.1.0's phase C review (info, done): neither the text's capped sentence nor data's said that
+    // the note's fix walk ("the first fixed above it that no range of its package holds") is unsafe
+    // on a capped package: over its kept ranges alone it can name a version a range left out still
+    // holds. Shown here on a package whose range j runs from j.0.0 to a fix at (j+1).0.0, so every
+    // fix is held by the next range: an installed 0.5.0 walks to c.0.0 over the first c ranges, and
+    // to N.0.0 over all N. Both notes now say so, and where to read that package's fix.
+    const chainAnswer = (n) => {
+      const base = RAPID_RESET.fixed_branches[0];
+      const chain = { ...base, package_name: "chain", fixed_branches: Array.from({ length: n }, (_, j) => ({ introduced: `${j}.0.0`, fixed: `${j + 1}.0.0`, last_affected: null, source: "osv_bulk", advisory_id: `GHSA-chain-${j}` })) };
+      return { ...RAPID_RESET, cve_id: `CVE-2099-${47000 + n}`, fixed_branches: [chain, ...RAPID_RESET.fixed_branches] };
+    };
+    // The note's rule over the ranges given: the first fixed above v that no range holds.
+    const major = (x) => Number(String(x).split(".")[0]);
+    const walk = (ranges, v) => {
+      const holds = (x) => ranges.some((b) => major(b.introduced) <= major(x) && (b.fixed === null || major(x) < major(b.fixed)));
+      const fixes = ranges.map((b) => b.fixed).filter((f) => f && major(f) > major(v)).sort((a, b) => major(a) - major(b));
+      return fixes.find((f) => !holds(f)) ?? null;
+    };
+    const CAPPED_FIX_TEXT = (full) => `A capped package's fix, walked over its kept ranges alone, can be wrong: read that package's fix ${full ? "with full: true" : "from structuredContent.data"}.`;
+    const CAPPED_FIX_DATA = "its fix, walked over its kept ranges alone, can be wrong (read that package's fix with full: true)";
+    it("3.1.0's phase C review: a capped package's fix walked over its kept ranges alone can be wrong, and the text's and data's notes say so and where to read it", async () => {
+      const answer = chainAnswer(600);
+      ANSWERS[REM(answer.cve_id)] = answer;
+      const res = await call("cve_remediation", { cve_id: answer.cve_id });
+      const shown = JSON.parse(textBlocks(res)[0]);
+      const data = res.structuredContent.data;
+      const [inText, inData] = [shown.fixed_branches[0], data.fixed_branches[0]];
+      assert.ok(inText.fixed_branches_truncated && inData.fixed_branches_truncated, "precondition: the chain package is capped in both");
+      // The walk's answer over what each keeps is not the answer over every range.
+      assert.equal(walk(answer.fixed_branches[0].fixed_branches, "0.5.0"), "600.0.0");
+      assert.equal(walk(inText.fixed_branches, "0.5.0"), `${inText.fixed_branches.length}.0.0`);
+      assert.equal(walk(inData.fixed_branches, "0.5.0"), `${inData.fixed_branches.length}.0.0`);
+      const note = noteOf(res);
+      const cut = textCutOf(note);
+      assert.ok(cut.includes(`chain (${answer.fixed_branches[0].ecosystem}) has more, carrying fixed_branches_truncated with its total and returned, and structuredContent.data holds every range with full: true. ${CAPPED_FIX_TEXT(true)}`), cut);
+      const dataCut = note.slice(note.indexOf("DATA CUT: "));
+      assert.ok(dataCut.includes(`a package with more carrying fixed_branches_truncated with its total and returned, and ${CAPPED_FIX_DATA}`), dataCut);
+      assert.ok(res.structuredContent.notes.join(" ").includes(CAPPED_FIX_TEXT(true)) && res.structuredContent.notes.join(" ").includes(CAPPED_FIX_DATA));
+      // data's step 2 caps to 1 range here, and says "range", not "1 ranges".
+      if (inData.fixed_branches.length === 1) assert.match(dataCut, /keeping at most its first 1 range, a package/);
+      // With full: true data holds every range, the text names data as where to read it, and the
+      // walk over data's ranges is the whole answer's.
+      const whole = await call("cve_remediation", { cve_id: answer.cve_id, full: true });
+      assert.equal(walk(whole.structuredContent.data.fixed_branches[0].fixed_branches, "0.5.0"), "600.0.0");
+      assert.ok(textCutOf(noteOf(whole)).includes(CAPPED_FIX_TEXT(false)), textCutOf(noteOf(whole)));
+    });
+    it("#3272: when advisories must leave the text, every list beside them is emptied first, and the TEXT CUT note names vendor_advisories_for_cve for the advisories left out", async () => {
+      // Each advisory's 8 items with URLs of 1,800 characters: about 15,000 characters an advisory at
+      // the leanest level, so the text holds one.
+      const wide = RAPID_RESET.vendor_remediations.map((a, j) => ({
+        ...a,
+        items: Array.from({ length: 8 }, (_, i) => ({ kind: "vendor_fix", source_category: "vendor_fix", text: "t", url: `https://access.redhat.com/errata/${a.vendor_advisory_id}?${String(j * 8 + i).padStart(4, "0")}${"u".repeat(1800)}` })),
+        items_total: 8,
+      }));
+      const answer = { ...RAPID_RESET, cve_id: "CVE-2099-46999", vendor_remediations: wide };
+      ANSWERS[REM(answer.cve_id)] = answer;
+      const res = await call("cve_remediation", { cve_id: answer.cve_id });
+      const [first] = textBlocks(res);
+      assert.ok(first.length <= 30_000, `${first.length} characters`);
+      const shown = JSON.parse(first);
+      const k = shown.vendor_remediations.length;
+      assert.ok(k > 0 && k < 20, `${k} advisories in the text`);
+      assert.deepEqual(shown.vendor_remediations.map((a) => a.vendor_advisory_id), wide.slice(0, k).map((a) => a.vendor_advisory_id));
+      assert.deepEqual([shown.fix_references, shown.patches, shown.fixed_branches], [[], [], []], "an advisory left the text while a list beside it kept a row");
+      const cut = textCutOf(noteOf(res));
+      assert.ok(cut.includes("In it, fix_references keeps none of its 20 entries, patches keeps none of its 30 entries and fixed_branches keeps none of its 50 entries, before any row of vendor_remediations is left out."), cut);
+      assert.ok(cut.includes(`Only ${k} of the 20 rows of vendor_remediations are in it;`), cut);
+      assert.ok(cut.includes(`vendor_advisories_for_cve, given this CVE, lists every vendor advisory naming it, the ${20 - k} left out of the first text block among them, each with its vendor and vendor_advisory_id.`), cut);
     });
 
     it("HTTP 500 and 404 are failures; an answer without state is a failure; a malformed id is refused with no request", async () => {

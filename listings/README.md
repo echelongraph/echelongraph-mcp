@@ -1,8 +1,8 @@
 # Directory listings for echelongraph-mcp
 
-Prepared for #2723. Nothing here has been submitted. Every submission below is a step for the
-founder (or someone the founder names), done by hand, signed in, on the directory's own site or
-repo. Steps that need no third-party account are marked **Parent**.
+Prepared for #2723. Every submission below is a step for the founder (or someone the founder
+names), done by hand, signed in, on the directory's own site or repo; the status table says which
+were made and where each stands. Steps that need no third-party account are marked **Parent**.
 
 One source of truth: `server.json` (its `title` and `description`) and `README.md`. Every paste
 block below uses their words. Rules from #2304: no "live", no "only", nothing comparative without
@@ -16,34 +16,45 @@ declares exactly the server's tools and prompts.
 Every directory's rules were re-read on 2026-10-04 (UTC); each section quotes the rules it relies
 on and names the source. Directory requirements change: re-read the source before you submit.
 
-## Status on 2026-10-11
+## Status on 2026-10-18
+
+A dated record: it says what was read on the dates it gives, and a release does not change it. Release
+step 8 below re-runs the check after each release, and the next commit to this directory replaces
+this table with that run's (this file is in the public repo's tree, so it changes with a release,
+never between a tag and the next). Earlier tables (2026-10-04, 2026-10-11) are in this file's history.
 
 Measured with `scripts/check-mcp-listings.mjs` (in the EchelonGraph repo; see "Listing check"
-below) at 09:43 UTC, npm `latest` 2.7.2; its one finding was Glama's lag. A row the check does not
-read, or a fact it does not measure, says when it was read. The first status, measured on
-2026-10-04 with npm `latest` at 2.6.2, is in this file's history.
+below) at 2026-10-17 19:21 UTC, after the 3.0.2 release (npm `latest` 3.0.2, published 2026-10-17
+17:14Z); its one finding was Glama's lag. npm, the official registry and the hosted endpoint were
+read again on 2026-10-18 (3.0.2 each). A row the check does not read, or a fact it does not
+measure, says when it was read.
 
 | Directory | Listed | Version shown | What it takes | Who |
 |---|---|---|---|---|
-| Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, 14 active versions (2026-10-11) | 2.7.2, `isLatest` | nothing: each release publishes it | release script |
-| Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 2.7.2 (`/health`, 2026-10-11) | nothing | deploy |
-| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.7.0 on 2026-10-11, **behind** npm's 2.7.2: it has shown 2.7.0 since a manual Admin → Sync Server at 2026-10-06 11:14Z, and has picked up neither 2.7.1 nor 2.7.2 (Auto-Release did not pick up 2.6.7, 2.6.8 or 2.7.0 either: sync by hand after each release) | set our one-line description under Admin → Listing if Glama's differs | founder (GitHub sign-in) |
-| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL; its scan on 2026-10-05 at 12:08Z read 2.6.7, with the 14 tools 2.6.7 had: release SUCCESS after one retry, Smithery's own build step having hit an internal database error) | proxies the hosted endpoint (2.7.2 on 2026-10-11) | set display name and description; Settings → Verification | founder (Smithery sign-in) |
-| mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |
-| PulseMCP | no | shows none | nothing: submissions paused; it reads the official registry | nobody |
-| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork), pinned to v2.7.2 (commit `1a0965ea`, the commit `v2.7.2^{}` names, not the tag object `1322ecc7`; moved 2026-10-11 with the 2.7.2 release, as #2845's release record says; the PR head was not re-read for this table, and `docker/server.yaml` here carries the same commit). Earlier pin: v2.7.1 (`313af8a7`, moved 2026-10-08, PR head `9930746d`). Validate and build passed in our local runs on 2026-10-06, 16 tools found. Docker's own CI has never run: both workflows sit at `action_required` (first-time contributor) until a Docker maintainer approves them | n/a until merged | Docker's review; move the pin on each release while open | Docker |
-| Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passed in our local runs (Docker's CI held at `action_required` for maintainer approval); tools are dynamic, so no pin to move | serves the hosted endpoint | Docker's review | Docker |
+| Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, active | 3.0.2, `isLatest` (published to it 2026-10-17 17:20Z; read 2026-10-18) | nothing: each release publishes it (release step 2) | release script |
+| Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 3.0.2 (`/health`, 2026-10-18) | nothing | deploy |
+| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.7.0 on 2026-10-17, **behind** npm's 3.0.2: it has shown 2.7.0 since a manual Admin → Sync Server on 2026-10-06, and Auto-Release has picked up none of 2.7.1, 2.7.2, 3.0.0 and 3.0.2 (nor 2.6.7, 2.6.8 or 2.7.0 before them) | Admin → Repository → Sync Server after each release; the one-line description in "Paste text", if Glama's own differs (recorded on #2723 on 2026-10-05 as still to be set, and not recorded as set since) | founder (GitHub sign-in) |
+| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL); display name and description set (recorded 2026-10-10) | proxies the hosted endpoint: its scan after the 3.0.2 release read 16 tools from it (2026-10-17) | re-publish after each release (release step 5); Settings → Verification, not recorded as done | release step 5; founder (Smithery sign-in) for Verification |
+| mcp.so | **submitted, not listed:** chatmcp/mcpso#4699, the free route the founder chose (the $39 form was declined), opened 2026-10-04 12:14Z; no reply on record (0 comments when read on 2026-10-10), and the check found no listing on 2026-10-17 | shows none | mcp.so's review of #4699. Do not open a second issue or pay the form | mcp.so |
+| PulseMCP | no | shows none | nothing: submissions paused (since 2026-09-03); it reads the official registry when it reopens | nobody |
+| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork; branch `add-echelongraph`), pinned to v3.0.2 (commit `3193362066d3`, the commit `v3.0.2^{}` names, not the tag object `47bd1ffb`; moved 2026-10-17 with the 3.0.2 release, validate and build passing). `docker/server.yaml` here still carries v2.7.2's commit `1a0965ea`: release step 6 mirrors the pin, in the next commit to this directory. No review on record; Docker's own CI has never run: both workflows sit at `action_required` (first-time contributor) until a Docker maintainer approves them | n/a until merged | Docker's review; move the pin on each release while open | Docker |
+| Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passed in our local runs (Docker's CI held at `action_required` for maintainer approval); tools are dynamic, so no pin to move; no review on record | serves the hosted endpoint | Docker's review | Docker |
 | awesome-mcp-servers (punkpeye) | **yes**: punkpeye/awesome-mcp-servers#15955 merged by punkpeye 2026-10-08T07:01:56Z (merge commit `89b9a3f946`); one line in 🔒 Security (README line 3769 at merge), with the Glama score badge | no version shown (links the repo; the Glama badge tracks Glama's score) | nothing; the line points at the public repo, so it stays current | maintainer |
-| Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth; when submitted, the endpoint served 2.6.7, with its 14 read-only tools) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
+| Public repo About (github.com/echelongraph/echelongraph-mcp) | description, homepage and topics equal to `github-repo-settings.json` (the check's `github-repo` row, read 2026-10-18 07:03Z; #3289) | no version shown | apply the file after each release that changes it (release step 7) | someone with admin on the repo |
+| Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth; when submitted, the endpoint served 2.6.7, with its 14 read-only tools). Not edited while in review: an edit resubmits it (founder, 2026-10-10) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
 
 Smithery by URL, Docker's remote entry and Anthropic's directory all connect to the hosted
 endpoint, so the version they serve is the hosted endpoint's.
 
 ## Who does what
 
-**Founder, signed in, in this order** (each section below has the exact text):
+**Founder, signed in, in this order** (each section below has the exact text). Steps 3 to 5 were
+done on 2026-10-04 and 2026-10-05; step 2's publish on 2026-10-05, with its text recorded as set on
+2026-10-10; and step 1 in part: Glama's listing was claimed on 2026-10-05 and synced on 2026-10-06, while its one-line description was recorded on 2026-10-05 as still to be set,
+if Glama's own differs. What is left of them is in the status table (Glama's description and its
+Sync Server after each release, Smithery's Settings → Verification):
 
-1. Glama: claim the listing, paste the one-line description, resync (fixes the one finding today).
+1. Glama: claim the listing, paste the one-line description, resync.
 2. Smithery: `smithery mcp publish https://mcp.echelongraph.io/mcp`, then paste the text.
 3. Docker: fork `docker/mcp-registry`, copy the two prepared entries, open the PR(s).
 4. Anthropic: the developer portal form at https://claude.ai/directory/manage .
@@ -52,7 +63,7 @@ endpoint, so the version they serve is the hosted endpoint's.
 **Parent, no third-party account:** keep these drafts at each release's version (the tests fail
 otherwise); run `node scripts/check-mcp-listings.mjs` after each founder step and again a week
 later (#2723's Done means); set that script's row to `listed` once a listing is up, so a later
-delisting is a finding; decide whether to wire the check (below).
+delisting is a finding. Every production deploy also runs the check, as a warning (below).
 
 ## Files
 
@@ -139,11 +150,13 @@ Links:
 
 ## Smithery
 
-**Status (2026-10-05):** listed at https://smithery.ai/servers/echelongraph/echelongraph-mcp , published by the
-founder through the CLI after `smithery namespace create echelongraph` (the namespace did not exist; publishing
-to it first answered `404 {"error":"Namespace not found"}`). Smithery's scan reached the hosted endpoint and
-read `echelongraph-mcp` 2.6.4 with 14 tools and 4 prompts. Its display name is still `echelongraph-mcp`, with an
-empty description, until steps 3 and 4 below are done. The listing check's row is now `listed`.
+**Status as of 2026-10-05** (a dated record; the status table above has the latest): listed at
+https://smithery.ai/servers/echelongraph/echelongraph-mcp , published by the founder through the CLI after
+`smithery namespace create echelongraph` (the namespace did not exist; publishing to it first answered
+`404 {"error":"Namespace not found"}`). Smithery's scan reached the hosted endpoint and read `echelongraph-mcp`
+2.6.4 with 14 tools and 4 prompts. Its display name was then `echelongraph-mcp`, with an empty description,
+until step 3 below was done (display name and description, recorded 2026-10-10); step 4,
+Verification, is not recorded as done. The listing check's row has been `listed` since.
 
 **Status (2026-10-04, before publishing):** not listed. `GET https://api.smithery.ai/servers/echelongraph/echelongraph-mcp`
 answers 404 `{"error":"Server not found"}`, and `?repoOwner=echelongraph&repoName=echelongraph-mcp`
@@ -218,8 +231,13 @@ server URL or bundle to Smithery".
 
 ## mcp.so
 
-**Status (2026-10-04):** not listed. https://mcp.so/search?q=echelongraph : "No servers match
-"echelongraph"".
+**Submitted 2026-10-04** through the free route, as chatmcp/mcpso#4699 (opened 12:14Z, with the
+title and body below as they stood that day, at 2.6.3's 14 tools); no reply on record when read on
+2026-10-10, and still not listed on 2026-10-17 (the status table). Step 1 below is done: do not
+open a second issue.
+
+**Status (2026-10-04, before submitting):** not listed. https://mcp.so/search?q=echelongraph :
+"No servers match "echelongraph"".
 
 **Routes.**
 
@@ -356,8 +374,9 @@ remote one (`echelongraph-remote`, the hosted URL, no image). The registry has s
 - `echelongraph-remote` (`docker/remote/`): every check passed, with "✅ Dynamic tools are valid".
   Run without `dynamic`, Docker's own client listed our tools from the URL: "✅ Remote tools are
   valid. Found 14 tools."
-- Not run: `task build -- --tools echelongraph` (the sandbox has no Docker daemon and no Task). It
-  builds `../Dockerfile`, and `tools/list` needs no configuration and no network:
+- Not run when this section was written (2026-10-04): `task build -- --tools echelongraph` (that
+  sandbox had no Docker daemon and no Task); first run that day on the devbox, and passing again on
+  2026-10-17, when #5429's pin moved to v3.0.2 (the status table). It builds `../Dockerfile`, and `tools/list` needs no configuration and no network:
   `test/listings.test.mjs` lists the tools exactly that way.
 
 **Steps**
@@ -486,8 +505,24 @@ clients, #2304: read the served Section 11 from a browser before submitting.)
 
 Use cases:
 
+Do not paste until the 2026-10-05 submission's review completes (founder's rule); the submitted copy said 'public exploit code', which cve_intel no longer claims.
+
 ```text
-Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Read its weakness (CWE), public exploit code, affected packages, fixed versions, EPSS history and the vendor advisories that name it. List the CVEs CISA has added to its KEV catalog, newest first. Check whether a product or package at a version is affected by known CVEs, or check an SBOM's components or a project's lockfiles (package-lock.json, go.mod, requirements.txt and others) against the advisory corpus. Search and filter CVEs and vendor advisories. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
+Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Read its weakness (CWE), exploit code and detection checks, affected packages, fixed versions, EPSS history and the vendor advisories that name it. List the CVEs CISA has added to its KEV catalog, newest first. Check whether a product or package at a version is affected by known CVEs, or check an SBOM's components or a project's lockfiles (package-lock.json, go.mod, requirements.txt and others) against the advisory corpus. Search and filter CVEs and vendor advisories. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
+```
+
+Use cases as submitted on 2026-10-05, kept as the record of what Anthropic is reviewing (not
+paste text). It is this block as the submission found it: EchelonGraph commit 981e6dbf, which
+recorded the submission, and the public repository's tag v2.6.8 (read 2026-10-18). The founder's
+rule: the in-review submission is not edited, because a change resubmits the listing, so the
+corrected block above waits for the review to complete. #3266 retired its "public exploit code":
+since #3039, cve_intel's exploits list holds exploit code and detection checks (Nuclei templates,
+GitHub checker repositories), and its description says so. The block above also names lockfiles,
+which scan_manifest added after the submission. The other blocks as submitted are in this file at
+the same commit and tag.
+
+```
+Look up one CVE's record: CVSS, the EchelonGraph score and whether it has been scored, EPSS, CISA-KEV status and known ransomware use, and the GitHub GHSA id. Read its weakness (CWE), public exploit code, affected packages, fixed versions, EPSS history and the vendor advisories that name it. List the CVEs CISA has added to its KEV catalog, newest first. Check whether a product or package at a version is affected by known CVEs, or check an SBOM's components against the advisory corpus. Search and filter CVEs and vendor advisories. Count active CVEs by severity band. See how many internet-facing services (distinct ip:port) EchelonGraph's KEV-exposure radar has on record running a version that maps to a CVE; exposure counts are derived from Shodan data (© Shodan).
 ```
 
 Test & launch:
@@ -503,9 +538,10 @@ https://claude.com/docs/connectors/building/review-criteria.md .
 
 ## Glama
 
-**Status (2026-10-04):** listed at https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp ,
-marked "Official", not claimed. The page's latest release is **v1.0.3**, recorded by Glama on
-2026-09-27, while npm is at 2.6.2: the one finding of the listing check today.
+**Status as of 2026-10-04** (a dated record; the status table above has the latest): listed at
+https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp , marked "Official", not claimed then
+(it was claimed on 2026-10-05). The page's latest release was **v1.0.3**, recorded by Glama on
+2026-09-27, while npm was at 2.6.2: the one finding of that day's listing check.
 
 **Our card's text is clean.** The page's description of this server (Glama's own, generated from
 the repo: "Enables any MCP client to look up CVE intelligence …") matches no `REMOVED_CLAIMS` term.
@@ -533,7 +569,8 @@ https://glama.ai/mcp/schemas/server.json , defines `maintainers` and nothing els
 2. **Founder:** set the description to the one-line description in "Paste text", and turn on "Use
    Glama listing details as the source of truth" if the page offers it, so a registry update does
    not overwrite the text. Run the admin page's repository sync if it offers one; otherwise ask
-   Glama to refresh the release list, which still shows v1.0.3.
+   Glama to refresh the release list (it showed v1.0.3 on 2026-10-04, and 2.7.0 from the
+   2026-10-06 sync: the status table).
 3. **Parent:** `node scripts/check-mcp-listings.mjs --only=glama` must read npm's latest (current),
    with no barred claim. Record the outcome on #2723.
 
@@ -555,8 +592,12 @@ jq '{names: .topics}' listings/github-repo-settings.json \
 ```
 
 Check after: `gh api repos/echelongraph/echelongraph-mcp --jq '.description, .homepage, .topics'`
-prints the same values. The description follows the rules above (no "live", no "only"), and
-`test/listings.test.mjs` checks it.
+prints the same values (GitHub lists topics sorted), and `node scripts/check-mcp-listings.mjs
+--only=github-repo` (in the EchelonGraph repo, see "Listing check") reports no finding: its row
+compares the live description, homepage and topics with this file, and every production deploy
+runs it with the other rows, as a warning (#3289). The description follows the rules above (no
+"live", no "only"), and `test/listings.test.mjs` checks it, its counts against `tools/list`
+included; nothing but the commands above changes the live About.
 
 ## Release notes
 
@@ -589,7 +630,17 @@ A release is done when all of these hold, in this order (2026-10-05). Each step 
 6. docker/mcp-registry#5429, while it is open: move `servers/echelongraph/server.yaml`'s
    `source.commit` to the tag's commit, then re-run `go run ./cmd/validate --name echelongraph` and
    `go run ./cmd/build --tools echelongraph`. Mirror the commit in `docker/server.yaml` here.
-7. `node scripts/check-mcp-listings.mjs`: no finding. Glama can lag a few minutes behind step 4.
+7. **Public repo About**, by someone with admin on github.com/echelongraph/echelongraph-mcp: apply
+   `github-repo-settings.json` with the `gh api -X PATCH` and `PUT …/topics` commands in "Public
+   repo settings" above, then check it: `node scripts/check-mcp-listings.mjs --only=github-repo`
+   reports no finding. `test/listings.test.mjs` holds the file's counts to `tools/list`, so a
+   release that changes the tool count changes the file; only this step changes the live About,
+   which directories (Glama among them) read (#3289).
+8. `node scripts/check-mcp-listings.mjs`: no finding. Glama can lag behind step 4 (its
+   Auto-Release did not pick up 2.6.5, 2.6.7, 2.6.8, 2.7.0 or any release since: the founder's
+   Admin → Sync Server). Then replace "Status on <date>" at the top of this file with that run's
+   table, in the next commit to this directory: this file ships in the release's tree, so it
+   cannot change between a tag and the next.
 
 ## Listing check
 
@@ -608,16 +659,21 @@ request at a time, and reports per row: listed or not; the version shown against
 | PulseMCP | `pulsemcp.com/servers?q=echelongraph`, then our server page | `<title>`, meta description | shows none |
 | Docker, local and remote | `desktop.docker.com/mcp/catalog/v3/catalog.yaml` | title, description | local: the release tag whose commit Docker built (`source …/tree/<commit>` against the public repo's tags); remote: none |
 | Anthropic | `claude.com/marketplace/connectors/echelongraph` | `<title>`, meta description | shows none |
+| Public repo About (`github-repo`, #3289) | `api.github.com/repos/echelongraph/echelongraph-mcp` | description; its description, homepage and topics are compared with `github-repo-settings.json` (topics as a set) | shows none |
 
 Exit codes: 0 every row measured, no finding; 1 at least one finding (`missing` where the table
-says listed, `version-lags`, `barred-claim`); 2 no finding, but something could not be measured
+says listed, `version-lags`, `barred-claim`, and `differs` where the public repo's About is not
+`github-repo-settings.json`, one per field); 2 no finding, but something could not be measured
 (a directory unreachable or challenged, a page whose shape changed, npm unreadable, a Docker build
 commit no release tag points at). A finding outranks could-not-measure, and both are printed.
 A row the script's table marks `pending` that does not list us is printed as PENDING and is not a
 finding. Once a listing is up, set its row to `listed`.
 
-`node scripts/check-mcp-listings.mjs --self-test` runs 12 cases offline against
+`node scripts/check-mcp-listings.mjs --self-test` runs 17 cases offline against
 `scripts/fixtures/mcp-listings/`: responses saved 2026-10-04 (several trimmed, in served order),
+the public repo's About as `api.github.com` served it on 2026-10-18 beside a copy of this
+directory's `github-repo-settings.json` (identical: passes; one word of the description changed,
+or the homepage and a topic: fails as `differs`; a 404: `missing`; a 403: not measured),
 plus labelled synthetic ones where no directory can serve a listed page yet. It covers both
 polarities of each finding, the control that passes when every row is listed, current and clean,
 and the control of the real 2026-10-04 responses (exit 1: Glama's lag, and PulseMCP's challenge
@@ -625,16 +681,22 @@ as curl got it). The real Glama page carries "live" in another server's card, an
 flagged. It passes with no network (run in a namespace with none), and every one of nine
 deliberate breaks of the checker made it fail.
 
-**How it would be wired (not wired; the parent decides):**
+**How it is wired (2026-10-18):**
 
-- **Deploy-time warning**, in `infrastructure/cloudrun/deploy-all.sh` next to the official
-  registry guard (`--check-mcp-registry`). It would warn, not fail: a deploy cannot fix a third
-  party's page, and today's Glama lag would block every deploy.
-  ```bash
-  node scripts/check-mcp-listings.mjs --self-test >/dev/null || warn "listing check FAILED ITS SELF-TEST"
-  node scripts/check-mcp-listings.mjs || warn "listing check: exit $? (1 finding, 2 not measured)"
-  ```
-- **Weekly schedule** (#2723: "re-checked a week later"): a scheduled CI job or Routine that runs
-  `--self-test` and then the check, and fails or alerts on exit 1 or 2. It needs egress to the eight
-  hostnames in the table, plus `registry.npmjs.org` and `api.github.com`.
-- **CI:** `--self-test` on changes to the script or its fixtures (offline, under a second).
+- **Deploy-time warning, wired:** every production run of `infrastructure/cloudrun/deploy-all.sh`
+  runs `node scripts/check-mcp-listings.mjs --self-test && node scripts/check-mcp-listings.mjs`,
+  after the official registry guard (`--check-mcp-registry`) and the `--check-public` guards. It
+  warns, never fails: a deploy cannot fix a third party's page, and Glama's lag alone would block
+  every deploy. Each run is bounded by `MCP_LISTING_CHECK_SECONDS` (default 120) through
+  `timeout(1)`, and without `timeout(1)` the check is not run, so a slow directory never holds a
+  deploy or a release; a check whose self-test fails is not run; `SKIP_MCP_LISTING_CHECK=1` skips
+  it, with a warning. `infrastructure/cloudrun/deploy-all-listing-check.test.sh` drives that block
+  as shipped (each exit, a hang past the bound, a failed self-test, a missing script, no
+  `timeout(1)`), with a control, in every production deploy's preflight. The preflight stops the
+  deploy only where that warning path fails; where the only failure is the real `--self-test`, it
+  warns and the deploy goes on, its listing check then warning that the self-test failed.
+- **Weekly schedule, not wired yet** (#2723: "re-checked a week later"): a scheduled CI job or
+  Routine that runs `--self-test` and then the check, and alerts on exit 1 or 2. It needs egress to
+  the eight hostnames in the table, plus `registry.npmjs.org` and `api.github.com`.
+- **CI, not wired yet:** `--self-test` on changes to the script or its fixtures (offline, under a
+  second).

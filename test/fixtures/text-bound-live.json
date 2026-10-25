@@ -1,9 +1,18 @@
 {
-  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record. tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh). tools.*.measured_at is when this checkout's server last measured the kept answers and answers_read_at when they were read from production (#2822); a re-measure of the kept answers (--answers test/fixtures/prod-answers) moves measured_at, never answers_read_at. cases: every case of text-bound.mjs SHAPED, each tool at its default call and largest page, held to the ceiling, and text-bound.test.mjs holds each SHAPED case within SHAPED_DRIFT of its record here; source says where the answers came from (probe-prod, or the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). structured (#3013, since 3.0.0's re-record): the same answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before carries none.",
+  "about": "#2616, #2783: production's text, measured on production's answers with this checkout's server. Written by test/text-bound-live.mjs --record, this about included (text-bound.mjs RECORD_ABOUT). tools: the production-wide tools (exposure_radar, cve_summary), held to MARGIN from this record, their answers kept in fixtures/prod-answers/ (written only from scripts/probe-prod.sh); answers_kept says so. cases: each case of text-bound.mjs SHAPED measured on production, held to the ceiling, and text-bound.test.mjs holds each SHAPED case's text, and (#3273) its structured result, within SHAPED_DRIFT of its record here (STRUCTURED_DRIFT_KNOWN names the cases past it, and what clears each); source says where the answers came from (probe-prod, the answers kept here, the hosted endpoint, replayed, or for exposure_radar and cve_intel the hosted endpoint's own text). Dates (#2782): measured_at is when production was read for the number, and read_ms how long that read took (null where it was not recorded); a re-measure of the kept answers (--answers test/fixtures/prod-answers --record) moves neither. answers_age_ms is how old each kept answer was, by its own generated_at, when production was read, written by the read: the API serves a radar's aggregate stale past its 60 s cache TTL to the first request after it, and the CDN 300 s more, so an honest read's answers can be minutes old; text-bound.test.mjs fails when measured_at less a kept answer's generated_at is not the age the read recorded for it. answers_read_at (#2822) is when the kept answers were read, the same read. code_measured_at is when this checkout's server last measured the answers, and code_version which code that was: package.json's version, with +unreleased when CHANGELOG.md's newest section is unreleased; package_version is package.json's version alone. total and blocks: the text's characters, all blocks and each. structured (#3013): the answer's structuredContent as compact JSON, what Claude Code hands the model, held to STRUCTURED_BUDGET (30,000); a case recorded before 3.0.0 carries none. data_truncated and truncated (#3273): whether the server measured cut that structured result's data, and what it cut, so the cut level is on record, not inferred; a case recorded before carries neither.",
   "tools": {
     "exposure_radar": {
-      "measured_at": "2026-10-11T11:41:36.680Z",
+      "measured_at": "2026-10-05T07:37:21.576Z",
       "answers_read_at": "2026-10-05T07:37:21.576Z",
+      "read_ms": null,
+      "answers_age_ms": {
+        "exposed-databases_stats.json": 152204,
+        "kev-exposure_stats.json": 32227,
+        "leaked-credentials_stats.json": 146371,
+        "shadow-ai-radar_stats.json": 46226
+      },
+      "code_measured_at": "2026-10-11T11:41:36.680Z",
+      "code_version": "2.7.2+unreleased",
       "package_version": "2.7.2",
       "total": 43702,
       "blocks": [
@@ -15,8 +24,17 @@
       "answers_kept": true
     },
     "cve_summary": {
-      "measured_at": "2026-10-11T11:41:36.680Z",
+      "measured_at": "2026-10-05T07:37:21.576Z",
       "answers_read_at": "2026-10-05T07:37:21.576Z",
+      "read_ms": null,
+      "answers_age_ms": {
+        "exposed-databases_stats.json": 152204,
+        "kev-exposure_stats.json": 32227,
+        "leaked-credentials_stats.json": 146371,
+        "shadow-ai-radar_stats.json": 46226
+      },
+      "code_measured_at": "2026-10-11T11:41:36.680Z",
+      "code_version": "2.7.2+unreleased",
       "package_version": "2.7.2",
       "total": 2725,
       "blocks": [

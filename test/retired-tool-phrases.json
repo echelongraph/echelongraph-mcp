@@ -1,0 +1,13 @@
+{
+  "about": "Phrases a tool's own description has retired (#3266). A phrase listed under a tool is a claim that tool's description no longer makes, so no copy of the description may make it again: the tool's row and example question on /pulse/mcp (marketing-site/lib/mcpToolClaims.test.ts), and every listing paste block and listing surface (test/listings.test.mjs), each read case-insensitively with runs of white space as one space. The tool's description itself must not carry the phrase again either (both tests check it): a phrase it carries is not retired, and is taken off this list. A check of words alone passes a dropped phrase whose words are each still in the description, as cve_intel's 'public exploit code' was (public, exploit and code each are), so each retirement is written down here. Add an entry when a description drops a claim; remove one only when the description makes the claim again.",
+  "tools": {
+    "cve_intel": [
+      {
+        "phrase": "public exploit code",
+        "retired_by": "#3039",
+        "description_says": "exploit code, detection checks",
+        "why": "cve_intel's exploits list holds exploit code and detection checks (Nuclei detection templates, GitHub checker repositories), which are not necessarily exploit code, and its description has said so since #3039 (detection checks since #3221)."
+      }
+    ]
+  }
+}

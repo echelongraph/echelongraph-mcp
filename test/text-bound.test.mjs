@@ -49,6 +49,7 @@ import {
   isEntryCutOf,
   isThinOf,
   keptSizesOffRecord,
+  pickedMatches,
   productionText,
   readLiveRecord,
   setKeptSize,
@@ -58,6 +59,13 @@ import {
   structuredSize,
   textSize,
 } from "./text-bound.mjs";
+// #2782, #3273: read off the module rather than imported by name, so a text-bound.mjs without them
+// fails the tests that read them, each by name, instead of failing this whole file at import.
+import * as tb from "./text-bound.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 // The cut itself, from the package under test (dist/textBudget.js starts no server and loads nothing but zod).
 const textBudget = await import(pathToFileURL(path.join(PKG_DIR, "dist", "textBudget.js")).href);
@@ -451,6 +459,60 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.match(note, /In it, undetermined keeps its first 10 of 50 entries; each entry of undetermined in it leaves out package, ecosystem and detail\./);
   });
 
+  // #2899: the same answer at the cap with a CISA-KEV-listed match last (and one with known
+  // ransomware use among the last 15). Through 3.0.2 the text kept the first 185 in rank order, so
+  // both were in structuredContent.data only and the note said "the last 15 in order". Now they
+  // stay in the text while any other match is in it; with every match KEV-listed, the note names
+  // each one left out.
+  it("#2899: check_affected at the registry cap of 200 with a KEV-listed match last keeps it in the text, and names any KEV-listed match it leaves out", async (t) => {
+    const c = SHAPED.find((x) => x.label.startsWith("check_affected, PyPI django"));
+    const [[path, body]] = Object.entries(shapedAnswers(c));
+    const at = (flag) =>
+      Array.from({ length: 200 }, (_, i) => ({
+        ...body.matches[i % body.matches.length],
+        cve_id: `CVE-2026-${String(20000 + i)}`,
+        kev_listed: flag(i),
+        ransomware: i === 190,
+        ...(i % 4 === 3
+          ? { fixed_in: null, fixed_in_reason: "interval ends at last_affected 1.11.29; no fixed version recorded" }
+          : { fixed_in: "2.2.28", interval: { introduced: "0", fixed: "2.2.28" } }),
+      }));
+    const undetermined = Array.from({ length: 50 }, (_, i) => ({ cve_id: `CVE-2025-${String(30000 + i)}`, package: "django", ecosystem: "PyPI", reason: "collapsed_fix_boundary", detail: "the advisory's affected range collapses to its fix boundary, so whether version 1.11.0 is inside it cannot be decided from the record" }));
+    const ask = async (matches) => {
+      stub.state.limited = undefined;
+      stub.state.answers = { [path]: { ...body, matches, cve_ids: matches.map((m) => m.cve_id), count: 200, capped: true, undetermined, undetermined_count: 73 } };
+      const res = await client.callTool({ name: "check_affected", arguments: argsOf(c) });
+      assert.notEqual(res.isError, true, blocksOf(res)[0]);
+      return res;
+    };
+    const matches = at((i) => i === 199 || i === 190);
+    const res = await ask(matches);
+    const [first, note] = blocksOf(res);
+    assert.ok(first.length <= DATA_TEXT_BUDGET, `${first.length} characters`);
+    const shown = JSON.parse(first).matches;
+    const n = shown.length;
+    t.diagnostic(`${n} of 200 matches in the text, ${first.length} characters; structuredContent.data keeps ${res.structuredContent.data.matches.length}, ${JSON.stringify(res.structuredContent.truncated?.matches)}`);
+    assert.ok(n < 200, "the case no longer reaches the cut that leaves matches out");
+    for (const i of [190, 199]) {
+      const m = shown.find((x) => x.cve_id === matches[i].cve_id);
+      assert.ok(m, `${matches[i].cve_id} (kev_listed ${matches[i].kev_listed}, ransomware ${matches[i].ransomware}) left the text while ${n} other matches stayed`);
+      assert.deepEqual([m.kev_listed, m.ransomware], [true, i === 190]);
+    }
+    // The text keeps the first matches in rank order, and the KEV-listed ones after them, in order.
+    assert.deepEqual(shown.map((m) => m.cve_id), matches.filter((m, i) => i < n - 2 || i === 190 || i === 199).map((m) => m.cve_id));
+    // A default call: structuredContent.data is cut too (DATA CUT), so the text says data holds them with full: true.
+    assert.match(note, new RegExp(`Only ${n} of the 200 rows of matches are in it; the other ${200 - n} are left out of it, the last ${200 - n} in order but for any whose kev_listed or ransomware is true \\(known exploited, per CISA-KEV\\), which leave it last, and structuredContent\\.data holds them with full: true\\.`));
+    assert.doesNotMatch(note, /Of the rows left out of it/);
+    // Every match KEV-listed: the last leave, and the note names each one.
+    const all = at(() => true);
+    const every = await ask(all);
+    const kept = JSON.parse(blocksOf(every)[0]).matches.map((m) => m.cve_id);
+    const gone = all.slice(kept.length).map((m) => m.cve_id);
+    assert.ok(gone.length > 0 && gone.includes(all[190].cve_id), `${kept.length} kept`);
+    assert.deepEqual(kept, all.slice(0, kept.length).map((m) => m.cve_id));
+    assert.ok(blocksOf(every)[1].includes(`Of the rows left out of it, ${gone.length} have kev_listed or ransomware true: ${gone.slice(0, -1).join(", ")} and ${gone.at(-1)}.`), blocksOf(every)[1]);
+  });
+
   // #2783 review: a 2,000-purl call from a fresh budget answers 1,200 rows and 800 purls not sent.
   // Kept whole, the 800 left no room for any row, so every list was cut to its first 64 in index
   // order: 14 of 240 affected rows beside 50 clean or unchecked ones, and 64 of the purls the note
@@ -474,7 +536,9 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.match(note, /they are the input's distinct purls from position 1201 on, counted in the order this tool read them \(the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place\), and data\.not_sent_purls lists them \(past the structured result's budget it is left out whole by default, never cut short, and those positions are coverage\.sent \+ 1 to coverage\.distinct_purls; with full: true it is always there\)/);
     // #3013: beside a cut data, the rows left out of the text are in data only with full: true.
     assert.match(note, /Only \d+ of the 1200 rows of results are in it; the other \d+ are left out of it: the \d+ whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\), and the last \d+ of the rest, and structuredContent\.data holds them with full: true\./);
-    assert.match(note, /To read every row in the text, check \d+ or fewer purls per call\./);
+    // #3269's second review: the text names no page size ("check N or fewer purls per call", N the
+    // rows it kept, was no page size: a call of the first N kept fewer in 34 of 89 mixes).
+    assert.doesNotMatch(note, /To read every row in the text/);
     // #3013: the structured result's cut goes in the same order: the purls not sent first (the note
     // says from which position they run), then the rows, clean and not-assessed ones first.
     // #3132's review: the purls not sent are the list a client retries, so data keeps all of them
@@ -492,7 +556,7 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.deepEqual(sc.data.results.map((r) => r.verdict).filter((v) => v === "not_affected" || v === "not_assessed"), [], "a clean or not-assessed row stayed in data beside affected rows left out");
     const keptSaid = sent === 0 ? "none of its 800 entries" : "all 800 entries";
     // #3132's review: rows leave only once no level keeps every row, and at the compact level.
-    assert.match(note, new RegExp(String.raw`DATA CUT: .* not_sent_purls keeps ${keptSaid}; results keeps \d+ of its 1200 entries, each cut to index, purl, verdict, not_assessed_reason, cve_ids, matched_package, matched_via, matched_version_from, purl_name and matches \(each with cve_id, kev_listed, ransomware, fixed_in and effective_score\)(?:, each row's matches keeping at most its first 10 .*)?, the \d+ left out being the 960 whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\) and the last \d+ of the rest(?:; with the room left, \d+ of the entries kept take back detail \(by position among those kept, in their order in data\): .*?)?\. truncated gives`));
+    assert.match(note, new RegExp(String.raw`DATA CUT: .* not_sent_purls keeps ${keptSaid}; results keeps \d+ of its 1200 entries, each cut to index, purl, verdict, not_assessed_reason, cve_ids, matched_package, matched_via, matched_version_from, purl_name and matches \(each with cve_id, kev_listed, ransomware, epss_score, effective_score, score_assessed and fixed_in\)(?:, each row's matches keeping at most 10, .*)?, the \d+ left out being the 960 whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\) and \d+ affected or undetermined rows(?:, none with a KEV-listed or ransomware match, at index [\d, toand]+?|: the \d+ with a KEV-listed or ransomware match at index [\d, toand]+?; the other \d+ at index [\d, toand]+?)(?:, and \d+ more past index \d+)?(?: \(kept: rows with one first, then the others, in input order, each that fits\))?(?:; with the room left, \d+ of the entries kept take back detail \(by position among those kept, in their order in data\): .*?)?\. Re-check these \d+ purls in this order, in calls of [\d, and]+(?:, then of at most \d+)?: each such call keeps every row in data\. truncated gives`));
     assert.equal(sc.truncated.results.thinned, true);
     assert.equal(sc.data.summary.affected, data.summary.affected, "data.summary is cut");
   });
@@ -507,8 +571,9 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
   const SBOM_ROW_FIELDS = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids", "matched_package", "matched_via"];
   const SBOM_ROW_MIN = ["index", "purl", "verdict", "not_assessed_reason", "cve_ids"];
   const SBOM_MATCH_FIELDS = ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason"];
-  // #3132's review: a compact match (check_sbom.ts SBOM_ROW_COMPACT) keeps these.
-  const SBOM_MATCH_COMPACT = ["cve_id", "kev_listed", "ransomware", "fixed_in", "effective_score"];
+  // #3132's review: a compact match (check_sbom.ts SBOM_ROW_COMPACT) keeps these; #3270: with
+  // epss_score and score_assessed, which workload_triage ranks by (3.0.2's dropped them).
+  const SBOM_MATCH_COMPACT = ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in"];
   it("check_sbom and scan_manifest thin every row before one leaves, drop clean and not-assessed rows before affected ones, and keep every affected row that fits", (t) => {
     const rowTools = TOOL_CASES.filter((c) => c.tool === "check_sbom" || c.tool === "scan_manifest");
     for (const c of rowTools) {
@@ -528,9 +593,12 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
         const a = byIndex.get(r.index);
         assert.ok(isEntryCutOf(r, a), `${c.label}: row ${r.index} is not the answer's row, thinned or cut on its own terms`);
         for (const f of Object.hasOwn(r, "matches") ? SBOM_ROW_FIELDS : SBOM_ROW_MIN) assert.ok(Object.hasOwn(r, f) || !Object.hasOwn(a, f), `${c.label}: row ${r.index} leaves out ${f}`);
+        // #3270: a capped row keeps its KEV-listed and ransomware matches first, so a kept match is
+        // the answer's match of the same cve_id, not the one at its position.
         for (const [i, m] of (r.matches ?? []).entries()) {
-          const fields = Object.hasOwn(m, "epss_score") || !Object.hasOwn(a.matches[i], "epss_score") ? SBOM_MATCH_FIELDS : SBOM_MATCH_COMPACT;
-          for (const f of fields) assert.ok(Object.hasOwn(m, f) || !Object.hasOwn(a.matches[i], f), `${c.label}: row ${r.index}, match ${i} leaves out ${f}`);
+          const am = a.matches.find((x) => x.cve_id === m.cve_id);
+          const fields = Object.hasOwn(m, "fixed_in_reason") || !Object.hasOwn(am, "fixed_in_reason") ? SBOM_MATCH_FIELDS : SBOM_MATCH_COMPACT;
+          for (const f of fields) assert.ok(Object.hasOwn(m, f) || !Object.hasOwn(am, f), `${c.label}: row ${r.index}, match ${i} (${m.cve_id}) leaves out ${f}`);
         }
       }
       // #3132's review: rows leave data at the compact level, so each row kept that had matches
@@ -542,7 +610,30 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       const keptAffected = kept.filter((r) => r.verdict === "affected").length;
       if (keptAffected < affected) {
         assert.deepEqual(kept.filter((r) => r.verdict === "not_affected" || r.verdict === "not_assessed"), [], `${c.label}: an affected row left data while a clean or not-assessed row stayed`);
-        assert.deepEqual(kept.map((r) => r.index), answer.filter((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed").slice(0, kept.length).map((r) => r.index), `${c.label}: the rows kept are not the first of the others`);
+        // #3269's second review: the rows kept are chosen KEV-listed ones first, then the others,
+        // each in input order, each that fits beside those before it, so a row of the others left
+        // out is one that does not fit in the room the result leaves (round 2: the first of the
+        // others, whatever fit after them). Its size as kept is at least its compact fields and its
+        // floor of matches; adding it takes its index out of the note (some 8 characters).
+        const keptIdx = new Set(kept.map((r) => r.index));
+        const room = STRUCTURED_BUDGET - JSON.stringify(sc).length;
+        const floorOf = (r) => Math.min(r.matches?.length ?? 0, (r.matches ?? []).filter((m) => m.kev_listed || m.ransomware).length + 10);
+        const least = (r) =>
+          JSON.stringify({
+            ...Object.fromEntries([...SBOM_ROW_FIELDS, "matched_version_from", "purl_name"].filter((f) => Object.hasOwn(r, f)).map((f) => [f, r[f]])),
+            ...(r.matches ? { matches: pickedMatches(r.matches, floorOf(r)).map((j) => Object.fromEntries(SBOM_MATCH_COMPACT.filter((f) => Object.hasOwn(r.matches[j], f)).map((f) => [f, r.matches[j][f]]))) } : {}),
+          }).length;
+        const fitting = answer.filter((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed" && !keptIdx.has(r.index) && least(r) + 1 - 8 <= room);
+        assert.deepEqual(fitting.map((r) => `${r.index}: ${least(r)}`), [], `${c.label}: rows left data that fit in the ${room} characters left`);
+      }
+      // #3269: while any other row is cut below SBOM_ROW_THIN (its matches capped, or left out), a
+      // clean or not-assessed row is kept at SBOM_ROW_MIN at most (through 3.0.2 they kept every
+      // field SBOM_ROW_THIN keeps beside affected rows with no match left).
+      const below = kept.filter((r) => r.verdict !== "not_affected" && r.verdict !== "not_assessed" && (Object.hasOwn(r, "matches_truncated") || (byIndex.get(r.index).matches?.length && !r.matches?.length)));
+      if (below.length) {
+        for (const r of kept.filter((x) => x.verdict === "not_affected" || x.verdict === "not_assessed")) {
+          assert.deepEqual(Object.keys(r).filter((k) => !SBOM_ROW_MIN.includes(k)), [], `${c.label}: row ${r.index} (${r.verdict}) keeps more than SBOM_ROW_MIN while row ${below[0].index} is cut below SBOM_ROW_THIN`);
+        }
       }
     }
     // The fixtures where every row fits thinned keep every row, every affected one among them.
@@ -730,6 +821,89 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     }
     for (const c of SHAPED.filter((x) => !x.live)) assert.ok(cases[c.label], `${c.label}: text-bound-live.mjs has no record of it: run npm run text-bound:live -- --record`);
     assert.ok(compared > 0);
+  });
+
+  // #3273: the same of the structured result, which #3140 recorded for every case and nothing
+  // compared: search_cves' default page was 28,336 characters of structuredContent here against
+  // production's 9,064 and passed. Cases recorded as the hosted endpoint's own text are left out, as
+  // above; STRUCTURED_DRIFT_KNOWN names the ones past it on the committed record, pinned.
+  it(`#3273: every case's structured result is within ${SHAPED_DRIFT * 100}% of production's for the same call, as text-bound-live.mjs recorded it, but the ones STRUCTURED_DRIFT_KNOWN names (pinned)`, (t) => {
+    assert.equal(typeof tb.structuredOffRecord, "function", "text-bound.mjs has no structuredOffRecord: SHAPED's structured sizes are held to nothing production measured");
+    const record = readLiveRecord();
+    let compared = 0;
+    for (const c of SHAPED) {
+      const r = record.cases?.[c.label];
+      if (typeof c.structured !== "number" || typeof r?.structured !== "number" || /own text/.test(r.source)) continue;
+      compared++;
+      const drift = (c.structured - r.structured) / r.structured;
+      t.diagnostic(`${c.label}: structuredContent ${c.structured} here, ${r.structured} on production's answers (${r.measured_at}), ${drift >= 0 ? "+" : ""}${(drift * 100).toFixed(1)}%${tb.STRUCTURED_DRIFT_KNOWN[c.label] ? " (STRUCTURED_DRIFT_KNOWN)" : ""}`);
+    }
+    // Every case the record measured with this checkout's server on production's data is compared.
+    assert.ok(compared >= 15, `only ${compared} cases compared`);
+    const off = tb.structuredOffRecord(record);
+    assert.deepEqual(off.filter((o) => !o.known).map(tb.structuredDriftMessage), []);
+    for (const [label, k] of Object.entries(tb.STRUCTURED_DRIFT_KNOWN)) {
+      const c = SHAPED.find((x) => x.label === label);
+      const r = record.cases?.[label];
+      assert.ok(c && r, `STRUCTURED_DRIFT_KNOWN names ${label}, which is not a recorded SHAPED case`);
+      assert.ok(Math.abs(c.structured - k.shaped) <= MARGIN && Math.abs(r.structured - k.recorded) <= MARGIN, `${label}: STRUCTURED_DRIFT_KNOWN pins ${k.shaped} here and ${k.recorded} on record; they are ${c.structured} and ${r.structured} now: look at it again (re-sample, re-record, or re-pin with why), do not let a known drift grow unseen`);
+      assert.ok(off.some((o) => o.label === label), `${label}: back within ${SHAPED_DRIFT * 100}% of the record (${c.structured} / ${r.structured}): drop its STRUCTURED_DRIFT_KNOWN entry`);
+      assert.ok(typeof k.why === "string" && k.why.length > 40 && typeof k.clears === "string" && k.clears.length > 20, `${label}: a known drift says why and what clears it`);
+    }
+  });
+
+  it("control (#3273): a case's structured result moved past SHAPED_DRIFT from its record is named, one at it is not, and the hosted endpoint's own text is left out", () => {
+    assert.equal(typeof tb.structuredOffRecord, "function", "text-bound.mjs has no structuredOffRecord");
+    const record = readLiveRecord();
+    const label = "get_cve, CVE-2021-44228";
+    const c = SHAPED.find((x) => x.label === label);
+    const at = (structured, source = record.cases[label].source) => ({ ...record, cases: { ...record.cases, [label]: { ...record.cases[label], structured, source } } });
+    const named = (rec) => tb.structuredOffRecord(rec).filter((o) => o.label === label);
+    // Past it either way: production's larger, and production's smaller.
+    for (const recorded of [Math.floor(c.structured / (1 + SHAPED_DRIFT)) - 1, Math.ceil(c.structured / (1 - SHAPED_DRIFT)) + 1]) {
+      const [o] = named(at(recorded));
+      assert.ok(o && !o.known, `${label} with production at ${recorded}: not named`);
+      assert.match(tb.structuredDriftMessage(o), new RegExp(`^get_cve, CVE-2021-44228: its structuredContent here, ${c.structured}, is [-+]\\d+\\.\\d% from production's ${recorded} `));
+    }
+    // At it, either way: not named.
+    for (const recorded of [Math.ceil(c.structured / (1 + SHAPED_DRIFT)), Math.floor(c.structured / (1 - SHAPED_DRIFT))]) assert.deepEqual(named(at(recorded)), [], `${label} with production at ${recorded}`);
+    // The ticket's own case: the default search_cves page as SHAPED held it through 3.0.2.
+    const sc = "search_cves, default page (search openssl)";
+    const [old] = tb.structuredOffRecord(record, SHAPED.map((x) => (x.label === sc ? { ...x, structured: 28_336 } : x))).filter((o) => o.label === sc);
+    assert.ok(old, "the 28,336-character default page through 3.0.2 is not named");
+    assert.match(tb.structuredDriftMessage(old), /is \+212\.6% from production's 9064/);
+    // The hosted endpoint's own text is compared with nothing but the ceiling, as for the text.
+    assert.deepEqual(named(at(1, "the hosted endpoint's own text (3.0.0), not this checkout's")), []);
+  });
+
+  // #3273's trip-wire is any doc that claims what a default search_cves row keeps. Production's cut
+  // level for that page is not on record (the record of 2026-10-11 has no truncated): only its size
+  // is. So while the record holds none, every sentence of the CHANGELOG's unreleased section and of
+  // text-bound.mjs that speaks of production's level for search_cves says it is inferred.
+  it("#3273's review: while the record holds no truncated for search_cves' default page, no sentence states production's cut level for it as measured", () => {
+    const label = "search_cves, default page (search openssl)";
+    const rec = readLiveRecord().cases?.[label];
+    assert.ok(rec, `control: the record has ${label}`);
+    if (Object.hasOwn(rec, "truncated")) return; // on record: a claim of it can be held to the record
+    const changelog = fs.readFileSync(path.join(PKG_DIR, "CHANGELOG.md"), "utf8");
+    const heads = [...changelog.matchAll(/^## .*$/gm)];
+    const unreleased = changelog.slice(heads[0].index, heads[1]?.index ?? changelog.length);
+    // text-bound.mjs's comments, each run of comment lines one passage.
+    const source = fs
+      .readFileSync(path.join(PKG_DIR, "test", "text-bound.mjs"), "utf8")
+      .split("\n")
+      .map((l) => (/^\s*\/\//.test(l) ? l.replace(/^\s*\/\/ ?/, "") : "\u0000"))
+      .join(" ")
+      .split("\u0000")
+      .join(". ");
+    const sentences = (text) => text.replace(/\s+/g, " ").split(/(?<=[.:;])\s+/);
+    const claims = [];
+    for (const [where, text] of [["CHANGELOG.md, its newest section", unreleased], ["test/text-bound.mjs", source]]) {
+      for (const s of sentences(text)) {
+        if (/default page|default search_cves/.test(s) && /production's/.test(s) && /\blevel\b|\bcuts? (?:it )?to\b/.test(s) && !/inferred|not (?:yet )?(?:measured|on record)/.test(s)) claims.push(`${where}: ${s.slice(0, 240)}`);
+      }
+    }
+    assert.deepEqual(claims, [], "production's level for the default search_cves page is inferred, not measured: say so");
   });
 
   // #2800: what each description says a row of the first text block keeps, held on every SHAPED
@@ -1023,7 +1197,8 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
     assert.match(note, /Only \d+ of the 2000 rows of results are in it; the other \d+ are left out of it: the \d+ whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\)/);
     // With full: true (#3013), the rows left out of the text are in its data, as through 2.7.x.
     assert.match(blocksOf(whole["check_sbom, 2,000 purls (10 batches of 200)"])[1], /Only \d+ of the 2000 rows of results are in it; the other \d+ are in structuredContent\.data only: the \d+ whose verdict is not_affected or not_assessed \(data\.summary counts every verdict\)/);
-    assert.match(note, /To read every row in the text, check \d+ or fewer purls per call\./);
+    // #3269's second review: and no page size for the text, which none of its sizes was.
+    assert.doesNotMatch(note, /To read every row in the text/);
   });
 
   // The ticket's control: production's 2.6.2 answer to a default search_cves, pretty-printed whole
@@ -1085,6 +1260,199 @@ describe("#2783: every tool's text on production-shaped answers, under the ceili
       assert.ok(typeof r.answers_read_at === "string" && !Number.isNaN(Date.parse(r.answers_read_at)), `${tool}: answers_read_at ${JSON.stringify(r.answers_read_at)} is not a time: re-record`);
       assert.ok(Date.parse(r.answers_read_at) <= Date.parse(r.measured_at), `${tool}: its answers were read (${r.answers_read_at}) after they were measured (${r.measured_at})`);
     }
+  });
+
+  // ── #2782: the record is dated by the production read, and names the code that measured apart ──
+  // Through 3.0.2 `--answers test/fixtures/prod-answers --record` wrote its own time as measured_at:
+  // the committed record said 2026-10-11T11:41Z for answers production served at 07:36Z on 10-05.
+  it("#2782: each entry measured on the kept answers is dated by the production read: measured_at less each kept answer's own generated_at is the age the read recorded for that answer (answers_age_ms)", (t) => {
+    assert.equal(typeof tb.datedAfterAnswers, "function", "text-bound.mjs has no datedAfterAnswers: nothing holds the record's date to the answers it measured");
+    assert.equal(typeof tb.generatedAtByFile, "function", "text-bound.mjs has no generatedAtByFile: the record's date is held to a fixed allowance, not to what its own answers say");
+    const gens = tb.generatedAtByFile();
+    assert.ok(Object.keys(gens).length, "no kept answer carries a generated_at, so the record's date is held to nothing");
+    for (const [tool, r] of Object.entries(readLiveRecord().tools ?? {})) {
+      if (!r.answers_kept) continue;
+      for (const [f, g] of Object.entries(gens)) t.diagnostic(`${tool}: ${f} (generated_at ${g.at}) was ${((Date.parse(r.measured_at) - g.ms) / 1000).toFixed(1)} s old at measured_at ${r.measured_at}; the read recorded ${r.answers_age_ms?.[f]} ms`);
+    }
+    assert.deepEqual(tb.datedAfterAnswers().map(tb.datedAfterAnswersMessage), []);
+  });
+
+  // The fixed 60 s this replaced rested on a false premise: core-backend's cache.SWR serves its last
+  // value, of any age, to the first request after the 60 s TTL (and refreshes behind it), and the
+  // stats handlers add stale-while-revalidate=300 for the CDN. So an honest read can get answers
+  // minutes old: on 2026-10-05 two were. Only the read can say how old each was.
+  it("#2782: the committed record carries the ages the 2026-10-05 read saw, and they show why no fixed allowance holds (two kept answers were over 140 s old)", () => {
+    assert.equal(typeof tb.answerAges, "function", "text-bound.mjs has no answerAges: the read does not record how old each answer it kept was");
+    const want = { "exposed-databases_stats.json": 152_204, "kev-exposure_stats.json": 32_227, "leaked-credentials_stats.json": 146_371, "shadow-ai-radar_stats.json": 46_226 };
+    for (const [tool, r] of Object.entries(readLiveRecord().tools ?? {})) {
+      if (!r.answers_kept) continue;
+      assert.deepEqual(r.answers_age_ms, want, `${tool}: answers_age_ms`);
+      assert.deepEqual(tb.answerAges(r.answers_read_at), want, `${tool}: the ages at its answers_read_at`);
+    }
+    assert.ok(Object.values(want).filter((ms) => ms > 60_000).length >= 2, "control: the read's answers past the stats cache's 60 s TTL");
+    assert.equal(tb.answerAges(null), null);
+    assert.equal(tb.answerAges("not a time"), null);
+  });
+
+  it("control (#2782): a record re-dated past its read is named (the ticket's 9m26s, 14 days, none, 1 ms either way, no ages, an answer the read did not keep); an honest read of answers 10 minutes old is not", () => {
+    assert.equal(typeof tb.answerAges, "function", "text-bound.mjs has no answerAges");
+    const record = readLiveRecord();
+    const dir = tb.PROD_ANSWERS;
+    const newest = tb.newestGeneratedAt(dir);
+    const iso = (ms) => new Date(ms).toISOString();
+    const read = Date.parse(record.tools.exposure_radar.measured_at);
+    const ages = record.tools.exposure_radar.answers_age_ms;
+    // An entry as the harness writes it at a read at `ms`: that read's time and the ages it saw.
+    const honest = (ms) => ({ measured_at: iso(ms), answers_age_ms: tb.answerAges(iso(ms), dir) });
+    const entry = (fields, where = "tools") =>
+      where === "tools"
+        ? { ...record, tools: { ...record.tools, exposure_radar: { ...record.tools.exposure_radar, ...fields } } }
+        : { ...record, cases: { ...record.cases, exposure_radar: { ...record.cases.exposure_radar, source: tb.KEPT_SOURCE, ...fields } } };
+    const names = (rec) => tb.datedAfterAnswers(rec, dir).map((o) => o.where);
+    const message = (rec) => tb.datedAfterAnswers(rec, dir).map(tb.datedAfterAnswersMessage)[0];
+    // e20db98c's re-date, 9m26s past the read.
+    assert.deepEqual(names(entry({ measured_at: iso(read + 566_000) })), ["tools.exposure_radar"]);
+    assert.match(message(entry({ measured_at: iso(read + 566_000) })), /^tools\.exposure_radar: measured_at "[^"]+" is 566\.0 s later than the read that kept these answers says: exposed-databases_stats\.json \(generated_at [^)]+\) would have been 718\.2 s old at it, and the read recorded that answer 152\.2 s old \(answers_age_ms\).* Re-measure with node test\/text-bound-live\.mjs --answers test\/fixtures\/prod-answers --record/);
+    // The ticket's 14 days, no date at all, and 1 ms either way.
+    assert.deepEqual(names(entry({ measured_at: iso(read + 14 * 86_400_000) })), ["tools.exposure_radar"]);
+    assert.deepEqual(names(entry({ measured_at: null })), ["tools.exposure_radar"]);
+    assert.deepEqual(names(entry({ measured_at: iso(read + 1) })), ["tools.exposure_radar"]);
+    assert.deepEqual(names(entry({ measured_at: iso(read - 1) })), ["tools.exposure_radar"]);
+    // An honest read 10 minutes after the newest answer was computed (every radar served stale):
+    // not named. The fixed 60 s allowance named it, and turned npm test red on an honest record.
+    assert.deepEqual(names(entry(honest(newest.ms + 600_000))), []);
+    assert.deepEqual(names(entry({ ...honest(newest.ms + 600_000), read_ms: null })), []);
+    // That read re-dated afterwards is named.
+    assert.deepEqual(names(entry({ ...honest(newest.ms + 600_000), measured_at: iso(newest.ms + 600_001) })), ["tools.exposure_radar"]);
+    // No ages on record (an older harness, a hand edit): the date is held to nothing, so named.
+    assert.deepEqual(names(entry({ answers_age_ms: undefined })), ["tools.exposure_radar"]);
+    assert.match(message(entry({ answers_age_ms: undefined })), /records no answers_age_ms/);
+    // A kept answer the read did not record: the answers were replaced after the read.
+    const { ["kev-exposure_stats.json"]: _kev, ...fewer } = ages;
+    assert.deepEqual(names(entry({ answers_age_ms: fewer })), ["tools.exposure_radar"]);
+    assert.match(message(entry({ answers_age_ms: fewer })), /kev-exposure_stats\.json/);
+    // A case measured on the kept answers is held the same way.
+    assert.deepEqual(names(entry({ measured_at: iso(read + 566_000), answers_age_ms: ages }, "cases")), ["cases.exposure_radar"]);
+    assert.deepEqual(names(entry({ measured_at: iso(read), answers_age_ms: ages }, "cases")), []);
+  });
+
+  it("#2782: each tools entry records the code that measured apart from the read: code_measured_at no earlier than measured_at, code_version package.json's version (+unreleased), read_ms a count or null", () => {
+    assert.equal(typeof tb.codeVersion, "function", "text-bound.mjs has no codeVersion: the record names package.json's version for unreleased code");
+    for (const [tool, r] of Object.entries(readLiveRecord().tools ?? {})) {
+      assert.ok(typeof r.code_measured_at === "string" && !Number.isNaN(Date.parse(r.code_measured_at)), `${tool}: code_measured_at ${JSON.stringify(r.code_measured_at)} is not a time: re-measure with node test/text-bound-live.mjs --answers test/fixtures/prod-answers --record`);
+      assert.ok(Date.parse(r.code_measured_at) >= Date.parse(r.measured_at), `${tool}: measured by this checkout's server (${r.code_measured_at}) before production was read (${r.measured_at})`);
+      assert.match(String(r.code_version), /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?(?:\+unreleased)?$/, `${tool}: code_version ${JSON.stringify(r.code_version)}`);
+      assert.ok(r.code_version.startsWith(r.package_version), `${tool}: code_version ${r.code_version} is not package.json's ${r.package_version}`);
+      assert.ok(r.read_ms === null || (Number.isInteger(r.read_ms) && r.read_ms >= 0), `${tool}: read_ms ${JSON.stringify(r.read_ms)}`);
+      assert.equal(r.answers_read_at, r.measured_at, `${tool}: answers_read_at and measured_at are the same read`);
+    }
+    // codeVersion: unreleased only where the newest section is unreleased and lists a change.
+    const log = (head, body) => `# Changelog\n\nPreamble.\n\n## ${head}\n\n${body}\n## 3.0.2 — 2026-10-17\n\n- released\n`;
+    assert.equal(tb.codeVersion("3.0.2", log("Unreleased", "- **a change** (#1).\n")), "3.0.2+unreleased");
+    assert.equal(tb.codeVersion("2.7.2", log("2.8.0 — unreleased", "- **Contract change** (#3013).\n")), "2.7.2+unreleased");
+    assert.equal(tb.codeVersion("3.0.2", log("Unreleased", "")), "3.0.2");
+    assert.equal(tb.codeVersion("3.0.2", "# Changelog\n\n## 3.0.2 — 2026-10-17\n\n- released\n"), "3.0.2");
+  });
+
+  it("#2782: the record's about is RECORD_ABOUT, which text-bound-live.mjs writes, and it names every field the record's entries carry", () => {
+    assert.equal(typeof tb.RECORD_ABOUT, "string", "text-bound.mjs has no RECORD_ABOUT: the record's about is written by hand and goes stale");
+    const record = readLiveRecord();
+    assert.equal(record.about, tb.RECORD_ABOUT, "the record's about is not RECORD_ABOUT: re-record, or set it there");
+    assert.doesNotMatch(record.about, /moves measured_at|until the first --record/, "the about says what the code no longer does");
+    const fields = new Set([...Object.values(record.tools ?? {}), ...Object.values(record.cases ?? {})].flatMap((r) => Object.keys(r)));
+    for (const f of [...fields, "read_ms", "code_measured_at", "code_version", "data_truncated", "truncated"]) assert.ok(record.about.includes(f), `the about does not say what ${f} is`);
+  });
+
+  // The ticket's done-means, run: the harness itself, on a copy of the record and the kept answers.
+  it("#2782: --answers test/fixtures/prod-answers --record keeps measured_at and read_ms, records the code that measured apart, and leaves the kept answers as they are (run on a copy)", async () => {
+    const harness = path.join(PKG_DIR, "test", "text-bound-live.mjs");
+    const run = promisify(execFile);
+    const fixture = (dir, name) => path.join(dir, name);
+    const copy = (to, record) => {
+      fs.mkdirSync(fixture(to, "prod-answers"), { recursive: true });
+      for (const f of fs.readdirSync(tb.PROD_ANSWERS)) fs.copyFileSync(path.join(tb.PROD_ANSWERS, f), path.join(to, "prod-answers", f));
+      fs.writeFileSync(fixture(to, "text-bound-live.json"), `${JSON.stringify(record, null, 2)}\n`);
+    };
+    const remeasure = async (dir, answers = fixture(dir, "prod-answers")) => {
+      const started = Date.now();
+      const out = await run(process.execPath, [harness, "--answers", answers, "--record", "--fixtures", dir], { encoding: "utf8", maxBuffer: 64 << 20 }).catch((e) => e);
+      assert.equal(out.code ?? 0, 0, `the harness exited ${out.code}: ${String(out.stdout).slice(-1500)}`);
+      assert.match(out.stdout, /recorded 2 cases and (exposure_radar, cve_summary|cve_summary, exposure_radar)/, out.stdout.slice(-800));
+      return { written: JSON.parse(fs.readFileSync(fixture(dir, "text-bound-live.json"), "utf8")), started, ended: Date.now() };
+    };
+    const record = readLiveRecord();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "eg-text-bound-live-"));
+    try {
+      const code = tb.codeVersion(JSON.parse(fs.readFileSync(path.join(PKG_DIR, "package.json"), "utf8")).version, fs.readFileSync(path.join(PKG_DIR, "CHANGELOG.md"), "utf8"));
+      // 1. The committed record, re-measured from the answers kept with it.
+      const a = path.join(tmp, "a");
+      copy(a, record);
+      const { written, started, ended } = await remeasure(a);
+      for (const tool of ["exposure_radar", "cve_summary"]) {
+        const was = record.tools[tool];
+        const now = written.tools[tool];
+        assert.deepEqual([now.measured_at, now.read_ms, now.answers_read_at, now.answers_age_ms], [was.measured_at, was.read_ms, was.answers_read_at, was.answers_age_ms], `${tool}: the re-measure moved when production was read`);
+        assert.ok(Date.parse(now.code_measured_at) >= started - 1000 && Date.parse(now.code_measured_at) <= ended, `${tool}: code_measured_at ${now.code_measured_at} is not this run`);
+        assert.equal(now.code_version, code, `${tool}: code_version`);
+        assert.ok(Math.abs(now.total - was.total) <= MARGIN, `${tool}: ${now.total} against the record's ${was.total}`);
+        const c = written.cases[tool];
+        assert.deepEqual([c.source, c.measured_at, c.read_ms, c.answers_age_ms], [tb.KEPT_SOURCE, was.measured_at, was.read_ms, was.answers_age_ms], `cases.${tool}: dated by the read, not the re-measure`);
+        assert.equal(typeof c.data_truncated, "boolean", `cases.${tool}: #3273's data_truncated is not on record`);
+      }
+      assert.equal(written.about, tb.RECORD_ABOUT);
+      assert.deepEqual(tb.datedAfterAnswers(written, fixture(a, "prod-answers")).map(tb.datedAfterAnswersMessage), []);
+      for (const f of fs.readdirSync(tb.PROD_ANSWERS)) assert.equal(fs.readFileSync(path.join(a, "prod-answers", f), "utf8"), fs.readFileSync(path.join(tb.PROD_ANSWERS, f), "utf8"), `${f}: the re-measure rewrote a kept answer`);
+      // 2. A record written before #2782 (measured_at the re-measure's time, as through 3.0.2, and
+      //    as an older harness on another branch writes it): the read is its answers_read_at.
+      const legacy = structuredClone(record);
+      for (const r of Object.values(legacy.tools)) {
+        r.measured_at = "2026-10-11T11:41:36.680Z";
+        for (const k of ["read_ms", "answers_age_ms", "code_measured_at", "code_version"]) delete r[k];
+      }
+      assert.deepEqual(tb.datedAfterAnswers(legacy).map((o) => o.where).sort(), ["tools.cve_summary", "tools.exposure_radar"], "control: the pre-#2782 record is not named");
+      const b = path.join(tmp, "b");
+      copy(b, legacy);
+      const { written: migrated } = await remeasure(b);
+      for (const tool of ["exposure_radar", "cve_summary"]) {
+        assert.equal(migrated.tools[tool].measured_at, record.tools[tool].answers_read_at, `${tool}: a pre-#2782 entry's read is its answers_read_at`);
+        assert.deepEqual(migrated.tools[tool].answers_age_ms, record.tools[tool].answers_age_ms, `${tool}: the ages are derived from the read on record (answers_read_at), not from now`);
+      }
+      assert.deepEqual(tb.datedAfterAnswers(migrated, fixture(b, "prod-answers")).map(tb.datedAfterAnswersMessage), []);
+      // 3. Answers from another directory were read at no known time: dated null, never now.
+      const c3 = path.join(tmp, "c");
+      copy(c3, record);
+      fs.cpSync(fixture(c3, "prod-answers"), path.join(tmp, "elsewhere"), { recursive: true });
+      const { written: elsewhere } = await remeasure(c3, path.join(tmp, "elsewhere"));
+      for (const tool of ["exposure_radar", "cve_summary"]) assert.deepEqual([elsewhere.tools[tool].measured_at, elsewhere.tools[tool].read_ms, elsewhere.tools[tool].answers_read_at, elsewhere.tools[tool].answers_age_ms], [null, null, null, null], tool);
+      // 4. A mixed merge (#2782's review): this harness's code_measured_at kept beside another
+      //    branch's re-dated measured_at. The suite names it, and the remedy it prints puts measured_at
+      //    back to the read (answers_read_at), instead of keeping the re-date and looping.
+      const mixed = structuredClone(record);
+      for (const r of Object.values(mixed.tools)) r.measured_at = "2026-10-18T09:00:00.000Z";
+      assert.deepEqual(tb.datedAfterAnswers(mixed).map((o) => o.where).sort(), ["tools.cve_summary", "tools.exposure_radar"], "control: the mixed record is not named");
+      const d = path.join(tmp, "d");
+      copy(d, mixed);
+      const { written: healed } = await remeasure(d);
+      for (const tool of ["exposure_radar", "cve_summary"]) assert.equal(healed.tools[tool].measured_at, record.tools[tool].answers_read_at, `${tool}: the re-measure kept the re-dated measured_at`);
+      assert.deepEqual(tb.datedAfterAnswers(healed, fixture(d, "prod-answers")).map(tb.datedAfterAnswersMessage), []);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("#2782: readTimeOf takes a tools entry's read from answers_read_at, which the read writes and nothing re-dates; measured_at only for an entry with no answers_read_at", () => {
+    const read = "2026-10-05T07:37:21.576Z";
+    const later = "2026-10-18T09:00:00.000Z";
+    // A mixed merge: this harness's code_measured_at beside a re-dated measured_at.
+    assert.equal(tb.readTimeOf({ measured_at: later, answers_read_at: read, code_measured_at: later }), read);
+    // Written before #2782: measured_at was the re-measure's time.
+    assert.equal(tb.readTimeOf({ measured_at: later, answers_read_at: read }), read);
+    // This harness's entry: the two are the same read.
+    assert.equal(tb.readTimeOf({ measured_at: read, answers_read_at: read, code_measured_at: later }), read);
+    // No answers_read_at: measured_at where this harness wrote it, else no read on record.
+    assert.equal(tb.readTimeOf({ measured_at: read, code_measured_at: later }), read);
+    assert.equal(tb.readTimeOf({ measured_at: later }), null);
+    assert.equal(tb.readTimeOf(undefined), null);
   });
 
   // The cut's own checks can fail: a value changed in the text, a row the answer does not have,
@@ -1287,6 +1655,89 @@ describe("#2783: how a first text block longer than the budget is cut", () => {
     assert.deepEqual(shown.not_sent_purls, d.not_sent_purls.slice(0, 10));
     assert.equal(shown.results.filter((r) => r.verdict === "affected").length, 120, "every affected row stays");
     assert.match(said, /In it, not_sent_purls keeps its first 10 of 800 entries\. The 800 not sent run from position 601; 10 shown\. Only \d+ of the 600 rows of results are in it; the other \d+ are in structuredContent\.data only: the \d+ whose verdict is not_affected \(counted\)/);
+  });
+
+  // #3272: through 3.0.2 a list the tool names beside its rows was only thinned or capped, and cut
+  // before the rows' leaner levels; once the leanest level did not fit, rows left the text while
+  // those lists stayed (cve_remediation's fixed_branches, patches and fix_references beside its
+  // advisories, which its structured cut thins and empties first). A list named beforeRows stays
+  // whole at every level, is cut as it says once the leanest level does not fit (in the order
+  // named), and then loses entries from the end, the last named first, before any row leaves.
+  it("#3272: lists named beforeRows stay whole at every level, then are cut, then lose entries from the end, the last named first, before any row leaves the text", () => {
+    const d = {
+      advisories: rows(20, (i) => ({ id: `A-${i}`, body: big(i, 1200) })),
+      branches: rows(40, (i) => ({ pkg: `p${i}`, range: big(i, 150) })),
+      patches: rows(40, (i) => ({ url: `https://p/${i}/${big(i, 150)}`, extra: big(i, 60) })),
+      refs: rows(20, (i) => ({ url: `https://r/${i}/${big(i, 150)}` })),
+    };
+    const cut = {
+      rows: "advisories",
+      levels: [
+        { keep: ["id", "body"], clip: 1000 },
+        { keep: ["id", "body"], clip: 700 },
+      ],
+      sides: [
+        { list: "branches", beforeRows: true },
+        { list: "patches", keep: ["url"], beforeRows: true },
+        { list: "refs", beforeRows: true },
+      ],
+      page: (k, n) => `The other ${n - k} are elsewhere.`,
+    };
+    const counts = (text) => Object.fromEntries(Object.entries(JSON.parse(text)).map(([k, v]) => [k, v.length]));
+    // The leaner level fits with every list whole: no list is cut.
+    const few = { ...d, patches: d.patches.slice(0, 10) };
+    const whole = dataText(few, cut);
+    assert.deepEqual(JSON.parse(whole.text).patches, few.patches, "a list named beforeRows was cut while a leaner level of the rows fit beside it whole");
+    assert.equal(JSON.parse(whole.text).advisories[0].body.length, 701);
+    assert.doesNotMatch(whole.said, /patches|refs|branches/);
+    // The leanest level does not fit: patches are cut to their url, then refs, named last, leave first.
+    const fit = dataText(d, cut);
+    assert.ok(fit.text.length <= DATA_TEXT_BUDGET);
+    assert.deepEqual(counts(fit.text), { advisories: 20, branches: 40, patches: 40, refs: 4 });
+    assert.deepEqual(JSON.parse(fit.text).patches, d.patches.map(({ url }) => ({ url })));
+    assert.deepEqual(JSON.parse(fit.text).refs, d.refs.slice(0, 4));
+    assert.match(fit.said, /Each entry of patches in it leaves out extra\. In it, refs keeps its first 4 of 20 entries, before any row of advisories is left out\.$/);
+    // More rows: refs, then patches, are emptied before branches loses any.
+    const more = dataText({ ...d, advisories: rows(40, (i) => ({ id: `A-${i}`, body: big(i, 1200) })) }, cut);
+    assert.deepEqual(counts(more.text), { advisories: 40, branches: 4, patches: 0, refs: 0 });
+    assert.match(more.said, /In it, refs keeps none of its 20 entries, patches keeps none of its 40 entries and branches keeps its first 4 of 40 entries, before any row of advisories is left out\.$/);
+    // Every list emptied and still too long: then rows leave, and the page sentence says where.
+    const most = dataText({ ...d, advisories: rows(60, (i) => ({ id: `A-${i}`, body: big(i, 1200) })) }, cut);
+    const left = counts(most.text);
+    assert.deepEqual([left.branches, left.patches, left.refs], [0, 0, 0]);
+    assert.ok(left.advisories > 0 && left.advisories < 60);
+    assert.match(most.said, new RegExp(`In it, refs keeps none of its 20 entries, patches keeps none of its 40 entries and branches keeps none of its 40 entries, before any row of advisories is left out\\. Only ${left.advisories} of the 60 rows of advisories are in it; the other ${60 - left.advisories} are in structuredContent\\.data only, the last ${60 - left.advisories} in order\\. The other ${60 - left.advisories} are elsewhere\\.$`));
+    // Control: without beforeRows (3.0.2's cut), rows leave while every list keeps its entries.
+    const old = dataText(d, { ...cut, sides: cut.sides.map(({ beforeRows, ...side }) => side) });
+    assert.deepEqual(counts(old.text), { advisories: 16, branches: 40, patches: 40, refs: 20 }, "the control does not show the 3.0.2 cut");
+  });
+
+  // #2899: rows leave the text from the end, so a KEV-listed match ranked last left it first.
+  it("#2899: rows named leaveOutLast stay while any other row is in the text, and each one left out is named", () => {
+    const d = { matches: rows(200, (i) => ({ cve_id: `CVE-2026-${20000 + i}`, kev_listed: i === 199 || i === 150, ransomware: i === 120, score: 9 - i / 100, reason: big(i, 160) })) };
+    const cut = {
+      rows: "matches",
+      levels: [{ keep: ["cve_id", "kev_listed", "ransomware", "score", "reason"], clip: 200 }],
+      leaveOutLast: { fields: ["kev_listed", "ransomware"], name: "cve_id", why: "exploited" },
+    };
+    const { text, said } = dataText(d, cut);
+    const shown = JSON.parse(text).matches;
+    assert.ok(text.length <= DATA_TEXT_BUDGET && shown.length < 200, `${shown.length} rows`);
+    for (const i of [120, 150, 199]) assert.ok(shown.some((m) => m.cve_id === d.matches[i].cve_id), `${d.matches[i].cve_id}, flagged, left the text while other rows stayed`);
+    assert.deepEqual(shown.map((m) => m.cve_id), d.matches.filter((m, i) => i < shown.length - 3 || [120, 150, 199].includes(i)).map((m) => m.cve_id), "the rows kept are the first in order and every flagged one, in order");
+    assert.match(said, new RegExp(`Only ${shown.length} of the 200 rows of matches are in it; the other ${200 - shown.length} are in structuredContent\\.data only, the last ${200 - shown.length} in order but for any whose kev_listed or ransomware is true \\(exploited\\), which leave it last\\.$`));
+    assert.doesNotMatch(said, /Of the rows left out/);
+    // Every row flagged: they leave too, from the end, and the note names each one left out.
+    const all = { matches: d.matches.map((m) => ({ ...m, kev_listed: true })) };
+    const every = dataText(all, cut);
+    const kept = JSON.parse(every.text).matches;
+    const gone = all.matches.slice(kept.length).map((m) => m.cve_id);
+    assert.ok(gone.length > 0);
+    assert.deepEqual(kept.map((m) => m.cve_id), all.matches.slice(0, kept.length).map((m) => m.cve_id));
+    assert.ok(every.said.includes(`, the last ${gone.length} in order. Of the rows left out of it, ${gone.length} have kev_listed or ransomware true: ${gone.slice(0, -1).join(", ")} and ${gone.at(-1)}.`), every.said);
+    // Control: without leaveOutLast the flagged last row leaves first (3.0.2's cut).
+    const old = JSON.parse(dataText(d, { ...cut, leaveOutLast: undefined }).text).matches;
+    assert.ok(!old.some((m) => m.cve_id === d.matches[199].cve_id), "the control does not show the 3.0.2 cut");
   });
 
   it("without a TextCut, every list keeps its first entries, halving until it fits, and the note names each with its full length", () => {

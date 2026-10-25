@@ -68,6 +68,22 @@ const wordingProblems = (where, text) => {
 // The fenced ```text blocks of listings/README.md: what the founder pastes into a form.
 const pasteBlocks = () => [...read("listings/README.md").matchAll(/^```text\n([\s\S]*?)^```$/gm)].map((m) => m[1]);
 
+// #3266: the phrases a tool's own description has retired (test/retired-tool-phrases.json, which
+// /pulse/mcp's check, marketing-site/lib/mcpToolClaims.test.ts, reads too). The wording check above
+// bars claims the package never makes; this bars a claim one tool's description made and dropped.
+// "public exploit code" passed every check here in the Anthropic use-case block after cve_intel's
+// description dropped it in #3039: the barred-claims list does not hold it, and nothing compared a
+// paste block with what the descriptions say now. A paste block is not one tool's, so every
+// retired phrase is read in every surface.
+const RETIRED = JSON.parse(read("test/retired-tool-phrases.json")).tools;
+const flatLower = (t) => t.replace(/\s+/g, " ").toLowerCase();
+const retiredPhraseProblems = (where, text) =>
+  Object.entries(RETIRED).flatMap(([tool, entries]) =>
+    entries
+      .filter((e) => flatLower(text).includes(flatLower(e.phrase)))
+      .map((e) => `${where}: "${e.phrase}", a claim ${tool}'s description retired (${e.retired_by}; it now says "${e.description_says}")`),
+  );
+
 // A top-level or nested scalar from the flat server.yaml draft, without a YAML dependency.
 const yamlScalar = (text, key) => {
   const m = text.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, "m"));
@@ -248,6 +264,21 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
   }
 });
 
+// Every listing surface a count or a claim can sit on, as [where, text] (#2845, #3266): the paste
+// blocks, the public repo's About description, the MCPB manifest's descriptions and the Docker drafts.
+const listingSurfaces = () => {
+  const manifest = JSON.parse(read("listings/mcpb/manifest.json"));
+  return [
+    ...pasteBlocks().map((b, i) => [`listings/README.md paste block ${i + 1}`, b]),
+    ["github-repo-settings.json description", JSON.parse(read("listings/github-repo-settings.json")).description],
+    ["manifest.json description", manifest.description],
+    ["manifest.json long_description", manifest.long_description],
+    ["docker/server.yaml description", yamlScalar(read("listings/docker/server.yaml"), "description")],
+    ["docker/remote/server.yaml description", yamlScalar(read("listings/docker/remote/server.yaml"), "description")],
+    ["docker/remote/readme.md", read("listings/docker/remote/readme.md")],
+  ];
+};
+
 // #2845: every count of tools or prompts that a listing surface states, the paste blocks of
 // listings/README.md (what the founder pastes into a directory's form), the public repo's About
 // description (github-repo-settings.json), the MCPB manifest's descriptions and the Docker drafts,
@@ -286,18 +317,7 @@ describe("listing counts equal tools/list and prompts/list (#2845)", { skip: SKI
   });
   after(() => client?.close());
   // Every surface a count can sit on, as [where, text].
-  const surfaces = () => {
-    const manifest = JSON.parse(read("listings/mcpb/manifest.json"));
-    return [
-      ...pasteBlocks().map((b, i) => [`listings/README.md paste block ${i + 1}`, b]),
-      ["github-repo-settings.json description", JSON.parse(read("listings/github-repo-settings.json")).description],
-      ["manifest.json description", manifest.description],
-      ["manifest.json long_description", manifest.long_description],
-      ["docker/server.yaml description", yamlScalar(read("listings/docker/server.yaml"), "description")],
-      ["docker/remote/server.yaml description", yamlScalar(read("listings/docker/remote/server.yaml"), "description")],
-      ["docker/remote/readme.md", read("listings/docker/remote/readme.md")],
-    ];
-  };
+  const surfaces = listingSurfaces;
   const problems = (list) => {
     const all = list.map(([where, text]) => countProblems(where, text, toolNames, promptCount));
     return { out: all.flatMap((r) => r.out), stated: all.reduce((s, r) => s + r.stated, 0) };
@@ -322,6 +342,64 @@ describe("listing counts equal tools/list and prompts/list (#2845)", { skip: SKI
     assert.ok(problems(mutate(long[0], (t) => t.replace(/ cve_remediation \([^)]*\),/, ""))).out.some((p) => p.includes("without cve_remediation")));
     assert.ok(problems([["c", "It serves 16 tools and four prompts."]]).out.some((p) => p.includes('"four prompts"')));
     assert.ok(problems([["c", "Tools (14, all read-only): a, b."]]).out.some((p) => p.includes('"Tools (14"')));
+  });
+});
+
+// #3266: a claim a tool's description retired stays out of every listing surface. The Anthropic
+// use-case block kept cve_intel's "public exploit code" after #3039 took it out of the description
+// on 2026-10-11, and the barred-claims check above passed it. The block as submitted on
+// 2026-10-05 is kept in listings/README.md as a record (a plain fence, not a paste block): the
+// founder's rule is that the in-review submission is not edited, so the corrected block carries a
+// note not to paste it until that review completes.
+const SUBMITTED_USE_CASES = /^Use cases as submitted on 2026-10-05\b[\s\S]*?^```\n([\s\S]*?)^```$/m;
+const HOLD_NOTE = "Do not paste until the 2026-10-05 submission's review completes (founder's rule); the submitted copy said 'public exploit code', which cve_intel no longer claims.";
+describe("#3266: no listing surface carries a phrase a tool's description has retired", { skip: SKIP }, () => {
+  let client, tools;
+  before(async () => {
+    client = new StdioMcpClient({ ...serverCommand(), env: { ...process.env, ECHELONGRAPH_API_BASE: "http://127.0.0.1:9" }, stderr: "ignore" });
+    await client.open(MODERN);
+    ({ tools } = await client.listTools());
+  });
+  after(() => client?.close());
+
+  it("every listing surface is free of every retired phrase", () => {
+    assert.deepEqual(listingSurfaces().flatMap(([where, text]) => retiredPhraseProblems(where, text)), []);
+  });
+
+  it("each retired phrase names a tool the server lists, whose description does not make the claim again", () => {
+    const entries = Object.entries(RETIRED);
+    assert.ok(entries.length > 0, "test/retired-tool-phrases.json lists no tool: re-aim this check");
+    for (const [tool, list] of entries) {
+      const t = tools.find((x) => x.name === tool);
+      assert.ok(t, `test/retired-tool-phrases.json names ${tool}, which tools/list does not list`);
+      assert.ok(Array.isArray(list) && list.length > 0, `${tool}: no phrase listed`);
+      for (const e of list) {
+        assert.ok(e.phrase && e.retired_by && e.description_says && e.why, `${tool}: an entry needs phrase, retired_by, description_says and why: ${JSON.stringify(e)}`);
+        assert.ok(!flatLower(t.description).includes(flatLower(e.phrase)), `${tool}'s description says "${e.phrase}" again: it is not retired, so take it off test/retired-tool-phrases.json (and back onto the pages that dropped it) or out of the description`);
+        assert.ok(flatLower(t.description).includes(flatLower(e.description_says)), `${tool}'s description no longer says "${e.description_says}": re-read what it says now and update the entry`);
+      }
+    }
+  });
+
+  it("control: the use-case block as submitted on 2026-10-05 fails on \"public exploit code\", which the barred-claims check passes", () => {
+    const m = read("listings/README.md").match(SUBMITTED_USE_CASES);
+    assert.ok(m, "listings/README.md no longer keeps the use-case block as submitted on 2026-10-05: re-aim this control");
+    const submitted = m[1];
+    assert.ok(retiredPhraseProblems("submitted use cases", submitted).some((p) => p.startsWith('submitted use cases: "public exploit code", a claim cve_intel\'s description retired')));
+    // The blind spot #3266 closes: nothing else here reads the phrase.
+    assert.deepEqual(wordingProblems("submitted use cases", submitted), []);
+    // The record is not a paste block, so the check of every surface does not read it.
+    assert.ok(!pasteBlocks().some((b) => b === submitted), "the submitted record is a ```text block: the founder would paste it");
+    // The phrase is found however the text is wrapped or capitalised.
+    assert.ok(retiredPhraseProblems("c", "Read its weakness,\n  Public Exploit\tCode and more.").length === 1);
+    assert.deepEqual(retiredPhraseProblems("c", "Read its weakness (CWE), exploit code and detection checks."), []);
+  });
+
+  it("while the Anthropic submission is in review, the corrected use-case block carries the founder's hold note and the submitted copy is kept", () => {
+    const text = read("listings/README.md");
+    if (!/\| Anthropic connector directory \| \*\*submitted 2026-10-05, in review\*\*/.test(text)) return;
+    assert.ok(text.includes(`Use cases:\n\n${HOLD_NOTE}\n\n\`\`\`text\n`), "the Use cases paste block has lost the hold note above it while the 2026-10-05 submission is in review");
+    assert.ok(SUBMITTED_USE_CASES.test(text), "the use-case block as submitted on 2026-10-05 is gone while its review is open");
   });
 });
 
@@ -352,5 +430,108 @@ describe("listings/README.md is not spliced", { skip: SKIP }, () => {
     const lines = read("listings/README.md").split("\n");
     const bad = lines.map((l, i) => [i + 1, l]).filter(([, l]) => /[a-z]\*\*[A-Z]/.test(l) || /\.\)[A-Za-z]/.test(l));
     assert.deepEqual(bad, [], `spliced lines in listings/README.md: ${bad.map(([n, l]) => `${n}: ${l}`).join(" | ")}`);
+  });
+});
+
+// The tracker says what it records (#2723's reviews of 2026-10-09 and 2026-10-10). Its opening line
+// said "Nothing here has been submitted." for two weeks above a table of four submissions; the mcp.so
+// row said "no" without the issue that was filed, chatmcp/mcpso#4699, so someone following it could
+// file a second one or pay the $39 form; and "Listing check" said the check was not wired after
+// deploy-all.sh ran it. deploy-all.sh is the EchelonGraph repo's, so that last check runs only there.
+const MCPSO_ISSUE = "chatmcp/mcpso#4699";
+function trackerProblems(text, deployAll) {
+  const out = [];
+  const rows = text.split("\n").filter((l) => l.startsWith("| "));
+  if (/Nothing here has been submitted/.test(text) && rows.some((r) => /\b(submitted|PR open|published|claimed)\b/.test(r)))
+    out.push('it says "Nothing here has been submitted." while its status table records submissions');
+  const mcpso = rows.find((r) => r.startsWith("| mcp.so |"));
+  if (!mcpso) out.push("its status table has no mcp.so row");
+  else if (!mcpso.startsWith("| mcp.so | yes") && !mcpso.includes(MCPSO_ISSUE)) out.push(`its mcp.so row does not cite ${MCPSO_ISSUE}, the submission it waits on: ${mcpso.slice(0, 80)}`);
+  if (deployAll?.includes("scripts/check-mcp-listings.mjs")) {
+    if (/not wired; the parent decides/.test(text)) out.push('"Listing check" says the check is not wired, but deploy-all.sh runs it');
+    if (!text.includes("Deploy-time warning, wired")) out.push('"Listing check" does not say the deploy-time warning is wired');
+  }
+  return out;
+}
+
+describe("listings/README.md matches what it records", { skip: SKIP }, () => {
+  // Whether "Listing check" says the check is wired as deploy-all.sh has it is held beside deploy-all.sh, by
+  // infrastructure/cloudrun/deploy-all-listing-check.test.sh: this suite reads nothing outside mcp-server/ that its
+  // CI path filter does not name (scripts/check-ci-mcp-jobs.py), and a deploy-all.sh change does not run it.
+  it("no line says nothing was submitted, and the mcp.so row cites its issue", () => {
+    assert.deepEqual(trackerProblems(read("listings/README.md"), null), []);
+  });
+  it("control: the tracker as it stood on 2026-10-11 is caught on each count", () => {
+    const stale = [
+      "Prepared for #2723. Nothing here has been submitted. Every submission below is a step for the",
+      "| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` | proxies | x | founder |",
+      "| mcp.so | no | shows none | a GitHub issue (free) or a $39 form | founder (GitHub sign-in; $39 is a money decision) |",
+      "**How it would be wired (not wired; the parent decides):**",
+    ].join("\n");
+    const got = trackerProblems(stale, "bash scripts/check-mcp-listings.mjs");
+    assert.equal(got.length, 4, got.join(" | "));
+    assert.deepEqual(trackerProblems(stale.replace("Nothing here has been submitted. ", ""), null).length, 1, "the mcp.so row alone");
+  });
+});
+
+// 3.1.0's phase C review (#2723): "All five were done on 2026-10-04 and 2026-10-05" overstated
+// step 1: #2723's 2026-10-05 record has Glama's one-line description still to be set, if Glama's
+// own differs, and the Glama row's "What it takes" had dropped it. And three section statuses read
+// as current after the facts changed: Glama "not claimed" with v1.0.3 (claimed 2026-10-05, 2.7.0
+// since 2026-10-06), Smithery's display name "still echelongraph-mcp" (set by 2026-10-10), and
+// Docker's "Not run: task build" (run when #5429 moved to v3.0.2). Each is now a record "as of" its
+// date, and step 1 says what was left.
+const STALE_AS_CURRENT = [
+  [/All five were done on 2026-10-04 and 2026-10-05/, '"Who does what" says all five founder steps were done, though Glama\'s one-line description was still to be set'],
+  [/Its display name is still `echelongraph-mcp`/, "Smithery's section says its display name is still echelongraph-mcp"],
+  [/which still shows v1\.0\.3/, "Glama's steps say the release list still shows v1.0.3"],
+  [/^\*\*Status \(2026-10-04\):\*\* listed at https:\/\/glama\.ai/m, "Glama's 2026-10-04 status (not claimed, v1.0.3) reads as current: mark it as of its date"],
+  [/^\*\*Status \(2026-10-05\):\*\* listed at https:\/\/smithery\.ai/m, "Smithery's 2026-10-05 status reads as current: mark it as of its date"],
+  [/^- Not run: `task build/m, "Docker's \"Not run: task build\" reads as current: mark it as of 2026-10-04"],
+  // 3.1.0's phase D1 review: the corrections overstated in their turn. Smithery's step 4 (Verification) is not
+  // recorded as done; step 2's text was recorded as set on 2026-10-10, not by 2026-10-05; and the Docker build first
+  // ran on 2026-10-04 itself, so "not run as of" that date misreads.
+  [/until steps 3 and 4 below were done/, "Smithery's 2026-10-05 status says steps 3 and 4 were done, but step 4 (Verification) is not recorded as done"],
+  [/Steps 2 to 5 were done on 2026-10-04 and 2026-10-05/, '"Who does what" says step 2 was done by 2026-10-05, but its text was recorded as set on 2026-10-10'],
+  [/Not run as of 2026-10-04: `task build/, "Docker's \"Not run as of 2026-10-04\" misreads: the build first ran that day on the devbox"],
+];
+function datedRecordProblems(text) {
+  // A phrase can wrap across lines: each is read in the text as it is and with its whitespace folded.
+  const flat = text.replace(/\s+/g, " ");
+  const out = STALE_AS_CURRENT.filter(([re]) => re.test(text) || re.test(flat)).map(([, what]) => what);
+  const glama = text.split("\n").find((l) => l.startsWith("| Glama |"));
+  if (!glama) out.push("its status table has no Glama row");
+  else if (!/one-line description/.test(glama)) out.push("the Glama row's \"What it takes\" does not name the one-line description still to be set");
+  return out;
+}
+describe("listings/README.md's section statuses are dated records", { skip: SKIP }, () => {
+  it("no section status or step reads a superseded fact as current, and step 1 says what is left of Glama's", () => {
+    assert.deepEqual(datedRecordProblems(read("listings/README.md")), []);
+  });
+  it("control: 12b67f22's lines are each caught", () => {
+    const stale = [
+      "**Founder, signed in, in this order** (each section below has the exact text). All five were done",
+      "on 2026-10-04 and 2026-10-05; what is left of them is in the status table (Glama's Sync Server after",
+      "| Glama | yes, **claimed 2026-10-05** | 2.7.0 | Admin → Repository → Sync Server after each release | founder (GitHub sign-in) |",
+      "**Status (2026-10-05):** listed at https://smithery.ai/servers/echelongraph/echelongraph-mcp , published by the",
+      "read `echelongraph-mcp` 2.6.4 with 14 tools and 4 prompts. Its display name is still `echelongraph-mcp`, with an",
+      "- Not run: `task build -- --tools echelongraph` (the sandbox has no Docker daemon and no Task). It",
+      "**Status (2026-10-04):** listed at https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp ,",
+      "   Glama to refresh the release list, which still shows v1.0.3.",
+    ].join("\n");
+    const got = datedRecordProblems(stale);
+    assert.equal(got.length, 7, got.join(" | "));
+  });
+  it("control: 355bcca4's corrections, each overstating in its turn, are caught", () => {
+    const stale = [
+      "| Glama | yes, **claimed 2026-10-05** | 2.7.0 | the one-line description, then Sync Server after each release | founder |",
+      "**Founder, signed in, in this order** (each section below has the exact text). Steps 2 to 5 were",
+      "done on 2026-10-04 and 2026-10-05, and step 1 in part: Glama's listing was claimed on 2026-10-05 and",
+      "2.6.4 with 14 tools and 4 prompts. Its display name was then `echelongraph-mcp`, with an empty description,",
+      "until steps 3 and 4 below were done (recorded as done on 2026-10-10). The listing check's row has been",
+      "- Not run as of 2026-10-04: `task build -- --tools echelongraph` (that sandbox had no Docker daemon",
+    ].join("\n");
+    const got = datedRecordProblems(stale);
+    assert.equal(got.length, 3, got.join(" | "));
   });
 });

@@ -2,7 +2,8 @@
 
 Part of the [README](../README.md), whose Tools table says what each tool answers. This page says,
 field by field, how `cve_summary`, `get_cve`, `search_cves`, `cve_exposure` and `check_affected`
-read the API's answer; `exposure_radar` has [a page of its own](exposure-radar.md). It is kept out
+read the API's answer, and how `check_sbom` and `scan_manifest` cut their rows past the
+structured result's budget; `exposure_radar` has [a page of its own](exposure-radar.md). It is kept out
 of the README because npm keeps only the first 65,536 characters of a package's README, and the
 package ships it in `docs/`. Exposure counts are derived from Shodan data. Shodan data is owned by
 Shodan, which holds its copyright (© Shodan).
@@ -33,6 +34,15 @@ carries `poller`. A `poller` field the answer sends in a JSON type other than th
 outputSchema describes is left out and named in the note, and a `poller` that is neither a JSON
 object nor null is left out whole; `summary` is relayed either way, so a change to that diagnostic
 block never withholds the counts.
+
+`nvd_poll` is when the fleet of API instances last completed an NVD poll: `last_completed_at` (the
+end of the last window fetched and stored without an error), with `scope` `fleet` and the poll's
+`interval`. The API leaves it out when that time is unknown, and never puts the answering
+instance's counters in its place. It is the result's `freshness` (`freshness.nvd_poll`, its time as
+`last_run_at`) where `last_completed_at` is a real RFC 3339 time at most 5 minutes after this
+server's clock and `scope` is `fleet`. Otherwise `freshness` is `null`, and the note says whether
+the answer carries no `nvd_poll` or one without such a time. `poller.last_poll_at` is never the
+feed's freshness.
 
 The tool relays the API's JSON as it was sent, less a `poller` field left out as above. When
 `summary.none`, `summary.nvd_none` or `summary.rejected` is above zero, the note says what it
@@ -133,9 +143,14 @@ affected, by one of two lookup paths:
   criteria name that product with a version range that includes the version. It matches the
   token across vendors, so each match carries `cpe_vendor` and `vendor_unknown`: a match with
   `vendor_unknown` true is real, but its vendor is not verified to be yours.
-- **Registry path** — `ecosystem` (`npm`, `PyPI`, `Maven`, …), `package` and `version`. Each OSV
-  advisory record EchelonGraph holds for the package is decided against the version as
-  affected (a match), not affected (`not_affected_count`) or undetermined.
+- **Registry path** — `ecosystem` (`npm`, `PyPI`, `Maven`, …), `package` and `version`. Each CVE
+  named by the OSV advisory records EchelonGraph holds for the package is decided against the
+  version once, as affected (one match), not affected (`not_affected_count`) or undetermined
+  (`undetermined_count`). When OSV publishes one CVE for the package in several records (a GHSA
+  and a package repository's own advisory, say), EchelonGraph stores a row for each and decides
+  them together, so the two counts count CVEs, while `advisories_considered` counts the stored
+  rows: a CVE stored as two rows and cleared counts 2 in `advisories_considered` and 1 in
+  `not_affected_count`.
 
 Read `assessed` before `count`. `assessed` false means the lookup did not evaluate the
 component, and `not_assessed_reason` says why: `product_not_in_cpe_corpus`,
@@ -156,8 +171,19 @@ holding interval's fixed bound, moved past any overlapping interval that still h
 and `fixed_in_detail` then names the intervals it moved past (#3074). `fixed_in` is always above
 the version asked about. It is null where no such version is recorded (the walk reaches an
 interval that ends at `last_affected`, or has no end, with none beyond it) or no interval holds
-the version, and `fixed_in_reason` then says which: a null is not a finding that no fix exists. A CPE
-match carries no `fixed_in`, since the end of a CPE version range is not a fix. `check_sbom` and
+the version, and `fixed_in_reason` then says which: a null is not a finding that no fix exists. When
+a CVE is stored as several records (#3137), `fixed_in` is walked over the records that store
+intervals. A record of the same CVE that stores none withholds it only when that record's versions
+or recorded fix may hold it affected. A record that cannot decide it (no version data, a git commit
+range, or one recorded fix that `fixed_in` is at or past) does not, so the same lookup at
+`fixed_in` itself can come back undetermined rather than not affected. A CPE
+match carries no `fixed_in`, since the end of a CPE version range is not a fix. Once
+EchelonGraph's API serves it, a CPE match carries that end in its own field, as NVD states it,
+`cpe_version_end_excluding` (the first version the matched range no longer holds) or
+`cpe_version_end_including` (the last one it holds), absent where the range sets no end. Only the
+first cut level of the text and the first thinned level of `data` keep them, so a CPE answer cut
+past those levels, as typical ones are, carries them only with `full: true`. Another range of the
+same CVE, or a vendor backport, can sit past it, so it is never given as a fixed version. `check_sbom` and
 `scan_manifest` relay the same fields (`interval`, `fixed_in`, `fixed_in_reason` and
 `fixed_in_detail`) on each match.
 
@@ -165,3 +191,110 @@ match carries no `fixed_in`, since the end of a CPE version range is not a fix. 
 `X-EG-Ecosystem` and `X-EG-Package` request headers, never in the URL, so request logs and
 trace spans that record URLs do not hold what was looked up. The endpoint reads a CPE vendor
 from the URL only, so this tool takes none.
+
+## The client cut
+
+The server instructions and every tool description are held to 2,048 characters
+(`CLIENT_DESCRIPTION_CUT`, `src/requiredText.ts`), and the sentences a client must not lose sit in
+the first 2,048 characters of each (`REQUIRED_IN_HEAD`). 2,048 is the shortest cut a client is
+known to make:
+
+- Claude Code from v2.1.280 sends the model at most `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`
+  characters of each description and of the instructions. Its documented default was 2,048 when
+  this budget was set (read 2026-10-05). On 2026-10-18 its documentation gives 4,096, and 16,384
+  for a tool it loads through tool search, and v2.1.302's debug log shows a 4,096 cut ("Tool
+  "exposure_radar" description truncated from 11807 to 4096 chars", from 2.6.8's 11,807-character
+  description). Builds between v2.1.280 and that change still cut at 2,048.
+- Cursor cuts tool descriptions at 6,500 characters. VS Code and Claude Desktop document no cap.
+
+Text that fits 2,048 therefore reaches each of them whole. The tests hold every served text to it
+over stdio (`test/tools.test.mjs`) and over the hosted endpoint (`test/http.test.mjs`), and the
+synthetic writes an `mcp text cut` line per transport and era that an alert reads.
+
+## How `check_sbom` and `scan_manifest` cut their rows
+
+Past 30,000 characters of structured result, and without `full: true`, `check_sbom` and
+`scan_manifest` cut `data` in this order (the note's `DATA CUT` sentences say where each answer
+stopped):
+
+1. `scan_manifest`'s `not_checked`, then `not_sent_purls`, which is kept whole or not at all (the
+   note gives the positions of the purls not sent, so a second call can send them).
+2. Every row is thinned, every row kept: each keeps `index`, `purl`, `verdict`,
+   `not_assessed_reason`, `cve_ids`, `matched_package` and `matched_via` (and an upstream row's
+   `matched_version_from` and `purl_name`), and each match `cve_id`, `kev_listed`, `ransomware`,
+   `epss_score`, `effective_score`, `score_assessed`, `fixed_in` and `fixed_in_reason`: every field
+   a prompt reads from a match.
+3. Before any other row's matches are cut, the `not_affected` and `not_assessed` rows are cut to
+   `index`, `purl`, `verdict`, `not_assessed_reason` and `cve_ids`, and leave, the `not_affected`
+   ones first, as many as must for every other row to keep all its matches. `data.summary` counts
+   every verdict, and the note says how many left (#3269).
+4. Where the other rows' matches must be capped even with all of those rows gone, those rows stay
+   instead, cut so, while every other row fits at its floor: its matches used in ransomware or
+   KEV-listed, and 10 more (#3269's review). Each row's matches are capped at one number, the most
+   that fit, never under 10, and a row whose floor is above that number keeps its floor. A row
+   with more keeps the matches chosen used in ransomware first, then its other KEV-listed ones,
+   then those of highest `effective_score`, listed in the API's order, and carries
+   `matches_truncated`: its total, the number returned, and the KEV-listed and ransomware CVE IDs
+   and `fixed_in` versions of all its matches (#3270). Only where even the floor does not fit with
+   every one of those rows do they leave, as many as must for it to.
+5. Each match is cut to the fields of step 2 less `fixed_in_reason`, still capped as step 4 says:
+   every level that keeps matches keeps every field `workload_triage` ranks by. A null `fixed_in`
+   there without its `fixed_in_reason` is a reason cut for size, and `sbom_review` never calls it
+   no fix: it checks the purl again with `full: true`, or reads the fix from `cve_remediation` or
+   `get_cve`. Kept here, the reason cost the 201-purl probe a row (43 to 42).
+6. Where even that does not fit with all of those rows gone, no row's matches are cut below its
+   floor (#3269's second review): the other rows leave instead, whole, at step 5's level and
+   their floor. The rows kept are chosen those with a KEV-listed or ransomware match first, then
+   the others, each in input order, each one that fits beside those chosen before it, so a row
+   too large to fit beside them leaves and the rows after it can stay. The note names the
+   `affected` and `undetermined` rows that left by `index`, those with a KEV-listed or ransomware
+   match first and apart from the others (the first 100 indices or runs of them in all), and
+   `check_sbom`'s note says how to check them again (#3269's third review): "Re-check these K
+   purls in this order, in calls of 7, 5, 8, 8 and 16, then of at most 17: each such call keeps
+   every row in data." Each of the first five sizes is the most of the rows left, in that order,
+   that the cut's own measure counts as fitting at their floor with `FIRST_FIT_SLACK` (600
+   characters) held back, so a lower bound: a real call of them often keeps more. The last is the
+   most such that any that many of the rest in a row count so. Each is counted for those rows, as
+   the cut would cut such a call, with this call's note longer by what such a call's note names of
+   them (its affected components). A call of fewer of them in a row keeps every row too. A row whose floor alone is
+   past the budget goes in a call of its own. Where not even one row fits at its floor (one row
+   whose KEV-listed matches alone are past the budget), the row chosen first stays alone with the
+   most of its matches that fit, chosen as in step 4, and the note says so; where not one match
+   fits beside it, with none.
+7. Only where no row but the `not_affected` and `not_assessed` ones has a match is each row cut
+   further, to `index`, `purl`, `verdict`, `not_assessed_reason` and `cve_ids`, before rows leave.
+
+Once the cut is settled, the rows kept take back detail in input order while room is left, and
+then the rows steps 3 and 4 sent out come back, cut as step 3 says, as many as the room left
+holds, where every other row stayed.
+
+When rows leave `data`, the note names a page size N: "A call of the first N of these purls, or
+of fewer, keeps every row in data; a call of other purls says in its own note what it leaves
+out." (`scan_manifest`: a call whose files hold the first N of these purls.) N is counted for this
+answer's own rows, as the cut above would cut a call of them, so it can be larger or smaller than
+the number of rows this answer keeps; it is not a page size for the rest of the purls, whose rows
+can be larger: round 2's "To read every row in data, check N or fewer purls per call" read as
+one, and calls of the purls in chunks of N lost rows in 55% of such mixes (#3269's second review).
+Nor is it a size for checking the rows left out again, which are the heavy ones: calls of N of
+them dropped 504 of 2,540 rows on realistic Debian images (#3269's third review); the re-check
+sentence of step 6 gives those sizes. `workload_triage` (its step 6) and `sbom_review` (its step
+1) check again the `affected` and `undetermined` rows the note names, those with a KEV-listed or
+ransomware match first, in calls of the sizes that sentence gives, at most 5 calls, and report the
+rest as unchecked; `workload_triage` takes its counts from `data.summary`, which counts every row
+whatever the cut. `scan_manifest` names its rows left out the same way and gives no re-check sizes:
+its rows are checked again through `check_sbom`, by purls its note does not give.
+
+The first text block, past its own 30,000 characters, keeps the same priority: before any row is
+cut to `index`, `purl`, `verdict`, `not_assessed_reason` and `cve_ids`, the `not_affected` and
+`not_assessed` rows are cut to that and leave the text, as many as must, so an affected row keeps
+its matches while room allows; only where that cannot fit is every row cut so, and then rows
+leave, those two kinds first, and the rows with a KEV-listed or ransomware match last, as `data`
+keeps them (#3284: through 3.1.0's review the text left the rest from the end in input order, so a
+KEV-bearing row `data` kept could leave the text unnamed; on 36 realistic Debian 12 images a client
+reading the text alone missed 95 of 413 such rows). The note names by `index` each of those that
+still leaves ("Of the rows left out of it, 30 have a KEV-listed or ransomware match: at index 511
+to 513, …"). The note says what those rows leave out, and that each string in
+them keeps its first 100 characters where one is longer. The text names no page size (through
+#3269's review it said "check N or fewer purls per call", N the rows it kept, and a call of the
+first N purls kept fewer in 34 of 89 mixes); its note says how many rows it leaves out, of which
+kinds, and that `structuredContent.data` holds them.

@@ -124,6 +124,14 @@ const Match = z.looseObject({
   fixed_in_detail: opt(z.string()).describe(
     "Set when fixed_in is not the fixed bound of the interval that holds this version: the overlapping intervals of the same record it moved past, which still hold that bound.",
   ),
+  // #2834: CPE matches only (core-backend cve/cpematch.go ProductMatch): the matched NVD range's
+  // own end, as NVD states it, in its own field and never as fixed_in.
+  cpe_version_end_excluding: opt(z.string()).describe(
+    "CPE match: NVD's versionEndExcluding for the range that matched, the first version that range no longer holds. Not a fix, and never fixed_in: another range of the same CVE, or a vendor backport, can sit past it. Absent on a registry match, and where the range sets no such end.",
+  ),
+  cpe_version_end_including: opt(z.string()).describe(
+    "CPE match: NVD's versionEndIncluding for the range that matched, the last version that range holds. Not a fix, and never fixed_in. Absent on a registry match, and where the range sets no such end.",
+  ),
 });
 const Undetermined = z.looseObject({
   cve_id: opt(z.string()),
@@ -153,7 +161,7 @@ const DATA = z.looseObject({
   excluded: z.unknown().optional(),
   undetermined_count: opt(z.number()),
   undetermined: opt(z.array(Undetermined)),
-  not_affected_count: opt(z.number()).describe("Advisories decided as not affecting this version."),
+  not_affected_count: opt(z.number()).describe("CVEs decided as not affecting this version: on the registry path one per CVE, however many of its advisory records are stored (advisories_considered counts those)."),
   degraded: opt(z.boolean()).describe("true: the lookup ran out of time."),
   undecidable_excluded_count: opt(z.number()),
   undecided_candidate_count: opt(z.number()),
@@ -229,13 +237,15 @@ function matchesNote(matches: unknown[]): string {
 // that no affected interval of the match's record holds (core-backend cve/pkgmatch_fixedin.go):
 // the fixed bound of the interval that holds this version, moved past any overlapping interval
 // that still holds it (#3074), so it is per match: an advisory with several branches (Log4Shell:
-// 2.3.1, 2.12.2, 2.15.0) names the one for this version.
+// 2.3.1, 2.12.2, 2.15.0) names the one for this version. The record is every advisory row stored for
+// the CVE and the package (#3137), so a null can come from another row of the CVE: no fix recorded,
+// or one that row may still hold affected, or versions that could not be ordered.
 function fixedInNote(matches: unknown[]): string {
   const registry = matches.filter((m) => m !== null && typeof m === "object" && "fixed_in" in (m as object));
   if (registry.length === 0) return "";
   const fixed = registry.filter((m) => typeof field(m, "fixed_in") === "string").length;
   const none = registry.length - fixed;
-  return ` fixed_in, the first version above this one that no affected interval of the advisory holds: ${fixed === registry.length ? `set on every match` : `set on ${fixed} of ${registry.length} matches`}${none > 0 ? `; null on ${none}, where the advisory records no fix for this version (fixed_in_reason says why)` : ""}.`;
+  return ` fixed_in, the first version above this one that no affected interval of the advisory holds: ${fixed === registry.length ? `set on every match` : `set on ${fixed} of ${registry.length} matches`}${none > 0 ? `; null on ${none}, where the CVE's advisory records show no version above this one to be unaffected (fixed_in_reason says why; it is not a finding that no fix exists)` : ""}.`;
 }
 
 // #2783: a production match is about 2,100 characters as pretty JSON, most of it the CVE's
@@ -276,7 +286,7 @@ const CHECK_AFFECTED_TEXT: TextCut = {
       keep: [
         "cve_id", "severity", "cvss_v3_score", "description", "kev_listed", "ransomware", "epss_score", "echelongraph_score", "echelongraph_severity", "effective_score", "effective_severity",
         "score_assessed", "score_unassessed_reason", "matched_criteria", "cpe_vendor", "vendor_unknown", "match_confidence", "match_reason", "version_evidence", "fixed_in",
-        "fixed_in_reason", "fixed_in_detail",
+        "fixed_in_reason", "fixed_in_detail", "cpe_version_end_excluding", "cpe_version_end_including",
       ],
       clip: 200,
     },
@@ -303,6 +313,12 @@ const CHECK_AFFECTED_TEXT: TextCut = {
     { list: "excluded", keep: ["cve_id", "reason"], clip: 100, cap: 10 },
     { list: "undetermined", keep: ["cve_id", "reason"], clip: 100, cap: 10 },
   ],
+  // #2899: the matches that leave the text near the cap are the last in rank order (effective_score),
+  // so through 3.0.2 a KEV-listed or ransomware match ranked low was in structuredContent.data only,
+  // and the note said how many left, not that one of them is exploited. Now every match whose
+  // kev_listed or ransomware is true stays while any other match is in the text, and should one
+  // still have to leave (every other already out), the note names each by its cve_id.
+  leaveOutLast: { fields: ["kev_listed", "ransomware"], name: "cve_id", why: "known exploited, per CISA-KEV" },
   whole: `${GET_CVE_WHOLE}, and cve_intel a CVE's affected packages and fixed versions.`,
 };
 
@@ -325,6 +341,7 @@ const CHECK_AFFECTED_DATA: DataCut = {
         [
           "cve_id", "severity", "cvss_v3_score", "kev_listed", "ransomware", "epss_score", "echelongraph_score", "echelongraph_severity", "effective_score", "effective_severity", "score_assessed",
           "score_unassessed_reason", "matched_criteria", "cpe_vendor", "vendor_unknown", "match_confidence", "version_evidence", "fixed_in", "fixed_in_reason",
+          "cpe_version_end_excluding", "cpe_version_end_including",
         ],
         ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason"],
       ],
@@ -382,10 +399,10 @@ async function checkAffected(kit: CheckAffectedKit, a: Args): Promise<ToolResult
       note += ` AFFECTED: ${plural(count, "CVE matches", "CVEs match")} this version${capped === true ? " (capped: true, so the list stopped at its cap and more may match)" : ""}.${matchesNote(matches)}${fixedInNote(matches)}`;
     } else if (count === 0 && assessed === true) {
       note += ` 0 CVEs match this version, a measured result (we looked and found nothing that matches), not a lookup failure.`;
-      if (lookup === "registry" && notAffected !== null) note += ` ${plural(notAffected, "advisory was", "advisories were")} decided not to affect this version (not_affected_count), and only those are cleared.`;
+      if (lookup === "registry" && notAffected !== null) note += ` ${plural(notAffected, "CVE was", "CVEs were")} decided not to affect this version (not_affected_count, one per CVE however many of its advisory records are stored), and only those are cleared.`;
     }
     if (undetermined !== null && undetermined > 0) {
-      note += ` UNDETERMINED: ${plural(undetermined, "advisory names", "advisories name")} this package with a version range that could not be decided at this version (undetermined_count, listed in undetermined): report ${undetermined === 1 ? "it" : "them"} as undetermined, never as safe.`;
+      note += ` UNDETERMINED: ${plural(undetermined, "CVE", "CVEs")} with advisories naming this package could not be decided at this version (undetermined_count, one per CVE, listed in undetermined): report ${undetermined === 1 ? "it" : "them"} as undetermined, never as safe.`;
     }
     if (candidatesCapped === true && reason !== "candidate_window_truncated") note += " candidates_capped is true: not every candidate CVE was loaded, so more CVEs may match than the answer lists.";
     if (excluded !== null && excluded > 0) note += ` ${plural(excluded, "candidate CVE was", "candidate CVEs were")} suppressed by the vendor or platform gate (excluded_count, listed in excluded).`;

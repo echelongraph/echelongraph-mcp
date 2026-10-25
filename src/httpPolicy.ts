@@ -243,14 +243,21 @@ export class FixedWindowLimiter {
 // 2,000-purl ~2 MB body +62 MB; one 5.47 MB body +76 MB; two 5.47 MB bodies at once 209 MB in
 // all, also with V8's old space held to 64 MB: ~59 MB of 256 MiB left for everything else, so
 // not a third. So a body past 64 KiB must hold one of DEFAULT_LARGE_BODY_SLOTS (2) slots per
-// instance for as long as it is read, waits for a place (below) and is served; with none free it
-// is answered 503 with Retry-After, never queued. The per-client limit still counts each large
+// instance for as long as it is read, waits for a place (below) and is served. With none free it
+// waits up to DEFAULT_LARGE_BODY_WAIT_MS for one, at most DEFAULT_LARGE_BODY_WAITERS at once, and
+// is answered 503 with Retry-After when its wait runs out, or at once when that many already wait
+// (#2775, decided 2026-10-18: behind the Google Frontend a client's close reaches the container too
+// late to free the slot of the call it abandoned, so its retry must be able to wait out that call;
+// a waiter holds at most the 64 KiB read before it needed the slot, so two of them change nothing
+// of the memory bound). The per-client limit still counts each large
 // request as one request, before its body is read. That budget measured the two bodies alone, not
 // the requests served beside them, which were enough to kill the instance (#2773): "Requests in
 // flight per instance" below bounds those and records what each costs.
 export const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 export const DEFAULT_MAX_SBOM_BODY_BYTES = 6 * 1024 * 1024;
 export const DEFAULT_LARGE_BODY_SLOTS = 2;
+export const DEFAULT_LARGE_BODY_WAIT_MS = 15_000;
+export const DEFAULT_LARGE_BODY_WAITERS = 2;
 /** The requests whose body may pass DEFAULT_MAX_BODY_BYTES: JSON-RPC method → the tools or prompts it may name.
  *  #2835: scan_manifest takes a project's lockfiles as text, up to the same 5,000,000 characters as
  *  check_sbom's document (scan_manifest.ts MAX_MANIFEST_CHARS), so it is admitted the same way. */
@@ -276,20 +283,59 @@ export function isLargeBodyTarget(facts: BodyFacts): boolean {
   return name !== undefined && targetsOf(facts.rpc_method).includes(name);
 }
 
-/** A counting semaphore that never waits: tryAcquire answers at once. */
+/** A counting semaphore: tryAcquire answers at once; acquire (#2775) waits up to waitMs for a slot, first come first
+ *  served, with at most maxWaiting waiting (past that it answers false at once). release hands a freed slot straight
+ *  to the first waiter. */
 export class Slots {
   private used = 0;
-  constructor(readonly max: number) {}
+  private readonly queue: Array<() => void> = [];
+  constructor(
+    readonly max: number,
+    readonly maxWaiting = 0,
+  ) {}
   tryAcquire(): boolean {
     if (this.used >= this.max) return false;
     this.used++;
     return true;
   }
+  /** Whether acquire(waitMs) would wait for a slot, rather than answer at once (one is free, or none may wait). */
+  wouldWait(waitMs: number): boolean {
+    return this.used >= this.max && waitMs > 0 && this.queue.length < this.maxWaiting;
+  }
+  acquire(waitMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (this.tryAcquire()) return Promise.resolve(true);
+    if (signal?.aborted || waitMs <= 0 || this.queue.length >= this.maxWaiting) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      // admit is called by release(), which hands its slot straight over (used is unchanged).
+      const admit = (): void => {
+        done();
+        resolve(true);
+      };
+      const giveUp = (): void => {
+        const i = this.queue.indexOf(admit);
+        if (i >= 0) this.queue.splice(i, 1);
+        done();
+        resolve(false);
+      };
+      const timer = setTimeout(giveUp, waitMs);
+      const done = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", giveUp);
+      };
+      signal?.addEventListener("abort", giveUp, { once: true });
+      this.queue.push(admit);
+    });
+  }
   release(): void {
-    if (this.used > 0) this.used--;
+    const next = this.queue.shift();
+    if (next) next();
+    else if (this.used > 0) this.used--;
   }
   get inUse(): number {
     return this.used;
+  }
+  get waiting(): number {
+    return this.queue.length;
   }
 }
 
@@ -454,14 +500,59 @@ export function isListenStream(facts: BodyFacts, body: Buffer, headers: Standard
 // The access line carries no body, no query string, no argument and no client address: only
 // values from small closed sets or shapes, so nothing a client types reaches the log (#1983).
 
-const RPC_METHOD = /^[a-z][a-z/_]{0,39}$/i;
+// #2923's review (nit): rpc_method is a label from a closed set, never the client's own string. It is the method
+// when MCP defines it for a client to send, and "(other)" for any other string, however well shaped: the SDK's
+// ClientRequestSchema and ClientNotificationSchema (@modelcontextprotocol/core 2.1.0, which the server bundles), and
+// the 2025-11-25 task methods the SDK defines beside them. test/http-policy.test.mjs reads both unions from the
+// SDK, so an SDK upgrade that adds a client method fails there until it is listed here.
+export const MCP_METHODS: ReadonlySet<string> = new Set([
+  // ClientRequestSchema
+  "ping",
+  "initialize",
+  "server/discover",
+  "completion/complete",
+  "logging/setLevel",
+  "prompts/get",
+  "prompts/list",
+  "resources/list",
+  "resources/templates/list",
+  "resources/read",
+  "resources/subscribe",
+  "resources/unsubscribe",
+  "subscriptions/listen",
+  "tools/call",
+  "tools/list",
+  // ClientNotificationSchema
+  "notifications/cancelled",
+  "notifications/progress",
+  "notifications/initialized",
+  "notifications/roots/list_changed",
+  // The task methods (GetTaskRequestSchema, GetTaskPayloadRequestSchema, ListTasksRequestSchema,
+  // CancelTaskRequestSchema, TaskStatusNotificationSchema)
+  "tasks/get",
+  "tasks/result",
+  "tasks/list",
+  "tasks/cancel",
+  "notifications/tasks/status",
+]);
+// 3.1.0's final review (low): the access line's `method` is a label from a closed set too. Over HTTP/1.1 Node's parser
+// admits only its own method list, but over h2c (production's protocol) the :method pseudo-header is whatever token the
+// client sent, and it reached the log verbatim ("JOHN.DOE-SSN-123-45-6789", an 8,000-character token). It is one of
+// these nine, as sent (case and all), else "(other)".
+export const HTTP_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"]);
+
+/** The request's HTTP method when it is one of HTTP_METHODS, else "(other)"; never the client's own token. */
+export function httpMethodLabel(m: string | undefined): string {
+  return m !== undefined && HTTP_METHODS.has(m) ? m : "(other)";
+}
+
 const TOOL_NAME = /^[a-z][a-z0-9_]{0,39}$/;
 const REVISION = /^\d{4}-\d{2}-\d{2}$/;
 const UA_FAMILY = /^[A-Za-z0-9._-]{1,40}$/;
 
 export type BodyFacts = { rpc_method: string; tool?: string; prompt?: string };
 
-/** The JSON-RPC method and, for tools/call, the tool name (for prompts/get, the prompt name), shape-checked; never anything else from the body. */
+/** The JSON-RPC method, one of MCP_METHODS or "(other)", and, for tools/call, the tool name (for prompts/get, the prompt name), shape-checked; never anything else from the body. */
 export function bodyFacts(body: Buffer | undefined): BodyFacts {
   if (!body || body.length === 0) return { rpc_method: "(none)" };
   let parsed: unknown;
@@ -474,11 +565,21 @@ export function bodyFacts(body: Buffer | undefined): BodyFacts {
   if (parsed === null || typeof parsed !== "object") return { rpc_method: "(other)" };
   const m = (parsed as { method?: unknown }).method;
   if (typeof m !== "string") return { rpc_method: "(response)" };
-  if (!RPC_METHOD.test(m)) return { rpc_method: "(other)" };
+  if (!MCP_METHODS.has(m)) return { rpc_method: "(other)" };
   if (m !== "tools/call" && m !== "prompts/get") return { rpc_method: m };
   const name = (parsed as { params?: { name?: unknown } }).params?.name;
   const shaped = typeof name === "string" && TOOL_NAME.test(name) ? name : "(other)";
   return m === "tools/call" ? { rpc_method: m, tool: shaped } : { rpc_method: m, prompt: shaped };
+}
+
+/** HTTP/2's error codes (RFC 9113 §7): NO_ERROR (0x0) to HTTP_1_1_REQUIRED (0xd). */
+export const H2_MAX_ERROR_CODE = 0xd;
+/** An HTTP/2 stream's reset code as mcp_client_gone logs it: a code RFC 9113 defines, else "(other)"; null when the
+ *  request came over HTTP/1.1 or its stream was not reset. Under direct h2c the code is the client's own RST_STREAM,
+ *  any 32-bit number it chose (3.1.0's final panel: a reset with 0x7a71c0de logged rst_code 2054275294). */
+export function rstCodeLabel(code: number | null | undefined): number | "(other)" | null {
+  if (code === undefined || code === null) return null;
+  return Number.isInteger(code) && code >= 0 && code <= H2_MAX_ERROR_CODE ? code : "(other)";
 }
 
 export function revisionLabel(v: string | undefined): string {
@@ -536,10 +637,36 @@ const HANDLER_ERROR_CLASSES: ReadonlyArray<readonly [string, string]> = [
   ["Failed to send", "send_failed"],
 ];
 
+// #2923, 2026-10-18: a live read since 3.0.2 found one line with error_class "other" and error_code -32022. The
+// bundled SDK (@modelcontextprotocol/server 2.1.0) raises -32022 on these paths:
+//   - createMcpHandler serveModern: an UnsupportedProtocolVersionError, "Unsupported protocol version: <requested>"
+//     (index.mjs:1334), for a modern request naming an unsupported revision or none ("unknown");
+//   - modernOnlyStrictRejection: a ProtocolError, "Unsupported protocol version: the request did not name a protocol
+//     version" (src-D-y6h4N7.mjs:5313), reported as "Rejected 2025-era request on a modern-only endpoint" (a
+//     legacy: "reject" endpoint only; this one serves the 2025 era);
+//   - Protocol._onrequest's era mismatch, answered with -32022 (src-D-y6h4N7.mjs:6467) and reported as "Era mismatch";
+//   - ProtocolError.fromError (src-D-y6h4N7.mjs:3614): a peer's -32022 error response, rebuilt with the PEER's own
+//     message, which no prefix can know. That is how "other" with -32022 is reached.
+// So a message no prefix knows is classified by its JSON-RPC code where the code names a cause (HANDLER_ERROR_CODES):
+// -32022 is unsupported_protocol_version whatever its message, and "other" with -32022 cannot occur.
+const HANDLER_ERROR_CODES: ReadonlyMap<number, string> = new Map([
+  [-32022, "unsupported_protocol_version"],
+  [-32021, "missing_client_capability"],
+  [-32020, "header_mismatch"],
+  [-32700, "parse_error"],
+  [-32600, "invalid_request"],
+  [-32601, "method_not_found"],
+  [-32602, "invalid_params"],
+]);
+
 export function handlerErrorClass(e: unknown): string {
-  const message = e instanceof Error ? e.message : "";
+  // A thrown non-Error (an object with a message) is read as an Error would be; its message is still never logged.
+  const m = (e as { message?: unknown } | null)?.message;
+  const message = typeof m === "string" ? m : "";
   const hit = HANDLER_ERROR_CLASSES.find(([prefix]) => message.startsWith(prefix));
-  return hit ? hit[1] : "other";
+  if (hit) return hit[1];
+  const code = protocolErrorCode(e);
+  return (code !== undefined && HANDLER_ERROR_CODES.get(code)) || "other";
 }
 
 export function protocolErrorCode(e: unknown): number | undefined {
@@ -555,4 +682,64 @@ export function classifyHandlerError(e: unknown): { error_name: string; error_cl
   const code = protocolErrorCode(e);
   if (code !== undefined) out.error_code = code;
   return out;
+}
+
+// ── The upstream-failure line (#2948) ──
+//
+// mcp_upstream_failed (http.ts) names the API call that failed by its ROUTE, never its path: a
+// lookup's path holds what was looked up (a CVE or CWE ID, a vendor and an advisory ID), and a
+// search's query string its filters (#1983). The route is one of the fixed templates below, each
+// core-backend's own name for it (the route field of its http_request line, router.go), so the two
+// lines can be read side by side: Fiber names a group's "/" with its trailing slash, so the two list
+// routes end in "/" although the server calls them without it (#2948's review; marketing-site
+// lib/privacyMcpEndpoint.test.ts holds every template to router.go). A path is matched whole, its query string dropped first, and only
+// the template that matched comes out: "(other)" when none does, "(none)" when no path is at hand
+// (an answer checked() refused against the tool's schema names none). The tool name (shape-checked)
+// and the JSON-RPC method (MCP_METHODS or "(other)") on the line are bodyFacts' own; the class,
+// status and duration are the server's. Nothing a client typed reaches it.
+const API_ROUTES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^\/api\/v1\/public\/cves\/?$/, "/api/v1/public/cves/"],
+  [/^\/api\/v1\/public\/cves\/summary$/, "/api/v1/public/cves/summary"],
+  [/^\/api\/v1\/public\/cves\/match$/, "/api/v1/public/cves/match"],
+  [/^\/api\/v1\/public\/cves\/match\/batch$/, "/api/v1/public/cves/match/batch"],
+  [/^\/api\/v1\/public\/cves\/[^/]+$/, "/api/v1/public/cves/:id"],
+  [/^\/api\/v1\/public\/cves\/[^/]+\/enrichment$/, "/api/v1/public/cves/:id/enrichment"],
+  [/^\/api\/v1\/public\/cves\/[^/]+\/epss-history$/, "/api/v1/public/cves/:id/epss-history"],
+  [/^\/api\/v1\/public\/cves\/[^/]+\/remediation$/, "/api/v1/public/cves/:id/remediation"],
+  [/^\/api\/v1\/public\/cwes\/[^/]+$/, "/api/v1/public/cwes/:cwe_id"],
+  [/^\/api\/v1\/public\/kev\/recent$/, "/api/v1/public/kev/recent"],
+  [/^\/api\/v1\/public\/kev-exposure\/stats$/, "/api/v1/public/kev-exposure/stats"],
+  [/^\/api\/v1\/public\/kev-exposure\/cve\/[^/]+$/, "/api/v1/public/kev-exposure/cve/:id"],
+  [/^\/api\/v1\/public\/exposed-databases\/stats$/, "/api/v1/public/exposed-databases/stats"],
+  [/^\/api\/v1\/public\/leaked-credentials\/stats$/, "/api/v1/public/leaked-credentials/stats"],
+  [/^\/api\/v1\/public\/shadow-ai-radar\/stats$/, "/api/v1/public/shadow-ai-radar/stats"],
+  [/^\/api\/v1\/public\/ai-exposure\/stats$/, "/api/v1/public/ai-exposure/stats"],
+  [/^\/api\/v1\/public\/vendor-advisories\/?$/, "/api/v1/public/vendor-advisories/"],
+  [/^\/api\/v1\/public\/vendor-advisories\/coverage$/, "/api/v1/public/vendor-advisories/coverage"],
+  [/^\/api\/v1\/public\/vendor-advisories\/by-cve\/[^/]+$/, "/api/v1/public/vendor-advisories/by-cve/:cve_id"],
+  [/^\/api\/v1\/public\/vendor-advisories\/[^/]+\/[^/]+$/, "/api/v1/public/vendor-advisories/:vendor/:advisory_id"],
+];
+
+/** Every route template the upstream-failure line can name, in match order. */
+export const API_ROUTE_TEMPLATES: readonly string[] = API_ROUTES.map(([, route]) => route);
+
+/** The route template of an API path (its query string dropped): one of API_ROUTE_TEMPLATES, "(other)", or "(none)" for no path. */
+export function apiRoute(path: string | null): string {
+  if (path === null) return "(none)";
+  const p = path.split(/[?#]/, 1)[0];
+  const hit = API_ROUTES.find(([re]) => re.test(p));
+  return hit ? hit[1] : "(other)";
+}
+
+// The severity. The API's own answer about the input is no outage: a 400 (it refused the input,
+// which the tool reports as invalid_input) or a 404 on a route that names a record (no such CVE,
+// CWE or advisory: the tool reports no record). Those are INFO, so the log metric, which counts
+// WARNING, and its alert see only failures. A 404 on a route that names none (a list, the summary, a
+// radar's stats) means the route is gone, and is WARNING with every other failure.
+// #2948's review: output_schema (the tool's own outputSchema refused the answer) is this server's fault, not an
+// upstream failure: ERROR, which the upstream metric (WARNING lines) does not count.
+export function upstreamSeverity(failureClass: string, status: number | null, route: string): "INFO" | "WARNING" | "ERROR" {
+  if (failureClass === "output_schema") return "ERROR";
+  if (failureClass === "http" && (status === 400 || (status === 404 && route.includes("/:")))) return "INFO";
+  return "WARNING";
 }

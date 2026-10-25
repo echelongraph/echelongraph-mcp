@@ -161,11 +161,54 @@ const WORKLOAD_MUST = [
   ["purls, not the document", /Pass purls, not the SBOM document/],
   ["no workload data in arguments", /put no workload, namespace, image or registry name, no credential and no exposure label into any argument of any EchelonGraph tool/],
   ["the call", /Call check_sbom with purls set to/],
+  // #3269's review: at the leanest cut matches_truncated keeps total and returned alone.
+  ["matches_truncated without its lists", /where it has total and returned and neither list \(the leanest cut\), nothing in the answer names the row's KEV-listed or ransomware CVEs, and the get_cve calls below read them/],
+  // #3269's second review: the counts are data.summary's (a call per image where several images'
+  // rows were left out); a left-out not_affected or not_assessed row is not checked again; only the
+  // affected and undetermined rows the DATA CUT names by index are, in calls of those purls alone,
+  // and past a few calls the rest are reported unchecked. Round 2 checked every purl left out
+  // again at the page size: 332 calls on a realistic Debian SBOM.
+  ["the counts from data.summary", /6\. data\.summary counts every row of a call whatever the cut: affected, not_affected, undetermined and not_assessed, and not_assessed_by_reason\. Take each image's counts from it, and a workload's from its images'/],
+  ["a call per image for its counts", /and the call carried several images' purls, call check_sbom with one image's purls per call for its counts\./],
+  ["clean rows left out are not checked again", /A row left out whose verdict is not_affected or not_assessed is not checked again: data\.summary counts it, and it holds no CVE;/],
+  // #3269's third review: the note names the rows with a KEV-listed or ransomware match first and
+  // apart, and step 6 checks them again first (round 3 checked them in index order, and on old
+  // unpatched images 119 of 255 were in view after its 5 calls); its calls are of the sizes the
+  // note's re-check sentence gives, counted for those rows, never of the page sentence's N, which
+  // holds for the first N purls sent (round 3's calls of N dropped 504 of 2,540 rows).
+  ["the affected rows named by index, KEV-bearing first", /The affected and undetermined rows that left data are the ones checked again: the DATA CUT sentence names them by index, those with a KEV-listed or ransomware match first and apart \("affected or undetermined rows: the K with a KEV-listed or ransomware match at index …; the other K at index …"\), each index the position, from 0, of a purl among the distinct purls you sent, in the order you sent them\./],
+  ["re-checked KEV-bearing first", /Call check_sbom again with those purls alone as purls, in the order the note names them, so those with a KEV-listed or ransomware match first,/],
+  ["the re-check sentence's sizes, not N", /in calls of the sizes its re-check sentence gives \("Re-check these K purls in this order, in calls of …"; a purl it sends to a call of its own goes alone\), not of the page sentence's N, which holds for the first N purls you sent and not for these;/],
+  ["a few calls, then report", /If that takes more than 5 calls, stop after 5 and report the affected and undetermined rows not checked again, by purl where the note names them and by count, as unchecked, never as clean\./],
+  // #3269's fourth review: the first text block leaves rows out from the end, in input order, while
+  // data keeps the KEV-bearing rows first, and workload_triage had no step for the rows the text
+  // left out, so a client reading the text alone lost them, KEV-bearing ones among them, unsaid.
+  ["the rows left out of the first text block, in structuredContent.data or counted as unchecked", /Where the note says that rows of data\.results are left out of the first text block, those rows are in structuredContent\.data, .*?: where you can read it, read them there as in steps 5 and 6\. Where you read the text alone, list the rows it carries, say how many affected rows it leaves out \(data\.summary\.affected, less those listed\), and give the undetermined and not_assessed rows it leaves out as data\.summary\.undetermined and data\.summary\.not_assessed \(by not_assessed_by_reason\), less those listed, as unchecked, never as clean\./],
+  // 3.1.0's phase B review: where a DATA CUT applies too (the large-image case the line is for),
+  // the rows the text leaves out need not be in default data: the note names those that left data
+  // by index, for step 6's re-check. 700 affected purls, KEV-listed late: 458 of the 514 rows the
+  // text left out were not in default data, 44 of them with a KEV-listed match.
+  ["the rows a DATA CUT leaves out of data too, named by index for step 6", /those rows are in structuredContent\.data, or, where a DATA CUT leaves rows out of data too, named there by index for step 6's re-check \(the note says data holds them whole with full: true\): where you can read it, read them there as in steps 5 and 6\./],
+  // #3284: the first text block keeps the KEV-bearing rows last to leave and names by index each
+  // of them it leaves out; read from the text alone, those are listed as KEV-bearing, unchecked.
+  ["the KEV-bearing rows the text leaves out, named by index", /The rows with a KEV-listed or ransomware match leave the text last, and the note names by index each of them it leaves out \("Of the rows left out of it, K have a KEV-listed or ransomware match: at index …"\): list those as KEV-bearing rows not checked, by index, never as clean\./],
 ];
 const WORKLOAD_MUST_NOT = [
   ["an EchelonGraph exposure tool as a ranking input", /\b(cve_exposure|exposure_radar)\b/],
+  // #3269's second review: round 2's step 6, every purl left out checked again at the page size.
+  ["every purl left out checked again", /the purls you sent that no row you read carries/],
+  ["round 2's page sentence", /check N or fewer purls per call/],
+  // #3269's third review: round 3's step 6 sized its calls by the page sentence.
+  ["round 3's re-check size", /at most as many per call as the note's page sentence names/],
   ["the SBOM document passed to check_sbom", /check_sbom with sbom set to/],
   ["the match_reason prose", /match_reason/],
+  // 3.1.0's phase B review: d42d4697's line said the rows the text leaves out are in data, read as in step 5.
+  ["the rows left out of the text said to be in data, whatever the DATA CUT", /those rows are in structuredContent\.data: where you can read it, read them there as in step 5\./],
+  // 3.1.0's phase B review: data.summary's counts include the undetermined and not_assessed rows
+  // the text still lists, so "as data.summary's counts" over-counts the rows it leaves out.
+  ["the undetermined and not_assessed rows left out counted as data.summary's whole counts", /rows it leaves out as data\.summary's counts/],
+  // #3284: d42d4697's line said a row the text leaves out can hold a KEV-listed CVE it does not name.
+  ["a KEV-bearing row left out of the text unnamed", /a row it leaves out can hold a KEV-listed CVE that the text does not name/],
 ];
 // Where check_sbom's routing sentence ends in a description: past the cut, or Infinity where it is
 // not there, fails the head check.
@@ -182,6 +225,77 @@ const headroomProblems = (tools) =>
   tools
     .filter((t) => (t.description ?? "").length > CLIENT_CUT - DESCRIPTION_HEADROOM)
     .map((t) => `${t.name}: ${t.description.length} characters, ${CLIENT_CUT - t.description.length} under the ${CLIENT_CUT}-character cut; the floor is ${DESCRIPTION_HEADROOM}`);
+// #3269's fourth review: what sbom_review's steps 1 and 3 must say, as a list of what they lack.
+function sbomRound4Problems(own) {
+  const lines = own.split("\n");
+  const step1 = lines.find((l) => l.startsWith("1. ")) ?? "";
+  const step3 = lines.find((l) => l.startsWith("3. ")) ?? "";
+  const out = [];
+  if (!/metadata\.component, the document's own subject, is not counted, so its purl, such as an image's pkg:oci, has no index/.test(step1)) out.push("step 1 counts metadata.component or does not say");
+  if (!/check your mapping against the rows data keeps, each of which carries its index and its purl, before you send these calls/.test(step1)) out.push("step 1 does not check its mapping against data's rows");
+  // 3.1.0's phase B review: fromSPDX counts every package with a purl, an SPDX document's root
+  // (image) package among them; "the document's own subject is not counted", read as general,
+  // had an agent skip that package's index.
+  if (!/has no index; an SPDX document has no metadata\.component: each of its packages with a purl is counted, its root package among them;/.test(step1)) out.push("step 1 does not say an SPDX document's root package is counted");
+  if (!/If there are more than 30 distinct CVEs, do this for 30 of them, chosen KEV-listed first: those whose check_sbom matches carry kev_listed true, or that a row's matches_truncated\.kev_listed_cve_ids names, then the others by highest epss_score/.test(step3)) out.push("step 3 does not take the KEV-listed CVEs first past 30");
+  if (!/each read for this choice from the check_sbom matches where the text or data keeps them, not from a get_cve call per CVE/.test(step3)) out.push("step 3 does not read the choice from the matches");
+  return out;
+}
+// 3.1.0's phase B review: sbom_review's text-alone line gives the undetermined and not_assessed
+// components the first text block leaves out as data.summary's counts less those listed, as it
+// gives the affected count; data.summary counts every row, the listed ones among them.
+function sbomTextAloneProblems(own) {
+  const line = own.split("\n").find((l) => l.startsWith("Where the note says that rows of data.results are left out of the first text block")) ?? "";
+  const out = [];
+  if (!/say how many affected components the text leaves out \(data\.summary\.affected, less those listed\), and give the undetermined and not_assessed components it leaves out as data\.summary\.undetermined and data\.summary\.not_assessed \(by not_assessed_by_reason\), less those listed, as not checked, never as clean\./.test(line)) out.push("the undetermined and not_assessed components left out are not counted less those listed");
+  if (/components it leaves out as data\.summary's counts/.test(line)) out.push("the undetermined and not_assessed components left out are counted as data.summary's whole counts");
+  // #3284: the KEV-bearing rows the first text block leaves out, named by index in its note.
+  if (!/The components with a KEV-listed or ransomware match leave the text last, and the note names by index each of them it leaves out \("Of the rows left out of it, K have a KEV-listed or ransomware match: at index …"\): list those as KEV-bearing components not checked, by index, never as clean\./.test(line)) out.push("the KEV-bearing components the text leaves out are not listed by index");
+  return out;
+}
+// #3285 (3.1.0's lane P): sbom_review's fixed_branches rule, applied as it reads to cve_intel's
+// affected_packages rows: the row for the component's ecosystem and package, or, where the rule
+// says a Packagist or Maven component's rows of its package_name, bare and with a repository URL
+// after ":", are one row, all of those rows; then the walk from the range that holds the installed
+// version. Versions here are plain release numbers. CVE-2025-48013's rows for
+// drupal/quick_node_block (Packagist:https://packages.drupal.org/8 [0, 2.0.1), Packagist [0, 2.0.0))
+// are the fixture's.
+const DRUPAL_ROWS = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "cve_remediation-CVE-2025-48013.json"), "utf8")).data.fixed_branches;
+const SBOM_ONE_ROW = /for a Packagist or Maven component, the rows of its package_name under that ecosystem, bare and with a repository URL after ":", such as Packagist and Packagist:https:\/\/packages\.drupal\.org\/8, are one row, their ranges all together, as cve_intel's note says; rows of two releases, such as Debian:11 and Debian:12, never are/;
+const TRIAGE_ONE_PACKAGE = /cve_intel rows of one package_name under Packagist or Maven, bare or with a repository URL after ":" \(such as Packagist and Packagist:https:\/\/packages\.drupal\.org\/8\), are one package, as cve_intel's note says: give their ranges together, and never a range's fixed that another of those ranges still holds as a fix, since that version is still affected; rows of two releases \(Debian:11 and Debian:12\) are two packages\./;
+const relNum = (a, b) => {
+  const [pa, pb] = [a, b].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0) ? -1 : 1;
+  return 0;
+};
+const rangeHolds = (r, v) => relNum(v, r.introduced) >= 0 && (r.fixed ? relNum(v, r.fixed) < 0 : r.last_affected ? relNum(v, r.last_affected) <= 0 : true);
+function fixBySbomRule(rule, rows, { ecosystem, pkg, installed }) {
+  const base = (e) => e.toLowerCase().split(":")[0];
+  const grouped = SBOM_ONE_ROW.test(rule) && ["packagist", "maven"].includes(base(ecosystem));
+  const mine = rows.filter((e) => e.package_name.toLowerCase() === pkg.toLowerCase() && (grouped ? base(e.ecosystem) === base(ecosystem) : e.ecosystem === ecosystem));
+  const ranges = mine.flatMap((e) => e.fixed_branches ?? []);
+  let r = ranges.find((x) => rangeHolds(x, installed));
+  const walked = new Set();
+  while (r) {
+    if (!r.fixed || walked.has(r)) return null;
+    walked.add(r);
+    const v = r.fixed;
+    r = ranges.find((x) => rangeHolds(x, v));
+    if (!r) return v;
+  }
+  return null;
+}
+// #3283: what the kubernetes exposure rule must say (the kubernetes text, and the text with no
+// source, which describes all three): a container hostPort and a Service's externalIPs reach a
+// pod as the paths it listed do, and "not exposed" requires having read both. Through 3.0.2 it
+// named neither, so a hostPort DaemonSet or a ClusterIP Service with externalIPs read not exposed.
+const K8S_EXPOSURE_MUST = [
+  ["a container hostPort as exposed", /a container of the pod sets a hostPort \(spec\.containers\[\]\.ports\[\]\.hostPort, which binds that port on the node's IP\)/],
+  ["a Service's externalIPs as exposed", /a Service that selects it lists externalIPs \(spec\.externalIPs, on which nodes accept its traffic whatever its type, ClusterIP included\)/],
+  ["the listed paths as exposed", /exposed means a Service of type LoadBalancer or NodePort selects the pod, .*an Ingress \(or a Gateway route\) sends traffic to a Service that selects it, .*or the pod sets hostNetwork: true;/],
+  ["not exposed only after reading the ports and the externalIPs", /not exposed means you read the pod's spec, its containers' ports among it, and the cluster's Services, with their type and externalIPs, Ingresses and routes, and none of these holds/],
+];
+const k8sExposureProblems = (t) => K8S_EXPOSURE_MUST.filter(([, re]) => !re.test(t)).map(([what]) => `lacks ${what}`);
 function workloadProblems(t) {
   return [
     ...WORKLOAD_MUST.filter(([, re]) => !re.test(t)).map(([what]) => `lacks ${what}`),
@@ -260,6 +374,16 @@ for (const era of ERAS) {
       assert.match(t, /each with cve_id CVE-2024-3400:/);
       for (const line of ["Exploited?", "Likelihood:", "Reachable?", "Patch:", "Deadline:", "Decision:"]) assert.ok(t.includes(`- ${line}`), line);
     });
+    // #3221: a github_checker row (a GitHub repository named or described as a checker or scanner,
+    // #3040) is a detection check like a Nuclei template; the Exploited? line's "GitHub or vendor
+    // proofs of concept" alone read as taking one in.
+    it("#3221: triage_cve reads a github_checker row as a detection check, given apart from exploit code", async () => {
+      const t = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: "CVE-2020-35489" } }));
+      const step = t.split("\n").find((l) => l.startsWith("2. cve_intel:"));
+      assert.ok(step.includes("a github_checker row a GitHub repository named or described as a checker or scanner: each checks whether a system is affected and is not necessarily exploit code"), step);
+      const exploited = t.split("\n").find((l) => l.startsWith("- Exploited?"));
+      assert.ok(exploited.endsWith("give Nuclei detection templates and GitHub checker repositories apart, as detection checks, never as exploit code."), exploited);
+    });
     it("kev_weekly_brief defaults days to 7 and tells the model to compute since from it", async () => {
       const t = textOf(await client.getPrompt({ name: "kev_weekly_brief", arguments: {} }));
       assert.match(t, /in the last 7 days/);
@@ -280,6 +404,103 @@ for (const era of ERAS) {
       assert.match(t, /1\. CISA-KEV listed \(kev_listed true\) first; 2\. then EPSS score, highest first; 3\. then echelongraph_score/);
     });
 
+    // #3269's third review (F3): sbom_review had no step for the affected and undetermined rows a
+    // DATA CUT leaves out of data, so a cut SBOM's fix list lacked them unsaid (Claude Code reads
+    // structuredContent, not the text). Step 1 now checks them again by index, those with a
+    // KEV-listed or ransomware match first, in calls of the sizes the note's re-check sentence
+    // gives, at most 5 calls, and lists the rest as unchecked. Control: 9f97d479's text lacks it.
+    it("#3269's third review: sbom_review checks again the affected rows a DATA CUT leaves out, KEV-bearing first, at the note's re-check sizes, in at most 5 calls, and lists the rest as unchecked", async () => {
+      const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      const step = own.split("\n").find((l) => l.startsWith("1. "));
+      assert.ok(
+        step.includes(
+          "Where a DATA CUT sentence names affected or undetermined rows of results left out of data, by index, those with a KEV-listed or ransomware match first and apart, call check_sbom again with purls set to the purls at those indices (each index the position, from 0, of a purl among the document's distinct purls, counted in the order check_sbom reads them: components or packages in document order, each component's nested components right after it, each purl at its first place; metadata.component, the document's own subject, is not counted, so its purl, such as an image's pkg:oci, has no index; an SPDX document has no metadata.component: each of its packages with a purl is counted, its root package among them; check your mapping against the rows data keeps, each of which carries its index and its purl, before you send these calls), in the order the note names them and in calls of the sizes its re-check sentence gives (\"Re-check these K purls in this order, in calls of …\"; a purl it sends to a call of its own goes alone), at most 5 such calls, and review their rows with the others; list the affected and undetermined rows not checked again, by index and by count, as unchecked, never as clean.",
+        ),
+        step,
+      );
+      assert.doesNotMatch(own, /page sentence's N|A call of the first N of these purls/, "sbom_review sizes its re-check calls by the page sentence");
+    });
+
+    // #3269's fourth review: step 1's index rule said nothing of metadata.component, which
+    // check_sbom does not read (fromCycloneDX walks doc.components alone; Trivy's metadata.component
+    // carries the image's pkg:oci purl), so an agent counting it sent every re-check purl one off;
+    // and past 30 distinct CVEs step 3 looked up any 30, so the KEV-listed ones could be among those
+    // not looked up, although the matches say which they are. Controls: 0bb8b2d3's steps 1 and 3.
+    it("#3269's fourth review: sbom_review's index rule leaves metadata.component out (an SPDX document's root package is counted) and checks the mapping against data's rows; past 30 CVEs it looks up the KEV-listed ones first, read from the matches", async () => {
+      const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      assert.deepEqual(sbomRound4Problems(own), []);
+      const step1 = own.split("\n").find((l) => l.startsWith("1. "));
+      const step3 = own.split("\n").find((l) => l.startsWith("3. "));
+      const old1 = step1.replace("; metadata.component, the document's own subject, is not counted, so its purl, such as an image's pkg:oci, has no index; an SPDX document has no metadata.component: each of its packages with a purl is counted, its root package among them; check your mapping against the rows data keeps, each of which carries its index and its purl, before you send these calls)", ")");
+      // 3.1.0's phase B review: d42d4697's step 1, without the SPDX clause.
+      const spdx = "; an SPDX document has no metadata.component: each of its packages with a purl is counted, its root package among them";
+      const oldB = step1.replace(spdx, "");
+      const old3 = step3.replace(/, chosen KEV-listed first: .*?; list the rest as not looked up, unranked\./, " and list the rest as not looked up, unranked.");
+      assert.notEqual(old1, step1, "re-aim this control: step 1 no longer holds the clause");
+      assert.notEqual(old3, step3, "re-aim this control: step 3 no longer holds the clause");
+      assert.ok(old3.endsWith("If there are more than 30 distinct CVEs, do this for 30 of them and list the rest as not looked up, unranked."), old3);
+      assert.notEqual(oldB, step1, "re-aim this control: step 1 no longer holds the SPDX clause");
+      assert.deepEqual(sbomRound4Problems(own.replace(step1, old1)), ["step 1 counts metadata.component or does not say", "step 1 does not check its mapping against data's rows", "step 1 does not say an SPDX document's root package is counted"]);
+      assert.deepEqual(sbomRound4Problems(own.replace(step1, oldB)), ["step 1 does not say an SPDX document's root package is counted"]);
+      assert.deepEqual(sbomRound4Problems(own.replace(step3, old3)), ["step 3 does not take the KEV-listed CVEs first past 30", "step 3 does not read the choice from the matches"]);
+    });
+
+    // 3.1.0's phase B review: read from the text alone, sbom_review gave the undetermined and
+    // not_assessed components the text leaves out as data.summary's counts, which count the ones
+    // the text still lists too. Control: d42d4697's line.
+    it("3.1.0's phase B review: sbom_review counts the undetermined and not_assessed components the first text block leaves out less those listed", async () => {
+      const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      assert.deepEqual(sbomTextAloneProblems(own), []);
+      const now = "as data.summary.undetermined and data.summary.not_assessed (by not_assessed_by_reason), less those listed, as not checked, never as clean.";
+      assert.ok(own.includes(now), "re-aim this control: sbom_review no longer holds the clause");
+      // #3284: without the sentence on the KEV-bearing components the text leaves out (d42d4697).
+      const kev = " The components with a KEV-listed or ransomware match leave the text last, and the note names by index each of them it leaves out (\"Of the rows left out of it, K have a KEV-listed or ransomware match: at index …\"): list those as KEV-bearing components not checked, by index, never as clean.";
+      assert.ok(own.includes(kev), "re-aim this control: sbom_review no longer holds the sentence");
+      assert.deepEqual(sbomTextAloneProblems(own.replace(kev, "")), ["the KEV-bearing components the text leaves out are not listed by index"]);
+      assert.deepEqual(sbomTextAloneProblems(own.replace(now, "as data.summary's counts, by not_assessed_reason, as not checked, never as clean.")), [
+        "the undetermined and not_assessed components left out are not counted less those listed",
+        "the undetermined and not_assessed components left out are counted as data.summary's whole counts",
+      ]);
+    });
+
+    // 3.1.0's phase B review: what step 1 says of the two formats is what check_sbom reads
+    // (check_sbom.ts fromCycloneDX, fromSPDX): CycloneDX's metadata.component has no index, and an
+    // SPDX document's root package, which carries the image's purl in an image SBOM, has one.
+    it("3.1.0's phase B review: sbom_review's index rule matches check_sbom's reading: metadata.component is not counted, an SPDX root package is", () => {
+      const image = "pkg:oci/app@sha256%3Aabc?repository_url=registry.example%2Fapp";
+      const libs = ["pkg:deb/debian/libc6@2.36-9?distro=debian-12", "pkg:npm/lodash@4.17.20"];
+      const cdx = SBOM_TOOLS.extract({ sbom: { bomFormat: "CycloneDX", specVersion: "1.5", metadata: { component: { type: "container", name: "app", purl: image } }, components: libs.map((purl, i) => ({ type: "library", name: `l${i}`, purl })) } });
+      assert.deepEqual(cdx.purls, libs);
+      const pkg = (id, purl) => ({ SPDXID: id, name: id, externalRefs: [{ referenceCategory: "PACKAGE-MANAGER", referenceType: "purl", referenceLocator: purl }] });
+      const spdx = SBOM_TOOLS.extract({ sbom: { spdxVersion: "SPDX-2.3", SPDXID: "SPDXRef-DOCUMENT", documentDescribes: ["SPDXRef-image"], packages: [pkg("SPDXRef-image", image), ...libs.map((p, i) => pkg(`SPDXRef-l${i}`, p))] } });
+      assert.deepEqual(spdx.purls, [image, ...libs], "the SPDX root package is counted, at index 0");
+    });
+
+    // #3285 follow-up (3.1.0's lane P): cve_intel lists a package once per stored ecosystem
+    // string, and sbom_review's rule took "the row for the component's ecosystem and package", so a
+    // Packagist drupal/quick_node_block 1.0.0 under CVE-2025-48013 got its Packagist row's 2.0.0,
+    // which the Packagist:https://packages.drupal.org/8 row still holds affected; the matcher reads
+    // both rows as one package and gives 2.0.1. triage_cve gave each row's ranges apart. Controls:
+    // d42d4697's rule gives 2.0.0, and its Patch line lacks the clause.
+    it("#3285: sbom_review's fix rule reads CVE-2025-48013's two Packagist rows as one: 1.0.0's fix is 2.0.1, not 2.0.0; triage_cve gives their ranges together", async () => {
+      const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom: SBOM } })).split("\nSBOM:\n")[0];
+      const rule = own.split("\n").find((l) => l.startsWith("For each line give the component"));
+      assert.match(rule, SBOM_ONE_ROW);
+      const component = { ecosystem: "Packagist", pkg: "drupal/quick_node_block", installed: "1.0.0" };
+      assert.equal(fixBySbomRule(rule, DRUPAL_ROWS, component), "2.0.1");
+      const old = rule.replace(/ \(for a Packagist or Maven component, .*? never are\)/, "");
+      assert.notEqual(old, rule, "re-aim this control: the rule no longer holds the clause");
+      assert.ok(old.includes("Where cve_intel's affected_packages row for the component's ecosystem and package carries fixed_branches, give the fixed of the range that holds the installed version:"), old);
+      assert.equal(fixBySbomRule(old, DRUPAL_ROWS, component), "2.0.0", "control: d42d4697's rule, row by row, gives the still-affected 2.0.0");
+      // A release suffix is never read so: Debian:12's own row alone.
+      const deb = [{ ecosystem: "Debian:11", package_name: "openssl", fixed_branches: [{ introduced: "0", fixed: "1.1.1" }] }, { ecosystem: "Debian:12", package_name: "openssl", fixed_branches: [{ introduced: "0", fixed: "3.0.1" }] }];
+      assert.equal(fixBySbomRule(rule, deb, { ecosystem: "Debian:12", pkg: "openssl", installed: "1.0.0" }), "3.0.1");
+      const triage = textOf(await client.getPrompt({ name: "triage_cve", arguments: { cve_id: "CVE-2025-48013" } }));
+      const patch = triage.split("\n").find((l) => l.startsWith("- Patch:"));
+      assert.match(patch, TRIAGE_ONE_PACKAGE);
+      assert.doesNotMatch(patch.replace(TRIAGE_ONE_PACKAGE, ""), TRIAGE_ONE_PACKAGE, "control: d42d4697's Patch line lacks the clause");
+    });
+
     it("#2834: am_i_affected's registry text reads each match's fixed_in, and its product text, whose CPE matches carry none, names none", async () => {
       const reg = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" } }));
       assert.match(reg, /For each match, give its fixed_in where it is a version: the first version above this one that no affected interval of the advisory holds\. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists\./);
@@ -294,8 +515,8 @@ for (const era of ERAS) {
       const rule = own.split("\n").find((l) => l.startsWith("For each line give the component"));
       const at = (re) => rule.search(re);
       // #3074: fixed_in is the first version above the installed one that no affected interval holds.
-      assert.ok(at(/Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component and write "no fix on record", which is not a finding that no fix exists\./) >= 0, rule);
-      assert.ok(at(/Where the text keeps no match for the component \(a cut text can keep its cve_ids alone\), or the match has no fixed_in field, the rest of this rule applies\./) >= 0, rule);
+      assert.ok(at(/Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\./) >= 0, rule);
+      assert.ok(at(/Where the text or data keeps no match for that CVE on the component \(a cut can keep a row's cve_ids alone, or fewer matches than cve_ids\), or the match has no fixed_in field, the rest of this rule applies\./) >= 0, rule);
       // fixed_in comes before cve_intel's values, and nothing reads match_reason.
       assert.ok(at(/carries fixed_in/) >= 0 && at(/carries fixed_in/) < at(/fixed_branches/), rule);
       assert.doesNotMatch(own, /match_reason|advisory interval \[A, B/, "sbom_review still reads a fixed version from match_reason's prose");
@@ -345,6 +566,8 @@ for (const era of ERAS) {
         for (const tool of ["cve_exposure", "exposure_radar"]) assert.ok(tools.has(tool) && !t.includes(tool), tool);
       }
       const k8s = textOf(await client.getPrompt({ name: "workload_triage", arguments: { source: "kubernetes" } }));
+      assert.deepEqual(k8sExposureProblems(k8s), [], "kubernetes");
+      assert.deepEqual(k8sExposureProblems(textOf(await client.getPrompt({ name: "workload_triage" }))), [], "no source");
       assert.match(k8s, /kubectl get pods -A -o json/);
       assert.match(k8s, /\.status\.containerStatuses\[\]\.imageID/);
       assert.match(k8s, /hostNetwork: true/);
@@ -423,6 +646,21 @@ for (const era of ERAS) {
         dataRow,
         "| data | On a success: the API's JSON (exposure_radar and cve_intel relay a labelled selection, and cve_summary leaves out a poller field of another JSON type, named in the note), its lists cut when data_truncated is true. |",
       );
+    });
+
+    // #2834 and #2836's last review (2026-10-11): the methodology said how check_affected and
+    // check_sbom measure, but not what a match carries for a fix, that a CPE range's end is not one,
+    // or that an upstream qualifier matches a binary package as its source package.
+    it("#2834/#2836: methodology says what fixed_in and a CPE range end are, and how an upstream purl is matched", async () => {
+      const t = (await client.readResource({ uri: "echelongraph://methodology" })).contents[0].text;
+      const line = (tool) => t.split("\n").find((l) => l.startsWith(`- ${tool}:`)) ?? "";
+      const affected = line("check_affected");
+      assert.match(affected, /A registry match carries fixed_in, [^.]*, or null with fixed_in_reason, which is not a finding that no fix exists\./, affected);
+      assert.match(affected, /A CPE match carries no fixed_in: the end of the NVD range it matched, cpe_version_end_excluding or cpe_version_end_including, is not a fix\./, affected);
+      const sbom = line("check_sbom");
+      assert.match(sbom, /Each match carries fixed_in, or null with fixed_in_reason/, sbom);
+      assert.match(sbom, /A deb, apk or alpine purl with an upstream qualifier \(upstream=name, or upstream=name@version\) is checked as the source package it names, which is how Debian and Alpine file advisories: its row says matched_via upstream, with that name as matched_package\./, sbom);
+      assert.match(sbom, /comes back not_assessed \(package_not_in_advisory_corpus\), never clean\./, sbom);
     });
 
     it("resources/read echelongraph://sources relays what the API reports, read at request time", async () => {
@@ -614,6 +852,69 @@ describe("#2846 controls: workload_triage's checker and check_sbom's routing hea
     assert.ok(workloadProblems(`${base}\nRank exposure by cve_exposure's exposed_hosts.`).includes("carries an EchelonGraph exposure tool as a ranking input"));
     assert.ok(workloadProblems(`${base}\nUse exposure_radar for the totals.`).includes("carries an EchelonGraph exposure tool as a ranking input"));
     assert.ok(workloadProblems(base.replace("Call check_sbom with purls set to", "Call check_sbom with sbom set to")).length >= 2);
+  });
+  // #3269's third review: round 3's step 6 checked the rows left out again in index order, at the
+  // page sentence's N; that text fails the checker.
+  it("round 3's step 6 (the rows left out in index order, the page sentence's N a call) fails it", () => {
+    const r3 =
+      'The affected and undetermined rows that left data are the ones checked again, and the DATA CUT sentence names them by index ("K affected or undetermined rows at index …"), each the position, from 0, of a purl among the distinct purls you sent, in the order you sent them. Call check_sbom again with those purls alone as purls, at most as many per call as the note\'s page sentence names ("A call of the first N of these purls"), and read their rows as in step 5;';
+    const got = base.replace(/The affected and undetermined rows that left data are the ones checked again: .*? read their rows as in step 5;/, r3);
+    assert.notEqual(got, base);
+    const p = workloadProblems(got);
+    for (const w of ["lacks the affected rows named by index, KEV-bearing first", "lacks re-checked KEV-bearing first", "lacks the re-check sentence's sizes, not N", "carries round 3's re-check size"]) assert.ok(p.includes(w), `${w}: ${JSON.stringify(p)}`);
+  });
+  // #3269's fourth review: 0bb8b2d3's text, which had no line for the rows the first text block
+  // leaves out, fails the checker.
+  it("the text without its line for the rows left out of the first text block (0bb8b2d3) fails it", () => {
+    const line = base.split("\n").find((l) => l.startsWith("Where the note says that rows of data.results are left out of the first text block"));
+    assert.ok(line, "re-aim this control: the text no longer holds the line");
+    const old = base.split("\n").filter((l) => l !== line).join("\n");
+    assert.deepEqual(workloadProblems(old), ["lacks the rows left out of the first text block, in structuredContent.data or counted as unchecked", "lacks the rows a DATA CUT leaves out of data too, named by index for step 6", "lacks the KEV-bearing rows the text leaves out, named by index"]);
+  });
+  // 3.1.0's phase B review: d42d4697's line, which said the rows the text leaves out are in
+  // structuredContent.data, read as in step 5, whatever the DATA CUT, fails the checker.
+  it("the line as d42d4697 had it (the rows the text leaves out are in data, read as in step 5) fails it", () => {
+    const now = "those rows are in structuredContent.data, or, where a DATA CUT leaves rows out of data too, named there by index for step 6's re-check (the note says data holds them whole with full: true): where you can read it, read them there as in steps 5 and 6.";
+    assert.ok(base.includes(now), "re-aim this control: the text no longer holds the clause");
+    const old = base.replace(now, "those rows are in structuredContent.data: where you can read it, read them there as in step 5.");
+    assert.deepEqual(workloadProblems(old), [
+      "lacks the rows left out of the first text block, in structuredContent.data or counted as unchecked",
+      "lacks the rows a DATA CUT leaves out of data too, named by index for step 6",
+      "carries the rows left out of the text said to be in data, whatever the DATA CUT",
+    ]);
+  });
+  // 3.1.0's phase B review: d42d4697's count of the undetermined and not_assessed rows the text
+  // leaves out, data.summary's whole counts, fails the checker.
+  it("the undetermined and not_assessed rows left out counted as data.summary's whole counts (d42d4697) fails it", () => {
+    const now = "as data.summary.undetermined and data.summary.not_assessed (by not_assessed_by_reason), less those listed, as unchecked, never as clean.";
+    assert.ok(base.includes(now), "re-aim this control: the text no longer holds the clause");
+    assert.deepEqual(workloadProblems(base.replace(now, "as data.summary's counts, by not_assessed_reason, as unchecked, never as clean.")), [
+      "lacks the rows left out of the first text block, in structuredContent.data or counted as unchecked",
+      "carries the undetermined and not_assessed rows left out counted as data.summary's whole counts",
+    ]);
+  });
+  // #3284: d42d4697's text-alone clause, a KEV-bearing row left out of the text unnamed, fails it.
+  it("the text-alone line as d42d4697 had it (a row left out can hold a KEV-listed CVE the text does not name) fails it", () => {
+    const kev = " The rows with a KEV-listed or ransomware match leave the text last, and the note names by index each of them it leaves out (\"Of the rows left out of it, K have a KEV-listed or ransomware match: at index …\"): list those as KEV-bearing rows not checked, by index, never as clean.";
+    assert.ok(base.includes(kev), "re-aim this control: the text no longer holds the sentence");
+    const old = base.replace(kev, "").replace("(data.summary.affected, less those listed)", "(data.summary.affected, less those listed; a row it leaves out can hold a KEV-listed CVE that the text does not name)");
+    assert.deepEqual(workloadProblems(old), ["lacks the rows left out of the first text block, in structuredContent.data or counted as unchecked", "lacks the KEV-bearing rows the text leaves out, named by index", "carries a KEV-bearing row left out of the text unnamed"]);
+  });
+  // #3283: the kubernetes rule without the hostPort clause, or without the externalIPs clause, or
+  // with d42d4697's "not exposed" (the pod's spec and the Services, nothing of their ports and
+  // externalIPs), fails the checker.
+  it("the kubernetes exposure rule without hostPort, without externalIPs, or with d42d4697's not-exposed clause fails it", () => {
+    assert.deepEqual(k8sExposureProblems(base), []);
+    const hostPort = ", a container of the pod sets a hostPort (spec.containers[].ports[].hostPort, which binds that port on the node's IP)";
+    const externalIPs = ", a Service that selects it lists externalIPs (spec.externalIPs, on which nodes accept its traffic whatever its type, ClusterIP included)";
+    const notExposed = "not exposed means you read the pod's spec, its containers' ports among it, and the cluster's Services, with their type and externalIPs, Ingresses and routes";
+    for (const x of [hostPort, externalIPs, notExposed]) assert.ok(base.includes(x), `re-aim this control: ${x}`);
+    assert.deepEqual(k8sExposureProblems(base.replace(hostPort, "")), ["lacks a container hostPort as exposed"]);
+    assert.deepEqual(k8sExposureProblems(base.replace(externalIPs, "")), ["lacks a Service's externalIPs as exposed"]);
+    assert.deepEqual(k8sExposureProblems(base.replace(notExposed, "not exposed means you read the pod's spec and the cluster's Services, Ingresses and routes")), ["lacks not exposed only after reading the ports and the externalIPs"]);
+    // d42d4697's rule whole: all three missing.
+    const old = base.replace(hostPort, "").replace(externalIPs, "").replace(notExposed, "not exposed means you read the pod's spec and the cluster's Services, Ingresses and routes");
+    assert.equal(k8sExposureProblems(old).length, 3);
   });
   it("the routing sentence moved past 2,048 characters is out of the head", () => {
     const r = SBOM_TOOLS.CHECK_SBOM_ROUTING;

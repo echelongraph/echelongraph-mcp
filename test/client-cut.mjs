@@ -1,6 +1,6 @@
 // #2842: what a client that cuts MCP text at CLIENT_DESCRIPTION_CUT characters still hands the model.
-// Claude Code cuts each tool description and the server instructions at 2,048 characters
-// (src/requiredText.ts cites where), so the server holds every one of them to that length whole,
+// Claude Code from v2.1.280 cut each tool description and the server instructions at 2,048
+// characters, the shortest cut a client is known to make (src/requiredText.ts cites where), so the server holds every one of them to that length whole,
 // and the sentences src/requiredText.ts names to the head of each.
 //
 // cutProblems reads what tools/list and the opening exchange serve, and names each way they break:

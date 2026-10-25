@@ -63,12 +63,17 @@ const READ_ORDER =
 const NOT_CHECKED_NOTE =
   "not_checked entries are not clean: each names a dependency this tool did not send to the API (its version is a range or unresolved, or it comes from a local path, a VCS checkout or a line this tool does not read), so no verdict was looked up for it.";
 
+// 3.1.0's phase A review: fix C's wording tied "50 seconds a call" to the 429 wait alone, while
+// match_batch.ts's TIME_BUDGET_MS bounds the whole call: a slow batch is cut off at its end
+// (time_budget), and a 429 refused (rate_limited) or a batch failed (request_failed) after the first
+// also answers partial, the rest in not_sent_purls. 3.0.2's "within 50 seconds" said so; the
+// description says it again, the room from shorter wording elsewhere (every claim kept).
 export const SCAN_MANIFEST_TITLE = "Check a lockfile against the advisory corpus";
 export const SCAN_MANIFEST_DESCRIPTION =
-  "Check a project's lockfile or pinned manifest against EchelonGraph's advisory corpus, one verdict per dependency. Pass files: 1 to 20 of filename and content, up to 5,000,000 characters in all; the filename, or format, gives the format. Read: requirements.txt (== and === pins only), go.mod (require, after replace and exclude), package-lock.json and npm-shrinkwrap.json (v1 to v3), Cargo.lock, Gemfile.lock, composer.lock, poetry.lock and gradle.lockfile. package.json, pyproject.toml, Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle hold ranges and are refused, naming the lockfile to pass; go.sum is refused: it lists versions the build does not select. This server reads the files into purls and only the purls are sent to the API, in POST bodies of at most 200, never in a URL; filenames and file contents are not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body, accepted up to 6 MiB. data.results holds one row per distinct purl, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids and matched_via; each match carries kev_listed, epss_score and fixed_in or null with fixed_in_reason. not_affected is the only clean verdict. data.not_checked lists each entry not sent, with file, line and reason: version_unpinned (a range), version_unresolved, local_path, vcs_source or unsupported_line; not_checked entries are not clean. At most 2,000 distinct purls per call, within 50 seconds; data.not_sent_purls lists any not sent, unchecked and not clean." +
+  "Check a project's lockfile or pinned manifest against EchelonGraph's advisory corpus, one verdict per dependency. Pass files: 1 to 20 of filename and content, up to 5,000,000 characters in all; the filename or format gives the format. Read: requirements.txt (== and === pins only), go.mod (require, after replace and exclude), package-lock.json and npm-shrinkwrap.json (v1-v3), Cargo.lock, Gemfile.lock, composer.lock, poetry.lock and gradle.lockfile. package.json, pyproject.toml, Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle hold ranges and are refused, naming the lockfile; go.sum is refused: it lists versions the build does not select. The server reads the files into purls; only the purls are sent to the API, in POST bodies of at most 200, never in a URL; filenames and file contents are not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body, up to 6 MiB. data.results holds a row per distinct purl, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids and matched_via; each match carries kev_listed, epss_score and fixed_in or null with fixed_in_reason. not_affected is the only clean verdict. data.not_checked lists each entry not sent (file, line, reason); not_checked entries are not clean. At most 2,000 distinct purls and 50 seconds a call. The API allows 1,200 components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls, unchecked, not clean." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
-  " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least; not_checked keeps its first 20.";
+  " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least; not_checked its first 20.";
 
 // The text's cut: check_sbom's rows and levels, and data.not_checked beside them, cut to its
 // first TEXT_NOT_CHECKED once the first level does not fit (structuredContent.data keeps it whole).
@@ -95,13 +100,16 @@ export function manifestText(sent: number): TextCut {
         said: (inText, total) => `coverage.not_checked_by_reason counts all ${total} entries not checked, ${inText} of them in the text.`,
       },
     ],
-    page: (shown) => `To read every row in the text, pass files that hold ${shown} or fewer distinct purls per call.`,
+    // #3269's second review: no page sentence, as for check_sbom's text (sbomText says why).
   };
 }
 
 // #3013: the structured result's cut, check_sbom's (sbomData: the lists beside the rows, then every
 // row thinned, then rows leaving, clean ones first) with not_checked beside not_sent_purls.
-const MANIFEST_DATA = sbomData(["not_sent_purls", "not_checked"], (k) => `To read every row in data, pass files that hold ${k} or fewer distinct purls per call.`);
+// #3269's second review: the sentence promises only what holds (check_sbom.ts sbomPageSaid).
+export const manifestPageSaid = (k: number): string =>
+  `A call whose files hold the first ${k} of these purls, or fewer, keeps every row in data; a call of other files says in its own note what it leaves out.`;
+const MANIFEST_DATA = sbomData(["not_sent_purls", "not_checked"], manifestPageSaid);
 
 // ── Reading the files ──
 

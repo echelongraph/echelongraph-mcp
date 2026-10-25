@@ -464,6 +464,19 @@ const PROD_CVE_SUMMARY = {
     last_updated: "2026-09-30T09:56:35.584Z",
   },
 };
+// #3276: production's /api/v1/public/cves/summary, read 2026-10-17T22:48:21Z, whole. Since #3242
+// (core-backend cve/handler.go nvdPollBlock) it carries nvd_poll, the FLEET's last completed NVD
+// poll, beside the poller block of the instance that answered, which had carried no cycle since it
+// started (every counter 0, no last_poll_at).
+const PROD_CVE_SUMMARY_NVD_POLL = {
+  nvd_poll: { interval: "20m0s", last_completed_at: "2026-10-17T22:45:09Z", scope: "fleet" },
+  poller: { cves_ingested: 0, cves_skipped: 0, http_retries: 0, interval: "20m0s", last_poll_dur_ms: 0, poll_count: 0, poll_errors: 0 },
+  summary: {
+    critical: 44242, high: 155887, medium: 172499, low: 14661, none: 3558, unscored: 3558, total: 390847,
+    nvd_critical: 40512, nvd_high: 125798, nvd_medium: 138010, nvd_low: 10471, nvd_none: 76056, rejected: 3235,
+    last_updated: "2026-10-17T22:21:44.433Z",
+  },
+};
 
 // Stub bodies shaped like the live API answered on 2026-09-15, trimmed to the fields the
 // tests assert on, except cve_summary's, which is production's whole answer (#2641). `ok` is a
@@ -937,8 +950,12 @@ const RADAR_LABELLED = {
     ].map((k) => [`mcp_servers.${k}`, `mcp_servers.${k}`]),
   ),
 };
+// #2438 (2026-10-18): the one number a dated_window carries. It is relayed only when some counted
+// rows carry no observation time, so the production-shaped answers above never reach it.
+const DATED_WINDOW_RADARS = ["kev_exposure", "exposed_databases", "leaked_credentials", "shadow_ai.confirmed_exposed"];
+const DATED_WINDOW_LABELLED = Object.fromEntries(DATED_WINDOW_RADARS.map((r) => [`${r}.dated_window.undated`, `${r}.dated_window.undated`]));
 // The numeric paths of a relayed exposure_radar result that carry no label.
-const unlabelledIn = (data) => [...numericPaths(data)].filter((p) => !(p in RADAR_LABELLED)).sort();
+const unlabelledIn = (data) => [...numericPaths(data)].filter((p) => !(p in RADAR_LABELLED) && !(p in DATED_WINDOW_LABELLED)).sort();
 function keyPaths(v, p = "", out = new Set()) {
   if (Array.isArray(v)) for (const x of v) keyPaths(x, `${p}[]`, out);
   else if (v !== null && typeof v === "object") {
@@ -2401,11 +2418,43 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.deepEqual(unlabelledIn(relayed), []);
     });
 
-    it("kev_exposure: a window that leaves counted pairs undated is not relayed, and the note says how many", async () => {
-      const { r, relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, observed_window: W("2026-10-01T00:00:00Z", "2026-10-04T22:10:00Z", 69931) } });
+    // #2438, 2026-10-18 decision: a window that leaves counted rows undated is never relayed as
+    // `window`, but the span over the dated rows is, as dated_window, labelled as covering them only.
+    it("kev_exposure: a window that leaves counted pairs undated is relayed only as dated_window, over the dated pairs, and the note says how many are undated", async () => {
+      const { r, relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, correlations: 66756, observed_window: W("2026-10-01T00:00:00Z", "2026-10-04T22:10:00Z", 26855) } });
+      assert.equal(relayed.kev_exposure.window, undefined, "a window over only some rows was relayed as the window");
+      assert.deepEqual(relayed.kev_exposure.dated_window, { from: "2026-10-01T00:00:00Z", to: "2026-10-04T22:10:00Z", undated: 26855 });
+      assert.match(n, /kev_exposure carries no window over every row it counts: 26855 of them have no observation time on record \(kev_exposure\.dated_window\.undated\)\. kev_exposure\.dated_window\.from \(2026-10-01T00:00:00Z\) and kev_exposure\.dated_window\.to \(2026-10-04T22:10:00Z\) are timestamps, not counts, over 39901 of the 66756 rows it counts only: when Shodan collected the banners/);
+      assert.match(n, /do not describe the undated rows\./);
+      assert.doesNotMatch(n, /observed_window/, "a served window was named as left out");
+      const sc = r.structuredContent;
+      assert.equal(sc.state, "not_assessed");
+      assert.equal(sc.measured_at, null, "a dated window's end is not measured_at");
+      assert.deepEqual(unlabelledIn(relayed), []);
+    });
+
+    it("kev_exposure: every counted pair undated (from and to null) relays no dated_window, and the note says how many", async () => {
+      const { relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, observed_window: { from: null, to: null, undated: 66756 } } });
       assert.equal(relayed.kev_exposure.window, undefined);
-      assert.match(n, /kev_exposure carries no window: 69931 of the rows it counts have no observation time on record/);
-      assert.equal(r.structuredContent.measured_at, null);
+      assert.equal(relayed.kev_exposure.dated_window, undefined, "a dated window was made up with no dated row");
+      assert.match(n, /kev_exposure carries no window: 66756 of the rows it counts have no observation time on record/);
+    });
+
+    it("a dated span that is not one (end before start, or the Go zero time) relays no dated_window", async () => {
+      for (const bad of [W("2026-10-04T00:00:00Z", "2026-10-03T00:00:00Z", 5), W("0001-01-01T00:00:00Z", "2026-10-03T00:00:00Z", 5)]) {
+        const { relayed, n } = await run({ [EDB]: { ...PROD_EXPOSED_DB_STATS, observed_window: bad } });
+        assert.equal(relayed.exposed_databases.window, undefined, JSON.stringify(bad));
+        assert.equal(relayed.exposed_databases.dated_window, undefined, JSON.stringify(bad));
+        assert.match(n, /exposed_databases carries no window: 5 of the rows it counts have no observation time on record/);
+      }
+    });
+
+    it("shadow_ai.confirmed_exposed: a confirmed window with undated services is relayed as dated_window", async () => {
+      const { relayed, n } = await run({ [SA]: { stats: { ...PROD_SHADOW_STATS, confirmed_window: W("2026-10-01T10:00:00Z", "2026-10-04T06:00:00Z", 3) }, poller: FOLLOWER_POLLER } });
+      assert.equal(relayed.shadow_ai.confirmed_exposed.window, undefined);
+      assert.deepEqual(relayed.shadow_ai.confirmed_exposed.dated_window, { from: "2026-10-01T10:00:00Z", to: "2026-10-04T06:00:00Z", undated: 3 });
+      assert.match(n, /shadow_ai\.confirmed_exposed carries no window over every row it counts: 3 of them have no observation time on record \(shadow_ai\.confirmed_exposed\.dated_window\.undated\)\. shadow_ai\.confirmed_exposed\.dated_window\.from \(2026-10-01T10:00:00Z\)/);
+      assert.deepEqual(unlabelledIn(relayed), []);
     });
 
     it("kev_exposure control: an API without observed_window gets no window, none made up and nothing named", async () => {
@@ -2421,10 +2470,11 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.doesNotMatch(n, /observed_window|kev_exposure carries no window/);
     });
 
-    it("a window that leaves counted rows undated is not relayed, and the note says how many", async () => {
+    it("a window that leaves counted rows undated is not relayed as the window: dated_window carries it, and the note says how many", async () => {
       const { relayed, n } = await run({ [EDB]: { ...PROD_EXPOSED_DB_STATS, observed_window: W("2026-09-20T01:00:00Z", "2026-10-03T22:00:00Z", 12) } });
       assert.equal(relayed.exposed_databases.window, undefined);
-      assert.match(n, /exposed_databases carries no window: 12 of the rows it counts have no observation time on record/);
+      assert.deepEqual(relayed.exposed_databases.dated_window, { from: "2026-09-20T01:00:00Z", to: "2026-10-03T22:00:00Z", undated: 12 });
+      assert.match(n, /exposed_databases carries no window over every row it counts: 12 of them have no observation time on record \(exposed_databases\.dated_window\.undated\)\. exposed_databases\.dated_window\.from \(2026-09-20T01:00:00Z\) and exposed_databases\.dated_window\.to \(2026-10-03T22:00:00Z\) are timestamps, not counts, over the rows it counts that carry an observation time only/);
     });
 
     it("a malformed window is left out and named, never relayed", async () => {
@@ -2439,7 +2489,10 @@ describe(`against a stub API [${ERA}]`, () => {
       const { tools } = await client.listTools();
       const d = toolText(tools.find((t) => t.name === "exposure_radar"));
       const readme = radarDocs();
-      for (const f of ["kev_exposure.window.from", "exposed_databases.window.from", "leaked_credentials.window.from", "confirmed_exposed.window.from"]) {
+      for (const f of [
+        "kev_exposure.window.from", "exposed_databases.window.from", "leaked_credentials.window.from", "confirmed_exposed.window.from",
+        ...["kev_exposure", "exposed_databases", "leaked_credentials", "confirmed_exposed"].flatMap((r) => [`${r}.dated_window.from`, `${r}.dated_window.undated`]),
+      ]) {
         assert.ok(d.includes(f), `the description does not label ${f}`);
         assert.ok(readme.includes(f), `the README does not label ${f}`);
       }
@@ -3091,7 +3144,9 @@ describe(`against a stub API [${ERA}]`, () => {
       }
     });
     it("the outputSchema admits no mcp_servers string field but the timestamps, and no count but the labelled ones", () => {
-      const s = branchOf(tools.find((t) => t.name === "exposure_radar").outputSchema, "not_assessed").properties.data.properties.mcp_servers;
+      // #3268: tools/list publishes it open (a field added later must not fail a client holding
+      // this list); the closed copy is what the server holds its answers to.
+      const s = branchOf(strictOutputSchema(tools.find((t) => t.name === "exposure_radar").outputSchema), "not_assessed").properties.data.properties.mcp_servers;
       assert.equal(s.additionalProperties, false);
       const strings = [];
       const walk = (x, p) => {
@@ -3167,7 +3222,8 @@ describe(`against a stub API [${ERA}]`, () => {
     // text in get_cve's and search_cves' outputSchemas (src/requiredText.ts REQUIRED_IN_OUTPUT_SCHEMA).
     it("#3138: get_cve's and search_cves' patch_available field text says true beside an empty patch_evidence is a withdrawal, and fix_status the current reading", () => {
       assert.match(REQUIRED.PATCH_AVAILABLE_WITHDRAWN, /^true beside an empty patch_evidence means evidence of a fix once held has since been withdrawn .* fix_status .* is the current reading/);
-      assert.deepEqual(Object.keys(REQUIRED.REQUIRED_IN_OUTPUT_SCHEMA).sort(), ["get_cve", "search_cves"]);
+      // #3016: cve_exposure's KEV flags joined them.
+      assert.deepEqual(Object.keys(REQUIRED.REQUIRED_IN_OUTPUT_SCHEMA).sort(), ["cve_exposure", "get_cve", "search_cves"]);
       assert.deepEqual(cutProblems(served).filter((p) => p.startsWith("(e)")), []);
     });
     it("control E: patch_available's field text without the withdrawal sentence (3.0.0's) fails (e), for each tool", () => {
@@ -3193,6 +3249,48 @@ describe(`against a stub API [${ERA}]`, () => {
         const gone = cutProblems(withField(name, at, (x) => delete x.description));
         assert.ok(gone.includes(`(e) ${name}: its outputSchema's success branch has no described field ${p}`), gone.join("\n"));
       }
+    });
+    // #3016: hosted cve_exposure CVE-2024-3400 (CISA-KEV) served kev_listed false beside
+    // kev_catalog_listed true (2026-10-10), and the outputSchema gave the three flags no text, so a
+    // client reading data alone could report a KEV CVE as not on KEV. Each flag's text says what it
+    // is; kev_listed stays in the schema, deprecated, as it stays in the API.
+    it("#3016: cve_exposure's outputSchema says kev_listed is the deprecated alias of kev_seen_in_observations, the radar's flag, and kev_catalog_listed the catalog's", () => {
+      const data = branchOf(tools.find((t) => t.name === "cve_exposure").outputSchema, "not_assessed").properties.data.properties;
+      for (const k of ["kev_listed", "kev_catalog_listed", "kev_seen_in_observations"]) {
+        assert.deepEqual(data[k].type, ["boolean", "null"], `${k} is still a nullable boolean`);
+        assert.equal(typeof data[k].description, "string", `${k} has no text in cve_exposure's outputSchema`);
+      }
+      assert.ok(data.kev_listed.description.startsWith(REQUIRED.KEV_LISTED_DEPRECATED), data.kev_listed.description);
+      assert.match(REQUIRED.KEV_LISTED_DEPRECATED, /^Deprecated: the same value as kev_seen_in_observations/);
+      for (const k of ["kev_listed", "kev_seen_in_observations"]) assert.ok(data[k].description.includes("It is the radar's observation flag, not CISA-KEV catalog status"), `${k}: ${data[k].description}`);
+      assert.ok(data.kev_listed.description.includes("kev_catalog_listed is the catalog flag."), data.kev_listed.description);
+      assert.ok(data.kev_catalog_listed.description.startsWith("The CISA-KEV catalog flag: true when EchelonGraph's CVE record marks the CVE as CISA-KEV-listed."), data.kev_catalog_listed.description);
+      // false also means "no record": it is worded as what EchelonGraph's data says, as the note is.
+      assert.match(data.kev_catalog_listed.description, /false also where EchelonGraph holds no record of the CVE/);
+      assert.doesNotMatch(data.kev_catalog_listed.description, /is (?:not )?listed in the CISA-KEV catalog/);
+      assert.deepEqual(Object.keys(REQUIRED.REQUIRED_IN_OUTPUT_SCHEMA.cve_exposure).sort(), ["data.kev_catalog_listed", "data.kev_listed", "data.kev_seen_in_observations"]);
+      assert.deepEqual(cutProblems(served).filter((p) => p.startsWith("(e) cve_exposure")), []);
+    });
+    it("#3016 control: 3.0.2's undescribed KEV flags, or a kev_listed text without the deprecation, fail (e)", () => {
+      const withData = (f) => ({
+        ...served,
+        tools: served.tools.map((t) => {
+          if (t.name !== "cve_exposure") return t;
+          const o = structuredClone(t.outputSchema);
+          f(branchOf(o, "not_assessed").properties.data.properties);
+          return { ...t, outputSchema: o };
+        }),
+      });
+      const bare = cutProblems(
+        withData((d) => {
+          for (const k of ["kev_listed", "kev_catalog_listed", "kev_seen_in_observations"]) delete d[k].description;
+        }),
+      );
+      for (const p of ["data.kev_listed", "data.kev_catalog_listed", "data.kev_seen_in_observations"]) {
+        assert.ok(bare.includes(`(e) cve_exposure: its outputSchema's success branch has no described field ${p}`), bare.join("\n"));
+      }
+      const undeprecated = cutProblems(withData((d) => (d.kev_listed.description = "true: the CVE is on CISA's KEV catalog.")));
+      assert.ok(undeprecated.includes(`(e) cve_exposure: the description of data.kev_listed in its outputSchema lacks: ${REQUIRED.KEV_LISTED_DEPRECATED}`), undeprecated.join("\n"));
     });
     it("control D: check_sbom's hosted-endpoint sentence moved past the cut fails (b)", () => {
       const p = cutProblems(withDescription("check_sbom", (d) => pastCut(d, "over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's")));
@@ -3303,8 +3401,8 @@ describe(`against a stub API [${ERA}]`, () => {
     it("#2313: the exposure_radar outputSchema allows exactly the labelled numeric paths, no more and no fewer", () => {
       const s = tools.find((t) => t.name === "exposure_radar").outputSchema;
       const paths = [...schemaNumericPaths(branchOf(s, "not_assessed").properties.data)].sort();
-      assert.deepEqual(paths.filter((p) => !(p in RADAR_LABELLED)), [], "the schema allows a number no label covers");
-      assert.deepEqual(paths, Object.keys(RADAR_LABELLED).sort());
+      assert.deepEqual(paths.filter((p) => !(p in RADAR_LABELLED) && !(p in DATED_WINDOW_LABELLED)), [], "the schema allows a number no label covers");
+      assert.deepEqual(paths, [...Object.keys(RADAR_LABELLED), ...Object.keys(DATED_WINDOW_LABELLED)].sort());
     });
     // #1880: descriptions listed fields the tools do not return (CWE on get_cve). A description
     // may name a field only if its own outputSchema holds it.
@@ -4542,6 +4640,172 @@ describe(`against a stub API [${ERA}]`, () => {
       const { interval: _gone, ...rest } = OK.poller;
       assert.deepEqual(sc.data, { ...OK, poller: rest });
       assert.ok(n.includes("poller.interval (a number, where this tool reads a string)"), n);
+    });
+  });
+
+  // #3276: since #3242 the summary answer carries nvd_poll, the FLEET's last completed NVD poll
+  // (core-backend cve/handler.go nvdPollBlock: last_completed_at, scope fleet, interval), and leaves
+  // it out when that time is unknown (none on record, or the read failed). Through 3.0.2 cve_summary
+  // answered freshness null with the note "the CVE feed's answer carries no time at which its pollers
+  // last completed a poll", beside that very block in data. Both polarities: a usable block is
+  // freshness.nvd_poll, in structuredContent and in the envelope text block; no block is freshness
+  // null with a note saying this answer carries no nvd_poll block, not that the feed has none. A
+  // block without a usable time (not RFC 3339, the zero time, a date that does not exist, past the
+  // clock skew, another scope) leaves freshness null, says why, and is still relayed in data: never
+  // a failed call and never an invented time.
+  describe("#3276: cve_summary's freshness is the fleet's last completed NVD poll where the answer carries nvd_poll", () => {
+    const LIVE = PROD_CVE_SUMMARY_NVD_POLL;
+    // 2026-09-30's answer, before #3242: no nvd_poll.
+    const OLD = BODIES["/api/v1/public/cves/summary"].ok;
+    const NO_BLOCK = "freshness is null: this answer carries no nvd_poll block (an older API, or the API holds no fleet NVD poll it could read).";
+    const usable = (interval) =>
+      `freshness.nvd_poll is the fleet's last completed NVD poll: last_run_at is data.nvd_poll.last_completed_at, the end of the window the fleet's last completed NVD poll stored (whichever API instance ran it), never the answering instance's poller.last_poll_at, and ${interval === null ? "the answer gives no usable nvd_poll.interval, so interval is null" : `the poll runs at an interval of ${interval} (nvd_poll.interval)`}.`;
+    const unusable = (why) => `freshness is null: ${why}, so this answer gives no usable time at which the fleet last completed an NVD poll; data relays the block as sent.`;
+    const NOT_REAL = "the answer's nvd_poll.last_completed_at is not a real RFC 3339 time";
+    // 3.0.2's sentences: the note, and what the descriptions and the methodology said.
+    const PRE_FIX = /carries no time at which its pollers last completed|serves no poll-completion time/;
+    const withPoll = (nvd_poll) => ({ ...LIVE, nvd_poll });
+    // A second-precision RFC 3339 instant `ms` milliseconds from now.
+    const fromNow = (ms) => new Date(Date.now() + ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+    // A measured success that relays summary and nvd_poll as sent, valid against the tool's own
+    // outputSchema, and the envelope as the result's last text block carries it.
+    async function answered(body) {
+      const res = await cveSummaryWith(body);
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "measured", brief(res));
+      assert.deepEqual(sc.data.summary, body.summary, "summary was not relayed as sent");
+      assert.deepEqual(sc.data.nvd_poll, body.nvd_poll, "nvd_poll was not relayed as sent");
+      const { tools } = await client.listTools();
+      assertValid("cve_summary", tools.find((t) => t.name === "cve_summary").outputSchema, sc);
+      const env = JSON.parse(textBlocks(res)[2]);
+      return { res, sc, env };
+    }
+    // What each case holds last: the envelope text block carries structuredContent's freshness, and
+    // no text says the feed's answer carries no poll-completion time.
+    function assertTextAgrees(res) {
+      const sc = res.structuredContent;
+      assert.deepEqual(JSON.parse(textBlocks(res)[2]).freshness, sc.freshness, "the envelope text block's freshness is not structuredContent's");
+      for (const t of [...textBlocks(res), ...sc.notes]) assert.doesNotMatch(t, PRE_FIX, t);
+    }
+    it("production's answer of 2026-10-17: freshness.nvd_poll is data.nvd_poll's time, scope and interval, in structuredContent and in the text, and the note says it is the fleet's", async () => {
+      const { res, sc, env } = await answered(LIVE);
+      assert.deepEqual(sc.freshness, { nvd_poll: { last_run_at: "2026-10-17T22:45:09Z", scope: "fleet", interval: "20m0s" } });
+      assert.equal(sc.freshness.nvd_poll.last_run_at, sc.data.nvd_poll.last_completed_at);
+      assert.ok(sc.notes.includes(usable("20m0s")), sc.notes.join(" | "));
+      assert.ok(env.notes.includes(usable("20m0s")), "the envelope text block does not say what freshness is");
+      assert.ok(!sc.notes.includes(NO_BLOCK), sc.notes.join(" | "));
+      assertTextAgrees(res);
+      // The answering instance's own poller is still labelled as that instance's.
+      assert.ok(noteOf((await cveSummaryWith(LIVE))).includes("poller is one API instance's NVD poller"));
+    });
+    // #3276 review: an old poll is said to be old (more than 3 intervals, or an hour with no interval).
+    const STALE = /^freshness\.nvd_poll\.last_run_at is about .+ before this answer, more than (3 times the poll's interval|an hour \(the answer gives no usable interval\)), so the CVE counts may lag NVD by about that much\.$/;
+    it("a poll more than three intervals old is said to be old; a fresh one is not; with no interval an hour is the bar", async () => {
+      const old = await answered(withPoll({ ...LIVE.nvd_poll, last_completed_at: fromNow(-2 * 3_600_000) }));
+      assert.ok(old.sc.notes.some((n) => STALE.test(n) && n.includes("more than 3 times the poll's interval")), old.sc.notes.join(" | "));
+      assert.ok(old.sc.notes.includes(usable("20m0s")), "the old poll is still relayed as freshness");
+      const fresh = await answered(withPoll({ ...LIVE.nvd_poll, last_completed_at: fromNow(-10 * 60_000) }));
+      assert.ok(!fresh.sc.notes.some((n) => STALE.test(n)), fresh.sc.notes.join(" | "));
+      const edge = await answered(withPoll({ ...LIVE.nvd_poll, last_completed_at: fromNow(-50 * 60_000) }));
+      assert.ok(!edge.sc.notes.some((n) => STALE.test(n)), "50 minutes is under 3 x 20m0s and was called old");
+      const noInterval = await answered(withPoll({ ...LIVE.nvd_poll, interval: "every so often", last_completed_at: fromNow(-90 * 60_000) }));
+      assert.ok(noInterval.sc.notes.some((n) => STALE.test(n) && n.includes("an hour (the answer gives no usable interval)")), noInterval.sc.notes.join(" | "));
+      assertTextAgrees(old.res);
+    });
+    it("an answer without nvd_poll (2026-09-30's, before #3242), or with nvd_poll null: freshness null, and the note says this answer carries no nvd_poll block", async () => {
+      const { nvd_poll: _gone, ...live } = LIVE;
+      for (const body of [OLD, live, withPoll(null)]) {
+        const { res, sc, env } = await answered(body);
+        assert.equal(sc.freshness, null);
+        assert.ok(sc.notes.includes(NO_BLOCK), sc.notes.join(" | "));
+        assert.ok(env.notes.includes(NO_BLOCK), "the envelope text block does not say why freshness is null");
+        assert.ok(!sc.notes.some((n) => n.startsWith("freshness.nvd_poll")), sc.notes.join(" | "));
+        assertTextAgrees(res);
+      }
+    });
+    for (const [what, nvd_poll, why] of [
+      ["the Go zero time", { ...LIVE.nvd_poll, last_completed_at: "0001-01-01T00:00:00Z" }, NOT_REAL],
+      ["a date that does not exist (2026-02-30)", { ...LIVE.nvd_poll, last_completed_at: "2026-02-30T22:45:09Z" }, NOT_REAL],
+      ["no zone", { ...LIVE.nvd_poll, last_completed_at: "2026-10-17T22:45:09" }, NOT_REAL],
+      ["a space for the T", { ...LIVE.nvd_poll, last_completed_at: "2026-10-17 22:45:09Z" }, NOT_REAL],
+      ["an empty string", { ...LIVE.nvd_poll, last_completed_at: "" }, NOT_REAL],
+      ["unix seconds", { ...LIVE.nvd_poll, last_completed_at: 1_792_277_109 }, NOT_REAL],
+      ["no last_completed_at", { interval: "20m0s", scope: "fleet" }, "the answer's nvd_poll carries no last_completed_at"],
+      ["scope instance", { ...LIVE.nvd_poll, scope: "instance" }, "the answer's nvd_poll.scope is not fleet"],
+      ["no scope", { interval: "20m0s", last_completed_at: "2026-10-17T22:45:09Z" }, "the answer's nvd_poll.scope is not fleet"],
+      ["nvd_poll as an array", [LIVE.nvd_poll], "the answer's nvd_poll is an array, where this tool reads an object"],
+      ["nvd_poll as a string", "2026-10-17T22:45:09Z", "the answer's nvd_poll is a string, where this tool reads an object"],
+    ]) {
+      it(`${what}: measured, freshness null, the note says why, and data relays the block as sent`, async () => {
+        const { res, sc, env } = await answered(withPoll(nvd_poll));
+        assert.equal(sc.freshness, null);
+        assert.ok(sc.notes.includes(unusable(why)), sc.notes.join(" | "));
+        assert.ok(env.notes.includes(unusable(why)));
+        assertTextAgrees(res);
+      });
+    }
+    it("a last_completed_at more than 5 minutes after this server's clock is never presented as a completed poll; one within 5 minutes is", async () => {
+      const late = fromNow(10 * 60_000);
+      const { sc } = await answered(withPoll({ ...LIVE.nvd_poll, last_completed_at: late }));
+      assert.equal(sc.freshness, null);
+      assert.ok(sc.notes.includes(unusable("the answer's nvd_poll.last_completed_at is more than 5 minutes after this server's clock")), sc.notes.join(" | "));
+      const skewed = fromNow(60_000);
+      const near = await answered(withPoll({ ...LIVE.nvd_poll, last_completed_at: skewed }));
+      assert.deepEqual(near.sc.freshness, { nvd_poll: { last_run_at: skewed, scope: "fleet", interval: "20m0s" } });
+      assertTextAgrees(near.res);
+    });
+    it("RFC 3339's other forms are relayed as sent: an offset, nine fractional digits, a lower-case t and z", async () => {
+      for (const at of ["2026-10-17T23:45:09+01:00", "2026-10-17T22:45:09.123456789Z", "2026-10-17t22:45:09z"]) {
+        const { res, sc } = await answered(withPoll({ ...LIVE.nvd_poll, last_completed_at: at }));
+        assert.deepEqual(sc.freshness, { nvd_poll: { last_run_at: at, scope: "fleet", interval: "20m0s" } }, at);
+        assertTextAgrees(res);
+      }
+    });
+    it("interval is relayed where it is a Go duration, else null, and the note says which", async () => {
+      for (const [interval, relayed] of [
+        [undefined, null],
+        [1_200_000_000_000, null],
+        ["twenty minutes", null],
+        ["1h0m0s", "1h0m0s"],
+        ["1m30.5s", "1m30.5s"],
+      ]) {
+        const { interval: _i, ...rest } = LIVE.nvd_poll;
+        const { sc } = await answered(withPoll(interval === undefined ? rest : { ...rest, interval }));
+        assert.deepEqual(sc.freshness, { nvd_poll: { last_run_at: LIVE.nvd_poll.last_completed_at, scope: "fleet", interval: relayed } }, String(interval));
+        assert.ok(sc.notes.includes(usable(relayed)), sc.notes.join(" | "));
+      }
+    });
+    it("search_cves and get_cve: freshness null, and the note says this answer carries no poll-completion time, and where the fleet's is", async () => {
+      stub.state.mode = "ok";
+      for (const [name, args] of [["search_cves", CALLS.search_cves], ["get_cve", CALLS.get_cve]]) {
+        const sc = (await client.callTool({ name, arguments: args })).structuredContent;
+        assert.equal(sc.freshness, null, name);
+        assert.ok(sc.notes.includes("freshness is null: this answer carries no poll-completion time; the CVE feed summary gives the fleet's last completed NVD poll."), `${name}: ${sc.notes.join(" | ")}`);
+        for (const n of sc.notes) assert.doesNotMatch(n, PRE_FIX, `${name}: ${n}`);
+      }
+    });
+    it("the description and outputSchema say what freshness is, the schema admits it, and no tool text, resource or doc page says the feed serves no poll-completion time", async () => {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "cve_summary");
+      const envelope = "with freshness.nvd_poll the fleet's last completed NVD poll and its interval, from the answer's nvd_poll (freshness null without one)";
+      assert.ok(t.description.includes(envelope), t.description);
+      // #2610's six words stay out of it (marketing-site lib/mcpToolClaims.test.ts's control).
+      assert.doesNotMatch(envelope, /\b(any|not|rating|scored|source|yet)\b/i);
+      const fresh = branchOf(t.outputSchema, "measured").properties.freshness;
+      const object = (fresh.anyOf ?? []).find((b) => b.type === "object");
+      assert.ok(object, JSON.stringify(fresh));
+      assert.deepEqual(Object.keys(object.properties.nvd_poll.properties).sort(), ["interval", "last_run_at", "scope"]);
+      assert.match(object.properties.nvd_poll.properties.last_run_at.description, /data\.nvd_poll\.last_completed_at/);
+      assert.ok((fresh.anyOf ?? []).some((b) => b.type === "null"), "freshness can no longer be null");
+      assert.match(branchOf(t.outputSchema, "measured").properties.data.properties.nvd_poll.description, /When the fleet of API instances last completed an NVD poll/);
+      for (const x of tools) assert.doesNotMatch(toolText(x), PRE_FIX, x.name);
+      for (const name of ["search_cves", "get_cve"]) assert.ok(tools.find((x) => x.name === name).description.includes("freshness is null: this answer carries no poll-completion time."), name);
+      const methodology = (await client.readResource({ uri: "echelongraph://methodology" })).contents[0].text;
+      assert.doesNotMatch(methodology, PRE_FIX);
+      assert.ok(methodology.includes("freshness.nvd_poll is the fleet's last completed NVD poll"), "the methodology does not say what cve_summary's freshness is");
+      for (const [page, text] of readDocs()) assert.doesNotMatch(text.replace(/\s+/g, " "), /carry no time at which its pollers|serves no poll-completion time/, page);
+      const results = readDocs().find(([p]) => p === "docs/structured-results.md")[1].replace(/\s+/g, " ");
+      assert.ok(results.includes("`freshness.nvd_poll`"), "docs/structured-results.md does not say what cve_summary's freshness is");
     });
   });
 

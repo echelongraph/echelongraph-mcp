@@ -114,6 +114,12 @@ const CVE_HEARTBLEED = "CVE-2014-0160";
 const CISCO_REVISED = win("cisco", "Cisco PSIRT openVuln", 312, "2024-10-23T16:00:00Z", "2026-10-01T16:00:00Z", "not_supported", 0, "2026-02-25T09:00:00Z");
 const REDHAT_REVISED = win("redhat", "Red Hat Product Security", 9120, "2009-02-04T00:00:00Z", "2026-10-04T04:00:00Z", "not_supported", 0, "2026-05-19T11:00:00Z");
 const CVE_3400 = "CVE-2024-3400"; // KEV; Palo Alto's own advisory is dated 2024-04-12
+// #3011: a row's advisory_id (EchelonGraph's UUID) and the detail of the same advisory by the vendor's
+// own ID; and a vendor whose own advisory ID has a UUID's shape, which must still be looked up.
+const ROW_UUID = row().advisory_id;
+const DETAIL_BY_VENDOR_ID = { ...row(), cve_ids: [CVE], known_cve_ids: [CVE], description: "A security feature bypass.", affected_products: ["Windows 11"], remediation: "Install the update.", references: [] };
+const UUID_SHAPED_VENDOR_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const DETAIL_UUID_SHAPED = { ...DETAIL, advisory_id: "6f1c7d2e-0000-4000-8000-0000000000aa", vendor: "gitlab", vendor_display_name: "GitLab", vendor_advisory_id: UUID_SHAPED_VENDOR_ID };
 const CVE_OLD = "CVE-2010-0249"; // older than Microsoft's earliest held advisory
 
 // A stub that records every request's URL and search header, and answers per path.
@@ -139,6 +145,9 @@ async function startStub() {
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2026%3A0101") return send(200, { ...DETAIL_REJ, vendor_advisory_id: "RHSA-2026:0101", rejected_cve_ids: [] });
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_NONE}`) return send(200, { cve_id: CVE_NONE, advisories: [], total: 0 });
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2024%3A1234") return send(200, DETAIL);
+    // #3011: the vendor's own ID answers; the row's UUID falls through to the 404 below, as the API's does.
+    if (pathname === `/api/v1/public/vendor-advisories/microsoft/${CVE}`) return send(200, DETAIL_BY_VENDOR_ID);
+    if (pathname === `/api/v1/public/vendor-advisories/gitlab/${UUID_SHAPED_VENDOR_ID}`) return send(200, DETAIL_UUID_SHAPED);
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2024%3A0001") return send(200, DETAIL_WITHDRAWN);
     if (pathname === "/api/v1/public/vendor-advisories") {
       const searched = req.headers[HEADER] !== undefined;
@@ -335,6 +344,92 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.equal(res.structuredContent.state, "invalid_input", JSON.stringify(args));
       }
       assert.deepEqual(stub.state.seen, []);
+    });
+
+    // ── #3011: a row's advisory_id is EchelonGraph's UUID; get_vendor_advisory takes vendor_advisory_id ──
+    it("#3011: a row's advisory_id passed straight from vendor_advisories_for_cve answers invalid_input naming vendor_advisory_id, never failed or no record", async () => {
+      const list = await call("vendor_advisories_for_cve", { cve_id: CVE });
+      const r0 = list.structuredContent.data.advisories[0];
+      assert.equal(r0.advisory_id, ROW_UUID);
+      stub.state.seen.length = 0;
+      const res = await call("get_vendor_advisory", { vendor: r0.vendor, advisory_id: r0.advisory_id });
+      // The API is still asked (a vendor's own ID could have this shape), once.
+      assert.deepEqual(mainRequests(stub.state.seen).map((x) => x.url), [`/api/v1/public/vendor-advisories/microsoft/${ROW_UUID}`]);
+      assert.equal(res.isError, true, textOf(res));
+      const sc = res.structuredContent;
+      assert.equal(sc.state, "invalid_input", textOf(res));
+      assert.deepEqual(sc.error, {
+        kind: "invalid_input",
+        path: `/api/v1/public/vendor-advisories/microsoft/${ROW_UUID}`,
+        status: 404,
+        message: `advisory_id ${ROW_UUID} has the shape of a row's advisory_id, EchelonGraph's internal ID for an advisory (a UUID), which this tool does not take, and EchelonGraph holds no microsoft advisory whose vendor_advisory_id it is (HTTP 404); pass the row's vendor_advisory_id as advisory_id`,
+      });
+      assert.equal(
+        res.content[0].text,
+        `get_vendor_advisory FAILED (state: invalid_input): advisory_id ${ROW_UUID} has the shape of a row's advisory_id, EchelonGraph's internal ID for an advisory (a UUID), which this tool does not take, and EchelonGraph holds no microsoft advisory whose vendor_advisory_id it is (HTTP 404). Call get_vendor_advisory again with the row's vendor and its vendor_advisory_id as advisory_id (e.g. CVE-2024-3400 for Palo Alto Networks, RHSA-2024:1234 for Red Hat). This says nothing about whether the advisory exists, and it is not a finding.`,
+      );
+      assert.ok(sc.notes.some((n) => n.includes("vendor_advisory_id as advisory_id")), JSON.stringify(sc.notes));
+      assert.doesNotMatch(textOf(res), /The API returned no record|advisory not found/);
+      assert.ok(!("data" in sc));
+      // The same row's vendor and vendor_advisory_id return it, and the detail's advisory_id is the row's.
+      const ok = await call("get_vendor_advisory", { vendor: r0.vendor, advisory_id: r0.vendor_advisory_id });
+      assert.notEqual(ok.isError, true, textOf(ok));
+      assert.equal(ok.structuredContent.state, "measured");
+      assert.equal(ok.structuredContent.data.vendor_advisory_id, r0.vendor_advisory_id);
+      assert.equal(ok.structuredContent.data.advisory_id, r0.advisory_id);
+    });
+
+    it("#3011: a search row's advisory_id answers the same refusal; a vendor's own ID of a UUID's shape is looked up and relayed; any other 404 stays failed, as no record", async () => {
+      stub.state.searchApplied = false;
+      let s0;
+      try {
+        s0 = (await call("search_vendor_advisories", {})).structuredContent.data.advisories[0];
+      } finally {
+        stub.state.searchApplied = true;
+      }
+      const res = await call("get_vendor_advisory", { vendor: s0.vendor, advisory_id: s0.advisory_id });
+      assert.equal(res.structuredContent.state, "invalid_input", textOf(res));
+      assert.match(textOf(res), /its vendor_advisory_id as advisory_id/);
+      const own = await call("get_vendor_advisory", { vendor: "gitlab", advisory_id: UUID_SHAPED_VENDOR_ID });
+      assert.notEqual(own.isError, true, textOf(own));
+      assert.equal(own.structuredContent.state, "measured");
+      assert.equal(own.structuredContent.data.vendor_advisory_id, UUID_SHAPED_VENDOR_ID);
+      const miss = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2099:0001" });
+      assert.equal(miss.structuredContent.state, "failed");
+      assert.match(textOf(miss), /HTTP 404.*advisory not found.*The API returned no record for this request/s);
+    });
+
+    it("#3011: both list tools' outputSchemas describe a row's advisory_id and vendor_advisory_id; get_vendor_advisory's input and its echoed advisory_id say which to pass", async () => {
+      const { tools } = await client.listTools();
+      const t = (n) => tools.find((x) => x.name === n);
+      // Every object schema in `s` that has an advisory_id property.
+      const rowsIn = (s, out = []) => {
+        if (Array.isArray(s)) s.forEach((x) => rowsIn(x, out));
+        else if (s && typeof s === "object") {
+          if (s.properties?.advisory_id && s.properties?.vendor_advisory_id) out.push(s.properties);
+          Object.values(s).forEach((x) => rowsIn(x, out));
+        }
+        return out;
+      };
+      for (const n of ["vendor_advisories_for_cve", "search_vendor_advisories", "get_vendor_advisory"]) {
+        const rows = rowsIn(t(n).outputSchema);
+        assert.ok(rows.length >= 1, `${n}: no row schema with advisory_id`);
+        for (const p of rows) {
+          assert.match(p.advisory_id.description ?? "", /EchelonGraph's internal ID for this advisory, a UUID\. It is not the vendor's advisory ID \(vendor_advisory_id\), and an advisory's detail is not looked up by it/, n);
+          assert.match(p.vendor_advisory_id.description ?? "", /With vendor, it is the key an advisory's detail is looked up by, as its advisory_id argument/, n);
+        }
+      }
+      const input = t("get_vendor_advisory").inputSchema.properties.advisory_id.description;
+      assert.match(input, /a row's vendor_advisory_id/);
+      assert.match(input, /not a row's advisory_id, EchelonGraph's internal UUID/);
+      assert.match(t("get_vendor_advisory").description, /vendor_advisory_id of a vendor advisory row, never its advisory_id/);
+    });
+
+    it("#3011: triage_cve's step 4 names the field get_vendor_advisory takes, vendor_advisory_id, and warns off the row's advisory_id", async () => {
+      const p = await client.getPrompt({ name: "triage_cve", arguments: { cve_id: CVE } });
+      const step4 = p.messages[0].content.text.split("\n").find((l) => l.startsWith("4. vendor_advisories_for_cve"));
+      assert.ok(step4, p.messages[0].content.text.slice(0, 400));
+      assert.match(step4, /Call get_vendor_advisory with a row's vendor and its vendor_advisory_id as advisory_id \(never the row's advisory_id, EchelonGraph's internal ID\)/);
     });
 
     // ── #2729: what is held of each vendor ──

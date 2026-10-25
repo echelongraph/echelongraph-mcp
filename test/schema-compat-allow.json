@@ -1,0 +1,110 @@
+{
+  "about": "Findings test/schema-compat.mjs reports for this candidate that a release accepts, each with why. scripts/npm-publish-mcp.sh's dry run compares the packed candidate with npm's latest and fails on any finding not listed here for that version (#3268's review). Each accepted break is named in CHANGELOG.md's entry for the release, which tells clients holding the old list to reconnect once.",
+  "accepted": [
+    {
+      "against": "3.0.2",
+      "finding": "cve_summary: freshness: widens its type from null to null|object",
+      "reason": "#3276: cve_summary answers freshness.nvd_poll, the fleet's last completed NVD poll, where 3.0.2 answered null. A client holding 3.0.2's list refuses cve_summary's answers until it reconnects once (CHANGELOG 3.1.0)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "exposure_radar: data.kev_exposure: adds dated_window under an object the old release closed",
+      "reason": "#2438: dated_window, the window over the dated rows, under an object 3.0.2 published closed. A client holding 3.0.2's list refuses exposure_radar's answers that carry it until it reconnects once (CHANGELOG 3.1.0)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "exposure_radar: data.exposed_databases: adds dated_window under an object the old release closed",
+      "reason": "#2438: as data.kev_exposure's dated_window."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "exposure_radar: data.leaked_credentials: adds dated_window under an object the old release closed",
+      "reason": "#2438: as data.kev_exposure's dated_window."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "exposure_radar: data.shadow_ai.confirmed_exposed: adds dated_window under an object the old release closed",
+      "reason": "#2438: as data.kev_exposure's dated_window."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "epss_history: coverage: adds days_in_progress, runs_undated, refresh_runs_truncated under an object the old release closed",
+      "reason": "#3143: the envelope's coverage relays runs_undated, refresh_runs_truncated and days_in_progress, under an object 3.0.2 published closed. A client holding 3.0.2's list refuses epss_history's answers until it reconnects once (CHANGELOG 3.1.0)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "cve_summary: coverage: widens its type from null to null|object",
+      "reason": "#3268's review: a null-only slot is published as null or an open object, so a later release can fill it without breaking a client holding this release's list. This release still answers null there (checked() and the suite hold it to null), so a client holding 3.0.2's list is not refused."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "get_cve: coverage: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "search_cves: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "get_cve: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "cve_exposure: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "epss_history: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "check_affected: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "check_sbom: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "scan_manifest: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "cve_intel: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "cve_remediation: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "get_cwe: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "vendor_advisories_for_cve: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "get_vendor_advisory: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.0.2",
+      "finding": "search_vendor_advisories: freshness: widens its type from null to null|object",
+      "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    }
+  ]
+}

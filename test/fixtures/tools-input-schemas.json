@@ -1,0 +1,423 @@
+{
+  "cve_summary": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    }
+  },
+  "search_cves": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "search": {
+        "description": "free-text search (product, vendor, or keyword, e.g. 'tomcat')",
+        "type": "string"
+      },
+      "severity": {
+        "description": "filter to one severity",
+        "type": "string",
+        "enum": [
+          "CRITICAL",
+          "HIGH",
+          "MEDIUM",
+          "LOW"
+        ]
+      },
+      "min_cvss": {
+        "description": "minimum CVSS score",
+        "type": "number",
+        "minimum": 0,
+        "maximum": 10
+      },
+      "sort": {
+        "description": "sort order (default: published)",
+        "type": "string",
+        "enum": [
+          "published",
+          "modified",
+          "nvd",
+          "echelongraph",
+          "epss"
+        ]
+      },
+      "limit": {
+        "description": "page size (default 20, max 50)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50
+      },
+      "offset": {
+        "description": "rows to skip (default 0)",
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    }
+  },
+  "get_cve": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cve_id": {
+        "type": "string",
+        "description": "a CVE ID, e.g. CVE-2023-44487"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cve_id"
+    ]
+  },
+  "cve_exposure": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cve_id": {
+        "type": "string",
+        "description": "a CVE ID, e.g. CVE-2023-44487"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cve_id"
+    ]
+  },
+  "exposure_radar": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    }
+  },
+  "kev_recent": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "since": {
+        "description": "earliest kev_added_date to include, YYYY-MM-DD (an RFC 3339 timestamp is read as the date written in it, with the time and offset dropped; anything else is refused)",
+        "type": "string"
+      },
+      "until": {
+        "description": "latest kev_added_date to include, YYYY-MM-DD (an RFC 3339 timestamp is read as the date written in it, with the time and offset dropped; anything else is refused)",
+        "type": "string"
+      },
+      "ransomware": {
+        "description": "true: only CVEs with known ransomware-campaign use; false: only those without",
+        "type": "boolean"
+      },
+      "vendor": {
+        "description": "CISA vendorProject, an exact case-insensitive match, e.g. 'Microsoft'",
+        "type": "string"
+      },
+      "limit": {
+        "description": "page size (default 50, max 200)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200
+      },
+      "cursor": {
+        "description": "next_cursor from the previous page",
+        "type": "string"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    }
+  },
+  "epss_history": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cve_id": {
+        "type": "string",
+        "description": "a CVE ID, e.g. CVE-2023-44487"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cve_id"
+    ]
+  },
+  "check_affected": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "product": {
+        "description": "CPE path: the NVD CPE product token, such as openssl, nginx or linux_kernel. Leave out for the registry path.",
+        "type": "string"
+      },
+      "ecosystem": {
+        "description": "Registry path: the package's ecosystem, such as npm, PyPI or Maven. Give with package, not with product.",
+        "type": "string"
+      },
+      "package": {
+        "description": "Registry path: the package name in that ecosystem, such as lodash.",
+        "type": "string"
+      },
+      "version": {
+        "type": "string",
+        "description": "The version to check, such as 3.0.0."
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "version"
+    ]
+  },
+  "check_sbom": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "purls": {
+        "description": "package URLs to check, e.g. pkg:npm/lodash@4.17.20 or pkg:deb/debian/openssl@3.0.11-1~deb12u1?distro=debian-12 (up to 2,000 distinct, sent in batches of 200)",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "sbom": {
+        "description": "a CycloneDX JSON or SPDX JSON document, as JSON text or as an object; its purls are read by this MCP server and only they are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the document is the request body",
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        ]
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    }
+  },
+  "scan_manifest": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string",
+              "description": "the file's name, e.g. package-lock.json or services/api/go.mod; it picks the format unless format is set"
+            },
+            "content": {
+              "type": "string",
+              "description": "the file's text, as it is on disk"
+            },
+            "format": {
+              "description": "the format to read the file as, when its name does not say",
+              "type": "string",
+              "enum": [
+                "requirements.txt",
+                "go.mod",
+                "package-lock.json",
+                "Cargo.lock",
+                "Gemfile.lock",
+                "composer.lock",
+                "poetry.lock",
+                "gradle.lockfile"
+              ]
+            }
+          },
+          "required": [
+            "filename",
+            "content"
+          ]
+        },
+        "description": "1 to 20 files, up to 5,000,000 characters of content in all; read by this MCP server into purls, and only the purls are sent to the API; over the hosted endpoint (mcp.echelongraph.io) the files are the request body"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "files"
+    ]
+  },
+  "cve_intel": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cve_id": {
+        "type": "string",
+        "description": "a CVE ID, e.g. CVE-2021-44228"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cve_id"
+    ]
+  },
+  "cve_remediation": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cve_id": {
+        "type": "string",
+        "description": "a CVE ID, e.g. CVE-2021-44228"
+      },
+      "ecosystem": {
+        "description": "Installed version, with package and version: the package's ecosystem, such as npm, PyPI or Maven. Sent in a request header.",
+        "type": "string"
+      },
+      "package": {
+        "description": "Installed version, with ecosystem and version: the package name in that ecosystem, such as org.apache.logging.log4j:log4j-core. Sent in a request header.",
+        "type": "string"
+      },
+      "version": {
+        "description": "Installed version, with ecosystem and package: the version installed, such as 2.14.1. Sent in a request header.",
+        "type": "string"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cve_id"
+    ]
+  },
+  "get_cwe": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cwe_id": {
+        "type": "string",
+        "description": "a CWE ID, e.g. CWE-79 (or 79)"
+      },
+      "page": {
+        "description": "page of 50 CVEs (default 1, max 200)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cwe_id"
+    ]
+  },
+  "vendor_advisories_for_cve": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "cve_id": {
+        "type": "string",
+        "description": "a CVE ID, e.g. CVE-2024-21412"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cve_id"
+    ]
+  },
+  "get_vendor_advisory": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "vendor": {
+        "type": "string",
+        "description": "the vendor slug, e.g. microsoft, redhat, github"
+      },
+      "advisory_id": {
+        "type": "string",
+        "description": "the vendor's own advisory ID, a row's vendor_advisory_id, e.g. RHSA-2024:1234, GHSA-xxxx-xxxx-xxxx or CVE-2024-3400; not a row's advisory_id, EchelonGraph's internal UUID"
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "vendor",
+      "advisory_id"
+    ]
+  },
+  "search_vendor_advisories": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "query": {
+        "description": "free text, at most 100 bytes: a product, an advisory ID, a CVE ID or a keyword, e.g. 'exchange server'; 1 or 2 characters match whole words only",
+        "type": "string"
+      },
+      "vendor": {
+        "description": "a vendor slug, e.g. microsoft, redhat, github",
+        "type": "string"
+      },
+      "severity": {
+        "description": "one severity band",
+        "type": "string",
+        "enum": [
+          "Critical",
+          "High",
+          "Medium",
+          "Low"
+        ]
+      },
+      "has_cve": {
+        "description": "true: only advisories naming a CVE; false: only those naming none",
+        "type": "boolean"
+      },
+      "limit": {
+        "description": "page size (default 20, max 50)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50
+      },
+      "offset": {
+        "description": "rows to skip (default 0)",
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000
+      },
+      "full": {
+        "description": "true: data in the structured result is the answer whole, however long. Without it, a structured result past 30,000 characters of JSON has its data cut (DATA CUT): in an order the note states, the entries of its longest lists keep only some of their fields, and then the lists only some of their entries; data_truncated is true, and truncated gives each list cut with its total, the number returned and whether its entries are thinned. Whole data is for a program; a client that sizes structured results, as Claude Code does against MAX_MCP_OUTPUT_TOKENS, can refuse an answer past its cap.",
+        "type": "boolean"
+      }
+    }
+  }
+}

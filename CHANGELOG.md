@@ -6,6 +6,602 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.1.0 — 2026-10-25
+
+- **cve_summary's `freshness` is the fleet's last completed NVD poll** (#3276). Since #3242 the
+  summary answer carries `nvd_poll`: `last_completed_at`, when the fleet of API instances last
+  completed an NVD poll, with `scope` `fleet` and the poll's `interval`. cve_summary relayed the
+  block in `data` but answered `freshness: null`, and its note, its description and the
+  methodology resource said the feed serves no poll-completion time. `freshness.nvd_poll` now
+  holds `last_run_at`, the block's `last_completed_at` as sent, `scope` `fleet` and `interval`
+  (production, 2026-10-17: `2026-10-17T22:45:09Z`, `fleet`, `20m0s`), and the
+  envelope's note says it is the fleet's poll, never the answering instance's
+  `poller.last_poll_at`. It is relayed only as a real RFC 3339 time at most 5 minutes after this
+  server's clock, on a block whose `scope` is `fleet`; `interval` only as a Go duration, else
+  `null`. An answer without `nvd_poll` (an older API, or one holding no fleet poll it could read) keeps
+  `freshness` `null`, and the note says this answer carries no `nvd_poll` block, not that the feed
+  has no poll time; a block without a usable time keeps it `null` too, says why, and is still
+  relayed in `data`. A poll more than three of its intervals old (or more than an hour, with no
+  usable `interval`) is said to be old: the note gives its age and says the CVE counts may lag
+  NVD by about that much. search_cves' and get_cve's note and description now say their answer carries
+  no poll-completion time. The outputSchema's `freshness` admits the new object and still `null`:
+  a client that listed the tools under 3.0.2 validates cve_summary against `freshness: null`, so
+  it fails cve_summary's answers until it reconnects (Claude Code: `/mcp`, then reconnect).
+- **exposure_radar relays the window over the dated rows, when some counted rows have no time**
+  (#2438). A radar's observation window was relayed as `window` only when every counted row
+  carried an observation time; otherwise nothing was relayed and the note said how many rows
+  carried none. On 2026-10-17, 26,855 of kev_exposure's 66,756 counted pairs were undated
+  (stored before banner times were captured), and those pairs can stay undated while the InternetDB re-check
+  keeps them on record, so its answers gave no observation time at all. `window` keeps its
+  meaning. Beside it, `dated_window` `{from, to, undated}` now carries the span over the dated
+  rows only, with the count of those without one, for kev_exposure, exposed_databases,
+  leaked_credentials and shadow_ai's confirmed_exposed. The note names both numbers (for
+  kev_exposure, the dated pairs out of `correlations`) and says the span does not describe the
+  undated rows. `state` stays `not_assessed` and `measured_at` `null`, as the 2026-10-04 decision
+  requires. Every count is unchanged. `dated_window` is a new field under objects 3.0.2 publishes
+  closed, so a client that listed the tools under 3.0.2 needs to reconnect.
+- **A success's `outputSchema` is open at every level, not only at its root** (#3268). 3.0.2 opened
+  the root alone (#3121). Below it, 86 objects still published `additionalProperties: false`: 40 in
+  `data` (exposure_radar's and cve_intel's `data` itself among them), 23 in `coverage`, 7 in
+  `freshness`, and each tool's `truncated` entry. 12 string enums admitted no other string, among
+  them scan_manifest's `manifest.files[].format` and `not_checked[].reason` and exposure_radar's
+  `kev_exposure.newest_kev[].exposure_state`. A client holding a release's tool list refused a field
+  added under any of those objects, or a value added to any of those enums, on every call of that
+  tool until it reconnected, and 2.6.3 and 2.7.0 each added such fields. A success's `outputSchema`
+  is open at every level: each object admits fields it does not name, and each enum but `state` any
+  string beside the values it lists. The failure branch keeps every object closed, and every enum
+  but four, which already accept any string: `coverage.not_assessed_reason` (check_affected),
+  `coverage.vendor_windows[].history_backfill` (vendor_advisories_for_cve, search_vendor_advisories)
+  and `coverage.vendor_window.history_backfill` (get_vendor_advisory). The server still checks its
+  own answers against the closed schema each tool builds, and so does the test suite.
+  `test/open-success.test.mjs` fails the release run on any closed object or enum in a success
+  branch of `tools/list`, and `test/schema-compat.mjs <old> [<new>]` lists what a candidate adds
+  under an object, or to an enum, that the release before it closed. The opened schema is built
+  once per process and shared by every server the hosted endpoint builds per request.
+- **A success's null-only `coverage` and `freshness` are published as `null` or an open object**
+  (#3268's review). 3.0.2 published `freshness` as `{"type": "null"}` in 14 tools and `coverage` so
+  in cve_summary and get_cve, so a client holding a release's list refused the object a later
+  release put there, as 3.0.2's clients refuse cve_summary's `freshness` now (#3276). In this
+  release those 15 slots (cve_summary's `freshness` now has its own schema) admit an object too,
+  while the server still answers `null` in each, as before. `test/open-success.test.mjs` finds a
+  success slot that admits only `null`, and `test/schema-compat.mjs` reports a type a candidate
+  widens at any node (`null` to `null|object`, a field made nullable, an integer made a number),
+  besides a field or value added. `scripts/npm-publish-mcp.sh`'s dry run runs it against npm's
+  latest and fails on any finding `test/schema-compat-allow.json` does not accept with a reason.
+- **A client that listed the tools under 3.0.2 or older must reconnect once** (Claude Code:
+  `/mcp`, then reconnect `echelongraph`), or it refuses these answers, which its list's closed
+  schema does not admit: cve_summary's (`freshness.nvd_poll`, #3276), epss_history's (`coverage`'s
+  `runs_undated`, `refresh_runs_truncated` and `days_in_progress`, #3143) and exposure_radar's where
+  it relays `dated_window` (under `kev_exposure`, `exposed_databases`, `leaked_credentials` and
+  `shadow_ai.confirmed_exposed`, #2438). `test/schema-compat.mjs` against npm 3.0.2 finds these and
+  the 15 slots above, which are not refused: they are still answered `null`. From 3.1.0 on, a field
+  or value added to a success does not need a reconnect.
+- README Versioning, and the 3.0.2 entry below, said each tool's `data` schema stays closed
+  (#3257). In 3.0.2 `data` was open at its root for 14 of 16 tools (closed for exposure_radar and
+  cve_intel), and objects below a success's root were closed in and outside `data`. Versioning now
+  says what is open and what is closed, in sentences `test/readme.test.mjs` derives from
+  `tools/list`, from "Since 3.1.0": 3.0.2 and older publish their success branches closed below the
+  root.
+- **cve_intel counts GitHub checker repositories apart from exploit code** (#3221). #3040 defined
+  an exploit-reference kind, `github_checker`, for a GitHub repository named or described as a
+  checker or scanner and never as an exploit, and EchelonGraph's API does not count a reference of
+  that kind as exploit code. cve_intel's note counted every reference but a Nuclei template as a
+  public exploit reference, a `github_checker` one included. It now counts each reference the API
+  serves as `github_checker` apart, as a GitHub checker repository, with /pulse's note that such a
+  repository checks whether a system is affected and is not necessarily exploit code (beside a
+  Nuclei template, /pulse's two notes in turn): 1 `github_poc` and 3 `github_checker` references
+  read "1 public exploit reference and 3 GitHub checker repositories", where they read "4 public
+  exploit references". The counts are the kinds the API serves: a repository it serves as
+  `github_poc` is still a public exploit reference here, even where /pulse reads it as a checker.
+  So for CVE-2020-35489 (1 proof of concept and 3 checkers on /pulse, 2026-10-11), cve_intel gives
+  the 3 as GitHub checker repositories only once the API serves them as `github_checker`. The
+  description's head says "detection checks" where it said "detection templates", the `kind`
+  field's text splits the exploit-code kinds from `nuclei_template` and `github_checker`, and
+  `exploits_by_kind` and the method say the same.
+- **cve_intel never counts a kind it does not classify as exploit code** (#3267). It counted every
+  reference whose kind was not one of its two detection kinds as a public exploit reference, so a
+  kind EchelonGraph's API serves that this release predates (another scanner or template source)
+  would have read "N public exploit references", the claim #3039 took out; `github_checker` did
+  that from #3040 to #3221. It now counts exploit code by name (`metasploit`, `exploit_db`,
+  `github_poc` and `vendor_poc`, the kinds the API counts as exploit code). A reference whose kind
+  is neither one of these nor one of the two detection kinds is "of a kind this server does not
+  classify": the note names the kind and counts it as neither exploit code nor a detection check.
+  2 references of an unknown kind `foo_check` read "2 references of a kind this server does not
+  classify", where they read "2 public exploit references", and a CVE holding one is never said to
+  hold no Metasploit module, Exploit-DB entry or proof of concept. The `kind` field's text says so,
+  and so do `method` and `exploits_by_kind`'s description, each now built from the same two lists
+  the note counts by: `method` adds "A kind on neither list is one this server does not classify:
+  the note counts it as neither.", and `exploits_by_kind` names the exploit-code kinds and what any
+  other kind's count is. The kinds the API serves today are all classified, so no count changes.
+- **triage_cve gives GitHub checker repositories apart from exploit code** (#3221). Its step 2
+  says a `github_checker` row is a GitHub repository named or described as a checker or scanner,
+  which checks whether a system is affected and is not necessarily exploit code, and its
+  "Exploited?" line gives them apart, as detection checks, with Nuclei detection templates. It
+  named only `nuclei_template`, so "GitHub or vendor proofs of concept" read as taking a checker in.
+- **cve_exposure's outputSchema says what each KEV flag is** (#3016). `kev_listed` is deprecated:
+  the same value as `kev_seen_in_observations`, the radar's observation flag, not CISA-KEV catalog
+  status, so it is false for a CISA-KEV CVE the radar holds no service for (CVE-2024-3400 on
+  2026-10-10: `kev_listed` false, `kev_catalog_listed` true). `kev_catalog_listed` is the catalog
+  flag: true when EchelonGraph's CVE record marks the CVE as CISA-KEV-listed, and false also where
+  EchelonGraph holds no record of it. The three fields had no text. `kev_listed` stays, so no
+  reader breaks; the values are unchanged.
+- `epss_history` relays `coverage.runs_undated` and `coverage.refresh_runs_truncated` in the
+  envelope's `coverage` (#3143), and its note names each when it is not 0 or false. An undated
+  refresh is one the run log holds no FIRST score date for: its file named none, or it stopped
+  before recording it. The day it applied is not counted (held, partial or in progress), so a day
+  the note lists as missing, or does not list, may be held for the CVEs it changed, and its points
+  carry no `score_date`. Production has served `runs_undated: 1` since 2026-10-08, when a deploy killed a
+  refresh mid-run, and the note said "none missing" without naming it. Both fields are `null` in
+  `coverage` when the API does not say, never 0 or false.
+- `epss_history` relays `coverage.days_in_progress` (#3143): the FIRST score dates a refresh that
+  has not finished is applying, held for some CVEs so far. core-backend now dates a refresh's run
+  row as soon as it reads the file's header, so its date is listed while it runs, and not in
+  `days_partial`, which means a refresh of the date failed part-way. A retry of a date whose
+  earlier refresh failed part-way is in both lists, and the note names it in both. The note never
+  says nothing failed: the API reads "not finished" off the row's status and age, so a refresh
+  killed minutes ago reads the same. `null` in `coverage` when the API does not say (an API older
+  than #3143).
+- **check_affected and check_sbom answer each CVE once per component** (#3137). OSV can publish one
+  CVE for a package in two records, a GHSA and a package repository's own advisory, and
+  EchelonGraph's API stored and answered each: `drupal/quick_node_block` 1.0.0 on Packagist came
+  back with 4 matches for 2 CVEs, each CVE's GHSA match naming `fixed_in` 2.0.0, which the CVE's
+  Drupal advisory still holds affected. The API now decides all of a CVE's stored records for the
+  package together: one match per CVE, `fixed_in` 2.0.1 for both, and cve_remediation's
+  installed-version answer agrees. `not_affected_count` and `undetermined_count` count CVEs, not
+  advisory records (`advisories_considered` still counts the records), and the notes say so. A
+  null `fixed_in` is described as no version above this one shown to be unaffected by the CVE's
+  advisory records, which is not a finding that no fix exists. A record of the CVE that cannot
+  decide `fixed_in` (no version data, a git commit range, or one recorded fix it is at or past)
+  does not withhold it, so the same lookup at `fixed_in` can come back undetermined.
+- **get_cve and search_cves type the scorer's three components** (#2879). Scorer v4.0 publishes
+  `eg_severity` (the impact severity alone: the CVSS base no KEV listing, EPSS or EG-KEV tier
+  raises; `assessed` false, with `unassessed_reason`, where no CVSS is published), `eg_likelihood`
+  (FIRST's EPSS probability of exploitation in the next 30 days, not EchelonGraph's own model; null,
+  with `null_reason`, where no EPSS is on record; `exploited` reports confirmed exploitation apart,
+  never folded in) and `eg_priority` (the SSVC decision, the BOD 26-04 timeline and their inputs).
+  The `outputSchema` types all three on get_cve's `data`, where `GET /cves/:id` serves them at the
+  top level, and on search_cves' `data.cves[]` rows (the list route carries them in
+  `score_factors`, whose description now names them); `echelongraph_score` is described as
+  severity escalated by confirmed exploitation, and `echelongraph_risk`'s severity term as
+  `eg_severity` from v4.0. get_cve's note adds up to two sentences, each only where the record
+  carries what it reads: where the score is above `eg_severity` because a KEV listing floors it at
+  9.0 or EPSS lifts it, that the rise is exploitation, not impact (for a KEV-listed CVE with no
+  CVSS, that the score is the floor for confirmed exploitation, not an impact rating); and where
+  `eg_likelihood.probability` is null, that the likelihood is unknown, not low. A record scored
+  before v4.0 reads as before. Additive: 3.0.2 published get_cve's `data` and search_cves' rows
+  open (`additionalProperties` `{}`), so a client holding 3.0.2's list accepts the fields.
+- **Arguments that break a tool's inputSchema answer the full envelope, `invalid_input`** (#3015).
+  The MCP SDK checked a call's arguments against the tool's `inputSchema` before the tool ran, and
+  answered a failure itself: `search_cves` `{limit: 500}` came back as one text block, "Input
+  validation error: Invalid arguments for tool search_cves: limit: Too big: expected number to be
+  <=50", `isError` true, with no `structuredContent`, so no `state` and no notes, although the README
+  says every result carries `structuredContent`. Every tool now answers such a call as it answers
+  any refusal: `state` `invalid_input`, `error.kind` `invalid_input`, the envelope in the last text
+  block, and notes naming each argument and the rule it broke (`limit must be at most 50`,
+  `severity must be one of "Critical", "High", "Medium" or "Low"`, `cve_id is required (a string)`),
+  by JSON type, never quoting a value sent, over stdio and the hosted endpoint, in both protocol
+  eras. Nothing is looked up. This change leaves `tools/list` as it was: it publishes every
+  `inputSchema` byte for byte as before it. Against 3.0.2, 15 of the 16 are unchanged;
+  get_vendor_advisory's differs in its `advisory_id` description alone, which #3011 (below)
+  rewrote to name `vendor_advisory_id` and warn off the row's UUID.
+- **get_vendor_advisory says which ID to pass when given a row's `advisory_id`** (#3011). A
+  vendor_advisories_for_cve or search_vendor_advisories row carries two IDs: `advisory_id`,
+  EchelonGraph's internal UUID, and `vendor_advisory_id`, the vendor's own. get_vendor_advisory's
+  argument is named `advisory_id` but takes the vendor's ID, and EchelonGraph's API has no route by
+  the UUID, so passing the row's `advisory_id` straight on (CVE-2024-3400's Palo Alto row,
+  `a68d033b-…`) answered `failed`, worded as the API holding no record, for an advisory it holds. It
+  now answers `invalid_input` naming the field to pass: the row's `vendor_advisory_id`
+  (`CVE-2024-3400`) as `advisory_id`. The API is still asked first, so a vendor's own ID shaped like a
+  UUID is looked up as before, and any other 404 is still `failed`, as no record. Both list tools'
+  `outputSchema` (and get_vendor_advisory's, which echoes it) now describe a row's `advisory_id` and
+  `vendor_advisory_id`, get_vendor_advisory's `advisory_id` argument and description name
+  `vendor_advisory_id` and warn off the UUID, and triage_cve's step 4 says to call
+  get_vendor_advisory with a row's vendor and its `vendor_advisory_id` as `advisory_id`.
+- **scan_manifest states the API's per-minute budget, and its batch numbers are checked** (#3100).
+  Its description now says that a call takes at most 2,000 distinct purls and 50 seconds, that the
+  API allows 1,200 components a minute per caller, and that on a 429 the tool waits out
+  `Retry-After` within those 50 seconds, while a later batch cut off at them, refused or failed
+  ends the call, the rest in `data.not_sent_purls`, unchecked and not clean (3.1.0's review: the
+  first wording bound only the 429 wait by the 50 seconds, which bound the whole call, as 3.0.2's
+  "within 50 seconds" said; the room came from shorter wording elsewhere). So from a fresh minute a
+  lockfile of 1,201 to 2,000 purls answers partial by design, which the description did not say;
+  started later in the API's minute, a call can wait for the next one and check more. Its list of
+  `not_checked` reasons gave way to it: each reason is described in the `outputSchema`.
+  The description's numbers (200 per POST, 2,000 purls, 50 seconds, 1,200 a minute) were literals
+  no test read; they are now held to the constants the tool sends by, and core-backend's guards
+  hold scan_manifest's batch size and budget to the API's own, as they did check_sbom's.
+- **cve_remediation's first text block keeps every advisory before any list beside them** (#3272).
+  #3139 fixed the cut order of `structuredContent.data` only. The first text block, which a client
+  that passes only `content` reads, still left advisories out from the end while `fixed_branches`,
+  `patches` and `fix_references` stayed whole beside them: on the recorded CVE-2023-44487 answer it
+  kept 19 of 20 advisories, and with 1, 5, 10 and 16 more `fixed_branches` packages 18, 13, 8 and 2.
+  Its TEXT CUT note named `get_vendor_advisory`, which needs the advisory's ID, and never
+  `vendor_advisories_for_cve`. The text now cuts in `data`'s order: each advisory to its leaner
+  fields first, then `fixed_branches` and then `patches` thinned to the fields `data` keeps, then
+  `fix_references`, `patches` and `fixed_branches` rows leave from the end, each list emptied
+  before the next loses one, and only then advisories. The note says what each list keeps and,
+  when an advisory is left out, names `vendor_advisories_for_cve`, which lists every one. That
+  answer keeps all 20 advisories now, beside every package, patch and reference, with 1 to 18
+  more packages too. As `data` does, once `fixed_branches` and `patches` are thinned and the text
+  still does not fit, each package's ranges are cut to the most that fit, every package kept: a
+  package so cut carries `fixed_branches_truncated` with its total and returned, and the note
+  names it and says `structuredContent.data` holds every range; only where even one range per
+  package does not fit do references, then patches, then packages leave, the room they leave going
+  back to the ranges. The note's fix rule, walked over a capped package's kept ranges alone, can
+  name a version a range left out still holds, so the text's note and `data`'s (of a package `data`
+  caps) say so and to read that package's fix with `full: true`. Before 3.1.0's review the text
+  capped no ranges: with one package of N ranges first among CVE-2023-44487's 51 it kept 11 of 20
+  references at 150 ranges, none at 200, no patch at 250, 25 packages at 300 and, from 400, no
+  package, patch or reference in 6,347 characters. It now keeps all 51 packages, 30 patches and 20
+  references from 50 to 600 ranges, the large package's ranges capped at 133 from 150 on (3.0.2's
+  every-list cap kept 32 packages, each to 32 ranges, 30 patches and 20 references). `data` keeps
+  all 51 throughout; the longer notes cost it a few references there (10 of 20 from 150 ranges, from
+  12 or 13).
+- **cve_remediation's fix rule reads a package listed under Packagist and Packagist:<repository
+  URL> as one** (#3285). `fixed_branches` lists a package once per stored ecosystem string, so
+  CVE-2025-48013 lists `drupal/quick_node_block` under `Packagist:https://packages.drupal.org/8`
+  (fixed 2.0.1) and under `Packagist` (fixed 2.0.0). The note's rule, "the first fixed above it
+  that no range of its package holds", read entry by entry, gave a Packagist 1.0.0 the fix 2.0.0,
+  which the Drupal advisory still holds affected; the matcher reads both entries as one package
+  and answers 2.0.1. Where such entries are listed, the note now counts them as one package, says
+  that entries of one `package_name` under Packagist or Maven, bare or with a repository URL, are
+  one package, and names them. A release suffix (`Debian:12`) is never folded. `data` is
+  unchanged.
+  - **cve_intel and the prompts read them the same way.** `cve_intel`'s `affected_packages` lists
+    a package once per stored ecosystem string too, and its note's rule ("no range of the row
+    holds") and the `sbom_review` and `triage_cve` fix rules took one row at a time, so the same
+    1.0.0 was given 2.0.0. `cve_intel`'s note now says such rows are one package, names them, and
+    states the walk over all their ranges; `sbom_review`'s rule reads a Packagist or Maven
+    component's rows of its `package_name`, bare and with a repository URL, as one row, and
+    `triage_cve` gives their ranges together, never a fixed that another of them still holds.
+    Both give 1.0.0 the fix 2.0.1.
+- **check_affected's text keeps KEV-listed and ransomware matches to the last** (#2899). Near the
+  cap of 200 registry matches the text left out the last matches by rank (`effective_score`), so
+  a KEV-listed match ranked low was in `structuredContent.data` only and the note said only how
+  many left. Now a match whose `kev_listed` or `ransomware` is true stays in the text while any
+  other match is in it, the note says so, and if one must still leave (every other already out)
+  the note names each by its `cve_id`. The structured result's cut rule is unchanged, but by
+  default `data` can hold a few entries fewer, because the longer `TEXT CUT` note sits in the same
+  envelope budget: at the cap of 200 registry matches check_affected's `data` keeps 131 where 3.0.2
+  kept 132 to 133, and cve_remediation's, with 100 packages more than CVE-2023-44487's 50, 78
+  `fixed_branches` rows where it kept 80 (and, with one package of 150 to 600 ranges among them, 11
+  of 20 `fix_references`, from 12 or 13, since the text names the package whose ranges it caps,
+  #3272). `full: true` returns `data` whole, as before.
+- **check_sbom's first text block keeps rows with a KEV-listed or ransomware match to the last**
+  (#3284). `data` keeps those rows first, while the text left the other affected rows out from the
+  end in input order, so a KEV-bearing row could leave the text and be named in no text block and
+  in no note (the `DATA CUT` sentence names only rows left out of `data`). On the reviewer's
+  text-only client (the first text block and the note, then `workload_triage`'s step 6), the 36
+  realistic Debian 12 images had 95 of 413 KEV-bearing rows in neither; the 2,000-purl images and
+  image mixes 23 of 119. Now those rows leave the text only after every other row does, the note
+  says so ("the last 123 of the rest without a KEV-listed or ransomware match"), and where some
+  must still leave it names each by `index` ("Of the rows left out of it, 30 have a KEV-listed or
+  ransomware match: at index 511 to 513, …"). On the same sets, a row the note names so counted as
+  named: 0 of 413 and 0 of 119, and the KEV-first-sorted images 0 of 374 (1 at d42d4697). `scan_manifest`'s text, cut the same way, does
+  the same. `workload_triage` and `sbom_review`, read from the text alone, list the rows so named
+  as KEV-bearing and not checked. The 201-purl probe keeps its 43 rows in `data`. As with #2899,
+  the longer note sits in the same envelope budget: on the realistic images `data` keeps 489
+  affected rows where it kept 491, and after `workload_triage`'s 5 re-check calls 392 KEV-bearing
+  rows are in view where 396 were (KEV-first images 352 of 374, from 356); every re-check call
+  still keeps every row it sends.
+- **workload_triage's Kubernetes exposure rule names a container `hostPort` and a Service's
+  `externalIPs`** (#3283). Its rule named a LoadBalancer or NodePort Service, an Ingress or Gateway
+  route and `hostNetwork`, and "not exposed" needed only the pod's spec and the Services read, so a
+  pod reachable on node IPs through a `hostPort` (an ingress controller or agent DaemonSet) or a
+  ClusterIP Service with `externalIPs` was labelled not exposed and sorted below the unknown ones
+  of its KEV group. Both are now exposed, and "not exposed" requires having read the containers'
+  ports and the Services' `externalIPs`. The MCP post's "Triage your pods" section states the same
+  rule, held to the prompt's text by marketing-site's prompt-claims test.
+- **sbom_review gives a null `fixed_in`'s reason** (#2834). Where a match's `fixed_in` is null,
+  the fix list writes "no fix on record" with the match's `fixed_in_reason`, as given, and reads
+  no version from it: a version it names (an interval that ends at `last_affected`) is not a fix.
+  It wrote "no fix on record" alone. check_sbom's text keeps `fixed_in_reason` at every level
+  that keeps a match. Its structured `data` does not at the compact level (#3269): kept there, the
+  reason cost the 201-purl probe a row (43 to 42) and image mixes affected rows at their floor. So
+  the clause applies where a match carries `fixed_in_reason`, and a null `fixed_in` without one is
+  a reason the cut left out: sbom_review never calls it no fix, and checks the purl again with
+  `full: true` or reads the fix from cve_remediation or get_cve.
+- **check_affected relays a CPE match's range end in its own field, never as `fixed_in`** (#2834).
+  Once EchelonGraph's API serves it, a CPE match carries the end of the NVD range that matched,
+  `cpe_version_end_excluding` (the first version the range no longer holds) or
+  `cpe_version_end_including` (the last one it holds). The outputSchema types both, and neither is
+  ever given as a fixed version: another range of the same CVE, or a vendor backport, can sit past
+  it. Only the first cut level of the text and the first thinned level of `data` keep them; every
+  later level leaves them out, so a CPE answer cut past its first level, as typical CPE answers
+  are, carries them only with `full: true`. A CPE match still carries no `fixed_in`.
+- check_sbom's and scan_manifest's `matched_package` and `matched_via` are on each row the lookup
+  ran for; a row the API refused has neither (#2836). The methodology resource, /pulse/mcp's
+  check_sbom row and the SBOM coverage program say so, where they said every row.
+- The `echelongraph://methodology` resource says what check_affected's and check_sbom's matches
+  carry for a fix (`fixed_in`, or null with `fixed_in_reason`; a CPE match's range end, which is
+  not one), and that a deb, apk or alpine purl's `upstream` qualifier is matched as the source
+  package it names (`matched_via` upstream, `matched_package` that name), while a binary package
+  sent without it comes back `not_assessed` (#2834, #2836).
+- **check_sbom and scan_manifest drop clean rows before they cut an affected row's matches**
+  (#3269). 3.0.2's structured cut (#3132) took every row through its levels together, the clean
+  ones with the affected, and only at the last did rows leave. On an ordinary image SBOM, where
+  most rows are clean, the affected rows lost their matches to keep the clean ones. Replayed on the
+  production synthetic's recorded rows, 150 purls with 40 affected kept all 150 rows, and only 2
+  of the 40 affected rows kept their matches. 3.0.0 kept 56 rows, all 40 affected with every
+  match. Now the `not_affected` and `not_assessed` rows are cut to `index`, `purl`, `verdict`,
+  `not_assessed_reason` and `cve_ids`. They then leave, `not_affected` first, as many as must for
+  every other row to keep all its matches. `data.summary` counts them, and the note says how many
+  left. Once the cut is settled they come back, cut so, as many as the room left holds. On the same
+  replays, 150/40 keeps 52 rows, 150/30 keeps 91 and 150/20 keeps 135, and every affected row has
+  every match.
+- **Where the affected rows must be capped anyway, the clean rows stay** (#3269's review). They
+  leave first to keep the other rows' matches whole, not to raise a cap those rows are cut to
+  anyway. So where every other row cannot keep all its matches even with every clean row gone,
+  the clean rows stay, cut as above, while every affected row keeps at least its floor: each of
+  its matches used in ransomware or KEV-listed, and 10 more of highest `effective_score`.
+  `linux-libc-dev` 6.1.55-1 (200 matches) with 100 clean Debian 12 purls keeps all 101 rows, as
+  3.0.2 did, `linux-libc-dev` with 29 of its matches; sending the clean rows out to raise the cap
+  kept 1 row of 101 in testing. Juice Shop 11.1.2 with `magento/community-edition` 2.3.0 keeps all
+  51 rows, every one of its 19 affected rows with matches, magento with 19 of its 200, both
+  KEV-listed ones among them (3.0.2 kept it 6, without CVE-2025-54236). Only where even the floor does not fit
+  with every clean row do they leave, as many as must for it to: five Debian 12 purls with 200
+  clean ones keep 69 rows.
+- **A capped affected row never goes below its floor; past it, rows leave whole** (#3269's second
+  review). Where even the floor did not fit with every clean row gone, the cap went on below it,
+  to 1 match a row and then none, every row still kept: five Debian 12 purls beside an image's 150
+  (40 affected) kept 45 affected rows, 1 with any match, where 3.0.2 kept 26, 22 with every
+  match. Now no row's matches are capped below its floor. The other rows leave instead, whole, at
+  the compact level and their floor, and the rows kept are chosen those with a KEV-listed or
+  ransomware match first, then the others, each in input order, each one that fits beside those
+  chosen before it (a row too large to fit leaves, and the rows after it stay). The note names
+  the affected and undetermined rows that left by `index`, so a call of those purls alone checks
+  them again (those with a KEV-listed or ransomware match first and apart, below). Where not even
+  one row fits at its floor (a row whose KEV-listed matches alone pass the budget), it stays alone
+  with the most of its matches that fit, ransomware first, and the note says so: 116 of 200
+  KEV-listed matches. Over 40 Debian-image mixes (five Debian 12 purls, or `linux-libc-dev`
+  6.1.55-1, beside 100 to 400 more purls, 10 to 60 affected), 820 affected rows keep every match
+  or their floor, 720 every match, and none is
+  under its floor (round 2: 462 and 408, and 744 rows under it; 3.0.2: 929 and 834, and 116 under
+  it). 3.0.2 kept more rows because its compact matches left out `epss_score` and
+  `score_assessed` (#3270): with those two fields out, this cut keeps 1,030 and 930. The note's
+  list of affected components says that the rest are in `data.results` whole with `full: true`.
+- **The trade against 3.0.2, plainly** (#3269, #3270). On heavy images the first call keeps fewer
+  affected rows than 3.0.2 did. Each row it keeps is whole at its floor or more, every match with
+  every field `workload_triage` ranks by (`epss_score` and `score_assessed` among them), the rows
+  with a KEV-listed or ransomware match kept first, and the rest are named by `index` for checking
+  again (next item). Measured on 36 realistic Debian 12 images (2026-10-18): 491 affected rows in
+  the first call, against 3.0.2's 686; but 367 with every match and all six ranked fields, against
+  61; 204 with a KEV-listed or ransomware match, against 39; and no KEV-listed match cut while a
+  match without one is kept, against 9 rows on 3.0.2. On three 2,000-purl images: 36 rows against
+  86, 28 against 2 with every ranked field, 31 against 4 KEV-bearing. On the 40 image mixes above:
+  820 against 1,045, 720 of them with every match and all six ranked fields, against none. After
+  `workload_triage`'s checks again, 396 of the realistic images' 413 KEV-bearing rows are in view.
+  Since those checks take the KEV-bearing rows first, 48 affected rows that 3.0.2's call showed,
+  on 3 of the 36 images (13 on one 2,000-purl image), are past its 5 calls, and it reports them
+  by `index` as unchecked.
+- **The rows left out are named KEV-bearing first, and checked again in calls that keep every
+  row** (#3269's third review).
+  - **The order.** The note counted the KEV-bearing rows among those left out, but named all of
+    them in one list, in `index` order. `workload_triage` checked them again in that order and
+    stopped after 5 calls, so on six old unpatched Debian images, where those rows come late, 119
+    of 255 KEV-bearing rows were in view after it. The note now names them first and apart: "95
+    affected or undetermined rows: the 32 with a KEV-listed or ransomware match at index 18 to 21,
+    …; the other 63 at index 0, 2, 4 to 9, …". Both lists are of runs of indices, 100 parts at
+    most in all. `workload_triage` checks them again in that order: 238 of the 255 are in view
+    after its 5 calls, against 228 with the input itself sorted KEV-bearing first.
+  - **The size of each call.** Step 6 sized its calls by the page sentence's N, which holds for a
+    call of the first N purls sent. The rows left out are the heavy ones, so those calls dropped
+    504 of 2,540 rows on the realistic images. The note now gives the sizes for these rows, counted
+    as the cut would cut a call of them, with that call's own note (the affected components it
+    names): "Re-check these 95 purls in this order, in calls of 7, 5, 8, 8 and 16, then of at most
+    17: each such call keeps every row in data." Each of the first five calls takes the most of
+    the rows left, in that order, that the cut's own measure counts as fitting at their floor with
+    600 characters held back, a lower bound (a real call of them often keeps more); after those,
+    the number is the most such that any that many of the rest in a row count so, and a call of
+    fewer rows in a row keeps them all too. One size for every call (the "at most M" alone) put 201 of the 255 in view in
+    testing; even the best single size, found by trying real calls, would put 224. Every call these
+    sentences give, made in full, kept every row: 551 calls on the 36 realistic images (15 an
+    image), 227 on the three 2,000-purl images, 441 on the 19 KEV-first-sorted ones, 28 on the
+    image mixes and 18 on the 16 adversarial ones; within the 5-call cap, 165 calls on the
+    realistic images.
+  - **A row past the budget alone.** A row whose floor alone does not fit (200 KEV-listed
+    matches) is sent to a call of its own, which keeps it under its floor and says so: "The purl
+    at index 150 goes in a call of its own: …".
+  - **sbom_review** had no step for the affected rows a `DATA CUT` leaves out of `data`, which is
+    what Claude Code reads. Its step 1 now checks them again the same way, by `index`, those with a
+    KEV-listed or ransomware match first, at most 5 calls, and lists the rest as unchecked.
+  - **The note's length.** Over the 36 realistic images the note is 151 characters longer on
+    average, 236 on the 2,000-purl images, and 20 shorter on the image mixes, where the order the
+    rows were kept in is left unsaid when it is plain. The first call keeps 491 affected rows on the
+    realistic images (round 3: 490), 820 on the image mixes (819), 36 on the 2,000-purl images
+    (38), and the 201-purl probe's 43.
+  - **The guard.** A prompt-fields test holds each shape of the note that `workload_triage` and
+    `sbom_review` quote to a real cut's note.
+- **What workload_triage and sbom_review do with a cut answer** (#3269's fourth review).
+  - **Rows left out of the first text block.** The text leaves rows out from the end, in input
+    order, while `data` keeps the KEV-bearing rows first, and `workload_triage` had no step for
+    the rows the text left out, so a client reading the text alone lost them unsaid, KEV-bearing
+    ones among them. Its last line now says they are in `structuredContent.data`, or, where a
+    `DATA CUT` leaves rows out of `data` too, named in its note by index for step 6's re-check,
+    and, read from the text alone, counts them from `data.summary` as unchecked, as `sbom_review`
+    does.
+  - **Indices.** `sbom_review`'s step 1 says that `metadata.component`, which check_sbom does not
+    read (Trivy puts the image's `pkg:oci` purl there), is not counted, and has the agent check
+    its index-to-purl mapping against the rows `data` keeps, which carry both, before it sends a
+    re-check call.
+  - **Past 30 CVEs.** `sbom_review`'s step 3 looked up any 30. It now takes the KEV-listed ones
+    first (a match with `kev_listed` true, or named in `matches_truncated.kev_listed_cve_ids`),
+    then the highest `epss_score`, read from check_sbom's matches, not from a `get_cve` per CVE.
+- **The page sentence promises what holds** (#3269's review, and its second review). With clean
+  rows leaving first, the number of rows `data` keeps is no longer a page size at which a call
+  keeps them all: in testing, Juice Shop with magento named 19, and a call of its first 19 purls
+  kept 14. The sentence now names the most purls N such that a call of the first N, or of fewer,
+  keeps every row, counted as the cut would cut that call, and says only that: "A call of the
+  first N of these purls, or of fewer, keeps every row in data; a call of other purls says in its
+  own note what it leaves out." Round 2's opening, "To read every row in data, check N or fewer
+  purls per call", read as a page size for the rest, and calls of the purls N at a time lost rows
+  in 55% of the paged mixes in its review. On the replays, 150/40 names 99 and the 201-purl probe
+  42; a call of the first N, or of fewer, kept every row in each of the replayed cases, in 24
+  seeded random mixes (the suite), and in the 158 of 160 more, of up to 2,000 purls, that named
+  one, run outside the suite.
+- **A capped check_sbom row keeps its KEV-listed matches; every level that keeps matches keeps
+  what workload_triage ranks by** (#3270).
+  - **Which matches stay.** A row whose matches were capped kept its first ones by
+    `effective_score`, so a KEV-listed CVE ranked lower was cut and only
+    `matches_truncated.kev_listed_cve_ids` named it. magento's CVE-2025-54236, at position 21 of
+    its 200 matches, was cut beside Juice Shop. Such a row now keeps the matches chosen used in
+    ransomware first, then its other KEV-listed ones, then those of highest `effective_score`;
+    `data` lists them in the API's order, and the note and `matches_truncated`'s text say both.
+  - **Which fields stay.** The compact level dropped `epss_score` and `score_assessed`, so the
+    201-purl probe kept 54 rows and not one match with either. It now keeps every field a prompt
+    ranks by: 43 rows fit, as on 3.0.0, each match with all six.
+  - **workload_triage.** Step 5 now reads `matches_truncated`'s `kev_listed_cve_ids` and
+    `ransomware_cve_ids`, and says that at the leanest cut neither list is there, so its `get_cve`
+    calls read those CVEs. It calls `get_cve` for every CVE kept without its match, and for every
+    match that lacks a field it ranks by. A new step 6 takes each image's counts from
+    `data.summary`, which counts every row whatever the cut (a call per image where several
+    images' rows were left out). A `not_affected` or `not_assessed` row left out is not checked
+    again; the affected and undetermined rows that left, which the note names by `index`, are, in
+    calls of their purls alone (KEV-bearing first, at the sizes the note gives, since #3269's
+    third review), at most 5, the rest reported as unchecked. (#3269's review first had every
+    purl left out checked again at the page size: 332 calls on a realistic Debian SBOM,
+    nearly all for clean rows.) sbom_review's fix rule now covers a CVE whose match a cut left out.
+  - **The guard.** The #3013 prompt-field test now holds every level that keeps matches, not
+    `SBOM_ROW_THIN` alone, with a control: 3.0.2's compact level fails it, naming the two fields.
+- **check_sbom's and scan_manifest's first text block follows the same priority** (#3269). Its
+  clean and not-assessed rows left the text only once every row was cut to `index`, `purl`,
+  `verdict`, `not_assessed_reason` and `cve_ids`. So on the same replays the text kept all 150 rows
+  of the 150/40 mix and the matches of none of the 40 affected rows, on 3.0.0 and 3.0.2 alike. Now
+  those rows are cut to that level and leave the text first, as many as must. The 150/40 text keeps
+  58 rows, every affected row with every match. Where that cannot fit, the text is cut as before,
+  every row to that level: the 2,000-purl and Juice Shop texts are unchanged, and five Debian 12
+  purls with 200 clean ones keep 157 rows. The note says what those rows leave out, and that each
+  string in them keeps its first 100 characters where one is longer (a 150-character Maven purl
+  with its `repository_url` came back clipped, unsaid, in testing). The text names no page size
+  (#3269's second review): "check N or fewer purls per call", N the rows it kept, was none, and a
+  call of the first N kept fewer rows in 34 of 89 mixes, on 3.0.2 too. Its note says how many
+  rows it left out, of which kinds, and that `structuredContent.data` holds them.
+- **A hosted handler error with JSON-RPC code -32022 is never `error_class` `other`** (#2923). A read
+  of production since 3.0.2 found one: the bundled SDK rebuilds a peer's -32022 error response with
+  the peer's own message (`ProtocolError.fromError`), which no fixed prefix can know. An error whose
+  message no prefix knows is now classified by its code where the code names a cause: -32022
+  `unsupported_protocol_version`, -32021 `missing_client_capability`, -32020 `header_mismatch`,
+  -32700, -32600, -32601 and -32602 `parse_error`, `invalid_request`, `method_not_found` and
+  `invalid_params`. The message is still never logged. Each such line now also names the request it
+  arose in by the access line's own labels, `rpc_method` and `protocol_version` (the
+  `MCP-Protocol-Version` header as a date, `(other)` or `(none)`), read from the request's own
+  context, since the SDK hands its `onerror` only the error; never a param. `rpc_method`, on this
+  line, the access line and `mcp_upstream_failed`, is now a closed set of labels: a method MCP
+  defines for a client to send (the bundled SDK's client requests and notifications, and its task
+  methods), or `(other)` for any other string. It was the client's own string, checked only for its
+  shape. The access line's `method` is closed the same way: GET, HEAD, POST, PUT, PATCH, DELETE,
+  OPTIONS, CONNECT or TRACE, else `(other)`. Over h2c, the hosted endpoint's protocol, it was any
+  `:method` token the client sent. So is `mcp_client_gone`'s `rst_code`, the reset code of a stream
+  the client reset: a code HTTP/2 defines (0 to 13), else `(other)`. It was any number the client's
+  reset carried.
+- **On the hosted endpoint, a large body that finds both large-body slots busy waits for one** (#2775).
+  Behind Cloud Run's front end a client's close reaches the server too late to free the slot of a
+  `check_sbom` call it abandoned (a probe on 2026-10-18: both follow-ups sent 1 s after two aborted
+  calls were answered 503 while those calls ran on to 200), so a client that timed out and retried
+  was refused for the rest of its own abandoned call. Now a `check_sbom` or `scan_manifest` call or
+  an `sbom_review` prompt past 64 KiB that finds every slot taken waits up to 15 seconds for one
+  (`MCP_LARGE_BODY_WAIT_MS`), at most two at once, first come first served, and is answered 503 with
+  `Retry-After`, as before, only when its wait runs out or two already wait. The access line records
+  the wait (`slot_wait_ms`), and `mcp_large_body_busy` is written only for a refusal. A body that
+  declares its `Content-Length` waits holding nothing; a chunked body (no `Content-Length`) waits
+  holding at most the 64 KiB general cap (`MCP_MAX_BODY_BYTES`) plus the chunk that crossed it, so
+  memory stays bounded as before.
+- **The hosted endpoint's body reader also reads whether the client had gone before it started**
+  (#2775). It learned of a close or an abort only from the listeners it attached, so a reader
+  started after the client went would have kept a large body among the waiters to the end of its
+  15 seconds, or taken a free slot and held it for good. No request to `http.js` met this: it starts
+  reading each body in the request's own event. On Node 20, 22 and 24, a stream reset or a close
+  sent in the same write as a large request's headers was logged 499 (`client_closed`) within a few
+  milliseconds, holding no slot and no place among the waiters, whether a slot was free or held. The
+  reader now reads the request and its response's signal as they are when it starts.
+- **The hosted endpoint logs every API call that fails** (#2948). On 2026-10-07 a hosted `get_cve`
+  answered "EchelonGraph ... could not be reached" in 460 ms, and the hosted service's only line
+  for it was its access line, `status` 200: the cause went to the client and nowhere else, and was
+  lost. Each failed API call now writes one `mcp_upstream_failed` line: `failure_class` (`timeout`,
+  `dns`, `refused`, `reset`, `connect_timeout`, `unreachable`, `tls` or `network` from the error's
+  codes; `http` with its `status`; `not_json` or `not_object`; `unexpected_shape` for a 2xx the tool
+  could not use), `route` (core-backend's route template, such as `/api/v1/public/cves/:id`: never
+  the path, which holds what was looked up, and never the query string), `tool` and `rpc_method` as
+  the access line has them, `after_ms`, and `synthetic`. It is WARNING, but INFO for the API's own
+  answer about the input (a 400, or a 404 for a named record), which the tool reports as invalid
+  input or no record: a departure from #2948's every-failure-WARNING, so that a mistyped CVE ID is
+  no outage (the hosted service's monitoring still counts the INFO lines, so a 404 that is really a
+  removed route shows); and ERROR for `output_schema`, the tool's own outputSchema refusing the answer
+  it built, which is this server's fault, not the API's (#2948's review: it is no upstream failure,
+  so the upstream metric, which counts WARNING, leaves it out). A call cancelled because its client
+  went writes none. `exposure_radar` writes
+  one per radar that failed. The npm package (stdio) writes nothing: stdout is the protocol.
+- README: "Privacy: what is sent where" names every field the hosted endpoint's access line
+  records (#2863). It named the method and path, status, duration, body size, JSON-RPC method,
+  tool name, protocol version, `Origin` presence and "the family" of the User-Agent; the line also
+  records the prompt name for `prompts/get`, how long the request waited for a place and how many
+  were served at once, whether the client's address is public (not the address), whether the client
+  closed early, and whether the request was throttled or refused, and why, as /privacy Section 11
+  says. The User-Agent is described as its first word, which is what is kept. Nothing the endpoint
+  logs changed. Each line it writes is now one of `src/logLines.ts`'s, with exactly its keys: a new
+  line or key does not build until it is listed there, and the tests hold the README to the list.
+- Repository only, not in the package: the production synthetic now writes what each answer costs
+  a client on every probe line whose call was answered, on both the npm package and the hosted
+  endpoint: `text_chars` (every text block's characters) and, for a tool call, `structured_chars`
+  (`structuredContent` as compact JSON), measured as `test/text-bound.mjs` measures them, sizes
+  only (#2781). Until now production's size was measured only when someone ran
+  `npm run text-bound:live`. Its loopback forwarder serves under a base as long as the API base it
+  stands for, because the package quotes its base and the cut fills its budget to the character,
+  so the npm leg's sizes are the ones a client of that API receives. The synthetic's monitoring
+  script gains two size distributions, two dashboard tiles for each (each tool's mean, and its
+  largest answer of the hour to its 1,000-character bucket), and an alert past #2617's 45,000
+  characters of text or #3013's 30,000 of `structuredContent`.
+- Repository only, not in the package: `test/text-bound-live.mjs --answers
+  test/fixtures/prod-answers --record` no longer re-dates the production record (#2782). Through
+  3.0.2 it wrote its own time as `measured_at`, so the record said the kept answers were read 6 days
+  after production served them. `measured_at` is now when production was read and `read_ms` how
+  long that read took, and a re-measure keeps both. The code that measured is recorded apart, as
+  `code_measured_at` and `code_version` (package.json's version, `+unreleased` while the CHANGELOG's
+  newest section is unreleased). The read also records how old each answer it kept was, by the
+  answer's own `generated_at` (`answers_age_ms`): the API serves a radar's aggregate stale past
+  its 60-second cache to the first request after it, and the CDN 300 seconds more, so an honest
+  read can get answers minutes old (two of 2026-10-05's were over 140 seconds), and no fixed
+  allowance holds. The suite fails when `measured_at` less a kept answer's `generated_at` is not
+  the age the read recorded for it. The record's `about` is now written by the harness. The suite
+  also holds each production-shaped case's `structuredContent` size within 10% of production's
+  recorded one, as it held the text (#3273). search_cves' default page now repeats rows of the
+  default page itself, and lands where production's size does: 8,927 characters against
+  production's 9,064, where it was 28,336. Production's cut level for that call is inferred from
+  its size, not measured, until the next `--hosted --record` writes its `truncated`. Two cases
+  past 10% are named with what clears each (check_sbom's Juice Shop fixture and
+  epss_history's record), and `--record` writes each case's `data_truncated` and `truncated`.
+- Hosted endpoint only: `Dockerfile.http` builds both its stages on
+  `node:22.23.3-alpine3.24@sha256:0a7108bf…`, pinned by its index digest, the base `Dockerfile`
+  (the stdio image) pins (#3018). It named the moving tag `node:22-alpine` (the same image on
+  2026-10-18), so two deploys of one commit could ship different base images with no record of
+  which. A test holds both files to one pinned base. A production deploy of the hosted endpoint
+  (EchelonGraph's deploy-all.sh run for it, or for every service) also scans the image it just built
+  for vulnerabilities with Trivy, before the push, and only that run does: no other deploy scans
+  it, and CI's scan job for it is not running yet. A HIGH or CRITICAL vulnerability with a fixed
+  version refuses the deploy; one with no fixed version is named and does not refuse; a scan that
+  did not run or cannot be read refuses. The scanner runs only as a pinned Trivy release's binary
+  (v0.75.0, by its sha256), from an empty directory with no `TRIVY_*` variable, its severities (HIGH,
+  CRITICAL) and an empty ignore file on its command line, so neither the deployer's environment
+  nor a stray `.trivyignore` or `trivy.yaml` narrows the scan. Another binary runs only with a
+  reason given (`MCP_REMOTE_TRIVY_OVERRIDE_REASON`), after a warning that names both sha256s and
+  its version, and the revision is then labelled `mcp-trivy=override`, never `clean`. A binary
+  that reports Trivy 0.69.4, 0.69.5 or 0.69.6 (the releases GHSA-69fq-xp46-6x23 names) is refused.
+  An operator can deploy anyway with `MCP_REMOTE_SCAN_OK=1` and a reason, and the revision is then
+  labelled `mcp-trivy=overridden`. The scan's summary names the image by its local config ID, not the
+  registry digest a deployed revision reports; a release revision records that digest
+  (`mcp-release-digest`).
+- Repository only, not in the package: the production synthetic compares the hosted endpoint with
+  the npm package it runs (#3097). When the endpoint reports the version the npm leg runs, each
+  era's tools (every field `tools/list` gives: name, title, description, inputSchema, outputSchema,
+  annotations), prompts, resources and instructions are compared, and one more probe line per era,
+  tool `(hosted-vs-npm)` on transport `http`, fails naming the first differences (`tool cve_intel:
+  description differs at character 221`). On 2026-10-11 the two both reported 2.7.1 and served
+  different cve_intel text, and each leg alone passed. When the endpoint reports another version
+  than the npm leg runs (a rollback to an older release), it is compared with npm's own package of
+  the version it reports, installed once for the run, and an endpoint reporting a version npm does
+  not serve fails too (`hosted_version_not_on_npm`); the run-complete line's `hosted_vs_npm` and
+  `hosted_vs_npm_at` say what was compared.
+
 ## 3.0.2 — 2026-10-17
 
 3.0.1 was tagged but never published to npm: its release run's memory test
@@ -79,9 +675,10 @@ flight, the hosted endpoint needed the whole of its image's 128 MiB heap, and V8
   again. In 3.0.0 a Claude Code session that listed the tools under 2.7.2 failed every tool's
   call: "data must NOT have additional properties", from `data_truncated`, which 3.0.0 added to
   every success. A field added at the top level in a minor release no longer breaks such a client.
-  The failure branch and each tool's `data` schema stay closed, so a field added inside `data`
-  still needs a reconnect, and the server still checks its own answers against the closed success
-  branch (`test/checked-strict.test.mjs`). If you see "does not match the tool's output schema" after an upgrade, reconnect
+  The failure branch stays closed, and the server still checks its own answers against the closed
+  success branch (`test/checked-strict.test.mjs`). This entry said each tool's `data` schema stays
+  closed too: `data` was open at its root for 14 of 16 tools, and 86 objects below a success's
+  root were closed, in and outside `data`, until #3268 (3.1.0). If you see "does not match the tool's output schema" after an upgrade, reconnect
   the client (README, Versioning).
 - `test/text-bound-live.mjs --hosted` calls a 3.0.0 or later endpoint with `full: true`. It
   refuses to replay a cut `data` as the API's answer (#3140). Without `full: true`, get_cve
@@ -289,8 +886,9 @@ structured result needs no change; it gets an answer where 2.7.x gave Claude Cod
   references NVD tagged Patch or Mitigation, and patches. Nothing is generated; every text is its
   source's, untested by EchelonGraph. none_in_source, not_parsed and an empty list are not a
   finding that no fix exists; a REJECTED CVE answers not_assessed. 15 tools. Its text for
-  CVE-2021-44228 on production's data is 20,644 characters (assembled before the route was
-  deployed; re-measure live).
+  CVE-2021-44228 on production's data was 20,644 characters, assembled before the route was
+  deployed; measured live on 2026-10-18, 22,571 characters on the hosted endpoint and on npm 3.0.2,
+  and 18,293 with an installed version (#2841).
 - get_cve relays remediation, a capped summary (at most 1,500 characters of JSON) of the same.
 - vendor_advisories_for_cve rows carry remediation_kinds and remediation_state, and
   get_vendor_advisory carries remediations, each item with its kind, verbatim text and URL

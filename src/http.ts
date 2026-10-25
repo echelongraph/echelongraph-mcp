@@ -37,13 +37,16 @@ import http2 from "node:http2";
 import type net from "node:net";
 import v8 from "node:v8";
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { forwardToken, markHttpEntrypoint, requestSettled, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
+import { forwardToken, markHttpEntrypoint, onUpstreamFailure, requestLabels, requestSettled, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
 import {
   Admission,
+  apiRoute,
   BODY_TOO_LARGE_CODE,
   BUSY_CODE,
   DEFAULT_ADMISSION_WAIT_MS,
   DEFAULT_LARGE_BODY_SLOTS,
+  DEFAULT_LARGE_BODY_WAIT_MS,
+  DEFAULT_LARGE_BODY_WAITERS,
   DEFAULT_MAX_BODY_BYTES,
   DEFAULT_MAX_IN_FLIGHT,
   DEFAULT_MAX_SBOM_BODY_BYTES,
@@ -56,16 +59,20 @@ import {
   RATE_LIMITED_CODE,
   bodyFacts,
   handlerErrorClass,
+  httpMethodLabel,
   protocolErrorCode,
   originVerdict,
   resolveClient,
   revisionLabel,
   rpcError,
+  rstCodeLabel,
   isLargeBodyTarget,
   isListenStream,
-  largeBodyAdmissible,
   uaFamily,
+  upstreamSeverity,
 } from "./httpPolicy.js";
+import type { LogFields, LogMessage, NotAny } from "./logLines.js";
+import { bodyReader, header, type BodyRead } from "./readBody.js";
 
 // Must run before index.ts is evaluated: it is how index.ts knows not to start stdio.
 markHttpEntrypoint();
@@ -84,12 +91,14 @@ const RATE_LIMIT_PER_MIN = positiveInt(process.env.MCP_RATE_LIMIT_PER_MIN, DEFAU
 const MAX_BODY_BYTES = positiveInt(process.env.MCP_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES);
 const MAX_SBOM_BODY_BYTES = Math.max(MAX_BODY_BYTES, positiveInt(process.env.MCP_MAX_SBOM_BODY_BYTES, DEFAULT_MAX_SBOM_BODY_BYTES));
 const LARGE_BODY_SLOTS = positiveInt(process.env.MCP_LARGE_BODY_SLOTS, DEFAULT_LARGE_BODY_SLOTS);
+// #2775: how long a large body that finds every slot busy waits for one (at most DEFAULT_LARGE_BODY_WAITERS wait).
+const LARGE_BODY_WAIT_MS = positiveInt(process.env.MCP_LARGE_BODY_WAIT_MS, DEFAULT_LARGE_BODY_WAIT_MS);
 // The requests served at once, and how long the next may wait (#2773): httpPolicy.ts "Requests
 // in flight per instance".
 const MAX_IN_FLIGHT = positiveInt(process.env.MCP_MAX_IN_FLIGHT, DEFAULT_MAX_IN_FLIGHT);
 const ADMISSION_WAIT_MS = positiveInt(process.env.MCP_ADMISSION_WAIT_MS, DEFAULT_ADMISSION_WAIT_MS);
-// A large body's wait for a slot is not queued: the client is told to come back. Nor is a
-// request that waited ADMISSION_WAIT_MS for admission.
+// A large body that waited LARGE_BODY_WAIT_MS for a slot (or found two waiting already), and a
+// request that waited ADMISSION_WAIT_MS for admission, are told to come back.
 const BUSY_RETRY_AFTER_SEC = 5;
 // #2775: serve h2c instead of HTTP/1.1 (see the top of this file). Exactly "1": anything else is
 // HTTP/1.1, the default for a local run and for every test that does not ask.
@@ -97,10 +106,36 @@ const H2C = process.env.MCP_H2C === "1";
 const MCP_PATH = "/mcp";
 const HEALTH_PATH = "/health";
 
-// One JSON object per line on stdout: Cloud Logging reads `severity` and `message`.
-function log(severity: "INFO" | "WARNING" | "ERROR", message: string, fields: Record<string, unknown> = {}): void {
+// One JSON object per line on stdout: Cloud Logging reads `severity` and `message`. #2863: the message is one of
+// logLines.ts LOG_LINES and the fields are exactly that line's keys, or this does not compile: a new line or a new
+// key is added there, where what each line carries is reviewed against /privacy Section 11 and the README.
+function log<M extends LogMessage, F extends LogFields<M>>(
+  severity: "INFO" | "WARNING" | "ERROR",
+  message: M,
+  fields: F & Record<Exclude<keyof F, keyof LogFields<M>>, never> & NotAny<F>,
+): void {
   process.stdout.write(`${JSON.stringify({ severity, message, ...fields })}\n`);
 }
+
+// #2948: one line per API call that failed (runtime.ts upstreamFailed, from index.ts api()), so an
+// answer that says "could not be reached" is on our record too, with its cause. The route is a
+// template (httpPolicy.ts apiRoute): never the path, which can hold what was looked up, nor the
+// query string. tool and rpc_method are the request's bodyFacts (a shape-checked tool, a method from
+// httpPolicy.ts MCP_METHODS or "(other)"); synthetic says the request was the production synthetic's (its User-Agent family). WARNING, except the API's own
+// answer about the input (httpPolicy.ts upstreamSeverity). Written before the request's own
+// mcp_request line, which still says status 200: the JSON-RPC call itself succeeded.
+onUpstreamFailure((f) => {
+  const route = apiRoute(f.path);
+  log(upstreamSeverity(f.failureClass, f.status, route), "mcp_upstream_failed", {
+    tool: f.tool,
+    rpc_method: f.rpcMethod,
+    route,
+    failure_class: f.failureClass,
+    status: f.status,
+    after_ms: f.afterMs,
+    synthetic: f.synthetic,
+  });
+});
 
 if (process.env.MCP_REQUIRE_FORWARD_TOKEN === "1" && !forwardToken()) {
   log("ERROR", "mcp_remote_refusing_to_start", {
@@ -119,11 +154,23 @@ const handler = createMcpHandler(createServer, {
   maxRequestBodySize: MAX_SBOM_BODY_BYTES,
   // Never the message: an SDK error message can quote what the client sent. A fixed label and
   // the JSON-RPC code instead, so each one can be told apart (#2923).
-  onerror: (e) => log("WARNING", "mcp_handler_error", { error_name: e.name, error_class: handlerErrorClass(e), error_code: protocolErrorCode(e) }),
+  // #2923: the error by a fixed class and its code, never its message; and the request it arose in by its fixed labels,
+  // read from the request's scope (runtime.ts requestLabels): its JSON-RPC method (MCP_METHODS or "(other)"), its
+  // protocol version.
+  onerror: (e) => {
+    const labels = requestLabels();
+    log("WARNING", "mcp_handler_error", {
+      error_name: e.name,
+      error_class: handlerErrorClass(e),
+      error_code: protocolErrorCode(e),
+      rpc_method: labels.rpcMethod,
+      protocol_version: labels.protocolVersion,
+    });
+  },
 });
 
 const limiter = new FixedWindowLimiter(RATE_LIMIT_PER_MIN);
-const largeBodies = new Slots(LARGE_BODY_SLOTS);
+const largeBodies = new Slots(LARGE_BODY_SLOTS, DEFAULT_LARGE_BODY_WAITERS);
 const admission = new Admission(MAX_IN_FLIGHT, DEFAULT_MAX_WAITING);
 
 // CORS for a browser client on an https Origin (the Origin policy has already admitted it).
@@ -178,75 +225,11 @@ type Outcome = {
   clientClosed?: boolean;
   inFlight?: number;
   queuedMs?: number;
+  slotWaitMs?: number;
 };
 
-// Reads the body. Up to MAX_BODY_BYTES it is read for any request. Past it, only a request that
-// may be one of LARGE_BODY_TARGETS (largeBodyAdmissible: its Mcp-Method / Mcp-Name headers,
-// when sent, say so) reads on, up to MAX_SBOM_BODY_BYTES, and only while it holds one of this
-// instance's large-body slots: none free is "busy". Over the cap that applies: "too_large".
-// Either way the rest is discarded unread (the response closes the connection). A body that
-// crossed MAX_BODY_BYTES returns holding its slot; the caller releases it. "gone": the request
-// closed before its body ended, so the client went mid-upload (a reset h2 stream ends the request
-// with 'close' and no 'error', #2775); its slot is released here.
-type BodyRead = { body: Buffer; slot: boolean } | "too_large" | "busy" | "gone";
-function readBody(req: http.IncomingMessage): Promise<BodyRead> {
-  const mayBeLarge = largeBodyAdmissible(header(req, "mcp-method"), header(req, "mcp-name"));
-  const cap = mayBeLarge ? MAX_SBOM_BODY_BYTES : MAX_BODY_BYTES;
-  const declared = Number(req.headers["content-length"]);
-  if (Number.isFinite(declared) && declared > cap) {
-    req.resume();
-    return Promise.resolve("too_large");
-  }
-  let slot = false;
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    if (!largeBodies.tryAcquire()) {
-      req.resume();
-      return Promise.resolve("busy");
-    }
-    slot = true;
-  }
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let done = false;
-    const stop = (r: "too_large" | "busy" | "gone"): void => {
-      done = true;
-      chunks.length = 0;
-      if (slot) largeBodies.release();
-      slot = false;
-      resolve(r);
-    };
-    req.on("data", (chunk: Buffer) => {
-      if (done) return;
-      size += chunk.length;
-      if (size > cap) return stop("too_large");
-      if (size > MAX_BODY_BYTES && !slot) {
-        if (!largeBodies.tryAcquire()) return stop("busy");
-        slot = true;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (done) return;
-      done = true;
-      resolve({ body: Buffer.concat(chunks), slot });
-    });
-    req.on("close", () => {
-      if (!done) stop("gone");
-    });
-    req.on("error", (e) => {
-      if (done) return;
-      done = true;
-      if (slot) largeBodies.release();
-      reject(e);
-    });
-  });
-}
-
-function header(req: http.IncomingMessage, name: string): string | undefined {
-  const v = req.headers[name];
-  return Array.isArray(v) ? v.join(", ") : v;
-}
+// The body is read by readBody.ts, over this instance's large-body slots and caps.
+const readBody = bodyReader(largeBodies, { maxBodyBytes: MAX_BODY_BYTES, maxSbomBodyBytes: MAX_SBOM_BODY_BYTES, largeBodyWaitMs: LARGE_BODY_WAIT_MS });
 
 function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outcome {
   send(
@@ -262,7 +245,14 @@ function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outco
   return { status: 413, refused: "body_size" };
 }
 
+// #2775: the access line's slot_wait_ms is how long the request's large body waited for a slot, whatever came of it.
 async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<Outcome> {
+  const timing = { slotWaitMs: 0 };
+  const o = await serveMcpTimed(req, res, pathname, timing);
+  return { ...o, slotWaitMs: timing.slotWaitMs };
+}
+
+async function serveMcpTimed(req: http.IncomingMessage, res: http.ServerResponse, pathname: string, timing: { slotWaitMs: number }): Promise<Outcome> {
   const method = req.method ?? "GET";
 
   const origin = req.headers.origin;
@@ -308,14 +298,15 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
   // whether its answer had started (answer_started). On 2026-10-05 a canary behind Cloud Run's
   // --use-http2 logged its aborted calls 499 only when their answers were written, 15 and 34 s
   // in: this line tells a reset that arrived then from one that arrived early and was not acted on
-  // (the access line's duration_ms is when the call actually stopped).
+  // (the access line's duration_ms is when the call actually stopped). rst_code is the stream's reset code when it is
+  // one HTTP/2 defines (0 to 13), else "(other)" (httpPolicy.ts rstCodeLabel): under h2c the client chooses it.
   const gone = new AbortController();
   const t0 = Date.now();
   const h2stream = (res as unknown as Partial<http2.Http2ServerResponse>).stream;
   const clientWent = (): void => {
     if (gone.signal.aborted) return;
     gone.abort();
-    log("INFO", "mcp_client_gone", { after_ms: Date.now() - t0, answer_started: res.headersSent, rst_code: h2stream?.rstCode ?? null });
+    log("INFO", "mcp_client_gone", { after_ms: Date.now() - t0, answer_started: res.headersSent, rst_code: rstCodeLabel(h2stream?.rstCode) });
   };
   res.on("close", () => {
     if (!res.writableFinished || h2stream?.aborted) clientWent();
@@ -338,7 +329,7 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
     if (method === "POST") {
       let read: BodyRead;
       try {
-        read = await readBody(req);
+        read = await readBody(req, gone.signal, timing);
       } catch (e) {
         // The request stream fails only when its connection does: the client went mid-upload.
         if (req.destroyed) return { status: 499, refused: "client_closed", clientClosed: true };
@@ -372,7 +363,7 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
       // keepalives here: it takes no place and holds no work, or 64 idle ones would leave every
       // other request waiting for a 503 (#2773; httpPolicy.ts isListenStream says what bounds it).
       const standard = { protocolVersion: header(req, "mcp-protocol-version"), mcpMethod: header(req, "mcp-method"), mcpName: header(req, "mcp-name") };
-      if (isListenStream(facts, body, standard)) return { ...(await relay(req, res, pathname, method, cors, client, body, gone.signal)), facts };
+      if (isListenStream(facts, body, standard)) return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal)), facts };
     }
 
     // #2773: at most MAX_IN_FLIGHT requests are served at once; the next waits here.
@@ -399,7 +390,7 @@ async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pat
     // large-body slot are held until all of it has settled, not only until the answer is written.
     const work = new Set<Promise<unknown>>();
     try {
-      return { ...(await relay(req, res, pathname, method, cors, client, body, gone.signal, work)), facts, ...admitted };
+      return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal, work)), facts, ...admitted };
     } finally {
       // Every tool call stops on `gone` (#2775), so this wait is long only if one does not.
       await requestSettled(work);
@@ -420,6 +411,7 @@ async function relay(
   cors: Record<string, string>,
   client: ReturnType<typeof resolveClient>,
   body: Buffer | undefined,
+  facts: ReturnType<typeof bodyFacts> | undefined,
   gone: AbortSignal,
   work?: Set<Promise<unknown>>,
 ): Promise<Outcome> {
@@ -440,7 +432,17 @@ async function relay(
   // carry the synthetic's fixed token (runtime.ts upstreamUserAgent), so they are never counted
   // as hosted adoption.
   const synthetic = uaFamily(req.headers["user-agent"]) === SYNTHETIC_UA_FAMILY;
-  const response = await withClient(client.forwardAddress, () => handler.fetch(request), { synthetic, signal: gone, work });
+  // #2948: the method and tool name a failed API call's line names (runtime.ts upstreamFailed).
+  // #2923: and the protocol-version label a handler error's line names (runtime.ts requestLabels).
+  const protocolVersion = revisionLabel(req.headers["mcp-protocol-version"] as string | undefined);
+  const response = await withClient(client.forwardAddress, () => handler.fetch(request), {
+    synthetic,
+    signal: gone,
+    work,
+    rpcMethod: facts?.rpc_method,
+    tool: facts?.tool,
+    protocolVersion,
+  });
   const out: Record<string, string> = { ...cors };
   response.headers.forEach((v, k) => {
     out[k] = v;
@@ -469,7 +471,7 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   const finish = (o: Outcome): void => {
     const facts = o.facts ?? (o.body ? bodyFacts(o.body) : { rpc_method: "(none)" });
     log("INFO", "mcp_request", {
-      method,
+      method: httpMethodLabel(method),
       path: pathname === MCP_PATH || pathname === HEALTH_PATH ? pathname : "(other)",
       status: o.status,
       duration_ms: Number((process.hrtime.bigint() - start) / 1_000_000n),
@@ -484,6 +486,7 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
       client_closed: o.clientClosed === true,
       in_flight: o.inFlight ?? 0,
       queued_ms: o.queuedMs ?? 0,
+      slot_wait_ms: o.slotWaitMs ?? 0,
     });
   };
 
@@ -547,6 +550,7 @@ server.listen(PORT, () => {
     max_body_bytes: MAX_BODY_BYTES,
     max_sbom_body_bytes: MAX_SBOM_BODY_BYTES,
     large_body_slots: LARGE_BODY_SLOTS,
+    large_body_wait_ms: LARGE_BODY_WAIT_MS,
     max_in_flight: MAX_IN_FLIGHT,
     admission_wait_ms: ADMISSION_WAIT_MS,
     heap_limit_mb: Math.round(heapLimit / MiB),

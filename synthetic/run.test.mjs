@@ -5,7 +5,9 @@
 // What must hold:
 //   - every listed tool is called once per era, judged against its own outputSchema with ajv,
 //     and reported success; not_assessed counts as success; the planned tools are reported
-//     not_published, never failure;
+//     not_published, never failure; a probed tool, prompt or resource the server does not list
+//     although its version is at or past the release probes.mjs SHIPPED_IN gives it is a failure,
+//     reason not_listed (#3282), and not_published before that release;
 //   - a failing API, a forced unknown tool and a result the schema refuses are failures, with
 //     a reason;
 //   - one JSON line per tool per era carrying exactly the metric's labels (tool, era, outcome)
@@ -24,8 +26,13 @@ import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect, MODERN } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, modern } from "../test/mcp-http-client.mjs";
-import { chooseInput, COMPLETE_MESSAGE, DEFAULT_CLIENT_CUT, HTTP, judge, judgePrompt, judgeResource, judgeTextCut, LEGACY, loadRequiredText, probeOrder, probeSession, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, TEXT_CUT_MESSAGE, UA_TOKEN } from "./run.mjs";
+import { chooseInput, compareCatalogs, COMPLETE_MESSAGE, DEFAULT_CLIENT_CUT, DRIFT_TOOL, HTTP, judge, judgePrompt, judgeResource, judgeTextCut, LEGACY, loadRequiredText, probeOrder, probeSession, PROBE_MESSAGE, remoteUrlAllowed, runSynthetic, STDIO, TEXT_CUT_MESSAGE, UA_TOKEN } from "./run.mjs";
 import { identify, startForwarder, uaFamilyOf } from "./forwarder.mjs";
+// #2781: read off the modules rather than imported by name, so a runner without them fails the
+// tests that read them, each by name, instead of failing this whole file at import.
+import * as runner from "./run.mjs";
+import * as forwarderModule from "./forwarder.mjs";
+import { PROD_BASE, STRUCTURED_BUDGET, TRIP_WIRE, structuredSize, textSize } from "../test/text-bound.mjs";
 import { AFTER, EXPECT, HTTP_EXPECT, HTTP_PROBES, LOG4J_CORE, LOG4J_CORE_PURL, LOG4J_FIXED_IN, PROBES, RESOURCE_PROBE, SBOM_PROBE_DOCUMENT, SBOM_PROBE_PURLS, UPSTREAM_PURL } from "./probes.mjs";
 import * as probeTable from "./probes.mjs";
 import { BATCH_PATH, batchAnswer, CALL_ANSWER, ROWS } from "../test/fixtures/match-batch.mjs";
@@ -48,7 +55,10 @@ const METHOD = "Shodan banner match over the radar's tracked product queries.";
 
 // Shaped like the live API, trimmed to what the tools need to answer.
 const BODIES = {
+  // #3276: with nvd_poll, the fleet's last completed NVD poll, as production serves it since #3242
+  // (EXPECT.cve_summary holds freshness to it).
   "/api/v1/public/cves/summary": {
+    nvd_poll: { interval: "20m0s", last_completed_at: AT, scope: "fleet" },
     poller: { cves_ingested: 1, cves_skipped: 0, http_retries: 0, interval: "20m0s", last_poll_at: AT, last_poll_dur_ms: 1000, poll_count: 1, poll_errors: 0 },
     summary: { critical: 1, high: 1, medium: 1, low: 1, none: 0, unscored: 0, total: 4, nvd_critical: 1, nvd_high: 1, nvd_medium: 1, nvd_low: 1, nvd_none: 0, rejected: 0, last_updated: AT },
   },
@@ -100,12 +110,15 @@ const VERDICT_LABELS = [
   `verdict:packagist/${MAGENTO}@2.4.4-p13`,
   `verdict:packagist/${MAGENTO}@2.4.5-p2`,
   "verdict:cpe/midgard_gpu_kernel_driver@r20p0",
+  // #2834: fixed_in on GET /cves/match's exact-list match.
+  "verdict:maven/org.apache.logging.log4j/log4j-core@2.14.1",
 ];
 const VERDICT_PROBES = probeTable.VERDICT_PROBES;
-// #3135: the Mali probe is pending until #3131 is deployed: listed, tested, not called. The lines a run
-// writes are the active labels. These tests follow whichever state probes.mjs is in (pending: no Mali
-// line; enabled: a Mali line, called and judged), so enabling it is one edit there and a redeploy;
-// a test that needs the other state sets it for its own run and puts it back.
+// #3135: a verdict probe whose label is in EXPECT_PENDING is listed and tested but not called; the
+// Mali probe was, until #3131 reached production, and has been called since c0f58d5d. The lines a run
+// writes are the active labels. These tests follow whichever state probes.mjs is in (held back: no
+// Mali line; called: a Mali line, judged), so either is one edit there and a redeploy; a test that
+// needs the other state sets it for its own run and puts it back.
 const EXPECT_PENDING = probeTable.EXPECT_PENDING ?? {};
 const MALI_LABEL = "verdict:cpe/midgard_gpu_kernel_driver@r20p0";
 const MALI_PENDING_REASON = "#3131 not yet deployed";
@@ -129,7 +142,10 @@ const withPendingEnabled = (label, fn) => withPendingAs(label, undefined, fn);
 // `regressed` set answers as the rule before each fix would: fixed_in_rule (#3074: the holding
 // interval's own bound, 4.9.7, no detail), comparator (#3101: p13 below p9 and p2 above p14, so
 // CosmicSting matches 2.4.4-p13 and SessionReaper misses 2.4.5-p2), cpe_comparator (#3131: r20p0
-// outside [r4p0, r31p0], which is production's answer until #3131 is deployed).
+// outside [r4p0, r31p0], which was production's answer until #3131 was deployed), and, for log4j-core
+// 2.14.1 (#2834), fixed_in_exact_list (the GET route's exact-list path with no interval lookup:
+// fixed_in null, with its reason) and fixed_in_stored (the bound read from the stored fixed_version,
+// 2.3.1).
 const registryAnswer = (ecosystem, pkg, version, matches, notAffected) => ({
   assessed: true, ecosystem, ecosystem_recognised: true, package: pkg, version, match_layer: "registry", not_assessed_reason: "",
   count: matches.length, capped: false, candidates_capped: false, degraded: false, undetermined_count: 0, undetermined: [], not_affected_count: notAffected,
@@ -158,6 +174,19 @@ const VERDICT_ANSWERS = {
       registryMatch(COSMICSTING_CVE, { kev_listed: true, interval: { introduced: "2.4.5-p1", fixed: "2.4.5-p8" }, fixed_in: "2.4.5-p8" }),
       ...(regressed.has("comparator") ? [] : [registryMatch(SESSIONREAPER_CVE, { kev_listed: true, fixed_in: null, fixed_in_reason: "the interval that holds this version ends at last_affected 2.4.5-p14; no fixed version is recorded" })]),
     ], 229),
+  // #2834, as production answered GET /cves/match on 2026-10-11 (#2834's review: the API, and hosted
+  // and stdio check_affected, gave the same answer).
+  "Maven|org.apache.logging.log4j:log4j-core|2.14.1": (regressed) =>
+    registryAnswer("Maven", "org.apache.logging.log4j:log4j-core", "2.14.1", [
+      registryMatch(CVE, {
+        severity: "CRITICAL", cvss_v3_score: 10, kev_listed: true, ransomware: true, effective_score: 10, effective_severity: "CRITICAL", matched_criteria: "pkg:maven/org.apache.logging.log4j:log4j-core",
+        version_evidence: "exact_version_list", interval: { introduced: "2.13.0", fixed: "2.15.0" },
+        ...(regressed.has("fixed_in_exact_list")
+          ? { interval: undefined, fixed_in: null, fixed_in_reason: "the version is listed verbatim in the advisory's affected versions, and no advisory interval holding it records a fixed version" }
+          : { fixed_in: regressed.has("fixed_in_stored") ? "2.3.1" : "2.15.0" }),
+      }),
+      registryMatch("CVE-2021-45046", { kev_listed: true, interval: { introduced: "2.13.0", fixed: "2.16.0" }, fixed_in: "2.16.0" }),
+    ], 3),
   "|midgard_gpu_kernel_driver|r20p0": (regressed) => {
     const cpe = (cve) => ({ cve_id: cve, severity: "MEDIUM", cvss_v3_score: 5.5, kev_listed: true, ransomware: false, score_assessed: true, cpe_vendor: "arm", vendor_unknown: false, match_method: "cpe", matched_criteria: "cpe:2.3:o:arm:midgard_gpu_kernel_driver:*:*:*:*:*:*:*:*" });
     const matches = [cpe("CVE-2023-4211"), ...(regressed.has("cpe_comparator") ? [] : [cpe(MALI_CVE)])];
@@ -331,9 +360,17 @@ async function startStub() {
   };
 }
 
+// #3097's review: npm's package at the version the hosted endpoint reports, for the comparison when
+// that is not the npm leg's version. Here this checkout's build is "npm's" package of its own version
+// (the endpoint under test is the same build); any other version is not published. Never the network.
+const releasedHere = async (spec) => {
+  const { PKG } = await import("../test/server-under-test.mjs");
+  if (spec !== `echelongraph-mcp@${PKG.version}`) throw new Error(`npm error code ETARGET | npm error notarget No matching version found for ${spec}.`);
+  return { serverJs: DIST, version: PKG.version };
+};
 async function run(stub, opts = {}) {
   const lines = [];
-  const result = await runSynthetic({ serverJs: DIST, apiBase: stub.base, timeoutMs: 30_000, write: (l) => lines.push(JSON.parse(JSON.stringify(l))), ...opts });
+  const result = await runSynthetic({ serverJs: DIST, apiBase: stub.base, timeoutMs: 30_000, installPackage: releasedHere, write: (l) => lines.push(JSON.parse(JSON.stringify(l))), ...opts });
   const probes = lines.filter((l) => l.message === PROBE_MESSAGE);
   const complete = lines.filter((l) => l.message === COMPLETE_MESSAGE);
   const of = (tool, era) => probes.find((l) => l.tool === tool && l.era === era);
@@ -719,6 +756,38 @@ describe("#2839: what get_cve's probe must show", () => {
   });
 });
 
+// #3276: EXPECT.cve_summary, both polarities. Where the answer carries nvd_poll, the fleet's last
+// completed NVD poll (core-backend #3242), freshness.nvd_poll.last_run_at is its last_completed_at;
+// where it carries none, freshness is null. 3.0.2 answered freshness null beside the block.
+describe("#3276: what cve_summary's probe must show", () => {
+  const POLL = { interval: "20m0s", last_completed_at: "2026-10-17T22:45:09Z", scope: "fleet" };
+  const FRESH = { nvd_poll: { last_run_at: POLL.last_completed_at, scope: "fleet", interval: "20m0s" } };
+  const sc = (freshness, nvd_poll) => ({ state: "measured", freshness, data: { summary: { total: 1 }, ...(nvd_poll === undefined ? {} : { nvd_poll }) } });
+  it("the probe calls it with no arguments", () => assert.deepEqual(PROBES.cve_summary, [{}]));
+  it("met: freshness.nvd_poll.last_run_at is data.nvd_poll.last_completed_at; with no block, or a null one, freshness is null", () => {
+    assert.equal(EXPECT.cve_summary(sc(FRESH, POLL)), undefined);
+    assert.equal(EXPECT.cve_summary(sc(null)), undefined);
+    assert.equal(EXPECT.cve_summary(sc(null, null)), undefined);
+  });
+  it("unmet, each named: 3.0.2's freshness null beside the block, another time, a block without a time, a freshness with no block", () => {
+    assert.equal(EXPECT.cve_summary(sc(null, POLL)), 'freshness.nvd_poll.last_run_at null, data.nvd_poll.last_completed_at "2026-10-17T22:45:09Z"; want them equal (freshness null)');
+    const other = { nvd_poll: { ...FRESH.nvd_poll, last_run_at: "2026-10-17T22:25:09Z" } };
+    assert.equal(EXPECT.cve_summary(sc(other, POLL)), `freshness.nvd_poll.last_run_at "2026-10-17T22:25:09Z", data.nvd_poll.last_completed_at "2026-10-17T22:45:09Z"; want them equal (freshness ${JSON.stringify(other)})`);
+    assert.equal(EXPECT.cve_summary(sc(null, { scope: "fleet" })), "freshness.nvd_poll.last_run_at null, data.nvd_poll.last_completed_at null; want them equal (freshness null)");
+    assert.equal(EXPECT.cve_summary(sc(FRESH)), `freshness ${JSON.stringify(FRESH)} with no data.nvd_poll; want null`);
+  });
+  it("judged as a probe line, 3.0.2's answer beside the block is expectation_unmet, and this package's is a success", () => {
+    const tool = { name: "cve_summary", outputSchema: { type: "object" } };
+    assert.deepEqual(judge({ structuredContent: sc(null, POLL) }, tool, EXPECT.cve_summary), {
+      outcome: "failure",
+      reason: "expectation_unmet",
+      state: "measured",
+      detail: 'freshness.nvd_poll.last_run_at null, data.nvd_poll.last_completed_at "2026-10-17T22:45:09Z"; want them equal (freshness null)',
+    });
+    assert.deepEqual(judge({ structuredContent: sc(FRESH, POLL) }, tool, EXPECT.cve_summary), { outcome: "success", state: "measured" });
+  });
+});
+
 // #2842: judgeTextCut and loadRequiredText, both polarities, against what this package's dist
 // serves and the registry it ships.
 describe("#2842: what a client that cuts at 2,048 characters is handed", () => {
@@ -901,9 +970,9 @@ describe("#3135: what the matcher-verdict probes must show", () => {
     return { state: "measured", data: VERDICT_ANSWERS[key](new Set(regressed)) };
   };
   const expectOf = (label) => VERDICT_PROBES.find((v) => v.label === label).expect;
-  const [MAYAN, P13, P2, MALI] = VERDICT_LABELS;
+  const [MAYAN, P13, P2, MALI, LOG4J] = VERDICT_LABELS;
 
-  it("VERDICT_PROBES is a list of check_affected calls under the four pinned labels, with the arguments verified live", () => {
+  it("VERDICT_PROBES is a list of check_affected calls under the five pinned labels, with the arguments verified live", () => {
     assert.ok(Array.isArray(VERDICT_PROBES), `probes.mjs exports no VERDICT_PROBES list (it is ${typeof VERDICT_PROBES})`);
     assert.deepEqual(VERDICT_PROBES.map((v) => v.label), VERDICT_LABELS);
     assert.deepEqual(VERDICT_PROBES.map((v) => [v.tool, v.arguments]), [
@@ -911,8 +980,10 @@ describe("#3135: what the matcher-verdict probes must show", () => {
       ["check_affected", { ecosystem: "Packagist", package: MAGENTO, version: "2.4.4-p13" }],
       ["check_affected", { ecosystem: "Packagist", package: MAGENTO, version: "2.4.5-p2" }],
       ["check_affected", { product: "midgard_gpu_kernel_driver", version: "r20p0" }],
+      ["check_affected", { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" }],
     ]);
     for (const v of VERDICT_PROBES) assert.equal(typeof v.expect, "function", v.label);
+    assert.equal(probeTable.LOG4J_VERDICT_LABEL, LOG4J);
   });
   it("met: production's answers as the fixed rules give them (#3074, #3101, #3131)", () => {
     for (const label of VERDICT_LABELS) assert.equal(expectOf(label)(sc(label)), undefined, label);
@@ -975,14 +1046,33 @@ describe("#3135: what the matcher-verdict probes must show", () => {
     const s = sc(P2);
     assert.equal(expectOf(P2)({ ...s, data: { ...s.data, matches: s.data.matches.slice(0, 1) } }), undefined);
   });
-  it("#3135: the Mali probe is a separate VERDICT_PROBES entry, pending (not called) until #3131 is deployed, then enabled by deleting its EXPECT_PENDING entry", () => {
-    // Pending as shipped; enabled, the table is empty. Either way nothing else is ever pending.
+  it("#3135: the Mali probe is a separate VERDICT_PROBES entry, held back (not called) only while its label is in EXPECT_PENDING, and called since #3131 was deployed", () => {
+    // Called as shipped since c0f58d5d, the table empty; held back, it names only the Mali probe. Either way nothing else is ever pending.
     assert.deepEqual({ ...EXPECT_PENDING }, MALI_PENDING ? { [MALI_LABEL]: MALI_PENDING_REASON } : {}, "EXPECT_PENDING names only the Mali probe, with its reason, or nothing once it is enabled");
     assert.equal(MALI, MALI_LABEL);
     assert.equal(probeTable.MALI_LABEL, MALI_LABEL);
     for (const l of VERDICT_LABELS.filter((x) => x !== MALI_LABEL)) assert.equal(EXPECT_PENDING[l], undefined, `${l} must never be pending`);
   });
-  it("#3131 unmet: r20p0 outside [r4p0, r31p0] — production's answer until #3131 is deployed", () => {
+  // #2834: the GET route's fixed_in for log4j-core 2.14.1, both polarities, each unmet shape named.
+  it("#2834 met: log4j-core 2.14.1's CVE-2021-44228 match carries fixed_in 2.15.0 on GET /cves/match", () => {
+    assert.equal(expectOf(LOG4J)(sc(LOG4J)), undefined);
+    // Never pending: the answer has been production's since #2834 reached it (2026-10-11).
+    assert.equal(EXPECT_PENDING[LOG4J], undefined);
+  });
+  it("#2834 unmet: fixed_in null on the exact-list path, the stored fixed_version's 2.3.1, absent, the match cut, no match", () => {
+    assert.equal(
+      expectOf(LOG4J)(sc(LOG4J, ["fixed_in_exact_list"])),
+      `Maven log4j-core 2.14.1 ${CVE} fixed_in null (fixed_in_reason "the version is listed verbatim in the advisory's affected versions, and no advisory interval holding it records a fixed version", interval null, version_evidence "exact_version_list"); want "2.15.0" (#2834)`,
+    );
+    assert.match(expectOf(LOG4J)(sc(LOG4J, ["fixed_in_stored"])), /fixed_in "2\.3\.1" \(fixed_in_reason null, interval \{"introduced":"2\.13\.0","fixed":"2\.15\.0"\}, version_evidence "exact_version_list"\); want "2\.15\.0" \(#2834\)$/);
+    const s = sc(LOG4J);
+    const [m, ...rest] = s.data.matches;
+    assert.match(expectOf(LOG4J)({ ...s, data: { ...s.data, matches: [(({ fixed_in, ...x }) => x)(m), ...rest] } }), /fixed_in absent \(/);
+    assert.match(expectOf(LOG4J)({ ...s, data: { ...s.data, matches: rest } }), /CVE-2021-44228 is in cve_ids but not in matches/);
+    assert.match(expectOf(LOG4J)({ ...s, data: { ...s.data, matches: rest, cve_ids: rest.map((x) => x.cve_id) } }), /^Maven log4j-core 2\.14\.1: CVE-2021-44228 not matched \(assessed true/);
+    assert.match(expectOf(LOG4J)({ state: "not_assessed", data: { assessed: false, not_assessed_reason: "package_not_in_advisory_corpus" } }), /not assessed .*want CVE-2021-44228 matched$/);
+  });
+  it("#3131 unmet: r20p0 outside [r4p0, r31p0] — production's answer until #3131 was deployed", () => {
     assert.match(expectOf(MALI)(sc(MALI, ["cpe_comparator"])), /^midgard_gpu_kernel_driver r20p0: CVE-2022-38181 not matched \(assessed true, match_layer "cpe", count 1, capped false, candidates_capped false, degraded null, not_assessed_reason null\); want it matched$/);
     assert.equal(MALI_CVE, "CVE-2022-38181");
   });
@@ -1039,6 +1129,98 @@ describe("the probe table picks up new tools", () => {
     const order = probeOrder(["get_vendor_advisory", "vendor_advisories_for_cve", "cve_summary"]);
     assert.ok(order.indexOf("get_vendor_advisory") > order.indexOf("vendor_advisories_for_cve"));
     assert.equal(order[0], "vendor_advisories_for_cve", "listed order is kept otherwise");
+  });
+});
+
+// #3011: the chaining mistake, made on purpose: get_vendor_advisory given a row's advisory_id (the
+// internal UUID), judged as #3011 specifies, and only where the endpoint advertises that fix.
+describe("#3011: the chain probe", () => {
+  const CHAIN_PROBES = probeTable.CHAIN_PROBES;
+  const judgeChain = runner.judgeChain;
+  const UUID = "a68d033b-5d1e-4537-8190-5e37897a27e8";
+  const SEEN = { vendor_advisories_for_cve: { state: "measured", data: { advisories: [{ advisory_id: UUID, vendor: "paloalto", vendor_advisory_id: "CVE-2024-3400" }] } } };
+  // get_vendor_advisory as tools/list gives it: 3.0.2's inputSchema, and #3011's.
+  const OUTPUT = {
+    oneOf: [
+      { type: "object", properties: { state: { enum: ["measured", "not_assessed"] }, data: { type: "object" } }, required: ["state"] },
+      { type: "object", properties: { state: { enum: ["failed", "invalid_input"] }, error: { type: "object" } }, required: ["state", "error"] },
+    ],
+  };
+  const toolWith = (description) => ({
+    name: "get_vendor_advisory",
+    inputSchema: { type: "object", properties: { vendor: { type: "string" }, advisory_id: { type: "string", description } }, required: ["vendor", "advisory_id"] },
+    outputSchema: OUTPUT,
+  });
+  const OLD = toolWith("the vendor's advisory ID, e.g. RHSA-2024:1234 or GHSA-xxxx-xxxx-xxxx");
+  const NEW = toolWith("the vendor's own advisory ID, a row's vendor_advisory_id, e.g. RHSA-2024:1234; not a row's advisory_id, EchelonGraph's internal UUID");
+  const probe = () => CHAIN_PROBES[0];
+  const ARGS = { vendor: "paloalto", advisory_id: UUID };
+  const refusal = (message, kind = "invalid_input") => ({ content: [{ type: "text", text: "get_vendor_advisory FAILED (state: invalid_input)" }], isError: true, structuredContent: { state: "invalid_input", error: { kind, path: null, status: 404, message } } });
+
+  it("CHAIN_PROBES is one get_vendor_advisory call under its pinned label, its arguments the first row's vendor and advisory_id (the UUID)", () => {
+    assert.ok(Array.isArray(CHAIN_PROBES), `probes.mjs exports no CHAIN_PROBES list (it is ${typeof CHAIN_PROBES})`);
+    assert.deepEqual(CHAIN_PROBES.map((c) => [c.label, c.tool]), [[CHAIN_LABELS[0], "get_vendor_advisory"]]);
+    assert.deepEqual(probe().arguments(SEEN), ARGS);
+    assert.deepEqual(chooseInput("get_vendor_advisory", NEW, SEEN, { get_vendor_advisory: [probe().arguments] }).args, ARGS);
+    // No row with a UUID advisory_id (or no answer): nothing to send, no_valid_probe_input.
+    assert.equal(probe().arguments({ vendor_advisories_for_cve: { data: { advisories: [{ vendor: "paloalto", vendor_advisory_id: "CVE-2024-3400" }] } } }), undefined);
+    assert.deepEqual(chooseInput("get_vendor_advisory", NEW, {}, { get_vendor_advisory: [probe().arguments] }), { reason: "no_valid_probe_input" });
+  });
+
+  it("published: 3.0.2's inputSchema is not the fix, #3011's is", () => {
+    assert.equal(probe().published(OLD), false);
+    assert.equal(probe().published(NEW), true);
+    assert.equal(probe().published(undefined), false);
+  });
+
+  it("judged: invalid_input naming vendor_advisory_id passes; the advisory itself passes; failed (the 404 as no record) fails; a refusal that names no field fails", () => {
+    assert.deepEqual(judgeChain(refusal(`advisory_id ${UUID} has the shape of a row's advisory_id; pass the row's vendor_advisory_id as advisory_id`), NEW, probe(), ARGS), { outcome: "success", state: "invalid_input" });
+    const measured = { content: [{ type: "text", text: "{}" }], structuredContent: { state: "measured", data: { advisory_id: UUID, vendor_advisory_id: "CVE-2024-3400" } } };
+    assert.deepEqual(judgeChain(measured, NEW, probe(), ARGS), { outcome: "success", state: "measured" });
+    // 3.0.2's answer to the same call (live 2026-10-10).
+    const failed = { content: [{ type: "text", text: "get_vendor_advisory FAILED: EchelonGraph answered HTTP 404 ... The API returned no record for this request" }], isError: true, structuredContent: { state: "failed", error: { kind: "http", path: `/api/v1/public/vendor-advisories/paloalto/${UUID}`, status: 404, message: "advisory not found" } } };
+    assert.deepEqual(judgeChain(failed, NEW, probe(), ARGS), { outcome: "failure", reason: "state_failed", state: "failed" });
+    const vague = judgeChain(refusal("vendor must be a vendor slug"), NEW, probe(), ARGS);
+    assert.deepEqual([vague.outcome, vague.reason], ["failure", "expectation_unmet"]);
+    const other = judgeChain({ ...measured, structuredContent: { state: "measured", data: { advisory_id: "6f1c7d2e-0000-4000-8000-000000000009" } } }, NEW, probe(), ARGS);
+    assert.deepEqual([other.outcome, other.reason], ["failure", "expectation_unmet"]);
+    // A refusal the outputSchema does not accept is not the specified one.
+    const bare = judgeChain({ content: [], isError: true, structuredContent: { state: "invalid_input" } }, NEW, probe(), ARGS);
+    assert.deepEqual([bare.outcome, bare.reason], ["failure", "schema_invalid"]);
+  });
+
+  it("in a session: not_published on an endpoint without the fix (no call made), failure on one that answers failed, success on one that refuses as specified", async () => {
+    const session = (tool, answer) => {
+      const calls = [];
+      const client = {
+        getServerVersion: () => ({ name: "echelongraph-mcp", version: "0.0.0-test" }),
+        listTools: async () => ({ tools: [{ name: "vendor_advisories_for_cve", inputSchema: { type: "object", properties: { cve_id: { type: "string" } } }, outputSchema: OUTPUT }, tool] }),
+        callTool: async ({ name, arguments: args }) => {
+          calls.push({ name, args });
+          return name === "vendor_advisories_for_cve" ? { content: [], structuredContent: SEEN.vendor_advisories_for_cve } : answer;
+        },
+        listPrompts: async () => ({ prompts: [] }),
+        listResources: async () => ({ resources: [] }),
+        close: async () => {},
+      };
+      return { client, calls };
+    };
+    const lineOf = async (s) => {
+      const lines = [];
+      await probeSession({ era: MODERN, open: async () => s.client, force: [], emit: (l) => lines.push(l), extras: true, probes: { vendor_advisories_for_cve: [{ cve_id: "CVE-2024-3400" }], get_vendor_advisory: [{ vendor: "paloalto", advisory_id: "CVE-2024-3400" }] }, expect: {} });
+      const of = lines.filter((l) => l.tool === CHAIN_LABELS[0]);
+      assert.equal(of.length, 1, JSON.stringify(lines));
+      return of[0];
+    };
+    const old = session(OLD, refusal("unused"));
+    assert.equal((await lineOf(old)).outcome, "not_published");
+    assert.ok(!old.calls.some((c) => c.name === "get_vendor_advisory" && c.args.advisory_id === UUID), "an endpoint without the fix was sent the UUID");
+    const failing = session(NEW, { content: [], isError: true, structuredContent: { state: "failed", error: { kind: "http", path: null, status: 404, message: "advisory not found" } } });
+    assert.deepEqual([(await lineOf(failing)).outcome, (await lineOf(failing)).reason], ["failure", "state_failed"]);
+    const fixed = session(NEW, refusal("pass the row's vendor_advisory_id as advisory_id"));
+    const l = await lineOf(fixed);
+    assert.deepEqual([l.outcome, l.state], ["success", "invalid_input"], JSON.stringify(l));
+    assert.ok(fixed.calls.some((c) => c.name === "get_vendor_advisory" && c.args.advisory_id === UUID && c.args.vendor === "paloalto"));
   });
 });
 
@@ -1099,7 +1281,7 @@ describe("the forwarder", () => {
 // failure, never as silence or success.
 const HTTP_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "http.js");
 
-async function startHttpEntry(apiBase, extraEnv = {}) {
+async function startHttpEntry(apiBase, extraEnv = {}, entry = HTTP_ENTRY) {
   const env = {
     ...process.env,
     PORT: "0",
@@ -1110,7 +1292,7 @@ async function startHttpEntry(apiBase, extraEnv = {}) {
     MCP_RATE_LIMIT_PER_MIN: "1000",
     ...extraEnv,
   };
-  const proc = spawn(process.execPath, [HTTP_ENTRY], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(process.execPath, [entry], { env, stdio: ["ignore", "pipe", "pipe"] });
   const lines = [];
   let stderr = "";
   proc.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
@@ -1160,9 +1342,11 @@ async function startHttpEntry(apiBase, extraEnv = {}) {
 // instead of failing this whole file at import.
 const PROMPT_LABELS = ["prompt:triage_cve", "prompt:workload_triage"];
 const PROMPT_PROBES = probeTable.PROMPT_PROBES;
+// #3011: the chaining-mistake probe's label, pinned for the same reason (a metric label).
+const CHAIN_LABELS = ["chain:get_vendor_advisory@row.advisory_id"];
 // #3135: the matcher-verdict lines come first, after the tools and before the prompts; a pending one
-// writes none.
-const EXTRAS = [...activeVerdicts(), ...PROMPT_LABELS, RESOURCE_PROBE.label];
+// writes none. #3011: the chain probe's after them.
+const EXTRAS = [...activeVerdicts(), ...CHAIN_LABELS, ...PROMPT_LABELS, RESOURCE_PROBE.label];
 
 describe("#2737: the hosted leg over Streamable HTTP", () => {
   let stub, srv;
@@ -1217,11 +1401,24 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       assert.equal(stdio.length, 2 * PUBLISHED.length);
       assert.ok(stdio.every((l) => !EXTRAS.includes(l.tool)), "the verdict, prompt and resource probes are the hosted leg's");
       const http = r.probes.filter((l) => l.transport === HTTP);
-      for (const x of EXTRAS) assert.equal(http.filter((l) => l.tool === x).length, 2, `${x}: want one http line per era`);
-      assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length));
+      for (const x of [...EXTRAS, DRIFT_TOOL]) assert.equal(http.filter((l) => l.tool === x).length, 2, `${x}: want one http line per era`);
+      // #3097: one (hosted-vs-npm) line per era beside the probes.
+      assert.equal(http.length, 2 * (PUBLISHED.length + EXTRAS.length) + 2);
       const c = r.complete[0];
       assert.deepEqual(c.transports, [STDIO, HTTP]);
-      assert.deepEqual([c.success, c.failure], [2 * PUBLISHED.length + 2 * (PUBLISHED.length + EXTRAS.length), 0]);
+      assert.deepEqual([c.success, c.failure], [2 * PUBLISHED.length + 2 * (PUBLISHED.length + EXTRAS.length) + 2, 0]);
+    });
+    it("#3097: on the npm package's version the endpoint's catalog is compared with it, era by era, and is the same: every tool, prompt and resource", async () => {
+      const { PKG } = await import("../test/server-under-test.mjs");
+      const drift = r.probes.filter((l) => l.tool === DRIFT_TOOL);
+      assert.deepEqual(drift.map((l) => [l.transport, l.era, l.outcome]), [[HTTP, MODERN, "success"], [HTTP, LEGACY, "success"]], JSON.stringify(drift));
+      for (const l of drift) {
+        assert.deepEqual([l.package_version, l.npm_version, l.reason, l.detail, l.uncompared], [PKG.version, PKG.version, undefined, undefined, undefined], JSON.stringify(l));
+        assert.equal(l.compared_tools, PUBLISHED.length, JSON.stringify(l));
+        assert.ok(l.compared_prompts >= 2 && l.compared_resources >= 1, `control: the prompts and the resource were compared: ${JSON.stringify(l)}`);
+        assert.equal(l.latency_ms, undefined, "not a tools/call: no latency for the latency metric");
+      }
+      assert.equal(r.complete[0].hosted_vs_npm, "identical");
     });
     it("an http line carries the version the endpoint reports in its handshake", async () => {
       const { PKG } = await import("../test/server-under-test.mjs");
@@ -1360,7 +1557,9 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
       // A verdict is a check_affected call: the API's 500 fails it as it fails the tool's own probe.
       for (const x of activeVerdicts()) assert.deepEqual([r.of(x, era)?.outcome, r.of(x, era)?.reason], ["failure", "state_failed"], `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
       if (MALI_PENDING) assert.equal(r.of(MALI_LABEL, era), undefined, "a pending verdict is never called");
-      for (const x of EXTRAS.filter((e) => !VERDICT_LABELS.includes(e))) assert.equal(r.of(x, era)?.outcome, "success", `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
+      // #3011: the chain probe reads vendor_advisories_for_cve's answer, which failed: like get_vendor_advisory's own probe.
+      for (const x of CHAIN_LABELS) assert.deepEqual([r.of(x, era)?.outcome, r.of(x, era)?.reason], ["failure", "no_valid_probe_input"], `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
+      for (const x of EXTRAS.filter((e) => !VERDICT_LABELS.includes(e) && !CHAIN_LABELS.includes(e))) assert.equal(r.of(x, era)?.outcome, "success", `${x} [${era}]: ${JSON.stringify(r.of(x, era) ?? "no line")}`);
     }
     assert.equal(r.exitCode, 2);
     assert.deepEqual(r.complete[0].transports, [HTTP]);
@@ -1369,11 +1568,12 @@ describe("#2737: the hosted leg over Streamable HTTP", () => {
   // #3135: each rule before its fix, answered by the API, fails its own verdicts and nothing else:
   // the answers fit check_affected's outputSchema, so only the expect can tell them apart.
   // The cpe_comparator case runs with the Mali probe enabled (its entry out of EXPECT_PENDING), as it
-  // will be once #3131 is deployed.
+  // has been since #3131 was deployed.
   for (const [regression, failing, saw] of [
     ["fixed_in_rule", [VERDICT_LABELS[0]], /CVE-2025-14692 fixed_in "4\.9\.7", fixed_in_detail null .*want a version above 4\.9\.7 with fixed_in_detail \(#3074\)$/],
     ["comparator", [VERDICT_LABELS[1], VERDICT_LABELS[2]], /CVE-2024-34102 matched \(fixed_in "2\.4\.4-p9".*want it not affected$|CVE-2025-54236 not matched .*want it matched$/],
     ["cpe_comparator", [VERDICT_LABELS[3]], /midgard_gpu_kernel_driver r20p0: CVE-2022-38181 not matched \(assessed true, match_layer "cpe", count 1,.*want it matched$/],
+    ["fixed_in_exact_list", [VERDICT_LABELS[4]], /^Maven log4j-core 2\.14\.1 CVE-2021-44228 fixed_in null \(fixed_in_reason "the version is listed verbatim.*; want "2\.15\.0" \(#2834\)$/],
   ]) {
     it(`#3135: an API with the ${regression} regression fails ${failing.join(" and ")} over http, expectation_unmet, and nothing else`, async () => {
       stub.state.mode = "ok";
@@ -1537,10 +1737,10 @@ describe("#2846: every prompt probe is its own line per era", () => {
     triage_cve: (args) => `Triage ${args?.cve_id}: call get_cve, cve_intel and cve_remediation.`,
     workload_triage: (args) => `List the workloads (${args?.source}), make an SBOM of each digest, then call check_sbom with its purls.`,
   };
-  function session({ prompts = ["triage_cve", "workload_triage"], says = SAYS, listFails = false } = {}) {
+  function session({ prompts = ["triage_cve", "workload_triage"], says = SAYS, listFails = false, version = "0.0.0-test" } = {}) {
     const calls = { list: 0, get: [] };
     const client = {
-      getServerVersion: () => ({ name: "echelongraph-mcp", version: "0.0.0-test" }),
+      getServerVersion: () => ({ name: "echelongraph-mcp", version }),
       listTools: async () => ({ tools: [] }),
       listPrompts: async () => {
         calls.list += 1;
@@ -1557,16 +1757,16 @@ describe("#2846: every prompt probe is its own line per era", () => {
     };
     return { client, calls };
   }
-  async function probe(s) {
+  async function probe(s, more = {}) {
     const lines = [];
-    await probeSession({ era: MODERN, open: async () => s.client, force: [], emit: (l) => lines.push(l), extras: true });
+    await probeSession({ era: MODERN, open: async () => s.client, force: [], emit: (l) => lines.push(l), extras: true, ...more });
     const extras = lines.filter((l) => l.tool.startsWith("prompt:") || l.tool.startsWith("resource:"));
     const one = (label) => {
       const of = extras.filter((l) => l.tool === label);
       assert.equal(of.length, 1, `${label}: ${of.length} lines, want 1: ${JSON.stringify(extras)}`);
       return of[0];
     };
-    return { extras, one };
+    return { extras, one, lines };
   }
 
   it("PROMPT_PROBES is a list: triage_cve exactly as it was, then workload_triage with source kubernetes, expecting check_sbom", () => {
@@ -1603,7 +1803,7 @@ describe("#2846: every prompt probe is its own line per era", () => {
     assert.equal(one(TRIAGE).outcome, "success");
   });
 
-  it("an endpoint that does not list workload_triage: not_published, never called, never a failure", async () => {
+  it("an endpoint whose version predates workload_triage (0.0.0-test) and does not list it: not_published, never called, never a failure", async () => {
     const s = session({ prompts: ["triage_cve"] });
     const { extras, one } = await probe(s);
     const l = one(WORKLOAD);
@@ -1612,6 +1812,44 @@ describe("#2846: every prompt probe is its own line per era", () => {
     assert.ok(!s.calls.get.some((c) => c.name === "workload_triage"), "an unlisted prompt was called");
     assert.equal(one(TRIAGE).outcome, "success");
     assert.ok(!extras.some((x) => x.outcome === "failure"), JSON.stringify(extras));
+  });
+
+  // #3282: #2846 asked the synthetic to read not_published before the release and fail after it.
+  // Through 3.0.2 an endpoint that stopped listing workload_triage (a revision built from a tag
+  // before 2.7.0, one deploy over another, a hosted-only registration regression) read
+  // not_published on every run and paged nobody. Now a probe the endpoint does not list although
+  // the version its handshake reports is at or past the release probes.mjs SHIPPED_IN gives it is
+  // a failure, reason not_listed. Control: the gate dropped (no SHIPPED_IN entry), 3.0.2 reads
+  // not_published again.
+  it("#3282: an endpoint reporting 3.0.2 that does not list workload_triage (shipped in 2.7.0): failure, reason not_listed, never called", async () => {
+    assert.equal(probeTable.SHIPPED_IN?.[WORKLOAD], "2.7.0", "probes.mjs gives workload_triage no release");
+    const s = session({ prompts: ["triage_cve"], version: "3.0.2" });
+    const { one } = await probe(s);
+    const l = one(WORKLOAD);
+    assert.deepEqual([l.outcome, l.reason, l.shipped_in], ["failure", "not_listed", "2.7.0"], JSON.stringify(l));
+    assert.equal(l.latency_ms, undefined);
+    assert.ok(!s.calls.get.some((c) => c.name === "workload_triage"), "an unlisted prompt was called");
+    assert.equal(one(TRIAGE).outcome, "success");
+  });
+  it("#3282: one reporting 2.6.5 (before workload_triage shipped) that does not list it: not_published", async () => {
+    const { one } = await probe(session({ prompts: ["triage_cve"], version: "2.6.5" }));
+    assert.equal(one(WORKLOAD).outcome, "not_published", JSON.stringify(one(WORKLOAD)));
+  });
+  it("#3282 control: with the gate dropped (no SHIPPED_IN entry for it), the 3.0.2 endpoint reads not_published again", async () => {
+    const { [WORKLOAD]: _dropped, ...rest } = probeTable.SHIPPED_IN;
+    const { one } = await probe(session({ prompts: ["triage_cve"], version: "3.0.2" }), { shipped: rest });
+    assert.equal(one(WORKLOAD).outcome, "not_published", JSON.stringify(one(WORKLOAD)));
+  });
+  it("#3282: the tool probes are gated the same way: at 3.0.2 every unlisted probed tool is not_listed; at 2.6.5 those of 2.7.0 are not_published; one with no release never fails", async () => {
+    const tools = Object.keys(PROBES);
+    const at = async (version) => (await probe(session({ version }))).lines.filter((l) => tools.includes(l.tool));
+    for (const l of await at("3.0.2")) assert.deepEqual([l.outcome, l.reason, l.shipped_in], ["failure", "not_listed", probeTable.SHIPPED_IN[l.tool]], JSON.stringify(l));
+    const old = await at("2.6.5");
+    for (const l of old) assert.equal(l.outcome, probeTable.SHIPPED_IN[l.tool] === "2.7.0" ? "not_published" : "failure", JSON.stringify(l));
+    assert.deepEqual(old.filter((l) => l.outcome === "not_published").map((l) => l.tool).sort(), ["cve_remediation", "scan_manifest"]);
+    // A tool with no release (a planned one) stays not_published at any version: the run tests
+    // above add one to PROBES and run it against this package's own version.
+    assert.deepEqual(runner.unlisted("planned_tool_not_yet_listed", "99.0.0"), { outcome: "not_published" });
   });
 
   it("a blank answer is prompt_empty, for each prompt", async () => {
@@ -1713,6 +1951,35 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
     }
     for (const deps of Object.values(AFTER)) for (const d of deps) assert.ok(names.has(d), `AFTER waits on ${d}, which tools/list does not answer`);
   });
+  // #3282: every probe has the release it shipped in (a probe without one would read not_published
+  // on an endpoint that drops it), none later than this package's version, and SHIPPED_IN names
+  // nothing probes.mjs does not probe.
+  it("#3282: probes.mjs SHIPPED_IN gives every probed tool, prompt and resource its release, none past this package's", async () => {
+    const { PKG } = await import("../test/server-under-test.mjs");
+    const { versionAtLeast } = runner;
+    const SHIPPED = probeTable.SHIPPED_IN;
+    assert.ok(SHIPPED && typeof SHIPPED === "object", "probes.mjs exports no SHIPPED_IN");
+    const keys = [...Object.keys(PROBES), ...PROMPT_PROBES.map((p) => p.label), RESOURCE_PROBE.label];
+    for (const k of [...keys, ...VERDICT_PROBES.map((v) => v.tool), ...probeTable.CHAIN_PROBES.map((c) => c.tool)]) {
+      assert.match(SHIPPED[k] ?? "", /^\d+\.\d+\.\d+$/, `${k}: no release in SHIPPED_IN, so an endpoint that drops it reads not_published`);
+      assert.ok(versionAtLeast(PKG.version, SHIPPED[k]), `${k}: SHIPPED_IN ${SHIPPED[k]} is past this package's ${PKG.version}`);
+    }
+    assert.deepEqual(Object.keys(SHIPPED).filter((k) => !keys.includes(k)), [], "SHIPPED_IN names what nothing probes");
+  });
+  it("#3011: this package's get_vendor_advisory is detected as carrying the chain probe's fix, on every transport and era, and the probe's arguments fit its inputSchema", () => {
+    const CHAIN_PROBES = probeTable.CHAIN_PROBES;
+    assert.ok(Array.isArray(CHAIN_PROBES), "probes.mjs exports no CHAIN_PROBES list");
+    const seen = { vendor_advisories_for_cve: { state: "measured", data: { advisories: [ADVISORY_ROW] } } };
+    for (const [where, tools] of Object.entries(listed)) {
+      for (const c of CHAIN_PROBES) {
+        const tool = tools.find((t) => t.name === c.tool);
+        assert.ok(tool, `${c.label}: ${c.tool} is not listed (${where})`);
+        assert.equal(c.published(tool), true, `${c.label} (${where}): the package's own inputSchema is not detected as the fix, so the probe would read not_published on every run`);
+        const choice = chooseInput(c.tool, tool, seen, { [c.tool]: [c.arguments] });
+        assert.deepEqual(choice.args, { vendor: "redhat", advisory_id: ADVISORY_ROW.advisory_id }, `${c.label} (${where}): ${JSON.stringify(choice)}`);
+      }
+    }
+  });
   it("#3135: every VERDICT_PROBES call is of a tool the hosted endpoint lists on both eras, with arguments its inputSchema accepts", () => {
     assert.ok(Array.isArray(VERDICT_PROBES), "probes.mjs exports no VERDICT_PROBES list");
     for (const era of [MODERN, LEGACY]) {
@@ -1741,5 +2008,385 @@ describe("#2724: the probe table covers exactly what the server lists", () => {
     const { WORKLOAD_SOURCES } = await import("../dist/prompts.js");
     const wt = PROMPT_PROBES.find((p) => p.name === "workload_triage");
     assert.ok(WORKLOAD_SOURCES.includes(wt?.arguments?.source), `workload_triage's probe sends source ${JSON.stringify(wt?.arguments?.source)}, not one of ${WORKLOAD_SOURCES.join(", ")}`);
+  });
+});
+
+// ── #2781: what each answer costs a client, on its probe line ───────────────────────────────────
+// Production's text size was measured only when someone ran `npm run text-bound:live`, so its
+// growth past the record was silent. Every probe line whose call was answered now carries
+// text_chars (and a tools/call line structured_chars), the series create-mcp-synthetic-monitoring.sh
+// reads. What must hold: the sizes are on every answered line of both legs and eras; they are the
+// numbers test/text-bound.mjs measures (textSize, structuredSize), never another count; on the stdio
+// leg they are what a client of the API base receives, though the package is pointed at the
+// forwarder (forwarder.mjs serves under a path that makes its base as long); and a line carries a
+// count, never a character of the answer.
+
+// The stub API under a base of `length` characters (production's https://app.echelongraph.io is
+// 27): a loopback server at http://127.0.0.1:<port>/<path> that takes the path off and relays the
+// rest, headers and body, to the stub. A forwarder in front of it then needs a path of its own.
+async function startLongBaseApi(upstream, length) {
+  let prefix = "";
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    if (!req.url.startsWith(`${prefix}/`)) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not under the long base\n");
+      return;
+    }
+    const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !["host", "connection", "content-length", "transfer-encoding", "accept-encoding"].includes(k)));
+    const up = await fetch(`${upstream}${req.url.slice(prefix.length)}`, { method: req.method, headers, body: chunks.length && req.method !== "GET" ? Buffer.concat(chunks) : undefined });
+    res.writeHead(up.status, { "content-type": up.headers.get("content-type") ?? "application/json" });
+    res.end(Buffer.from(await up.arrayBuffer()));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  prefix = `/${"a".repeat(length - origin.length - 1)}`;
+  return {
+    base: `${origin}${prefix}`,
+    close: () => {
+      server.closeAllConnections();
+      return new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+describe("#2781: each answered probe line says what the answer costs a client (text_chars, structured_chars)", () => {
+  let stub, srv, longApi, both, viaForwarder, direct;
+  const sizeKeys = (l) => ["text_chars", "structured_chars"].filter((k) => Object.hasOwn(l, k));
+  before(async () => {
+    stub = await startStub();
+    stub.state.mode = "ok";
+    srv = await startHttpEntry(stub.base);
+    longApi = await startLongBaseApi(stub.base, PROD_BASE.length);
+    both = await run(stub, { remoteUrl: srv.url, force: ["canary_deliberate_failure"] });
+    viaForwarder = await run(stub, { apiBase: longApi.base, eras: [MODERN] });
+    direct = await run(stub, { apiBase: longApi.base, eras: [MODERN], direct: true });
+  });
+  after(async () => {
+    await srv?.stop();
+    await longApi?.close();
+    await stub?.close();
+  });
+
+  it("every tools/call line that was answered carries text_chars and structured_chars, on both legs and eras; a prompt's and the resource's line carries text_chars", () => {
+    assert.equal(typeof runner.sizesOf, "function", "run.mjs exports no sizesOf: the probe lines carry no size");
+    for (const transport of [STDIO, HTTP]) {
+      for (const era of [MODERN, LEGACY]) {
+        const calls = [...PUBLISHED, ...(transport === HTTP ? activeVerdicts() : [])];
+        for (const tool of calls) {
+          const l = both.probes.find((p) => p.transport === transport && p.tool === tool && p.era === era);
+          assert.ok(l, `${tool} [${transport} ${era}]: no line`);
+          assert.ok(Number.isInteger(l.text_chars) && l.text_chars > 0, `${tool} [${transport} ${era}]: text_chars ${JSON.stringify(l.text_chars)}`);
+          assert.ok(Number.isInteger(l.structured_chars) && l.structured_chars > 0, `${tool} [${transport} ${era}]: structured_chars ${JSON.stringify(l.structured_chars)}`);
+        }
+        if (transport === HTTP) {
+          for (const label of [...PROMPT_LABELS, RESOURCE_PROBE.label]) {
+            const l = both.probes.find((p) => p.transport === HTTP && p.tool === label && p.era === era);
+            assert.ok(l && Number.isInteger(l.text_chars) && l.text_chars > 0, `${label} [${era}]: ${JSON.stringify(l)}`);
+            assert.deepEqual(sizeKeys(l), ["text_chars"], `${label} [${era}]: a prompt or resource answer has no structuredContent to size`);
+          }
+        }
+      }
+    }
+  });
+
+  // #3011's chain probe (merged beside #2781) is a tools/call too: its answer costs a client the same.
+  it("a chain:… line whose call was answered carries text_chars and structured_chars, as every other tools/call line does", () => {
+    for (const era of [MODERN, LEGACY]) {
+      for (const label of CHAIN_LABELS) {
+        const l = both.probes.find((p) => p.transport === HTTP && p.tool === label && p.era === era);
+        assert.ok(l && Number.isInteger(l.latency_ms), `control: ${label} [${era}] was called and answered: ${JSON.stringify(l)}`);
+        assert.ok(Number.isInteger(l.text_chars) && l.text_chars > 0, `${label} [${era}]: text_chars ${JSON.stringify(l.text_chars)}`);
+        assert.ok(l.structured_chars === null || (Number.isInteger(l.structured_chars) && l.structured_chars > 0), `${label} [${era}]: structured_chars ${JSON.stringify(l.structured_chars)}`);
+        assert.ok(Object.hasOwn(l, "structured_chars"), `${label} [${era}]: no structured_chars`);
+      }
+    }
+  });
+
+  it("a line whose call was not answered carries no size, and one answered with an error carries the error's", () => {
+    for (const era of [MODERN, LEGACY]) {
+      for (const transport of [STDIO, HTTP]) {
+        const l = both.probes.find((p) => p.transport === transport && p.tool === "canary_deliberate_failure" && p.era === era);
+        assert.equal(l?.outcome, "failure", JSON.stringify(l));
+        if (l.reason === "rpc_error") assert.deepEqual(sizeKeys(l), [], `answered no result, so no size: ${JSON.stringify(l)}`);
+        else assert.ok(Number.isInteger(l.text_chars), `answered a result, so it is sized: ${JSON.stringify(l)}`);
+      }
+    }
+  });
+
+  it("each size is the number test/text-bound.mjs measures of the same answer (textSize's total, structuredSize), the stub's base counted as production's", async () => {
+    assert.equal(typeof runner.sizesOf, "function", "run.mjs exports no sizesOf");
+    const answers = [];
+    const lines = [];
+    const measure = (res) => {
+      answers.push(res);
+      return runner.sizesOf(res);
+    };
+    const emit = (l) => lines.push(l);
+    const open = () => connect({ era: MODERN, command: process.execPath, args: [DIST], env: { ...process.env, ECHELONGRAPH_API_BASE: stub.base }, stderr: "ignore" });
+    await probeSession({ era: MODERN, open, force: [], emit, measure });
+    const openHttp = () => connectHttp({ era: MODERN, url: srv.url, userAgent: UA_TOKEN });
+    await probeSession({ era: MODERN, open: openHttp, force: [], emit, measure, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
+    const sized = lines.filter((l) => Object.hasOwn(l, "text_chars"));
+    assert.equal(sized.length, answers.length, "a line for every answer measured");
+    assert.ok(answers.length >= 2 * PUBLISHED.length, `${answers.length} answers measured`);
+    let prompts = 0;
+    for (const [i, res] of answers.entries()) {
+      const l = sized[i];
+      if (Array.isArray(res.messages)) {
+        prompts++;
+        assert.equal(l.text_chars, res.messages.filter((m) => m.content?.type === "text").reduce((n, m) => n + m.content.text.length, 0), l.tool);
+        continue;
+      }
+      assert.equal(l.text_chars, textSize(res).total, `${l.tool}: text_chars is not text-bound.mjs's textSize`);
+      if (!res.contents) assert.equal(l.structured_chars, structuredSize(res) ?? null, `${l.tool}: structured_chars is not text-bound.mjs's structuredSize`);
+      // With a base counted as production's, as text-bound.mjs counts its stub's.
+      const asProd = runner.sizesOf(res, { localBase: stub.base, asBase: PROD_BASE });
+      assert.equal(asProd.text_chars, textSize(res, stub.base).total, `${l.tool}: the base, counted as production's`);
+      if (!res.contents) assert.equal(asProd.structured_chars, structuredSize(res, stub.base) ?? null, `${l.tool}: the base, counted as production's (structured)`);
+    }
+    assert.equal(prompts, PROMPT_LABELS.length, "both prompt answers measured");
+    // Not vacuous: the package quotes its base (the OK note), so counting it as production's moves the size.
+    const summary = answers[lines.findIndex((l) => l.tool === "cve_summary")];
+    assert.ok(JSON.stringify(summary.content).includes(stub.base), "the answer does not quote the API base, so the base check above proves nothing");
+    assert.ok(runner.sizesOf(summary, { localBase: stub.base, asBase: PROD_BASE }).text_chars > runner.sizesOf(summary).text_chars);
+  });
+
+  it("the stdio leg's sizes are what a client of the API base receives: the forwarder's base is as long as that base, so the package answers it as it answers a direct client", async () => {
+    // The package's own answers, uncounted (no base taken for another): pointed at a forwarder in
+    // front of the long base, and at the long base itself. The package quotes its base, and the cut
+    // fills its budget to the character, so only a forwarder base of the same length answers alike.
+    const raw = async (base) => {
+      const out = {};
+      const open = () => connect({ era: MODERN, command: process.execPath, args: [DIST], env: { ...process.env, ECHELONGRAPH_API_BASE: base, ECHELONGRAPH_MCP_UA: UA_TOKEN }, stderr: "ignore" });
+      await probeSession({ era: MODERN, open, force: [], emit: (l) => (out[l.tool] = l), measure: (res) => runner.sizesOf(res) });
+      return out;
+    };
+    const fwd = await startForwarder({ upstream: longApi.base, token: UA_TOKEN });
+    let via, own;
+    try {
+      [via, own] = [await raw(fwd.base), await raw(longApi.base)];
+    } finally {
+      await fwd.close();
+    }
+    for (const tool of PUBLISHED) {
+      assert.ok(Number.isInteger(own[tool]?.text_chars), `${tool}: ${JSON.stringify(own[tool])}`);
+      assert.deepEqual([via[tool].text_chars, via[tool].structured_chars], [own[tool].text_chars, own[tool].structured_chars], `${tool}: the package answered the forwarder in other sizes than a client of the API base`);
+    }
+    for (const tool of PUBLISHED) {
+      const f = viaForwarder.of(tool, MODERN);
+      const d = direct.of(tool, MODERN);
+      assert.equal(f?.outcome, "success", `${tool} via the forwarder: ${JSON.stringify(f)}`);
+      assert.equal(d?.outcome, "success", `${tool} direct: ${JSON.stringify(d)}`);
+      assert.ok(Number.isInteger(d.text_chars) && Number.isInteger(d.structured_chars), `${tool} direct: no sizes: ${JSON.stringify(d)}`);
+      assert.deepEqual([f.text_chars, f.structured_chars], [d.text_chars, d.structured_chars], `${tool}: via the forwarder ${f.text_chars} / ${f.structured_chars}, direct ${d.text_chars} / ${d.structured_chars}`);
+    }
+    assert.equal(direct.complete[0].forwarder, "off");
+    assert.ok(viaForwarder.complete[0].api_requests > 0, "the forwarder relayed nothing, so the comparison proves nothing");
+  });
+
+  it("the forwarder serves under a path that makes its base as long as its upstream's, takes it off before relaying, and relays nothing outside it", async () => {
+    assert.equal(typeof forwarderModule.prefixFor, "function", "forwarder.mjs exports no prefixFor: its base is the loopback origin's length, not the API's");
+    const prod = await startForwarder({ upstream: PROD_BASE, token: UA_TOKEN });
+    try {
+      assert.equal(prod.base.length, PROD_BASE.length, prod.base);
+      assert.match(prod.base, /^http:\/\/127\.0\.0\.1:\d+\/p+$/);
+    } finally {
+      await prod.close();
+    }
+    stub.state.mode = "echo";
+    const long = await startForwarder({ upstream: `${stub.base}/upstream-path`, token: UA_TOKEN });
+    try {
+      assert.equal(long.base.length, `${stub.base}/upstream-path`.length);
+      const res = await fetch(`${long.base}/api/v1/public/cves/summary?x=1`, { headers: { "user-agent": "echelongraph-mcp/2.3.4" } });
+      assert.equal(res.status, 201);
+      assert.equal((await res.json()).url, "/upstream-path/api/v1/public/cves/summary?x=1", "the forwarder's own path was relayed, or the upstream's dropped");
+      const seen = stub.state.seen.length;
+      const outside = await fetch(`${new URL(long.base).origin}/api/v1/public/cves/summary`);
+      assert.equal(outside.status, 404);
+      assert.equal(stub.state.seen.length, seen, "a request outside the forwarder's base was relayed");
+    } finally {
+      stub.state.mode = "ok";
+      await long.close();
+    }
+    // An upstream no longer than the loopback origin: no path.
+    const same = await startForwarder({ upstream: stub.base, token: UA_TOKEN });
+    try {
+      assert.equal(new URL(same.base).pathname, "/");
+      assert.equal(same.base, new URL(same.base).origin);
+    } finally {
+      await same.close();
+    }
+  });
+
+  it("sizes only: text_chars and structured_chars are counts, and the thresholds the monitoring alerts at are the suite's (#2617's 45,000 and #3013's 30,000)", () => {
+    for (const l of [...both.probes, ...viaForwarder.probes]) {
+      for (const k of sizeKeys(l)) assert.ok(l[k] === null || Number.isInteger(l[k]), `${l.tool}: ${k} is ${JSON.stringify(l[k])}, not a count`);
+    }
+    assert.equal(TRIP_WIRE, 45_000);
+    assert.equal(STRUCTURED_BUDGET, 30_000);
+    // Every answer the healthy run sized is under both, so the alert rests at nothing on it.
+    for (const l of both.probes.filter((p) => Object.hasOwn(p, "text_chars"))) {
+      assert.ok(l.text_chars <= TRIP_WIRE && (l.structured_chars ?? 0) <= STRUCTURED_BUDGET, JSON.stringify(l));
+    }
+  });
+});
+
+// ── #3097: hosted versus npm ─────────────────────────────────────────────────────────────────
+// On 2026-10-11 the hosted endpoint and npm both reported 2.7.1 and served different cve_intel
+// descriptions, and the synthetic, judging each leg by its own outputSchema, could not see it. A
+// copy of this package's dist/ with one tool description changed stands in for a build that is not
+// the release: served as the hosted endpoint (the 2026-10-11 case), and run as the npm package (the
+// other way). Both must fail the (hosted-vs-npm) line, naming the tool and the field, and nothing
+// else; the same build on another version is not compared; the release build passes.
+const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const DRIFT_FROM = "How one CVE's EPSS score (FIRST's";
+const DRIFT_TO = "How one CVE's EPSS scores (FIRST's";
+function driftedCopy() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eg-mcp-drift-3097-"));
+  fs.cpSync(path.join(PKG_DIR, "dist"), path.join(dir, "dist"), { recursive: true });
+  fs.copyFileSync(path.join(PKG_DIR, "package.json"), path.join(dir, "package.json"));
+  fs.symlinkSync(fs.realpathSync(path.join(PKG_DIR, "node_modules")), path.join(dir, "node_modules"), "dir");
+  const f = path.join(dir, "dist", "tools", "epss_history.js");
+  const src = fs.readFileSync(f, "utf8");
+  assert.equal(src.split(DRIFT_FROM).length, 2, "control: dist/tools/epss_history.js holds the description's opening once (re-aim DRIFT_FROM)");
+  fs.writeFileSync(f, src.replace(DRIFT_FROM, DRIFT_TO));
+  return dir;
+}
+
+describe("#3097: a hosted endpoint serving other code than the npm release it reports", () => {
+  let stub, release, drifted, copy;
+  before(async () => {
+    stub = await startStub();
+    copy = driftedCopy();
+    release = await startHttpEntry(stub.base);
+    drifted = await startHttpEntry(stub.base, {}, path.join(copy, "dist", "http.js"));
+  });
+  after(async () => {
+    await release?.stop();
+    await drifted?.stop();
+    await stub?.close();
+    if (copy) fs.rmSync(copy, { recursive: true, force: true });
+  });
+  const driftLines = (r) => r.probes.filter((l) => l.tool === DRIFT_TOOL);
+  const at = DRIFT_FROM.length - " (FIRST's".length + 1; // the first character that differs, 1-based
+
+  function failsOnlyTheComparison(r, what) {
+    const drift = driftLines(r);
+    assert.deepEqual(drift.map((l) => [l.transport, l.era, l.outcome, l.reason, l.differences]),
+      [[HTTP, MODERN, "failure", "hosted_differs_from_npm", 1], [HTTP, LEGACY, "failure", "hosted_differs_from_npm", 1]], JSON.stringify(drift));
+    for (const l of drift) {
+      assert.match(l.detail, new RegExp(`^tool epss_history: description differs at character ${at} \\(npm (\\d+) characters, hosted (\\d+)\\)$`), l.detail);
+      const [, npm, hosted] = l.detail.match(/npm (\d+) characters, hosted (\d+)/).map(Number);
+      assert.equal(hosted - npm, what === "hosted" ? 1 : -1, `the longer description is the ${what} one: ${l.detail}`);
+      assert.equal(l.compared_tools, PUBLISHED.length);
+    }
+    const others = r.probes.filter((l) => l.tool !== DRIFT_TOOL && l.outcome === "failure");
+    assert.deepEqual(others, [], "only the comparison fails: each leg alone is healthy, which is why nothing saw 2026-10-11");
+    assert.equal(r.exitCode, 2);
+    assert.deepEqual([r.complete[0].failure, r.complete[0].hosted_vs_npm], [2, "differs"]);
+  }
+
+  it("the hosted endpoint drifted (one description changed, the 2026-10-11 case): (hosted-vs-npm) fails on both eras, naming the tool, the field and where it differs", async () => {
+    stub.state.mode = "ok";
+    failsOnlyTheComparison(await run(stub, { remoteUrl: drifted.url }), "hosted");
+  });
+  it("the npm package drifted (the other way): the same failure, the other length", async () => {
+    stub.state.mode = "ok";
+    failsOnlyTheComparison(await run(stub, { serverJs: path.join(copy, "dist", "index.js"), remoteUrl: release.url }), "npm");
+  });
+  // #3097's review: on another version than npm's latest (a rollback to an older release, a hand
+  // deploy reporting another number), the endpoint is compared with npm's package of the version it
+  // reports, installed once per run, instead of nothing being compared.
+  it("the drifted endpoint on another version than the npm leg's: compared with npm's package of the version it reports, installed once for both eras, and it fails", async () => {
+    stub.state.mode = "ok";
+    const { PKG } = await import("../test/server-under-test.mjs");
+    const asked = [];
+    const r = await run(stub, { remoteUrl: drifted.url, version: "0.0.0-another", installPackage: async (spec, dir) => (asked.push([spec, typeof dir]), releasedHere(spec)) });
+    assert.deepEqual(asked, [[`echelongraph-mcp@${PKG.version}`, "string"]], "npm's package of the hosted version, installed once, into a directory of its own");
+    const drift = driftLines(r);
+    assert.deepEqual(drift.map((l) => [l.era, l.outcome, l.reason, l.npm_version, l.compared_with]),
+      [[MODERN, "failure", "hosted_differs_from_npm", PKG.version, "hosted_version"], [LEGACY, "failure", "hosted_differs_from_npm", PKG.version, "hosted_version"]], JSON.stringify(drift));
+    for (const l of drift) assert.match(l.detail, /^tool epss_history: description differs at character \d+/);
+    assert.deepEqual([r.exitCode, r.complete[0].hosted_vs_npm, r.complete[0].hosted_vs_npm_at], [2, "differs", PKG.version]);
+  });
+  it("the release build on another version than the npm leg's: compared at its own version, and the same", async () => {
+    stub.state.mode = "ok";
+    const { PKG } = await import("../test/server-under-test.mjs");
+    const r = await run(stub, { remoteUrl: release.url, version: "0.0.0-another" });
+    assert.deepEqual(driftLines(r).map((l) => [l.era, l.outcome, l.compared_with, l.npm_version, l.compared_tools]), [[MODERN, "success", "hosted_version", PKG.version, PUBLISHED.length], [LEGACY, "success", "hosted_version", PKG.version, PUBLISHED.length]]);
+    assert.deepEqual([r.exitCode, r.complete[0].hosted_vs_npm, r.complete[0].hosted_vs_npm_at], [0, "identical", PKG.version]);
+  });
+  it("an endpoint reporting a version npm does not serve: fails on both eras (hosted_version_not_on_npm), a build no release has", async () => {
+    stub.state.mode = "ok";
+    const r = await run(stub, { remoteUrl: release.url, version: "0.0.0-another", installPackage: async (spec) => { throw new Error(`npm error code ETARGET | npm error notarget No matching version found for ${spec}.`); } });
+    assert.deepEqual(driftLines(r).map((l) => [l.era, l.outcome, l.reason, l.compared_with]), [[MODERN, "failure", "hosted_version_not_on_npm", "hosted_version"], [LEGACY, "failure", "hosted_version_not_on_npm", "hosted_version"]]);
+    for (const l of driftLines(r)) assert.match(l.detail, /No matching version found for echelongraph-mcp@/);
+    assert.deepEqual([r.exitCode, r.complete[0].hosted_vs_npm], [2, "hosted_version_not_on_npm"]);
+  });
+  it("npm's package of the hosted version that cannot be installed otherwise: fails on both eras (hosted_version_install_failed), never read as the same", async () => {
+    stub.state.mode = "ok";
+    const r = await run(stub, { remoteUrl: release.url, version: "0.0.0-another", installPackage: async () => { throw new Error("npm error code ECONNRESET | npm error network aborted"); } });
+    assert.deepEqual(driftLines(r).map((l) => [l.era, l.outcome, l.reason]), [[MODERN, "failure", "hosted_version_install_failed"], [LEGACY, "failure", "hosted_version_install_failed"]]);
+    assert.deepEqual([r.exitCode, r.complete[0].hosted_vs_npm], [2, "hosted_version_install_failed"]);
+  });
+  it("restored to the release build: (hosted-vs-npm) passes on both eras", async () => {
+    stub.state.mode = "ok";
+    const r = await run(stub, { remoteUrl: release.url });
+    assert.deepEqual(driftLines(r).map((l) => [l.era, l.outcome]), [[MODERN, "success"], [LEGACY, "success"]]);
+    assert.deepEqual([r.exitCode, r.complete[0].hosted_vs_npm], [0, "identical"]);
+  });
+  it("one leg alone compares nothing and says so only when both legs ran", async () => {
+    stub.state.mode = "ok";
+    const hostedOnly = await run(stub, { stdio: false, remoteUrl: drifted.url, eras: [LEGACY] });
+    assert.deepEqual([driftLines(hostedOnly), hostedOnly.complete[0].hosted_vs_npm], [[], undefined]);
+    const npmOnly = await run(stub, { eras: [LEGACY] });
+    assert.deepEqual([driftLines(npmOnly), npmOnly.complete[0].hosted_vs_npm], [[], undefined]);
+    const noInstall = await run(stub, { serverJs: undefined, packageSpec: "not a spec", remoteUrl: release.url, eras: [LEGACY] });
+    assert.deepEqual([driftLines(noInstall), noInstall.complete[0].hosted_vs_npm], [[], "version_unknown"]);
+  });
+});
+
+describe("#3097: comparing two catalogs", () => {
+  const tool = (over = {}) => ({ name: "a", title: "A", description: "abcde", inputSchema: { type: "object", properties: { x: { type: "string" } }, required: ["x"] }, outputSchema: { type: "object" }, annotations: { readOnlyHint: true }, ...over });
+  const cat = (over = {}) => ({ instructions: "use it", tools: [tool(), tool({ name: "b" })], prompts: [{ name: "p", arguments: [{ name: "cve_id", required: true }] }], resources: [{ uri: "echelongraph://m", name: "m", mimeType: "text/markdown" }], ...over });
+  const diffs = (npm, hosted) => compareCatalogs(npm, hosted).differences;
+
+  it("the same catalog, keys in another order and tools in another order, is the same", () => {
+    const shuffled = cat({ tools: [tool({ name: "b" }), Object.fromEntries(Object.entries(tool()).reverse())] });
+    const r = compareCatalogs(cat(), shuffled);
+    assert.deepEqual(r, { differences: [], compared: { tools: 2, prompts: 1, resources: 1 }, uncompared: [] });
+  });
+  it("each field of a tool changed alone is a difference naming the tool and the field", () => {
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool({ description: "abXde" }), tool({ name: "b" })] })), ["tool a: description differs at character 3 (npm 5 characters, hosted 5)"]);
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool({ title: "A2" }), tool({ name: "b" })] })), ["tool a: title differs at character 2 (npm 1 characters, hosted 2)"]);
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool({ inputSchema: { type: "object", properties: { x: { type: "string", maxLength: 9 } }, required: ["x"] } }), tool({ name: "b" })] })), ["tool a: inputSchema differs"]);
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool({ outputSchema: undefined }), tool({ name: "b" })] })), ["tool a: outputSchema only on npm"]);
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool({ annotations: { readOnlyHint: false } }), tool({ name: "b" })] })), ["tool a: annotations differs"]);
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool({ _meta: { x: 1 } }), tool({ name: "b" })] })), ["tool a: _meta only on the hosted endpoint"]);
+  });
+  it("a tool, a prompt or a resource on one side only is named, both ways", () => {
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool(), tool({ name: "b" }), tool({ name: "c" })] })), ["tool c: only on the hosted endpoint"]);
+    assert.deepEqual(diffs(cat(), cat({ tools: [tool()] })), ["tool b: only on npm"]);
+    assert.deepEqual(diffs(cat(), cat({ prompts: [] })), ["prompt p: only on npm"]);
+    assert.deepEqual(diffs(cat({ resources: [] }), cat()), ["resource echelongraph://m: only on the hosted endpoint"]);
+  });
+  it("a prompt's arguments, a resource's fields and the instructions are compared too", () => {
+    assert.deepEqual(diffs(cat(), cat({ prompts: [{ name: "p", arguments: [{ name: "cve_id", required: false }] }] })), ["prompt p: arguments differs"]);
+    assert.deepEqual(diffs(cat(), cat({ resources: [{ uri: "echelongraph://m", name: "m", mimeType: "text/plain" }] })), ["resource echelongraph://m: mimeType differs at character 6 (npm 13 characters, hosted 10)"]);
+    assert.deepEqual(diffs(cat(), cat({ instructions: "use it well" })), ["the server: instructions differs at character 7 (npm 6 characters, hosted 11)"]);
+  });
+  it("a list one side could not read is uncompared, not a difference; the same failure on both sides is no difference", () => {
+    const r = compareCatalogs(cat(), cat({ prompts: { error: "rpc_error -32601" } }));
+    assert.deepEqual([r.differences, r.uncompared, r.compared.prompts], [[], ["prompts/list (npm read it, hosted: rpc_error -32601)"], 0]);
+    const both = compareCatalogs(cat({ resources: { error: "rpc_error -32601" } }), cat({ resources: { error: "rpc_error -32601" } }));
+    assert.deepEqual([both.differences, both.uncompared], [[], []]);
+  });
+  it("control: a comparison that reads no field would pass every case above; this one reads every field (each changed alone fails)", () => {
+    for (const [field, v] of Object.entries({ name: "z", title: "Z", description: "zzz", inputSchema: {}, outputSchema: {}, annotations: {}, icons: [] })) {
+      const hosted = cat({ tools: [tool({ [field]: v }), tool({ name: "b" })] });
+      assert.ok(diffs(cat(), hosted).length > 0, `a changed ${field} was not seen`);
+    }
   });
 });

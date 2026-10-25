@@ -33,9 +33,20 @@ import * as z from "zod";
 //      in "…", every list in it to its first `cap` entries); then, for a tool that names the
 //      lists beside its rows (`sides`: check_affected's excluded sample, check_sbom's
 //      not_sent_purls), the same level with those lists cut as it says; then each next level with
-//      them cut; and when no level fits, rows are left out of the text, those the tool names
-//      first, then from the end. A list beside the rows is cut before any row field the first
-//      level keeps, and before any row leaves the text;
+//      them cut; and when no level fits, the lists beside the rows that the tool names
+//      beforeRows (#3272: cve_remediation's fixed_branches, patches and fix_references, which its
+//      structured cut thins and leaves in the same order) are cut as each says, one after another,
+//      then (3.1.0's phase A review, `capped`: fixed_branches) each entry's own list is cut to its
+//      first c entries, the most that fit, every entry kept and marked as the structured cut
+//      marks it, and then they lose entries from the end, the last named first, the room left
+//      going back to c; then rows are left out of the
+//      text, those the tool names first, then from the end, those it names last (leaveOutLast,
+//      #2899: check_affected's KEV-listed and ransomware matches) only after every other, the note
+//      naming each of those left out. A list the tool names beside its rows is cut before any row
+//      leaves the text, and, unless it is named beforeRows, before any row field the first level
+//      keeps (a list it does not name is cut only in step 4).
+//      With outFirstBefore (#3269: check_sbom), the rows the tool names are cut to the leanest
+//      level and leave first, as many as must, before any other row is cut to the level it names;
 //   4. else every list keeps its first n entries, n halving, and then strings are cut too.
 // Whenever the text is not the JSON whole, the note ends with one sentence, starting TEXT CUT,
 // that says what the first text block leaves out, where structuredContent.data carries all of it,
@@ -67,7 +78,17 @@ import * as z from "zod";
 //      each entry on its own terms (an EntryLevel, #3132: check_sbom's rows keep at most the same
 //      number of matches, the most that fit, so only the rows with more lose any), and a step named
 //      keepAll (#3139: cve_remediation's vendor_remediations) keeps every entry at its leanest level
-//      while the later steps are cut, its entries leaving only once they all are;
+//      while the later steps are cut, its entries leaving only once they all are; and a step named
+//      with outFirst (#3269: check_sbom's results) sends the entries leaveOutFirst names out, cut
+//      lean, before the others are cut past a given level, and has them back with the room left,
+//      but (#3269's review, outFirst.floor) keeps them while the others, capped anyway, fit at a
+//      floor; and a tool that pages names the page size at which a call of its first entries keeps
+//      them all (PageAt.firstFit), counted as this cut would cut that call; #3269's second review:
+//      with EntryLevel.floor and leaveAt's floor no entry's list goes below its floor, the entries
+//      leave whole instead, chosen by fit, those DataCutStep.leaveLast holds kept first, and the
+//      note names by id those of them that left (#3269's third review: those it holds first and
+//      apart, and, where the tool gives the sentence, the sizes of calls of them alone that keep
+//      every one, PageAt.againFit);
 //   2. then every other list at the top level of data, the same way. A list inside an object of
 //      data (get_cve's remediation summary, with fix_status, #2841) is cut only where a DataCut
 //      names it, and none names get_cve's. Once a step fits, the room it leaves goes back to the
@@ -121,18 +142,43 @@ export type TextCutLevel = { keep: RowKeep; clip: number; cap?: number };
 // level alone does not fit: each entry that is an object to the fields `keep` names, every string
 // in it to its first `clip` characters, and the list to its first `cap` entries; and the tool's
 // sentence for what the list still says, given how many entries the text keeps and how many the
-// list holds (`said`).
-export type TextSide = { list: string; keep?: RowKeep; clip?: number; cap?: number; said?: (inText: number, total: number, data: object) => string };
+// list holds (`said`). #3272: with `beforeRows`, the list stays whole at every level; once no level
+// fits, it is cut as it says (the lists so named one after another, in their order in `sides`),
+// and then its entries leave the text from the end, before any row does (the last so named first,
+// each emptied before the next loses any).
+// 3.1.0's phase A review: with `capped` (cve_remediation's fixed_branches, as its DataCut's step 2
+// caps them), once every list named beforeRows is thinned and the text still does not fit, each
+// entry's own list (`capped.list`, a package's ranges) is cut to its first c entries, c the most
+// that fit beside the other lists as they stand, at least `least`, every entry kept and marked as
+// the structured cut marks it (`mark`); only where even `least` does not fit do entries of the
+// lists leave, and the room they leave goes back to c. `said` gives the sentence: c, the entries
+// cut so (by `name`), and whether data is whole only with full: true.
+export type TextSideCap = {
+  list: string;
+  least: number;
+  mark: (entry: Record<string, unknown>, cap: number) => Record<string, unknown>;
+  name: (entry: unknown) => string;
+  said: (cap: number, names: readonly string[], full: boolean) => string;
+};
+export type TextSide = { list: string; keep?: RowKeep; clip?: number; cap?: number; said?: (inText: number, total: number, data: object) => string; beforeRows?: true; capped?: TextSideCap };
 // A tool's cut: the list in data whose rows it cuts (`rows`), its levels, most kept first; the
 // lists beside the rows and how each is cut (`sides`); the rows left out first when rows must go
 // (`leaveOutFirst`: those whose `field` is one of `values`, in that order, and why that loses
-// nothing); the sentence naming the tool that returns one row whole; and the sentence saying how
-// to read the rows left out in the text.
+// nothing); the rows left out last (`leaveOutLast`, #2899: those where any of `fields` is true,
+// only once every other row is out, each named by its field `name` in the note when it leaves,
+// and why they stay; #3284: or those `has` holds, which the note says they have as `said`, named
+// by their `name` as runs of numbers with `runs`); the sentence naming the tool that returns one
+// row whole; and the sentence saying how to read the rows left out in the text.
 export type TextCut = {
   rows: string;
   levels: readonly TextCutLevel[];
   sides?: readonly TextSide[];
   leaveOutFirst?: { field: string; values: readonly string[]; why: string };
+  leaveOutLast?: { fields: readonly string[]; name: string; why: string; has?: (row: unknown) => boolean; said?: string; runs?: true };
+  // #3269: before any row is cut to levels[outFirstBefore], the rows leaveOutFirst names are cut
+  // to the leanest level and then leave the text, as many as must (check_sbom: its clean and
+  // not-assessed rows, before an affected row loses its matches).
+  outFirstBefore?: number;
   whole?: string;
   page?: (inText: number, rows: number, data: object) => string;
 };
@@ -259,7 +305,7 @@ function cutSides(data: Record<string, unknown>, sides: readonly TextSide[]): { 
 // whole. The cve:// resource has no first text block and no data beside its own, so it names its
 // own place (resources.ts, #2801). `leftOut` says where the rows a cut leaves out of the text are
 // (`which` says which they are); by default, in structuredContent.data only.
-export type CutPlace = { opens: (chars: number) => string; leftOut?: (n: number, which: string) => string };
+export type CutPlace = { opens: (chars: number) => string; leftOut?: (n: number, which: string) => string; full?: true };
 export const FIRST_TEXT_BLOCK: CutPlace = {
   opens: (chars) =>
     `TEXT CUT: the API's answer is ${chars} characters of JSON, more than the ${DATA_TEXT_BUDGET} the first text block holds, so that block is cut, and structuredContent.data carries the answer whole.`,
@@ -270,6 +316,7 @@ export const FIRST_TEXT_BLOCK_BESIDE_A_CUT: CutPlace = {
   opens: (chars) =>
     `TEXT CUT: the API's answer is ${chars} characters of JSON, more than the ${DATA_TEXT_BUDGET} the first text block holds, so that block is cut, and structuredContent.data carries the answer whole with full: true (DATA CUT, below).`,
   leftOut: (n, which) => `the other ${n} are left out of it${which}, and structuredContent.data holds them with full: true`,
+  full: true,
 };
 
 // What step 4 cut, for a caller that states it as a structured result's truncated does (the cve://
@@ -295,54 +342,248 @@ export function dataText(data: object, cut?: TextCut, place: CutPlace = FIRST_TE
   if (cut && isPlainObject(data) && Array.isArray(rows) && rows.length > 0 && cut.levels.length > 0) {
     const n = rows.length;
     // The lists beside the rows, cut once; tried with the first level after it fails with them
-    // whole, and with every later level.
-    const sides = cut.sides?.length ? cutSides(data, cut.sides) : { fields: {}, said: [] };
+    // whole, and with every later level. (Those named beforeRows, #3272, are cut only below.)
+    const early = (cut.sides ?? []).filter((side) => !side.beforeRows);
+    const sides = early.length ? cutSides(data, early) : { fields: {}, said: [] };
     const sided = sides.said.length > 0;
     const attempts = cut.levels.flatMap((level, i) => (i === 0 && sided ? [{ level, sided: false }, { level, sided: true }] : [{ level, sided }]));
-    let cutRows: unknown[] = [];
-    let beside: Record<string, unknown> = data;
-    for (const attempt of attempts) {
-      const { level } = attempt;
-      const s: CutStats = { left: new Set(), clipped: 0, capped: 0 };
-      const cap = level.cap ?? Number.POSITIVE_INFINITY;
-      cutRows = rows.map((r) => (isPlainObject(r) ? cutRow(r, level.keep, level, s) : cutValue(r, level.clip, cap, s)));
-      rowsSaid = levelSaid(cut.rows, n, level, s);
-      beside = attempt.sided ? { ...data, ...sides.fields } : data;
-      sidesSaid = attempt.sided ? sides.said : [];
-      const shown = lined({ ...beside, [cut.rows]: cutRows });
-      if (shown.length <= DATA_TEXT_BUDGET) return { text: shown, said: say(rowsSaid, ...sidesSaid, cut.whole) };
-    }
-    // No level fits: rows leave the text, those the tool names first (by value, in its order,
-    // each from the end), then the rest from the end, until it fits.
-    const lens = cutRows.map((r) => 4 + JSON.stringify(r).length);
-    const emptyLen = lined({ ...beside, [cut.rows]: [] }).length;
-    const textLen = (kept: number, sum: number) => (kept === 0 ? emptyLen : emptyLen + 2 + sum + 2 * kept);
+    // The order rows leave the text in: those the tool names first (by value, in its order, each
+    // from the end), then the rest from the end.
     const firstOut = cut.leaveOutFirst;
+    const isNamed = (i: number) => firstOut !== undefined && firstOut.values.includes(String(field(rows[i], firstOut.field)));
+    const lastOut = cut.leaveOutLast;
+    const isLast = (i: number) => lastOut !== undefined && (lastOut.fields.some((f) => field(rows[i], f) === true) || lastOut.has?.(rows[i]) === true);
+    // What a row named last has, as the note says it: "kev_listed or ransomware true" (#2899), or
+    // the tool's own words (#3284: "a KEV-listed or ransomware match").
+    const lastHas = lastOut ? (lastOut.said ?? `${orListed(lastOut.fields)} true`) : "";
+    const lastWhose = lastOut ? (lastOut.said ? `with ${lastOut.said}` : `whose ${orListed(lastOut.fields)} is true`) : "";
+    const lastWithout = lastOut ? (lastOut.said ? `without ${lastOut.said}` : `whose ${orListed(lastOut.fields)} is not true`) : "";
     const order: number[] = [];
     for (const value of firstOut?.values ?? []) {
       for (let i = n - 1; i >= 0; i--) if (field(rows[i], firstOut?.field ?? "") === value) order.push(i);
     }
+    const named = order.length;
     const queued = new Set(order);
-    for (let i = n - 1; i >= 0; i--) if (!queued.has(i)) order.push(i);
-    const out = new Set<number>();
-    let sum = lens.reduce((t, x) => t + x, 0);
-    for (const i of order) {
-      if (textLen(n - out.size, sum) <= DATA_TEXT_BUDGET) break;
-      out.add(i);
-      sum -= lens[i];
-    }
-    const kept = cutRows.filter((_, i) => !out.has(i));
-    const shown = lined({ ...beside, [cut.rows]: kept });
-    if (kept.length > 0 && shown.length <= DATA_TEXT_BUDGET) {
-      const outFirst = firstOut ? [...out].filter((i) => firstOut.values.includes(String(field(rows[i], firstOut.field)))).length : 0;
+    for (let i = n - 1; i >= 0; i--) if (!queued.has(i) && !isLast(i)) order.push(i);
+    for (let i = n - 1; i >= 0; i--) if (!queued.has(i) && isLast(i)) order.push(i);
+    // Rows leave `cutRows` in that order, the first `upTo` of it at most, until the text fits; the
+    // answer so cut, its sentences after those `said` gives for the number of named rows that left,
+    // or undefined where it does not fit.
+    const leaving = (
+      cutRows: unknown[],
+      beside: Record<string, unknown>,
+      said: (namedOut: number, out: ReadonlySet<number>) => (string | undefined)[],
+      upTo = n,
+    ): { text: string; said: string } | undefined => {
+      const lens = cutRows.map((r) => 4 + JSON.stringify(r).length);
+      const emptyLen = lined({ ...beside, [cut.rows]: [] }).length;
+      const textLen = (kept: number, sum: number) => (kept === 0 ? emptyLen : emptyLen + 2 + sum + 2 * kept);
+      const out = new Set<number>();
+      let sum = lens.reduce((t, x) => t + x, 0);
+      for (const i of order.slice(0, upTo)) {
+        if (textLen(n - out.size, sum) <= DATA_TEXT_BUDGET) break;
+        out.add(i);
+        sum -= lens[i];
+      }
+      const kept = cutRows.filter((_, i) => !out.has(i));
+      const shown = lined({ ...beside, [cut.rows]: kept });
+      if (kept.length === 0 || shown.length > DATA_TEXT_BUDGET) return undefined;
+      const outFirst = [...out].filter(isNamed).length;
+      // #2899: the rows left out are the last in order unless a row named last stayed behind them.
+      const inOrder = [...out].every((i) => i >= n - out.size);
+      // #3284: the same of the rows left out that the tool does not name first: the last of the
+      // rest unless a row named last stayed behind them.
+      const restOut = [...out].filter((i) => !isNamed(i));
+      const restIdx = [...Array(n).keys()].filter((i) => !isNamed(i));
+      const restInOrder = restOut.every((i) => restIdx.indexOf(i) >= restIdx.length - restOut.length);
+      const butLast = lastOut ? ` but for any ${lastWhose}${lastOut.why ? ` (${lastOut.why})` : ""}, which leave it last` : "";
+      // #3284: the rest, where a row named last stayed behind them: the last of those without one,
+      // or, where rows named last left too, each without one and then the last of those with one
+      // (said short: the note counts against the structured result's budget).
+      const lastOutN = [...out].filter(isLast).length;
+      const restOf = (m: number) =>
+        restInOrder || !lastOut
+          ? `, and the last ${m} of the rest`
+          : lastOutN === 0
+            ? `, and the last ${m} of the rest ${lastWithout}`
+            : `, and ${m} of the rest: each ${lastWithout}, then the last ${lastOutN} ${lastWhose}`;
       const which =
         outFirst > 0
-          ? `: the ${outFirst} whose ${firstOut?.field} is ${(firstOut?.values ?? []).join(" or ")} (${firstOut?.why})${out.size > outFirst ? `, and the last ${out.size - outFirst} of the rest` : ""}`
-          : `, the last ${out.size} in order`;
+          ? `: the ${outFirst} whose ${firstOut?.field} is ${(firstOut?.values ?? []).join(" or ")} (${firstOut?.why})${out.size > outFirst ? restOf(out.size - outFirst) : ""}`
+          : inOrder || !lastOut
+            ? `, the last ${out.size} in order`
+            : !lastOut.said
+              ? `, the last ${out.size} in order${butLast}`
+              : lastOutN === 0
+                ? `, the last ${out.size} ${lastWithout}`
+                : `: each ${lastWithout}, then the last ${lastOutN} ${lastWhose}`;
       const elsewhere = place.leftOut ? place.leftOut(out.size, which) : `the other ${out.size} are in structuredContent.data only${which}`;
-      const left = `Only ${kept.length} of the ${n} rows of ${cut.rows} are in it; ${elsewhere}.`;
-      return { text: shown, said: say(rowsSaid, ...sidesSaid, left, cut.whole, cut.page?.(kept.length, n, data)) };
+      const left = out.size > 0 ? `Only ${kept.length} of the ${n} rows of ${cut.rows} are in it; ${elsewhere}.` : "";
+      // #2899: each row named last that the text still leaves out, by name.
+      const lastLeft = [...out].filter(isLast).sort((a, b) => a - b);
+      const named_ = (): string => {
+        if (!lastOut?.runs) return listed(lastLeft.map((i) => String(field(rows[i], lastOut?.name ?? "") ?? `${cut.rows}[${i}]`)));
+        // #3284: by their numbers, in runs, at most OTHERS_LEFT_LISTED parts.
+        const ids = lastLeft.map((i) => field(rows[i], lastOut.name)).map((v, j) => (typeof v === "number" ? v : lastLeft[j])).sort((a, b) => a - b);
+        const r = runsSaid(ids);
+        return `at ${lastOut.name} ${r.said}${r.more > 0 ? `, and ${r.more} more past ${lastOut.name} ${r.last}` : ""}`;
+      };
+      const lastSaid = lastOut && lastLeft.length ? `Of the rows left out of it, ${lastLeft.length} ${lastLeft.length === 1 ? "has" : "have"} ${lastHas}: ${named_()}.` : "";
+      return { text: shown, said: say(...said(outFirst, out), left, lastSaid, cut.whole, out.size > 0 ? cut.page?.(kept.length, n, data) : undefined) };
+    };
+    let cutRows: unknown[] = [];
+    let beside: Record<string, unknown> = data;
+    for (const attempt of attempts) {
+      const { level } = attempt;
+      beside = attempt.sided ? { ...data, ...sides.fields } : data;
+      sidesSaid = attempt.sided ? sides.said : [];
+      // #3269: before any row is cut to the level outFirstBefore names, the rows leaveOutFirst
+      // names are cut to the leanest level, the others kept at the level before, and then leave,
+      // as many as must. Where even that does not fit, the cut goes on as it did through 3.0.2:
+      // every row at the next level, then rows leaving, those named first.
+      const li = cut.levels.indexOf(level);
+      if (cut.outFirstBefore !== undefined && li === cut.outFirstBefore && li > 0 && named > 0 && attempt === attempts.find((a) => a.level === level)) {
+        const prev = cut.levels[li - 1];
+        const lean = cut.levels[cut.levels.length - 1];
+        const s: CutStats = { left: new Set(), clipped: 0, capped: 0 };
+        const sn: CutStats = { left: new Set(), clipped: 0, capped: 0 };
+        // #3269's review: the named rows whose strings the lean level clips, or whose lists it
+        // caps, by index, so the sentence says so of the ones kept (round 1 said only the fields
+        // they leave out, and a clean row's 150-character purl came back clipped unsaid).
+        const clippedAt = new Set<number>();
+        const cappedAt = new Set<number>();
+        const apart = rows.map((r, i) => {
+          if (!isPlainObject(r)) return cutValue(r, prev.clip, prev.cap ?? Number.POSITIVE_INFINITY, s);
+          if (!isNamed(i)) return cutRow(r, prev.keep, prev, s);
+          const [clipped, capped] = [sn.clipped, sn.capped];
+          const lean_ = cutRow(r, lean.keep, lean, sn);
+          if (sn.clipped > clipped) clippedAt.add(i);
+          if (sn.capped > capped) cappedAt.add(i);
+          return lean_;
+        });
+        const extra = [...sn.left].filter((f) => !s.left.has(f));
+        const apartSaid = (left: number, out: ReadonlySet<number>) => {
+          const parts: string[] = [];
+          if (extra.length) parts.push(`leave out ${listed(extra)} too`);
+          if ([...clippedAt].some((i) => !out.has(i))) parts.push(`every string in each of them longer than ${lean.clip} characters keeps its first ${lean.clip}, ending in "…"`);
+          if (lean.cap !== undefined && [...cappedAt].some((i) => !out.has(i))) parts.push(`every list in each of them longer than ${lean.cap} entries keeps its first ${lean.cap}`);
+          return named - left > 0 && parts.length ? `The ${named - left} rows of ${cut.rows} in it whose ${firstOut?.field} is ${(firstOut?.values ?? []).join(" or ")} ${parts.join("; ")}.` : "";
+        };
+        const prevSaid = levelSaid(cut.rows, n, prev, s);
+        const shown = lined({ ...beside, [cut.rows]: apart });
+        if (shown.length <= DATA_TEXT_BUDGET) return { text: shown, said: say(prevSaid, apartSaid(0, new Set()), ...sidesSaid, cut.whole) };
+        // Only the named rows leave here.
+        const r = leaving(apart, beside, (left, out) => [prevSaid, apartSaid(left, out), ...sidesSaid], named);
+        if (r) return r;
+      }
+      const s: CutStats = { left: new Set(), clipped: 0, capped: 0 };
+      const cap = level.cap ?? Number.POSITIVE_INFINITY;
+      cutRows = rows.map((r) => (isPlainObject(r) ? cutRow(r, level.keep, level, s) : cutValue(r, level.clip, cap, s)));
+      rowsSaid = levelSaid(cut.rows, n, level, s);
+      const shown = lined({ ...beside, [cut.rows]: cutRows });
+      if (shown.length <= DATA_TEXT_BUDGET) return { text: shown, said: say(rowsSaid, ...sidesSaid, cut.whole) };
     }
+    // No level fits. #3272: the lists the tool names beforeRows, whole until now, are cut as each
+    // says, one after another in the order named, until the text fits with every row at the
+    // leanest level; then they lose entries, from the end, the last named first, each emptied
+    // before the next loses any (a DataCut's keepAll steps, in the same order); the note says
+    // what each keeps.
+    const spent = (cut.sides ?? []).filter((side) => side.beforeRows);
+    for (const side of spent) {
+      const one = cutSides(data, [side]);
+      if (!one.said.length) continue;
+      beside = { ...beside, ...one.fields };
+      sidesSaid = [...sidesSaid, ...one.said];
+      const shown = lined({ ...beside, [cut.rows]: cutRows });
+      if (shown.length <= DATA_TEXT_BUDGET) return { text: shown, said: say(rowsSaid, ...sidesSaid, cut.whole) };
+    }
+    // 3.1.0's phase A review: the lists named with `capped` have each entry's own list cut to its
+    // first c entries, the most that fit, before any entry of a list leaves (#3272's text emptied
+    // fixed_branches once one package of some 400 ranges did not fit alone, while 3.0.2's every-list
+    // cap kept 32 packages; data caps each package's ranges instead, and so does the text now).
+    const capping = spent.filter((side) => side.capped && Array.isArray(beside[side.list]) && (beside[side.list] as unknown[]).length > 0);
+    const caps = new Map<string, number>();
+    const capList = (side: TextSide, v: unknown[], c: number): unknown[] =>
+      v.map((e) => {
+        const inner = isPlainObject(e) ? e[side.capped!.list] : undefined;
+        return isPlainObject(e) && Array.isArray(inner) && inner.length > c ? { ...e, [side.capped!.list]: inner.slice(0, c), ...side.capped!.mark(e, c) } : e;
+      });
+    const longest = (v: unknown[], list: string) => v.reduce<number>((m, e) => Math.max(m, Array.isArray(field(e, list)) ? (field(e, list) as unknown[]).length : 0), 0);
+    // The most c (from `least` up to the longest list less one) at which the text fits, or undefined.
+    const mostCap = (side: TextSide, whole: unknown[], with_: Record<string, unknown>): number | undefined => {
+      const at = (c: number) => lined({ ...with_, [side.list]: capList(side, whole, c), [cut.rows]: cutRows }).length <= DATA_TEXT_BUDGET;
+      let lo = side.capped!.least;
+      let hi = longest(whole, side.capped!.list) - 1;
+      if (hi < lo || !at(lo)) return undefined;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (at(mid)) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    const uncapped = new Map<string, unknown[]>();
+    for (const side of capping) {
+      const whole = beside[side.list] as unknown[];
+      uncapped.set(side.list, whole);
+      const c = mostCap(side, whole, beside) ?? side.capped!.least;
+      caps.set(side.list, c);
+      beside = { ...beside, [side.list]: capList(side, whole, c) };
+    }
+    // The sentence for each capped list: c, and the entries whose own list it cut, by name.
+    const capSaid = (): string[] =>
+      capping.flatMap((side) => {
+        const c = caps.get(side.list)!;
+        const kept = (beside[side.list] as unknown[]).length;
+        const inner = (e: unknown) => (Array.isArray(field(e, side.capped!.list)) ? (field(e, side.capped!.list) as unknown[]).length : 0);
+        const names = uncapped.get(side.list)!.slice(0, kept).filter((e) => inner(e) > c).map(side.capped!.name);
+        return names.length ? [side.capped!.said(c, names, place.full === true)] : [];
+      });
+    if (capping.length) {
+      const shown = lined({ ...beside, [cut.rows]: cutRows });
+      if (shown.length <= DATA_TEXT_BUDGET) return { text: shown, said: say(rowsSaid, ...sidesSaid, ...capSaid(), cut.whole) };
+    }
+    const before: string[] = [];
+    for (const side of [...spent].reverse()) {
+      const v = beside[side.list];
+      if (!Array.isArray(v) || v.length === 0) continue;
+      const total = Array.isArray(data[side.list]) ? (data[side.list] as unknown[]).length : v.length;
+      const at = (k: number) => lined({ ...beside, [side.list]: v.slice(0, k), [cut.rows]: cutRows }).length;
+      // Every entry of it does not fit (the text did not, as it stands): the most that do, or none.
+      let k = 0;
+      if (at(0) <= DATA_TEXT_BUDGET) {
+        let hi = v.length - 1;
+        while (k < hi) {
+          const mid = Math.ceil((k + hi) / 2);
+          if (at(mid) <= DATA_TEXT_BUDGET) k = mid;
+          else hi = mid - 1;
+        }
+      }
+      beside = { ...beside, [side.list]: v.slice(0, k) };
+      before.push(k === 0 ? `${side.list} keeps none of its ${total} entries` : `${side.list} keeps its first ${k} of ${total} entries`);
+      if (at(k) <= DATA_TEXT_BUDGET) break;
+    }
+    // The room the entries that left give back goes to the capped lists' c (as the structured cut's
+    // giveBack does), the first named first.
+    for (const side of capping) {
+      const whole = uncapped.get(side.list)!;
+      const kept = (beside[side.list] as unknown[]).length;
+      const c = mostCap(side, whole.slice(0, kept), beside);
+      if (c !== undefined && c > caps.get(side.list)!) {
+        caps.set(side.list, c);
+        beside = { ...beside, [side.list]: capList(side, whole.slice(0, kept), c) };
+      }
+    }
+    if (before.length || capping.length) {
+      if (before.length) sidesSaid = [...sidesSaid, `In it, ${listed(before)}, before any row of ${cut.rows} is left out.`];
+      sidesSaid = [...sidesSaid, ...capSaid()];
+      const shown = lined({ ...beside, [cut.rows]: cutRows });
+      if (shown.length <= DATA_TEXT_BUDGET) return { text: shown, said: say(rowsSaid, ...sidesSaid, cut.whole) };
+    }
+    // Then rows leave the text, those the tool names first, then the rest from the end, until it
+    // fits (#2899: those it names last only once every other row is out).
+    const r = leaving(cutRows, beside, () => [rowsSaid, ...sidesSaid]);
+    if (r) return r;
     base = { ...beside, [cut.rows]: cutRows };
   }
   // Step 4: lists, then strings.
@@ -402,12 +643,29 @@ export type LeaveOutFirst = { field: string; values: readonly string[]; why: str
 // #3132's review: `least` is the smallest cap at which a capped level is taken; below it the next
 // level is tried (check_sbom's SBOM_ROW_THIN capped is passed rather than kept with no match, where
 // the compact level after it still holds some).
+//
+// #3270: `pick` says which `cap` entries of the capped list an entry keeps, by their index in its
+// list whole; they stay in their order in the list. Without it an entry keeps its first `cap`.
+// check_sbom's rows keep their KEV-listed and ransomware matches first, then the highest
+// effective_score: through 3.0.2 a row kept its first m in the API's order (highest effective_score
+// first), so magento/community-edition 2.3.0's KEV-listed CVE-2025-54236, at position 21 of its 200
+// matches, was cut whenever m was 21 or less, and only matches_truncated named it.
+//
+// #3269's second review: `floor` is the fewest entries of the capped list each entry keeps at this
+// level, whatever the cap: an entry keeps max(cap, floor(entry)) of them (check_sbom's matchFloor:
+// a row's KEV-listed and ransomware matches and 10 more), so a capped row never goes below it;
+// `said` is then told whether any entry's floor is above the cap (`raised`). `below` is the clause
+// for an entry kept under its floor, which only DataCutStep.leaveAt's `floor` does, for the one
+// entry kept where not even it fits at its floor.
 export type EntryLevel = {
   keep: RowKeep;
   capped?: string;
   least?: number;
+  floor?: (entry: unknown) => number;
+  pick?: (inner: readonly unknown[], cap: number) => readonly number[];
   mark?: (whole: Record<string, unknown>, cap: number) => Record<string, unknown>;
-  said?: (cap: number) => string;
+  said?: (cap: number, raised?: boolean) => string;
+  below?: (cap: number) => string;
 };
 export type ThinLevel = RowKeep | EntryLevel;
 // #3139: with `keepAll`, the step's entries are thinned level by level as above, but none leaves
@@ -427,15 +685,89 @@ export type ThinLevel = RowKeep | EntryLevel;
 //    capped level at the most entries that fit, stopping at the first entry that takes back none.
 //  - `whole`: each list of the step keeps all its entries or none, never its first ones
 //    (data.not_sent_purls: a client retries the list, and its first entries are not it).
+//
+// #3269: `outFirst`. Through 3.0.2 every entry went down the levels of `thin` together, and only at
+// the leanest did those leaveOutFirst names leave first, so check_sbom kept every clean row by
+// cutting the affected rows' matches: 150 purls, 40 of them affected, kept all 150 rows and the
+// matches of 2 of the 40 affected (3.0.0 kept 56 rows, all 40 affected with every match). With
+// `outFirst`, before any entry is cut to thin[before], the entries leaveOutFirst names are cut to
+// `level` (the others staying at thin[before - 1], a level that caps nothing), then leave, in its
+// order, as many as must; only once all of them have left do the others go on to thin[before]. When
+// the cut is settled and the others have taken back what they can (giveBack), the entries that left
+// so come back, cut to `level`, the last to leave first, as many as fit.
+//
+// #3269's review: with `floor`, the named entries leave first only to keep the others uncapped,
+// not to raise a cap the others are cut to anyway. Through round 1, once the others had to be
+// capped, the cap was the most that fit with every named entry gone, so it took all the room and
+// they came back only into what was left: linux-libc-dev 6.1.55-1 with 100 clean Debian purls kept 1
+// row of 101 (3.0.2 kept all 101). Now, where the others do not fit uncapped even with every named
+// entry gone, the named entries stay, cut to `level`, while the others fit at the floor: each
+// capped level from thin[before] to thin[floor.at] is tried with every entry kept, at the most
+// inner entries m that fit, from the level's `least`, each entry keeping its own EntryLevel.floor
+// at least (for check_sbom, a row's KEV-listed and ransomware matches and SBOM_LEAVING_CAP more).
+// Only where even thin[floor.at] at its least does not fit with them do named entries leave, as
+// many as must for it to; and only where it does not fit with every one of them gone does the cut
+// go on, every other entry still at its floor or above, to leave at leaveAt.
+//
+// #3269's second review (DO-NOT-SHIP on the first): "the cut goes on as before" took the cap below
+// the floor where the floor did not fit even with every named entry gone, down to a cap of 1 at
+// thin[1] and 0 at thin[2], and then to the levels that keep no inner list, every row kept with one
+// match or none: five Debian 12 purls beside 150 of an image's (40 affected) kept 45 affected rows,
+// 1 with any match, where 3.0.2 kept 26 rows, 22 with every match. Each capped level now holds the
+// floor itself (EntryLevel.floor), so floor.at names only the leanest level the named entries stay
+// for; where even it does not fit with all of them gone, the others leave whole at leaveAt (whose
+// `floor` keeps every level past it out while an entry not named has inner entries).
+export type OutFirst = { before: number; level: ThinLevel; floor?: { at: number } };
+// #3269's second review: of the entries leaveOutFirst does not name, those `has` holds leave last
+// (check_sbom: a row with a KEV-listed or ransomware match), each group from the end, and where
+// leaveAt has a floor the entries kept are chosen in the reverse of that order, by fit (cutData's
+// keptByFit), so one too large to fit beside them leaves before the rest; `said` names
+// them in the note, `id` is the field the note names a left entry by (its position from 1 where an
+// entry has none), `rest` what one and several of the entries not named are (check_sbom: affected
+// or undetermined rows), and `chosen` how the entries kept are chosen (cutData's keptByFit).
+//
+// #3269's third review: the note named the entries that left in one list, by id, and counted those
+// `has` holds, so a client checking them again in id order (workload_triage, 5 calls at most)
+// reached the KEV-bearing ones last: on old unpatched Debian images 119 of 255 rows with a
+// KEV-listed match were read after its re-checks. The note now names the entries `has` holds first
+// and apart, then the others (othersLeftSaid), and `again`, where the tool gives it, says how to
+// call them again, in that order, so that each call keeps every one (PageAt.againFit: counted for
+// those entries, where the page sentence's N holds for the first N of the call's own entries
+// only, and re-check calls of N dropped 504 of 2,540 rows on realistic images): the sizes of the
+// first `againCalls` calls, each the most of the rest that fits (firstFit over the entries left, in
+// that order), then M, the most such that any M of the rest in a row fit; and the entries that go
+// in a call of their own (not even one fits at its floor beside the result). `noteOver`, given the
+// entries `left` and this call's, gives for m the most characters the note of a call of m of
+// `left` alone can take past this call's note (negative where less: check_sbom's Affected sentence
+// names the call's first 25 affected components, and a call of m rows names m at most;
+// match_batch.ts affectedSaidOver).
+export type Again = { k: number; sizes: readonly number[]; m: number; alone: string; aloneCount: number };
+export type LeaveLast = {
+  has: (entry: unknown) => boolean;
+  said: string;
+  id: string;
+  rest: readonly [string, string];
+  chosen: string;
+  again?: (a: Again) => string;
+  againCalls?: number;
+  noteOver?: (left: readonly unknown[], all: readonly unknown[]) => (m: number) => number;
+};
 export type DataCutStep = {
   lists: readonly string[];
   leaveOutFirst?: LeaveOutFirst;
+  leaveLast?: LeaveLast;
   thin?: readonly ThinLevel[];
   keepNewest?: true;
   keepAll?: true;
-  leaveAt?: { level: number; cap: number };
+  // #3269's second review: with `floor`, no level of `thin` past `level` is taken while an entry
+  // that leaveOutFirst does not name holds any entry of that level's capped list (each would keep
+  // none of it, below its EntryLevel.floor): the entries leave at `level` instead, whole; and where
+  // not even one fits there, the one the leaving order keeps last stays, its capped list at the most
+  // that fit (EntryLevel.below), else at the first later level that fits.
+  leaveAt?: { level: number; cap: number; floor?: true };
   giveBack?: true;
   whole?: true;
+  outFirst?: OutFirst;
 };
 // What data keeps of each list cut, by its path in data: its entries in the answer, the entries
 // data holds, and thinned, true when each of them is cut to some of its fields (absent otherwise).
@@ -446,7 +778,30 @@ export type Truncated = Record<string, { total: number; returned: number; thinne
 // with the rest of data whole, its note as the call's own without the DATA CUT sentences, and no
 // truncated. A page sentence that names a page size fitting data whole counts it so: a page of the
 // thinned entries' number comes back thinned again.
-export type PageAt = { keeps: Readonly<Record<string, RowKeep>>; wholeFit: (path: string) => number };
+//
+// #3269's review: `firstFit`, for a list a step thins (check_sbom's results): the most first
+// entries n such that a call answering only the first n' of them, for every n' up to n, keeps
+// every one of them, as this cut would cut that call (see firstFit in cutData). Through round 1 the
+// page sentence named the number of entries data kept, which a call of that many purls need not
+// keep: Juice Shop 11.1.2 with magento/community-edition 2.3.0 said "check 19 or fewer purls per
+// call", and a call of its first 19 purls kept 14 of them.
+//
+// #3269's third review: `againFit`, for the entries of that list a LeaveLast step sent out, in the
+// order the note names them (`seq`, by index in the list), how calls of them alone, in that order,
+// each keep every one of them, as this cut would cut such a call, counted as firstFit counts a call
+// (each entry at its floor, this call's envelope and note, with LeaveLast.noteOver for the note's
+// own sentences of those entries): `sizes`, the first LeaveLast.againCalls calls', each the most
+// of the entries left that fit; `m`, for the entries after those, the most such that any m of them
+// in a row fit (0 where none is left); and `alone`, the entries of `seq` that do not fit at their
+// floor even alone, which it leaves out of those calls (a call of one of them alone keeps it under
+// its floor). A call of fewer entries in a row than one of these sizes keeps every one too.
+export type AgainFit = { sizes: number[]; m: number; alone: number[] };
+export type PageAt = {
+  keeps: Readonly<Record<string, RowKeep>>;
+  wholeFit: (path: string) => number;
+  firstFit: (path: string) => number;
+  againFit: (path: string, seq: readonly number[]) => AgainFit;
+};
 // The clause of a paging tool's DATA CUT sentence that names the page size whose rows fit data
 // whole, given PageAt.wholeFit for its rows (search_cves, search_vendor_advisories).
 export const wholePage = (n: number): string =>
@@ -497,6 +852,22 @@ type CutList = {
   level?: number;
   cap: number;
   over: Map<number, GivenBack>;
+  // #3269: the fields the entries leaveOutFirst names are cut to (outFirst's level), where they are
+  // cut apart from the others, and whether entry i is one of them.
+  outThin?: RowKeep;
+  isNamed: (i: number) => boolean;
+  // #3269's second review: the step's LeaveLast; the entries not named that leave when k are kept,
+  // and `below`, where the one entry kept is under its floor (leaveAt's floor). #3269's third
+  // review: those LeaveLast.has holds (`held`) apart from the others (`rest`), each by index in
+  // the list, ascending by `id`, its LeaveLast.id (or position from 1, `byPosition`).
+  leaveLast?: LeaveLast;
+  othersOut: (k: number) => { held: number[]; rest: number[]; id: (i: number) => number; byPosition: boolean };
+  below?: true;
+  // The order the entries leave in, by index, and one entry's characters as cut.
+  order: readonly number[];
+  charsOf: (i: number) => number;
+  // The same list, its entries cut the same way (and not cut again), leaving in `order`.
+  withOrder: (order: readonly number[]) => CutList;
   chars: (k: number) => number;
   kept: (k: number) => number[];
   keep: (k: number) => unknown[];
@@ -506,14 +877,24 @@ type CutList = {
 type GivenBack = { entry: unknown; level: number; cap: number; keep: RowKeep; said?: string };
 // A level as its fields, and what it does inside each entry (#3132).
 const levelOf = (l: ThinLevel): EntryLevel => (Array.isArray(l) ? { keep: l as RowKeep } : (l as EntryLevel));
-const thinned = (e: unknown, level: ThinLevel, cap = Number.POSITIVE_INFINITY): unknown => {
+// The cap an entry is cut to at a level: `cap`, or the entry's floor where that is more (#3269's
+// second review: EntryLevel.floor), unless `below` (leaveAt's floor, for the one entry kept).
+const capFor = (lv: EntryLevel, e: unknown, cap: number, below?: true): number => (lv.floor && !below ? Math.max(cap, lv.floor(e)) : cap);
+const thinned = (e: unknown, level: ThinLevel, cap = Number.POSITIVE_INFINITY, below?: true): unknown => {
   if (!isPlainObject(e)) return e;
-  const { keep, capped, mark } = levelOf(level);
+  const lv = levelOf(level);
+  const { keep, capped, mark, pick } = lv;
+  const c = capFor(lv, e, cap, below);
   const t = cutRow(e, keep, { keep, clip: Number.POSITIVE_INFINITY });
   const inner = capped ? t[capped] : undefined;
-  if (capped && Array.isArray(inner) && inner.length > cap) t[capped] = inner.slice(0, cap);
-  return mark ? { ...t, ...mark(e, cap) } : t;
+  if (capped && Array.isArray(inner) && inner.length > c) {
+    // cutRow keeps every entry of the list, in order, so inner[j] is the thinned e[capped][j].
+    const whole = e[capped];
+    t[capped] = pick && Array.isArray(whole) && whole.length === inner.length ? pick(whole, c).map((j) => inner[j]) : inner.slice(0, c);
+  }
+  return mark ? { ...t, ...mark(e, c) } : t;
 };
+const innerOf = (e: unknown, capped: string | undefined): number => (capped !== undefined && Array.isArray(field(e, capped)) ? (field(e, capped) as unknown[]).length : 0);
 // The longest list named `capped` inside any entry of a list (#3132): the cap a level starts below.
 const longestInside = (v: unknown, capped: string): number =>
   Array.isArray(v) ? v.reduce<number>((m, e) => Math.max(m, Array.isArray(field(e, capped)) ? (field(e, capped) as unknown[]).length : 0), 0) : 0;
@@ -528,38 +909,70 @@ const listOf = (data: Record<string, unknown>, at: readonly string[]): unknown =
 // (test/http-memory.test.mjs's) the structured cut allocated 108 MB, against 18 MB on 3.0.0 and 24
 // MB now (V8's sampling heap profiler, collected objects included). What is measured and kept is
 // the same: each entry thinned as before, its characters summed as before.
-function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOutFirst, level?: ThinLevel, newest?: true, cap = Number.POSITIVE_INFINITY, levelAt?: number): CutList | undefined {
+// #3269: with `outLevel`, the entries firstOut names are cut to it instead (DataCutStep.outFirst).
+// #3269's second review: with `last`, the entries not named that it holds leave after those it does
+// not (DataCutStep.leaveLast); with `below`, each entry is cut to `cap` under its floor.
+function listAt(
+  data: Record<string, unknown>,
+  path: string,
+  firstOut?: LeaveOutFirst,
+  level?: ThinLevel,
+  newest?: true,
+  cap = Number.POSITIVE_INFINITY,
+  levelAt?: number,
+  outLevel?: ThinLevel,
+  last?: LeaveLast,
+  below?: true,
+  ordered?: readonly number[],
+  shared?: { made: unknown[]; lens?: number[] },
+): CutList | undefined {
   const at = path.split(".");
   const v = listOf(data, at);
   if (!Array.isArray(v) || v.length === 0) return undefined;
   const n = v.length;
-  const made: unknown[] = [];
+  const isNamed = (i: number): boolean => firstOut !== undefined && firstOut.values.includes(field(v[i], firstOut.field) as string);
+  const cutOne = (i: number): unknown => (outLevel && isNamed(i) ? thinned(v[i], outLevel) : level ? thinned(v[i], level, cap, below) : v[i]);
+  const cache = shared ?? { made: [] as unknown[] };
+  const made = cache.made;
   const entry = (i: number): unknown => {
-    if (!level) return v[i];
-    if (!(i in made)) made[i] = thinned(v[i], level, cap);
+    if (!level && !outLevel) return v[i];
+    if (!(i in made)) made[i] = cutOne(i);
     return made[i];
   };
   const thin = level ? levelOf(level).keep : undefined;
   // A capped level's clause only where its cap cuts an entry's list (#3139's review: a package
-  // with one range is not "at most its first 1").
+  // with one range is not "at most its first 1"), each entry at its own floor or more (#3269's
+  // second review), and told whether some entry's floor is above the cap.
   const lv = level ? levelOf(level) : undefined;
-  const bites = lv?.capped === undefined || v.some((e) => (Array.isArray(field(e, lv.capped as string)) ? (field(e, lv.capped as string) as unknown[]).length : 0) > cap);
-  const thinSaid = lv && bites ? lv.said?.(cap) : undefined;
-  // The indices in the order they leave: from the end, or, for a series kept newest, from the start.
+  const bites = lv?.capped === undefined || v.some((e) => innerOf(e, lv.capped) > capFor(lv, e, cap, below));
+  const raised = lv?.capped !== undefined && lv.floor !== undefined && !below && v.some((e) => innerOf(e, lv.capped) > cap && (lv.floor as (e: unknown) => number)(e) > cap);
+  const thinSaid = lv && bites ? (below ? (lv.below ?? lv.said)?.(cap) : lv.said?.(cap, raised)) : undefined;
+  // The indices in the order they leave: from the end, or, for a series kept newest, from the start;
+  // those firstOut names first, value by value; then, with `last`, the others it does not hold,
+  // then those it holds.
   const leavingOrder = (i: number) => (newest ? i : n - 1 - i);
   const order: number[] = [];
   for (const value of firstOut?.values ?? []) for (let j = 0; j < n; j++) if (field(v[leavingOrder(j)], firstOut?.field ?? "") === value) order.push(leavingOrder(j));
   const named = order.length;
   const queued = new Set(order);
-  for (let j = 0; j < n; j++) if (!queued.has(leavingOrder(j))) order.push(leavingOrder(j));
+  const held = (i: number): boolean => last !== undefined && last.has(v[i]);
+  for (const late of last ? [false, true] : [false]) for (let j = 0; j < n; j++) if (!queued.has(leavingOrder(j)) && (!last || held(leavingOrder(j)) === late)) order.push(leavingOrder(j));
+  // #3269's second review: an order the cut chose (the rows kept by fit, cutData), named first.
+  if (ordered && ordered.length === n) order.splice(0, n, ...ordered);
   // The characters of the entries in the order they leave, summed: leaving[j] is the first j's.
   let leaving: number[] | undefined;
+  const lensOf = (): number[] => {
+    if (cache.lens) return cache.lens;
+    const lens: number[] = [];
+    for (let i = 0; i < n; i++) lens.push(entryChars(i in made ? made[i] : cutOne(i)));
+    cache.lens = lens;
+    return lens;
+  };
   const sums = (): number[] => {
     if (leaving) return leaving;
-    const lens: number[] = [];
-    for (let i = 0; i < n; i++) lens.push(entryChars(!level || i in made ? entry(i) : thinned(v[i], level, cap)));
+    const ls = lensOf();
     leaving = [0];
-    for (const i of order) leaving.push(leaving[leaving.length - 1] + lens[i]);
+    for (const i of order) leaving.push(leaving[leaving.length - 1] + ls[i]);
     return leaving;
   };
   const kept = (k: number) => Math.max(0, Math.min(n, k));
@@ -580,6 +993,21 @@ function listAt(data: Record<string, unknown>, path: string, firstOut?: LeaveOut
     ...(levelAt !== undefined ? { level: levelAt } : {}),
     cap,
     over,
+    ...(outLevel && named > 0 ? { outThin: levelOf(outLevel).keep } : {}),
+    isNamed,
+    ...(last ? { leaveLast: last } : {}),
+    othersOut: (k) => {
+      const out = order.slice(0, n - kept(k)).filter((i) => !isNamed(i));
+      const own = (i: number): unknown => (last ? field(v[i], last.id) : undefined);
+      const byPosition = out.some((i) => typeof own(i) !== "number" || !Number.isFinite(own(i) as number));
+      const id = (i: number): number => (byPosition ? i + 1 : (own(i) as number));
+      const asc = (xs: number[]) => xs.sort((a, b) => id(a) - id(b));
+      return { held: asc(out.filter(held)), rest: asc(out.filter((i) => !held(i))), id, byPosition };
+    },
+    ...(below ? { below } : {}),
+    order,
+    charsOf: (i) => lensOf()[i],
+    withOrder: (o) => listAt(data, path, firstOut, level, newest, cap, levelAt, outLevel, last, below, o, cache) as CutList,
     chars: (k) => {
       const l = sums();
       return l[n] - l[n - kept(k)] + Math.max(0, kept(k) - 1);
@@ -618,6 +1046,64 @@ function givenBackSaid(list: CutList, k: number): string {
   return `; with the room left, ${n} of the entries kept take back detail (by position among those kept, in their order in data): ${runs.map(one).join("; ")}`;
 }
 
+// The most ids, or runs of them, the clause on the entries not named that left lists (#3269's
+// second review): a client calls those again a few calls' worth at a time (workload_triage: at
+// most 5 calls), and past this many it says how many more. #3269's third review: those LeaveLast
+// holds and the others share it, the held ones first.
+export const OTHERS_LEFT_LISTED = 100;
+// Integers, ascending, as a sentence names them, runs of three or more as "a to b", at most `max`
+// parts: the parts, how many integers they say (`n`) and leave out (`more`), and the last said.
+const runsSaid = (xs: readonly number[], max = OTHERS_LEFT_LISTED): { said: string; parts: number; n: number; more: number; last: number } => {
+  const parts: string[] = [];
+  // xs[0..j) are said.
+  let j = 0;
+  while (j < xs.length && parts.length < max) {
+    let e = j;
+    while (e + 1 < xs.length && xs[e + 1] === xs[e] + 1) e++;
+    if (e - j >= 2) {
+      parts.push(`${xs[j]} to ${xs[e]}`);
+      j = e + 1;
+    } else {
+      parts.push(String(xs[j]));
+      j++;
+    }
+  }
+  return { said: listed(parts), parts: parts.length, n: j, more: xs.length - j, last: xs[j - 1] };
+};
+// The clause on the `g` entries not named that left, with LeaveLast: how many, the order they are
+// kept in, and which (by its id), those LeaveLast holds first and apart (#3269's third review);
+// and, where LeaveLast.again gives it, the sentence on checking them again: in that order, in calls
+// of the sizes PageAt.againFit gives.
+// With `counted` false the clause leaves out the count (the sentence has just said it). The order
+// they were kept in is said where it shows (some entry kept after one that left, in input order).
+function othersLeftSaid(list: CutList, k: number, g: number, fit: Omit<PageAt, "keeps">, counted = true): { said: string; again: string } {
+  const ll = list.leaveLast as LeaveLast;
+  const { held, rest, id, byPosition } = list.othersOut(k);
+  const by = byPosition ? `position in ${list.path} (from 1)` : ll.id;
+  const h = runsSaid(held.map(id));
+  const r = runsSaid(rest.map(id), OTHERS_LEFT_LISTED - h.parts);
+  const at = (x: ReturnType<typeof runsSaid>) =>
+    x.n === 0 ? `not named here (the note names at most ${OTHERS_LEFT_LISTED} of them, or runs of them)` : `at ${by} ${x.said}${x.more > 0 ? `, and ${x.more} more past ${by} ${x.last}` : ""}`;
+  const which =
+    held.length === 0
+      ? `, ${g === 1 ? "without" : "none with"} ${ll.said}, ${at(r)}`
+      : rest.length === 0
+        ? `, ${g === 1 ? "with" : "all with"} ${ll.said}, ${at(h)}`
+        : `: the ${held.length === 1 ? "one" : held.length} with ${ll.said} ${at(h)}; the other ${rest.length} ${at(r)}`;
+  // Where none of them is one LeaveLast holds and each left after every entry kept (the last
+  // ones), the order shows nothing to say (the synthetic's 201-purl probe: 43 rows kept with it
+  // unsaid, 42 with it said).
+  const kept = list.kept(k).filter((i) => !list.isNamed(i));
+  const last = held.length === 0 && (kept.length === 0 || rest.every((i) => i > kept[kept.length - 1]));
+  const said = `${counted ? `${g} ` : ""}${g === 1 ? ll.rest[0] : ll.rest[1]}${which}${last ? "" : ` (${ll.chosen})`}`;
+  if (!ll.again || byPosition) return { said, again: "" };
+  // The entries the note names, in the order it names them.
+  const seq = [...held.slice(0, h.n), ...rest.slice(0, r.n)];
+  const { sizes, m, alone } = fit.againFit(list.path, seq);
+  const a = runsSaid(alone.map(id), Number.POSITIVE_INFINITY);
+  return { said, again: ll.again({ k: seq.length, sizes, m, alone: a.said, aloneCount: alone.length }) };
+}
+
 // What a cut keeps of each list it has cut so far, as truncated and as the DATA CUT sentences.
 function cutSaid(
   cut: DataCut,
@@ -625,7 +1111,7 @@ function cutSaid(
   wholeChars: number,
   data: object,
   over: boolean,
-  wholeFit: PageAt["wholeFit"],
+  fit: Omit<PageAt, "keeps">,
 ): { truncated?: Truncated; said: string } {
   const isThinned = ({ list, k }: { list: CutList; k: number }) => list.thin !== undefined && k > 0;
   const cutOnes = kept.filter((x) => x.k < x.list.n || isThinned(x));
@@ -637,6 +1123,7 @@ function cutSaid(
   // review) says it keeps its newest entries, and that its oldest left.
   type Group = { k: number; newest: boolean; lists: CutList[] };
   const parts: (string | Group)[] = [];
+  const again: string[] = [];
   const byKept = new Map<string, Group>();
   for (const x of cutOnes) {
     const { list, k } = x;
@@ -644,11 +1131,31 @@ function cutSaid(
     const first = Math.min(out, list.named);
     const end = list.newest ? "oldest" : "last";
     const which = list.firstOut ? `whose ${list.firstOut.field} is ${orListed(list.firstOut.values)} (${list.firstOut.why})` : "";
+    // #3269's second review: with LeaveLast, the entries not named that left are named by its id,
+    // so a client can call them alone again, and the order they leave in is said. #3269's third
+    // review: and how many of them, in the order named, a call of them alone keeps every one of.
+    const others = list.leaveLast && out > first ? othersLeftSaid(list, k, out - first, fit, first > 0) : undefined;
+    const rest = others?.said ?? "";
+    if (others?.again) again.push(others.again);
     const leftOut =
-      out === 0 ? "" : first === 0 ? `, the ${end} ${out} left out` : first === out ? `, the ${out} left out being entries ${which}` : `, the ${out} left out being the ${first} ${which} and the ${end} ${out - first} of the rest`;
+      out === 0
+        ? ""
+        : rest
+          ? first === 0
+            ? `, the ${out} left out being ${rest}`
+            : `, the ${out} left out being the ${first} ${which} and ${rest}`
+          : first === 0
+            ? `, the ${end} ${out} left out`
+            : first === out
+              ? `, the ${out} left out being entries ${which}`
+              : `, the ${out} left out being the ${first} ${which} and the ${end} ${out - first} of the rest`;
     if (isThinned(x)) {
+      // #3269: the entries outFirst cut apart, those of them kept.
+      const apart = list.outThin ? list.kept(k).filter((i) => list.isNamed(i)).length : 0;
+      const apartSaid =
+        apart > 0 && list.firstOut ? `, except the ${apart} kept whose ${list.firstOut.field} is ${orListed(list.firstOut.values)}, each cut to ${keepSaid(list.outThin as RowKeep)}` : "";
       parts.push(
-        `${list.path} keeps ${k === list.n ? `all ${k}` : `${k} of its ${list.n}`} entries, each cut to ${keepSaid(list.thin as RowKeep)}${list.thinSaid ? `, ${list.thinSaid}` : ""}${leftOut}${givenBackSaid(list, k)}`,
+        `${list.path} keeps ${k === list.n ? `all ${k}` : `${k} of its ${list.n}`} entries, each cut to ${keepSaid(list.thin as RowKeep)}${list.thinSaid ? `, ${list.thinSaid}` : ""}${apartSaid}${leftOut}${givenBackSaid(list, k)}`,
       );
       continue;
     }
@@ -674,9 +1181,10 @@ function cutSaid(
     return p.k === 0 ? `${paths} keep none of their entries` : `${paths} keep their ${which} ${p.k} entries each`;
   });
   const keeps: Record<string, RowKeep> = Object.fromEntries(cutOnes.filter(isThinned).map((x) => [x.list.path, x.list.thin as RowKeep]));
-  const page = cut.page?.(truncated, data, { keeps, wholeFit }) ?? "";
+  const page = cut.page?.(truncated, data, { keeps, ...fit }) ?? "";
   const said = [
     `DATA CUT: with data whole, this structured result is ${wholeChars} characters of JSON, more than the ${STRUCTURED_BUDGET} it holds unless the call says full: true, so its data is cut: ${cuts.join("; ")}.`,
+    ...again,
     "truncated gives the total and the number returned of each list cut, and thinned where its entries are cut to some of their fields.",
     page,
     over ? `Cut so, the structured result is still past ${STRUCTURED_BUDGET} characters: data holds no other list to cut.` : "",
@@ -702,7 +1210,9 @@ export function cutData(
   const steps: readonly DataCutStep[] = [...cut.steps, { lists: Object.keys(data).filter((k) => !named.has(k)) }];
   // Each list cut so far, in the order cut, at the level it was thinned to, how many entries it
   // keeps, and the step that cut it.
-  const kept = new Map<string, { list: CutList; k: number; step: number }>();
+  // `gone` (#3269): the list's entries outFirst names left before the others were cut further, and
+  // may come back once the cut is settled.
+  const kept = new Map<string, { list: CutList; k: number; step: number; gone?: true }>();
   const apply = (also: readonly { list: CutList; k: number }[] = []): Record<string, unknown> =>
     [...kept.values(), ...also].reduce((d, { list, k }) => withList(d, list.at, list.keep(k)), data);
   // PageAt.wholeFit: of the list at `path`, the most first entries, each whole, that the result
@@ -726,12 +1236,243 @@ export function cutData(
     wholeFits.set(path, k);
     return k;
   };
+  // PageAt.firstFit (#3269's review): of the list at `path`, which a step thins, the most first
+  // entries n such that, for every n' up to n, a call answering only the first n' of them keeps
+  // every one of them, as this cut would cut that call: it does where
+  //   - every entry fits thinned (thin[0]), those leaveOutFirst names cut to outFirst's level; or
+  //   - every entry fits at the floor (thin[floor.at] at its least, each entry at its own
+  //     EntryLevel.floor or more: #3269's second review), those named so cut, and either none is
+  //     named or the entries not named, thinned, are past the budget on their own (so the call
+  //     cannot keep them uncapped by sending the named ones out, and keeps them at the floor
+  //     instead).
+  // A step without a floor is held to its leaveAt level and cap instead, so a page of that size
+  // comes back with that level's detail, as #3132's review asked. Each size is counted as this
+  // call's: the entries as they are (the first n of a call are these, at the same index), data
+  // beside them with this list and the lists of the steps before it empty (a cut empties those
+  // first, and a call of fewer purls sends them all), and this call's envelope and note, with the
+  // longest DATA CUT sentence such a call can carry while it keeps every entry. A call of fewer
+  // purls has a note no longer than this one's (its counts are no larger, the affected components
+  // it names are the first of these), but for its TEXT CUT sentences, which can be cut no further
+  // than this call's text but can take another form: FIRST_FIT_SLACK holds the difference.
+  const FIRST_FIT_SLACK = 600;
+  // How firstFit and againFit count a call of some of a thinned list's entries (#3269's third
+  // review: one measure for both): the list whole, its step, the characters of a call's result
+  // without the list's entries (`env`: the rest of data, the envelope and note, the longest DATA
+  // CUT sentence, FIRST_FIT_SLACK), and each entry's characters thinned (thin[0]; one leaveOutFirst
+  // names at outFirst's level) and at its floor, each measured once.
+  type Measure = {
+    v: readonly unknown[];
+    step: DataCutStep;
+    env: number;
+    named: (i: number) => boolean;
+    thinChars: (i: number) => number;
+    floorChars: (i: number) => number;
+  };
+  const measures = new Map<string, Measure | null>();
+  const measureOf = (path: string): Measure | null => {
+    const known = measures.get(path);
+    if (known !== undefined) return known;
+    const s = steps.findIndex((st) => st.lists.includes(path));
+    const v = listOf(data, path.split("."));
+    const m = s >= 0 && steps[s].thin?.length && Array.isArray(v) && v.length > 0 ? measureFor(steps[s], s, path, v) : null;
+    measures.set(path, m);
+    return m;
+  };
+  const measureFor = (step: DataCutStep, s: number, path: string, v: readonly unknown[]): Measure => {
+    const thin = step.thin as readonly ThinLevel[];
+    const first = step.leaveOutFirst;
+    const out = first ? step.outFirst : undefined;
+    const floor = out?.floor;
+    const lean = out?.level;
+    const n = v.length;
+    const isNamed = (e: unknown): boolean => first !== undefined && first.values.includes(field(e, first.field) as string);
+    const bare = [path, ...steps.slice(0, s).flatMap((st) => st.lists)].reduce<Record<string, unknown>>(
+      (d, p) => (Array.isArray(listOf(d, p.split("."))) ? withList(d, p.split("."), []) : d),
+      data as Record<string, unknown>,
+    );
+    const base = JSON.stringify(bare).length;
+    // The level and cap every entry is held to where they are not all kept thinned.
+    const atFloor = floor ? floor.at : step.leaveAt ? step.leaveAt.level : thin.length - 1;
+    const floorCap = floor ? (levelOf(thin[atFloor]).least ?? 0) : step.leaveAt ? step.leaveAt.cap : Number.POSITIVE_INFINITY;
+    // The envelope, its note and the longest DATA CUT sentence of a call that keeps every entry,
+    // at each level it can stop at (a capped level's clause said at its least, where it bites).
+    const noPage: DataCut = { steps: cut.steps };
+    const stops = [0, ...(floor && out ? Array.from({ length: floor.at - out.before + 1 }, (_, j) => out.before + j) : [atFloor])];
+    const env =
+      Math.max(
+        ...stops.map((j) => {
+          const lv = levelOf(thin[j]);
+          const list = listAt(data as Record<string, unknown>, path, first, thin[j], step.keepNewest, lv.capped ? (lv.least ?? 0) : Number.POSITIVE_INFINITY, j, lean, step.leaveLast);
+          if (!list) return 0;
+          const { said } = cutSaid(noPage, [{ list, k: n }], wholeChars, data, false, { wholeFit, firstFit: () => 0, againFit: () => ({ sizes: [], m: 0, alone: [] }) });
+          return JSON.stringify(structured(null, { [path]: { total: n, returned: n, thinned: true } }, said)).length - "null".length;
+        }),
+      ) +
+      base +
+      FIRST_FIT_SLACK;
+    const chars = (e: unknown, level: ThinLevel, cap = Number.POSITIVE_INFINITY): number => entryChars(thinned(e, level, cap));
+    const once = (f: (i: number) => number) => {
+      const got = new Map<number, number>();
+      return (i: number): number => {
+        let c = got.get(i);
+        if (c === undefined) got.set(i, (c = f(i)));
+        return c;
+      };
+    };
+    const named = (i: number) => isNamed(v[i]);
+    return {
+      v,
+      step,
+      env,
+      named,
+      thinChars: once((i) => chars(v[i], named(i) && lean !== undefined ? lean : thin[0])),
+      floorChars: once((i) => (named(i) && lean !== undefined ? chars(v[i], lean) : chars(v[i], thin[atFloor], floorCap))),
+    };
+  };
+  const firstFits = new Map<string, number>();
+  const firstFit = (path: string): number => {
+    const known = firstFits.get(path);
+    if (known !== undefined) return known;
+    const ms = measureOf(path);
+    const fit = ms ? firstFitOf(ms) : 0;
+    firstFits.set(path, fit);
+    return fit;
+  };
+  const firstFitOf = ({ v, step, env, named: isNamed, thinChars, floorChars }: Measure): number => {
+    const out = step.leaveOutFirst ? step.outFirst : undefined;
+    const floor = out?.floor;
+    const n = v.length;
+    let thinnedAll = 0;
+    let atFloorAll = 0;
+    let others = 0;
+    let othersAlone = 0;
+    let named = 0;
+    for (let i = 0; i < n; i++) {
+      const nm = isNamed(i);
+      if (nm) named++;
+      thinnedAll += thinChars(i);
+      atFloorAll += floorChars(i);
+      if (!nm) {
+        others++;
+        othersAlone += thinChars(i);
+      }
+      const commas = i;
+      const keepsThinned = env + thinnedAll + commas <= STRUCTURED_BUDGET;
+      const keepsAtFloor = env + atFloorAll + commas <= STRUCTURED_BUDGET;
+      // The entries not named, thinned, without the rest of the result: a lower bound.
+      const othersPast = othersAlone + Math.max(0, others - 1) + 2 > STRUCTURED_BUDGET;
+      if (!(keepsThinned || (keepsAtFloor && (named === 0 || !out || (floor !== undefined && othersPast))))) return i;
+    }
+    return n;
+  };
+  // PageAt.againFit (#3269's third review): of the entries `seq` names (none of them one
+  // leaveOutFirst names, so a call of them alone keeps every one where they fit at their floor, as
+  // firstFit counts), those that do not fit at it even alone leave `seq` (`alone`). Of the rest,
+  // each of the first LeaveLast.againCalls calls takes the most of those left, in order, that fit
+  // at the floor beside the result's envelope (this call's, its note with LeaveLast.noteOver's
+  // characters for a call of that many, and a DATA CUT sentence keeping them all); of the entries
+  // after those, m is the most such that every m of them in a row fit so. So each call of those
+  // sizes keeps every one, and so does a call of fewer of them in a row. Counted once per `seq`
+  // (the cut sizes the same note many times).
+  const againFits = new Map<string, AgainFit>();
+  const againFit = (path: string, seq: readonly number[]): AgainFit => {
+    const key = `${path}:${seq.join(",")}`;
+    const known = againFits.get(key);
+    if (known) return known;
+    const got = againFitOf(path, seq);
+    againFits.set(key, got);
+    return got;
+  };
+  const againFitOf = (path: string, seq: readonly number[]): AgainFit => {
+    const ms = measureOf(path);
+    if (!ms || seq.length === 0) return { sizes: [], m: 0, alone: [] };
+    const ll = ms.step.leaveLast;
+    const over = ll?.noteOver?.(seq.map((i) => ms.v[i]), ms.v) ?? (() => 0);
+    const room = (m: number) => STRUCTURED_BUDGET - ms.env - over(m);
+    const one = room(1);
+    const alone = seq.filter((i) => ms.floorChars(i) > one);
+    const rest = alone.length ? seq.filter((i) => ms.floorChars(i) <= one) : seq;
+    const calls = ll?.againCalls ?? 0;
+    // sums[j]: the characters of rest's first j entries; rest[a..b) fits as one call.
+    const sums = [0];
+    for (const i of rest) sums.push(sums[sums.length - 1] + ms.floorChars(i));
+    const fitsAt = (a: number, b: number): boolean => sums[b] - sums[a] + (b - a - 1) <= room(b - a);
+    const sizes: number[] = [];
+    let at = 0;
+    while (sizes.length < calls && at < rest.length) {
+      let b = at + 1;
+      while (b < rest.length && fitsAt(at, b + 1)) b++;
+      sizes.push(b - at);
+      at = b;
+    }
+    // Every m of rest[at..] in a row fits (fewer, at its end, are within the last m).
+    const fits = (m: number): boolean => {
+      for (let a = at; a + m <= rest.length; a++) if (!fitsAt(a, a + m)) return false;
+      return true;
+    };
+    let m = rest.length > at ? 1 : 0;
+    let hi = rest.length - at;
+    while (m < hi) {
+      const mid = Math.ceil((m + hi) / 2);
+      if (fits(mid)) m = mid;
+      else hi = mid - 1;
+    }
+    return { sizes, m, alone };
+  };
+  const fit = { wholeFit, firstFit, againFit };
   // The result's size with this step's lists at k entries each: the rest of the result (data
   // null), data with this step's lists empty (`base`), and their entries.
   const size = (lists: readonly CutList[], k: number, base: number): number => {
     const all = [...kept.values(), ...lists.map((list) => ({ list, k: Math.min(k, list.n) }))];
-    const { truncated, said } = cutSaid(cut, all, wholeChars, data, false, wholeFit);
+    const { truncated, said } = cutSaid(cut, all, wholeChars, data, false, fit);
     return JSON.stringify(structured(null, truncated, said)).length - "null".length + base + lists.reduce((t, l) => t + l.chars(k), 0);
+  };
+  // #3269's second review: whether an entry of a step's lists that leaveOutFirst does not name holds
+  // any entry of the list leaveAt's level caps (DataCutStep.leaveAt's floor).
+  const holdsInner = (step: DataCutStep): boolean => {
+    const inner = step.thin && step.leaveAt ? levelOf(step.thin[step.leaveAt.level]).capped : undefined;
+    if (inner === undefined) return false;
+    const first = step.leaveOutFirst;
+    const named = (e: unknown) => first !== undefined && first.values.includes(field(e, first.field) as string);
+    return step.lists.some((p) => {
+      const v = listOf(data, p.split("."));
+      return Array.isArray(v) && v.some((e) => !named(e) && innerOf(e, inner) > 0);
+    });
+  };
+  // #3269's second review: with leaveAt's floor and LeaveLast, the entries kept are chosen in the
+  // reverse of the order they leave in (LeaveLast's first, then the rest, each from the start),
+  // each one kept that fits beside those chosen before it, and the rest leave first: the list so
+  // reordered, and how many it keeps. In the plain order a row too large to fit beside the rows kept
+  // sent every row before it in that order out with it, and left their room empty: a row of 200
+  // KEV-listed matches after 150 purls of an image (40 affected) kept 1 row of 151, in 7,572
+  // characters. The choice is made on the room the result leaves with none kept, then checked as
+  // the result is (its note names the entries left out, by index), the last chosen leaving while it
+  // does not fit, and topped up, each entry not chosen that fits now, in the same order.
+  const keptByFit = (l: CutList, base: number): { list: CutList; k: number } | undefined => {
+    if (size([l], 0, base) > STRUCTURED_BUDGET) return undefined;
+    const named = l.order.filter((i) => l.isNamed(i));
+    const pri = [...l.order].reverse().filter((i) => !l.isNamed(i));
+    const orderOf = (chosen: ReadonlySet<number>) => [...named, ...l.order.filter((i) => !l.isNamed(i) && !chosen.has(i)), ...l.order.filter((i) => chosen.has(i))];
+    const chosen = new Set<number>();
+    let room = STRUCTURED_BUDGET - size([l], 0, base);
+    for (const i of pri) {
+      const c = l.charsOf(i) + (chosen.size > 0 ? 1 : 0);
+      if (c > room) continue;
+      chosen.add(i);
+      room -= c;
+    }
+    let cur = l.withOrder(orderOf(chosen));
+    let k = chosen.size;
+    while (k > 0 && size([cur], k, base) > STRUCTURED_BUDGET) k--;
+    for (let tries = 0; tries < 64; tries++) {
+      const kept = new Set(cur.kept(k));
+      const left = STRUCTURED_BUDGET - size([cur], k, base);
+      const next = pri.find((i) => !kept.has(i) && cur.charsOf(i) + 1 <= left && size([cur.withOrder(orderOf(new Set([...kept, i])))], k + 1, base) <= STRUCTURED_BUDGET);
+      if (next === undefined) break;
+      cur = cur.withOrder(orderOf(new Set([...kept, next])));
+      k++;
+    }
+    return { list: cur, k };
   };
   let fits = false;
   for (const [s, step] of steps.entries()) {
@@ -740,13 +1481,97 @@ export function cutData(
     const levels: readonly (ThinLevel | undefined)[] = [undefined, ...(step.thin ?? [])];
     let lists: CutList[] = [];
     let k = 0;
-    const at = (level: ThinLevel | undefined, cap?: number, levelAt?: number) =>
-      step.lists.map((p) => listAt(data, p, step.leaveOutFirst, level, step.keepNewest, cap, levelAt)).filter((l): l is CutList => l !== undefined && !kept.has(l.path));
+    // #3269: once the entries outFirst names have left (gone), each later level cuts them to its
+    // level, so that they can come back so cut, and keeps at most the others (they leave first).
+    const out = step.leaveOutFirst ? step.outFirst : undefined;
+    let gone = false;
+    const at = (level: ThinLevel | undefined, cap?: number, levelAt?: number, outLevel = gone ? out?.level : undefined, below?: true) =>
+      step.lists
+        .map((p) => listAt(data, p, step.leaveOutFirst, level, step.keepNewest, cap, levelAt, outLevel, step.leaveLast, below))
+        .filter((l): l is CutList => l !== undefined && !kept.has(l.path));
+    // #3269's second review: with leaveAt's floor, the last level tried with every entry kept is
+    // leaveAt's while an entry not named holds inner entries (DataCutStep.leaveAt): no later level
+    // keeps any of them, so the entries leave there, whole, instead.
+    const end = step.leaveAt?.floor && step.thin && holdsInner(step) ? step.leaveAt.level + 1 : levels.length - 1;
     for (const [i, thin] of levels.entries()) {
+      if (i > end) break;
+      // #3269: before any entry is cut to thin[out.before], the entries leaveOutFirst names are cut
+      // to out.level, the others kept at the level before; then they leave, as many as must.
+      if (out && !gone && i === out.before + 1) {
+        const apart = at(levels[i - 1], undefined, i - 2, out.level);
+        if (apart.some((l) => l.named > 0)) {
+          const base = JSON.stringify(apply(apart.map((list) => ({ list, k: 0 })))).length;
+          const rest = Math.max(...apart.map((l) => l.n - l.named));
+          const all = Math.max(...apart.map((l) => l.n));
+          // The most entries each list keeps, `lo` at least, cut as `ls` is.
+          const most = (ls: readonly CutList[], lo: number): number => {
+            let kk = lo;
+            let hi = all;
+            while (kk < hi) {
+              const mid = Math.ceil((kk + hi) / 2);
+              if (size(ls, mid, base) <= STRUCTURED_BUDGET) kk = mid;
+              else hi = mid - 1;
+            }
+            return kk;
+          };
+          if (size(apart, rest, base) <= STRUCTURED_BUDGET) {
+            k = most(apart, rest);
+            lists = apart;
+            fits = true;
+            break;
+          }
+          // #3269's review: the others are capped anyway, so the named entries stay while the
+          // others fit at the floor (OutFirst.floor). #3269's second review: each capped level
+          // holds each entry's own floor (EntryLevel.floor), so the cap starts at its least.
+          const floor = out.floor;
+          if (floor) {
+            const last = floor.at + 1;
+            // With kk entries kept, the richest capped level from thin[before] to thin[floor.at]
+            // that fits at the floor or more, at the most inner entries that fit; none where none.
+            const capped = (kk: number): CutList[] | undefined => {
+              for (let j = i; j <= last; j++) {
+                const lv = levelOf(levels[j] as ThinLevel);
+                if (lv.capped === undefined) continue;
+                const ls = (c: number) => at(levels[j], c, j - 1, out.level);
+                let m = lv.least ?? 0;
+                if (size(ls(m), kk, base) > STRUCTURED_BUDGET) continue;
+                let hi = Math.max(m, ...step.lists.map((p) => longestInside(listOf(data, p.split(".")), lv.capped as string)));
+                while (m < hi) {
+                  const mid = Math.ceil((m + hi) / 2);
+                  if (size(ls(mid), kk, base) <= STRUCTURED_BUDGET) m = mid;
+                  else hi = mid - 1;
+                }
+                return ls(m);
+              }
+              return undefined;
+            };
+            let kk = all;
+            let got = capped(all);
+            if (!got) {
+              // Even the floor does not fit with every named entry: they leave, as many as must
+              // for it to, and the others then take the most that fits.
+              const lv = levelOf(levels[last] as ThinLevel);
+              const atLeast = at(levels[last], lv.least ?? 0, last - 1, out.level);
+              if (size(atLeast, rest, base) <= STRUCTURED_BUDGET) {
+                kk = most(atLeast, rest);
+                got = capped(kk);
+              }
+            }
+            if (got) {
+              lists = got;
+              k = kk;
+              if (kk < all) gone = true;
+              fits = true;
+              break;
+            }
+          }
+          gone = true;
+        }
+      }
       lists = at(thin, undefined, i - 1);
       if (lists.length === 0) break;
       const base = JSON.stringify(apply(lists.map((list) => ({ list, k: 0 })))).length;
-      const top = Math.max(...lists.map((l) => l.n));
+      const top = Math.max(...lists.map((l) => (gone ? l.n - l.named : l.n)));
       // #3132: a level that caps a list inside each entry, every entry kept: the most entries of
       // that inner list, the same number in each, that fit; a level where even none fits is passed.
       // #3132's review: a level with `least` is taken at that cap or more, or passed.
@@ -767,11 +1592,11 @@ export function cutData(
           fits = true;
           break;
         }
-        if (i < levels.length - 1) continue;
+        if (i < end) continue;
         // The last level, and even its least cap does not fit: the entries go on at that cap.
         lists = at(thin, least, i - 1);
       }
-      if (i < levels.length - 1) {
+      if (i < end) {
         if (size(lists, top, base) <= STRUCTURED_BUDGET) {
           k = top;
           fits = true;
@@ -798,7 +1623,12 @@ export function cutData(
         }
         break;
       }
-      if (size(lists, 0, base) <= STRUCTURED_BUDGET) {
+      const chosen = step.leaveAt?.floor && step.leaveLast && lists.length === 1 ? keptByFit(lists[0], base) : undefined;
+      if (chosen) {
+        lists = [chosen.list];
+        k = chosen.k;
+        fits = true;
+      } else if (size(lists, 0, base) <= STRUCTURED_BUDGET) {
         // The most entries each list of the step keeps with the result inside the budget.
         let hi = top;
         while (k < hi) {
@@ -808,12 +1638,42 @@ export function cutData(
         }
         fits = true;
       }
+      // #3269's second review: not even one entry fits at its floor (one extreme row, its KEV-listed
+      // matches alone past the budget). The one the leaving order keeps last stays, its capped list
+      // at the most that fit below its floor, at least one; where not even one fits, at the first
+      // later level that fits; and only where none does, no entry.
+      if (fits && k === 0 && top > 0 && step.leaveAt?.floor && step.thin) {
+        const { level } = step.leaveAt;
+        const inner = levelOf(step.thin[level]).capped;
+        let got: CutList[] | undefined;
+        if (inner !== undefined) {
+          const ls = (c: number) => at(step.thin?.[level], c, level, undefined, true);
+          if (size(ls(1), 1, base) <= STRUCTURED_BUDGET) {
+            let c = 1;
+            let hi = Math.max(1, ...step.lists.map((p) => longestInside(listOf(data, p.split(".")), inner)) ) - 1;
+            while (c < hi) {
+              const mid = Math.ceil((c + hi) / 2);
+              if (size(ls(mid), 1, base) <= STRUCTURED_BUDGET) c = mid;
+              else hi = mid - 1;
+            }
+            got = ls(c);
+          }
+        }
+        for (let j = level + 1; !got && j < step.thin.length; j++) {
+          const ls = at(step.thin[j], undefined, j);
+          if (size(ls, 1, base) <= STRUCTURED_BUDGET) got = ls;
+        }
+        if (got) {
+          lists = got;
+          k = 1;
+        }
+      }
     }
-    for (const list of lists) kept.set(list.path, { list, k: Math.min(k, list.n), step: s });
+    for (const list of lists) kept.set(list.path, { list, k: Math.min(k, list.n), step: s, ...(gone ? { gone: true as const } : {}) });
     if (fits) break;
   }
   const exact = (): number => {
-    const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, false, wholeFit);
+    const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, false, fit);
     return JSON.stringify(structured(apply(), truncated, said)).length;
   };
   // #3139: every step cut and the result still past the budget: a keepAll step's entries leave now,
@@ -888,7 +1748,8 @@ export function cutData(
       for (const e of [...kept.values()].filter((x) => x.step === s)) {
         const { list } = e;
         const own = list.level;
-        if (own === undefined || list.thin === undefined) continue;
+        // #3269's second review: the one entry kept below its floor takes back nothing (more did not fit).
+        if (own === undefined || list.thin === undefined || list.below) continue;
         const whole = listOf(data, list.at);
         if (!Array.isArray(whole)) continue;
         let leanestCapped = -1;
@@ -901,20 +1762,24 @@ export function cutData(
           return false;
         };
         for (const i of list.kept(e.k)) {
+          // #3269: an entry outFirst cut apart takes back nothing (the others come first).
+          if (list.outThin && list.isNamed(i)) continue;
           // An entry its own level already keeps as the richest would is passed, not an end.
           if (JSON.stringify(thinned(whole[i], thin[0])) === JSON.stringify(thinned(whole[i], thin[own], list.cap))) continue;
           let took = false;
           for (let j = 0; j <= own && !took; j++) {
             const l = levelOf(thin[j]);
-            const inner = l.capped !== undefined && Array.isArray(field(whole[i], l.capped)) ? (field(whole[i], l.capped) as unknown[]).length : 0;
+            const inner = innerOf(whole[i], l.capped);
             if (l.capped === undefined) {
               if (j < own) took = tryAt(i, j, Number.POSITIVE_INFINITY);
               continue;
             }
             if (j !== leanestCapped) continue;
-            if (j < own || list.cap < inner) took = tryAt(i, j, Number.POSITIVE_INFINITY);
+            // #3269's second review: the cap the entry is cut to, its floor where that is more.
+            const now = capFor(l, whole[i], list.cap);
+            if (j < own || now < inner) took = tryAt(i, j, Number.POSITIVE_INFINITY);
             if (took) break;
-            let c = j === own ? list.cap + 1 : (l.least ?? 0);
+            let c = j === own ? now + 1 : capFor(l, whole[i], l.least ?? 0);
             let hi = inner - 1;
             if (c > hi || !tryAt(i, j, c)) continue;
             while (c < hi) {
@@ -928,7 +1793,24 @@ export function cutData(
       }
     }
   }
-  const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, !fits, wholeFit);
+  // #3269: last, the entries outFirst sent out come back with the room left, cut to its level, the
+  // last to leave first (they leave first of all, so they come back only where every other entry
+  // stayed), as many as fit.
+  if (fits) {
+    for (const e of kept.values()) {
+      if (!e.gone || e.k < e.list.n - e.list.named) continue;
+      let hi = e.list.n;
+      let k = e.k;
+      while (k < hi) {
+        const mid = Math.ceil((k + hi) / 2);
+        e.k = mid;
+        if (exact() <= STRUCTURED_BUDGET) k = mid;
+        else hi = mid - 1;
+      }
+      e.k = k;
+    }
+  }
+  const { truncated, said } = cutSaid(cut, [...kept.values()], wholeChars, data, !fits, fit);
   if (truncated === undefined) return undefined;
   const d = apply();
   return { data: d, truncated, said, structured: structured(d, truncated, said) };

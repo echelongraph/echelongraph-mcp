@@ -43,6 +43,7 @@ maps to a CISA-KEV-listed CVE (see [How `cve_exposure` counts](tools.md#how-cve_
 | `kev_exposure.newest_kev[].cvss_v3_score`, `kev_exposure.newest_kev[].epss_score` | Scores, not counts: the CVE record's CVSS v3 base score and EPSS probability (0 to 1), absent when the record has none. |
 | `kev_exposure.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle in which its Shodan search answered at least one query (others may have failed) and its list of services due for a re-check was read. A cycle that skipped the search for want of Shodan query credits, or whose reads failed, does not move it. |
 | `kev_exposure.window.from`, `kev_exposure.window.to` | Timestamps, not counts: when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, Shodan's own times, not when EchelonGraph stored or re-checked a pair; a span of observations made at different times. Relayed only when every counted pair has such a time; otherwise the note says how many do not. |
+| `kev_exposure.dated_window.from`, `kev_exposure.dated_window.to`, `kev_exposure.dated_window.undated` | Relayed instead of the window when some counted pairs have no banner time on record (pairs stored before the banner time was captured stay so while the InternetDB re-check keeps them): from and to are the same Shodan banner times over the dated pairs only, and undated counts the pairs with none. The note gives both numbers; the window does not describe the undated pairs. |
 
 A `newest_kev` row's `exposure_state` says whether its count is a measurement:
 
@@ -61,6 +62,7 @@ A `newest_kev` row's `exposure_state` says whether its count is a measurement:
 | `exposed_databases.top_engines`, `exposed_databases.top_countries` | Up to 15 engines and 10 countries, ranked by those services. |
 | `exposed_databases.pii_likely`, `exposed_databases.pci_likely` | Services whose schema names pass a high-confidence gate for personal data, or for payment-card data. The names are index, database, table or field names in the Shodan or LeakIX banner or in the check's response, never record values; the gate passes one unambiguous term (such as `ssn` or `cardholder`) or two distinct indicators. It is a precision-first schema gate, not a census: a service whose names do not pass it is not counted, whatever it holds, so the other services are not shown to hold no such data. |
 | `exposed_databases.window.from`, `exposed_databases.window.to` | Timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication, a span of checks made at different times. Relayed only when every counted service has such a time; otherwise the note says how many do not. |
+| `exposed_databases.dated_window.from`, `exposed_databases.dated_window.to`, `exposed_databases.dated_window.undated` | Relayed instead of the window when some counted services have no such time on record: from and to span the dated services only, and undated counts those with none. |
 | `exposed_databases.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle in which its Shodan search, or the LeakIX fallback, answered at least one query (others may have failed), its list of services due for a re-check was read, and the scan opt-out register could be consulted. A cycle that searched nothing, or whose reads failed, does not move it. |
 
 ## `leaked_credentials`
@@ -72,6 +74,7 @@ A `newest_kev` row's `exposure_state` says whether its count is a measurement:
 | `leaked_credentials.distinct_repos` | Public GitHub repositories with at least one. |
 | `leaked_credentials.top_providers`, `leaked_credentials.top_types` | Up to 15 providers and secret types, ranked by (repository, secret) pairs. |
 | `leaked_credentials.window.from`, `leaked_credentials.window.to` | Timestamps, not counts: when EchelonGraph's detector last found the oldest and the newest of the (repository, secret) pairs counted in a public commit. |
+| `leaked_credentials.dated_window.from`, `leaked_credentials.dated_window.to`, `leaked_credentials.dated_window.undated` | Relayed instead of the window when some counted pairs have no such time on record: from and to span the dated pairs only, and undated counts those with none. |
 | `leaked_credentials.last_run_at` | A timestamp, not a count: when the radar last completed a check, a cycle that read the public GitHub event stream (fetches of some of the commits it lists may have failed). A cycle whose read of that stream failed does not move it. |
 
 None of them is validated. Each is a credential-shaped string in a public commit that passed
@@ -90,6 +93,7 @@ labels each one. Only `shadow_ai.confirmed_exposed` counts exposed services.
 | `confirmed_exposed.by_category` | The same services, by category. |
 | `confirmed_exposed.last_24h` | Confirmed-exposed services first recorded in the last 24 hours. |
 | `confirmed_exposed.window.from`, `confirmed_exposed.window.to` | Timestamps, not counts: when EchelonGraph's verifier ran the probe that last decided the oldest and the newest of the confirmed-exposed services, a span of probes made at different times. Relayed only when every one has such a time. |
+| `confirmed_exposed.dated_window.from`, `confirmed_exposed.dated_window.to`, `confirmed_exposed.dated_window.undated` | Relayed instead of the window when some confirmed-exposed services have no such time on record: from and to span the dated ones only, and undated counts those with none. |
 | `observed.total` | Every Certificate Transparency or Shodan observation on record, whatever its verification state: observed, not exposed. |
 | `observed.by_category` | The same observations, by category. |
 | `observed.last_24h` | Observations first recorded in the last 24 hours. |

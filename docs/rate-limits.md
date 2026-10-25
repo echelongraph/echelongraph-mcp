@@ -34,7 +34,9 @@ JSON-RPC error (code `-32029`) that names the limit and the seconds to wait. A r
 64 KiB is refused (HTTP 413, code `-32600`), except a `tools/call` of `check_sbom` or
 `scan_manifest`, or a `prompts/get` of `sbom_review`, which may be up to 6 MiB: enough for a
 CycloneDX or SPDX document, or a call's lockfiles, at the tools' 5,000,000-character cap. Each server instance reads at most two such large bodies at
-once; a third is answered HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`). Each
+once; a third waits up to 15 seconds for one to finish (two may wait at once), and is answered
+HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`) only when that wait runs out, or at
+once when two are already waiting. Each
 instance serves at most 64 requests at once; the next waits up to 10 seconds for one to finish,
 and is then answered the same way. A `subscriptions/listen` stream, which stays open until its
 client leaves, is not one of the 64.
@@ -46,5 +48,6 @@ server at all (<https://docs.cloud.google.com/run/docs/troubleshooting>). The ho
 speaks HTTP/2 to Cloud Run, where the same page says a disconnect is passed on. Measured on
 2026-10-05, Cloud Run reset the stream of a client that stopped reading its answer 15 s in, and the
 call was logged as a client that closed. Whether a client that aborts mid-call is passed on at once
-has not been observed yet. Until it is, an abandoned `check_sbom` or `scan_manifest` call may run for up to its
-50-second budget and hold its slot that long.
+has not been observed yet: on 2026-10-18 two calls aborted 1.5 s in ran on to their answers. So an
+abandoned `check_sbom` or `scan_manifest` call may run for up to its 50-second budget and hold its
+slot that long, and a retry of it waits for that slot (above) instead of being refused at once.

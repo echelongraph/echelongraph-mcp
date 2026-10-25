@@ -5,8 +5,8 @@
 // dropped, a head naming Shodan without SHODAN_OWNERSHIP, or a tool registered with no entry here
 // fails it. A tool added later adds its entry here.
 //
-// The cut. Claude Code sends each MCP tool description and each server's instructions to the model
-// cut at 2,048 characters, with "… [truncated]" appended:
+// The cut. Claude Code from v2.1.280 sent each MCP tool description and each server's instructions
+// to the model cut at 2,048 characters, with "… [truncated]" appended:
 //   - Claude Code docs, environment variables (code.claude.com/docs/en/env-vars, read 2026-10-05):
 //     CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, "Maximum length in characters of each MCP tool
 //     description and each MCP server's instructions that Claude Code sends to the model (default:
@@ -14,10 +14,15 @@
 //   - anthropics/claude-code#87650 (closed, not planned): the minified constant Tpe=2048 gates the
 //     cut in v2.1.234; /mcp shows the whole text while the model receives the cut one, and only the
 //     instructions' cut is logged ("Server instructions truncated from X to 2048 chars").
+//   - Re-read 2026-10-18: the same page now gives default limits of 4,096, and 16,384 for a tool
+//     Claude Code loads through tool search, and v2.1.302's --debug log shows "Tool
+//     "exposure_radar" description truncated from 11807 to 4096 chars" (2.6.8's description). The
+//     budget stays 2,048: builds from v2.1.280 until that change cut there, and they are in use.
 // The other clients looked at cut later or not at all: Cursor cuts tool descriptions at 6,500
 // characters (Cursor staff, forum.cursor.com/t/147465); VS Code and Claude Desktop document no
 // description cap (VS Code caps a tool's name at 64 characters and a request at 128 tools). So
-// Claude Code's default is the budget: text that fits it reaches every one of them whole.
+// the shortest cut a client is known to make is the budget: text that fits it reaches every one of
+// them whole. docs/tools.md ("The client cut") says the same for readers.
 //
 // Kept under src/ so marketing-site lib/mcpToolClaims.test.ts's resolver can fold the two Shodan
 // sentences, which the descriptions and notes take from here.
@@ -132,7 +137,22 @@ export const REQUIRED_IN_HEAD: Readonly<Record<string, readonly string[]>> = {
 // field, not a tool (test/description-policy.test.mjs: no schema text names another tool).
 export const PATCH_AVAILABLE_WITHDRAWN =
   "true beside an empty patch_evidence means evidence of a fix once held has since been withdrawn (patch_available is never set back to false), and fix_status (remediation.fix_status in the CVE's record) is the current reading, not patch_available.";
+// #3016: cve_exposure's three KEV flags. kev_listed is core-backend's deprecated alias of
+// kev_seen_in_observations (kevexposure/store.go CVEExposure.KEVListed): bool_or over the radar's
+// observation rows, so it is false for a CISA-KEV CVE the radar holds no service for, whatever the
+// catalog says. Through 3.0.2 the outputSchema gave all three as booleans with no text, and hosted
+// cve_exposure CVE-2024-3400 (PAN-OS, CISA-KEV) served kev_listed false beside kev_catalog_listed
+// true (2026-10-10), so a client reading data alone could report a KEV CVE as not on KEV. The
+// field stays (dropping it would break a reader, a major version); its text says what it is.
+export const KEV_LISTED_DEPRECATED = "Deprecated: the same value as kev_seen_in_observations, kept for compatibility.";
+export const KEV_OBSERVATION_FLAG = "It is the radar's observation flag, not CISA-KEV catalog status";
+export const KEV_CATALOG_FLAG = "The CISA-KEV catalog flag:";
 export const REQUIRED_IN_OUTPUT_SCHEMA: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
   get_cve: { "data.patch_available": [PATCH_AVAILABLE_WITHDRAWN] },
   search_cves: { "data.cves[].patch_available": [PATCH_AVAILABLE_WITHDRAWN] },
+  cve_exposure: {
+    "data.kev_listed": [KEV_LISTED_DEPRECATED, KEV_OBSERVATION_FLAG],
+    "data.kev_seen_in_observations": [KEV_OBSERVATION_FLAG],
+    "data.kev_catalog_listed": [KEV_CATALOG_FLAG],
+  },
 };

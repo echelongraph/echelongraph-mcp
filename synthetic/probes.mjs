@@ -193,6 +193,15 @@ export const AFTER = { get_vendor_advisory: ["vendor_advisories_for_cve"] };
 //                       batch route did not answer every purl (detail quotes not_sent_reason), or
 //                       production no longer finds lodash 4.17.15 affected (the corpus lost its
 //                       lodash advisories, or the matcher regressed).
+//   cve_summary (#3276)  where data.nvd_poll is present, freshness.nvd_poll.last_run_at equals its
+//                       last_completed_at (the fleet's last completed NVD poll, core-backend #3242);
+//                       where it is absent (the API could not read that time), freshness is null.
+//                       Unmet means the package answers freshness null beside the block, as
+//                       echelongraph-mcp 3.0.2 and every version before #3276 do (so this job must
+//                       not be redeployed with this entry before a release with #3276 is on npm
+//                       and the hosted endpoint, or every run fails), or a freshness without the
+//                       block; or the API served a last_completed_at that is not a real RFC 3339
+//                       time (the package leaves freshness null then, and detail quotes both).
 export const LOG4J_CORE = "org.apache.logging.log4j:log4j-core";
 // The fixed_in the log4j-core 2.14.1 probe row must carry for CVE-2021-44228 (#2834).
 export const LOG4J_FIXED_IN = "2.15.0";
@@ -248,6 +257,17 @@ export const EXPECT = {
     if (c.not_sent !== 0) return `coverage.not_sent ${c.not_sent} (not_sent_reason ${JSON.stringify(c.not_sent_reason ?? null)}); want 0`;
     const affected = sc?.data?.summary?.affected;
     if (typeof affected !== "number" || affected < 1) return `data.summary.affected ${JSON.stringify(affected ?? null)}; want at least 1 (lodash 4.17.15)`;
+    return undefined;
+  },
+  cve_summary: (sc) => {
+    const poll = sc?.data?.nvd_poll;
+    const fresh = sc?.freshness ?? null;
+    if (poll === undefined || poll === null) return fresh === null ? undefined : `freshness ${JSON.stringify(fresh)} with no data.nvd_poll; want null`;
+    const at = poll?.last_completed_at;
+    const got = fresh?.nvd_poll?.last_run_at;
+    if (typeof at !== "string" || got !== at) {
+      return `freshness.nvd_poll.last_run_at ${JSON.stringify(got ?? null)}, data.nvd_poll.last_completed_at ${JSON.stringify(at ?? null)}; want them equal (freshness ${JSON.stringify(fresh)})`;
+    }
     return undefined;
   },
   cve_remediation: (sc) => {
@@ -330,8 +350,8 @@ export const HTTP_EXPECT = {
 // as a tools/call (judge(), against the endpoint's outputSchema) and then by its `expect`. A tool the
 // endpoint does not list is not_published; arguments its inputSchema refuses are no_valid_probe_input,
 // never sent. A label in EXPECT_PENDING (below) is not called at all. The hosted leg only: the
-// verdict is core-backend's, and the stdio leg reaches the same API; up to four more calls per era
-// (eight per run) on a route with no per-minute component budget.
+// verdict is core-backend's, and the stdio leg reaches the same API; up to five more calls per era
+// (ten per run) on a route with no per-minute component budget.
 //   verdict:pypi/mayan-edms@4.9.0 (#3074)  CVE-2025-14692 matches with a fixed_in whose release is
 //                       strictly above 4.9.7 and a non-empty fixed_in_detail: 4.9.0 sits in
 //                       [4.9.0, 4.9.7), whose bound 4.9.7 is inside [0, 4.10.2) of the same record.
@@ -357,6 +377,20 @@ export const HTTP_EXPECT = {
 //                       = +1, so the range held nothing); present since #3131 reached production in
 //                       core-backend (2026-10-12 03:19Z: 14 matches, all four KEV
 //                       CVEs), when its EXPECT_PENDING entry was removed.
+//   verdict:maven/org.apache.logging.log4j/log4j-core@2.14.1 (#2834)  GET /cves/match, the route
+//                       check_affected and /am-i-affected read: CVE-2021-44228 matches with fixed_in
+//                       "2.15.0", the fixed bound of [2.13.0, 2.15.0), the interval that holds 2.14.1.
+//                       2.14.1 is also listed verbatim in the advisory's affected versions, the
+//                       exact-list path, which read no interval and so named no fix before #2834.
+//                       check_sbom's EXPECT holds the same answer on POST /cves/match/batch; this one
+//                       holds the GET route. Pinned to "2.15.0", as the check_sbom EXPECT is: #3074's
+//                       walk gives it too ([2.0-beta9, 2.3.1), [2.4, 2.12.2), [2.13.0, 2.15.0) leave
+//                       2.15.0 first above 2.14.1). Unmet: fixed_in absent (core-backend without
+//                       #2834), null with fixed_in_reason (the interval lookup skipped on the
+//                       exact-list path), or another version (the bound read from the stored
+//                       fixed_version, "2.3.1"), and detail says which. Live 2026-10-11 (the API, and
+//                       hosted and stdio check_affected at 2.7.1, #2834's review): fixed_in "2.15.0",
+//                       interval {introduced 2.13.0, fixed 2.15.0}.
 // An unmet `expect` is expectation_unmet with what it saw as detail (create-mcp-synthetic-monitoring.sh's
 // runbook says how to read each).
 export const MAYAN_CVE = "CVE-2025-14692";
@@ -368,13 +402,18 @@ export const COSMICSTING_CVE = "CVE-2024-34102";
 export const SESSIONREAPER_CVE = "CVE-2025-54236";
 export const MALI_CVE = "CVE-2022-38181";
 export const MALI_LABEL = "verdict:cpe/midgard_gpu_kernel_driver@r20p0";
-// VERDICT_PROBES labels that are NOT called yet, each with why: run.mjs skips them (no call, no line,
-// so nothing to page on). The Mali probe waits on #3131 reaching production. TO ENABLE IT, once
-// #3131's core-backend is deployed: check it live (curl -sS https://app.echelongraph.io/api/v1/public/cves/match
+export const LOG4J_VERDICT_LABEL = "verdict:maven/org.apache.logging.log4j/log4j-core@2.14.1";
+// VERDICT_PROBES labels held back, each with why: run.mjs skips them (no call, no line, so nothing
+// to page on). Empty: every verdict probe is called on every run (the Mali one since c0f58d5d, once
+// #3131 reached production). To hold one back while the core-backend change its `expect` needs is
+// not yet in production, add its label here with the reason ({ [MALI_LABEL]: "#3131 not yet
+// deployed" } was the last entry); to call it again, once a live check shows production answers as
+// the `expect` wants (for the Mali probe: curl -sS https://app.echelongraph.io/api/v1/public/cves/match
 // -H 'X-EG-Product: midgard_gpu_kernel_driver' -H 'X-EG-Version: r20p0' | jq '[.matches[].cve_id] |
-// index("CVE-2022-38181")' answers a number, not null), delete its entry here, and redeploy the job
-// (infrastructure/mcp-synthetic/deploy.sh). Nothing else changes: run.test.mjs judges whichever state
-// this table is in (pending: no Mali line; enabled: a Mali line, called and judged) and tests the other too.
+// index("CVE-2022-38181")' answers a number, not null), delete the entry; either way redeploy the
+// job (infrastructure/mcp-synthetic/deploy.sh). Nothing else changes: run.test.mjs judges whichever
+// state this table is in (held back: no line for the label; called: a line, judged) and tests the
+// other too.
 export const EXPECT_PENDING = {};
 // a's dotted numeric release is strictly above b's (missing components are 0); undefined when either
 // does not begin with one. The release alone: "4.9.7.post1" is not above "4.9.7" here, which can only
@@ -445,12 +484,75 @@ export const VERDICT_PROBES = [
     arguments: { ecosystem: "Packagist", package: MAGENTO, version: "2.4.5-p2" },
     expect: present(`Packagist ${MAGENTO} 2.4.5-p2`, SESSIONREAPER_CVE),
   },
-  // PENDING until #3131 is deployed (EXPECT_PENDING above): not called while its label is there.
+  // #3131's CPE comparator: called on every run since c0f58d5d; an EXPECT_PENDING entry (above) for
+  // its label would hold it back.
   {
     label: MALI_LABEL,
     tool: "check_affected",
     arguments: { product: "midgard_gpu_kernel_driver", version: "r20p0" },
     expect: present("midgard_gpu_kernel_driver r20p0", MALI_CVE),
+  },
+  // #2834: fixed_in on the GET route's exact-list match.
+  {
+    label: LOG4J_VERDICT_LABEL,
+    tool: "check_affected",
+    arguments: { ecosystem: "Maven", package: LOG4J_CORE, version: "2.14.1" },
+    expect: (sc) => {
+      const what = "Maven log4j-core 2.14.1";
+      const unmet = present(what, CVE)(sc);
+      if (unmet) return unmet;
+      const m = verdictFor(sc, CVE).match;
+      if (!m) return `${what}: ${CVE} is in cve_ids but not in matches (cut from structuredContent); want its match with fixed_in`;
+      if (m.fixed_in !== LOG4J_FIXED_IN) {
+        return `${what} ${CVE} fixed_in ${m.fixed_in === undefined ? "absent" : JSON.stringify(m.fixed_in)} (fixed_in_reason ${JSON.stringify(m.fixed_in_reason ?? null)}, interval ${JSON.stringify(m.interval ?? null)}, version_evidence ${JSON.stringify(m.version_evidence ?? null)}); want "${LOG4J_FIXED_IN}" (#2834)`;
+      }
+      return undefined;
+    },
+  },
+];
+
+// THE CHAINING MISTAKE (#3011), made on purpose. A vendor_advisories_for_cve row carries two IDs:
+// advisory_id, EchelonGraph's internal UUID, and vendor_advisory_id, the vendor's own. The
+// get_vendor_advisory probe above passes vendor_advisory_id; a model that chains the two tools by
+// the shared name passes advisory_id, which the API's detail route does not take (it is keyed on
+// vendor_advisory_id and has no route by the UUID). Through 3.0.2 that answered state failed, worded
+// as the API holding no record, for an advisory it holds (CVE-2024-3400's Palo Alto row, live
+// 2026-10-10), and no probe saw it. This one passes the first row's vendor and advisory_id, on the
+// hosted leg after the verdicts, and must get back what #3011 specifies: the advisory itself
+// (measured, its advisory_id the one sent), or invalid_input whose error names vendor_advisory_id.
+// failed, the 404 relayed as no record, fails it (state_failed). One call per era, two API requests
+// (the detail's 404 and the vendors' windows), no per-minute component budget.
+//   published  only an endpoint that advertises the fix is judged: its get_vendor_advisory
+//              inputSchema says advisory_id is a row's vendor_advisory_id (3.0.2's says only "the
+//              vendor's advisory ID"). Before that the line is not_published, so the job can deploy
+//              ahead of the endpoint and page on nothing; after it the probe runs with no change here.
+//              run.test.mjs holds this package's own tools/list to being detected.
+export const CHAIN_LABEL = "chain:get_vendor_advisory@row.advisory_id";
+const INTERNAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The first row's vendor and its advisory_id, the internal UUID, from vendor_advisories_for_cve's
+// structuredContent; undefined when no row carries both (no_valid_probe_input).
+export function internalIdFrom(sc) {
+  const rows = sc?.data?.advisories;
+  if (!Array.isArray(rows)) return undefined;
+  const row = rows.find((r) => r && typeof r.vendor === "string" && r.vendor && typeof r.advisory_id === "string" && INTERNAL_ID.test(r.advisory_id));
+  return row ? { vendor: row.vendor, advisory_id: row.advisory_id } : undefined;
+}
+export const CHAIN_PROBES = [
+  {
+    label: CHAIN_LABEL,
+    tool: "get_vendor_advisory",
+    arguments: (seen) => internalIdFrom(seen.vendor_advisories_for_cve),
+    published: (tool) => /vendor_advisory_id/.test(tool?.inputSchema?.properties?.advisory_id?.description ?? ""),
+    // A success: the advisory the UUID names.
+    expect: (sc, args) =>
+      sc?.state === "measured" && sc?.data?.advisory_id === args.advisory_id
+        ? undefined
+        : `state ${JSON.stringify(sc?.state ?? null)}, data.advisory_id ${JSON.stringify(sc?.data?.advisory_id ?? null)}; want the advisory whose advisory_id was sent, or invalid_input naming vendor_advisory_id`,
+    // A refusal: invalid_input whose error names the field to pass instead.
+    refusal: (sc) =>
+      sc?.error?.kind === "invalid_input" && /vendor_advisory_id/.test(sc?.error?.message ?? "")
+        ? undefined
+        : `invalid_input with error.kind ${JSON.stringify(sc?.error?.kind ?? null)} whose message does not name vendor_advisory_id`,
   },
 ];
 
@@ -470,3 +572,37 @@ export const PROMPT_PROBES = [
   { label: "prompt:workload_triage", name: "workload_triage", arguments: { source: "kubernetes" }, expect: "check_sbom", unmet: "prompt_tool_not_named" },
 ];
 export const RESOURCE_PROBE = { label: "resource:methodology", uri: "echelongraph://methodology" };
+
+// #3282: the release each probed tool, prompt and resource first shipped in, by the line's `tool`
+// (a tool's name; a prompt or resource probe's label; a verdict or chain probe reads its tool's).
+// An endpoint whose handshake reports this version or a later one and does not list it is a
+// failure, reason not_listed (run.mjs unlisted): a hosted revision built from an older tag, one
+// deploy over another, or a hosted-only registration regression drops it, and through 3.0.2 that
+// read not_published on every run and paged nobody. Before that version, or with no version to
+// read, it is not_published, as a planned tool is (one with no entry here). From the CHANGELOG:
+// the five tools before 2.4.0 are given 2.4.0, the first release with the hosted entry
+// (dist/http.js), which the hosted leg is the only one to reach at an old version; 2.4.0's nine
+// (#2726); 2.5.0's prompts and resources (#2722); 2.7.0's cve_remediation (#2841), scan_manifest
+// (#2835) and workload_triage (#2846). A tool or probe added to this file is given its release
+// here (run.test.mjs holds every probe to an entry).
+export const SHIPPED_IN = {
+  cve_summary: "2.4.0",
+  search_cves: "2.4.0",
+  get_cve: "2.4.0",
+  cve_exposure: "2.4.0",
+  exposure_radar: "2.4.0",
+  kev_recent: "2.4.0",
+  epss_history: "2.4.0",
+  check_affected: "2.4.0",
+  check_sbom: "2.4.0",
+  scan_manifest: "2.7.0",
+  cve_intel: "2.4.0",
+  cve_remediation: "2.7.0",
+  get_cwe: "2.4.0",
+  vendor_advisories_for_cve: "2.4.0",
+  get_vendor_advisory: "2.4.0",
+  search_vendor_advisories: "2.4.0",
+  "prompt:triage_cve": "2.5.0",
+  "prompt:workload_triage": "2.7.0",
+  "resource:methodology": "2.5.0",
+};

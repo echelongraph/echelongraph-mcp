@@ -16,21 +16,39 @@
 //   failure       anything else: a JSON-RPC error, a timeout, isError, state failed or
 //                 invalid_input, no structuredContent, a structuredContent the schema refuses,
 //                 or no input the synthetic can send. `reason` says which.
-//   not_published a tool probes.mjs names that this version does not list (a planned tool).
+//   not_published a tool probes.mjs names that this version does not list (a planned tool, or one
+//                 whose probes.mjs SHIPPED_IN release is past the version the server reports).
+//   failure, reason not_listed (#3282): a tool, prompt or resource the server does not list
+//                 although the version it reports is at or past the one probes.mjs SHIPPED_IN
+//                 gives it (shipped_in on the line): a rolled-back or mis-registered endpoint.
 //
 // OUTPUT: one JSON line per tool per era on stdout, message "mcp tool probe", which Cloud Run
 // stores as jsonPayload; the log-based metric mcp_tool_probe_total{tool,era,outcome,transport} counts
-// them and mcp_tool_probe_latency_ms reads latency_ms (infrastructure/monitoring/
-// create-mcp-synthetic-monitoring.sh). Then one "mcp synthetic run complete" line, the
+// them, mcp_tool_probe_latency_ms reads latency_ms, and mcp_tool_probe_text_chars and
+// mcp_tool_probe_structured_chars read text_chars and structured_chars (#2781, below)
+// (infrastructure/monitoring/create-mcp-synthetic-monitoring.sh). Then one "mcp synthetic run complete" line, the
 // liveness signal. Every line has the one severity of its message, INFO: the outcome is a
 // field, never the severity, so a re-levelled line cannot silence a metric.
 //
 // The session itself can fail (install, spawn, handshake, tools/list): that is a probe line
 // with tool "(install)" or "(session)" and outcome failure, so the same alert sees it.
 //
+// WHAT AN ANSWER COSTS A CLIENT (#2781). Every probe line whose call was answered (a tool, a
+// verdict, a chain probe, a prompt or the resource) carries text_chars: the characters of every text block it
+// returned (a resource's contents, a prompt's messages), what lands in a client's context. A
+// tools/call line carries structured_chars too: its structuredContent as compact JSON, what Claude
+// Code hands the model, null when the answer has none. Both are measured as test/text-bound.mjs
+// measures them (textSize's total, structuredSize; run.test.mjs holds the two equal), so the series
+// is the same number the suite bounds: under #2617's trip-wire of 45,000 characters of text and
+// #3013's budget of 30,000 of structuredContent. create-mcp-synthetic-monitoring.sh reads them
+// (mcp_tool_probe_text_chars, mcp_tool_probe_structured_chars) and alerts past either. Sizes only:
+// a count of characters, never a character of the answer. On the stdio leg the package talks to
+// the forwarder, whose base is as long as the API base it stands for (forwarder.mjs), and that
+// base is counted as the API's, so the size is the one a client of that API receives.
+//
 // THE CLIENT CUT (#2842). Once per era and transport, after tools/list, one more line, message
-// "mcp text cut": what a client that cuts MCP text at 2,048 characters (Claude Code; the package's
-// src/requiredText.ts cites where) hands the model of that session's server instructions and tool
+// "mcp text cut": what a client that cuts MCP text at 2,048 characters (Claude Code from v2.1.280;
+// the package's src/requiredText.ts cites where) hands the model of that session's server instructions and tool
 // descriptions. instructions_chars is the opening exchange's instructions length (initialize, or
 // server/discover on the modern era); description_heads_ok says whether every sentence the
 // package's REQUIRED_IN_HEAD names for a tool sits in that tool's first 2,048 characters, and no
@@ -49,8 +67,12 @@
 // endpoint's own tests use) on both eras: lists the tools, calls every one with the same probe
 // table, judged the same way against the outputSchema the ENDPOINT advertises, then a tools/call per
 // probes.mjs VERDICT_PROBES entry not in EXPECT_PENDING (#3135: the matcher answers that tell #3074's
-// fixed_in walk and the #3101/#3131 comparators from the rules before them, tools "verdict:…"; the
-// #3131 Mali one is pending until #3131 is deployed), then a prompts/get
+// fixed_in walk and the #3101/#3131 comparators from the rules before them, tools "verdict:…"; a
+// label held back in EXPECT_PENDING is not called, and none is), then a tools/call per probes.mjs
+// CHAIN_PROBES entry (#3011: get_vendor_advisory given a vendor_advisories_for_cve row's
+// advisory_id, the chaining mistake, which must answer the advisory or invalid_input naming
+// vendor_advisory_id, never failed; not_published until the endpoint advertises that fix), then a
+// prompts/get
 // per probes.mjs PROMPT_PROBES entry (triage_cve with a CVE; workload_triage with source
 // kubernetes, #2846) and one resources/read (echelongraph://methodology), tools "prompt:triage_cve",
 // "prompt:workload_triage" and "resource:methodology". check_sbom is sent its 201 purls as
@@ -61,6 +83,29 @@
 // "stdio" or "http", the metric's fourth label, so a hosted outage is its own series and its own
 // alert; package_version on an http line is the version the endpoint reports in its handshake.
 // The hosted leg runs even when the npm install failed: they are independent products.
+//
+// HOSTED VERSUS NPM (#3097). The hosted endpoint reports a version in its handshake, and #2741's
+// gate holds the image deploy-all.sh builds to that release; a hand deploy, the gate's override or a
+// rollback to a pre-gate revision does not, and on 2026-10-11 hosted and npm both said 2.7.1 and
+// served different cve_intel descriptions. So when both legs ran and the endpoint reports the
+// version the npm leg runs, each era's catalog of the two is compared: every tool object as
+// tools/list gives it (name, title, description, inputSchema, outputSchema, annotations, every
+// field), every prompt and resource as prompts/list and resources/list give them, and the
+// instructions. One more probe line per era on the http leg, tool "(hosted-vs-npm)": success when
+// they are the same; failure, reason hosted_differs_from_npm, when not, with differences (the
+// count) and detail (the first few, e.g. "tool cve_intel: description differs at character 221"),
+// so "MCP tool failed 2 synthetic runs in a row" opens on a divergence that lasts two runs. A list
+// one side could not read is named in uncompared and is not a difference (its own probe line
+// says why). #3097's review: when the endpoint reports another version than the npm leg runs (a
+// rollback to an older release, a deploy reporting another number), it is compared with npm's own
+// package of the version it reports, echelongraph-mcp@<that version>, installed once per run as the
+// npm leg's is and listed over stdio for each era (no tool is called); the line says
+// compared_with "hosted_version" ("npm_leg" otherwise). npm not serving that version is a failure,
+// reason hosted_version_not_on_npm (a build no release has); an install that fails otherwise is
+// hosted_version_install_failed, never read as the same. Without both legs, or a version unknown,
+// nothing is compared and no line is written. The run-complete line's hosted_vs_npm says which:
+// identical, differs, hosted_version_not_on_npm, hosted_version_install_failed, version_unknown or
+// not_compared, and hosted_vs_npm_at the npm version compared.
 // An answer that is not JSON-RPC (a platform 5xx, a 403 from the Origin policy, a 404) is reason
 // http_status with the status in http_status.
 //
@@ -77,7 +122,8 @@
 // No value is logged that a person typed: the inputs are this file's own public constants, and
 // a line names the candidate it sent by index.
 //
-// Exit status: 0 when every probe line is success or not_published and no client-cut line is a
+// Exit status: 0 when every probe line is success or not_published (never not_listed, a failure)
+// and no client-cut line is a
 // failure, 2 when any is, 1 when the runner itself broke. The metric, not the exit status, is
 // what alerts.
 //
@@ -104,7 +150,7 @@ import { parseArgs, promisify } from "node:util";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { connect, MODERN, RpcError } from "../test/mcp-stdio-client.mjs";
 import { connectHttp, HttpStatusError } from "../test/mcp-http-client.mjs";
-import { AFTER, EXPECT, EXPECT_PENDING, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE, VERDICT_PROBES } from "./probes.mjs";
+import { AFTER, CHAIN_PROBES, EXPECT, EXPECT_PENDING, HTTP_EXPECT, HTTP_PROBES, PROBES, PROMPT_PROBES, RESOURCE_PROBE, SHIPPED_IN, VERDICT_PROBES } from "./probes.mjs";
 import { startForwarder } from "./forwarder.mjs";
 
 export const LEGACY = "2025-06-18";
@@ -115,6 +161,8 @@ export const UA_TOKEN = "echelongraph-mcp-synthetic/1.0";
 export const PROBE_MESSAGE = "mcp tool probe";
 export const COMPLETE_MESSAGE = "mcp synthetic run complete";
 export const TEXT_CUT_MESSAGE = "mcp text cut";
+// #3097: the probe line of the hosted-versus-npm comparison, one per era on the http leg.
+export const DRIFT_TOOL = "(hosted-vs-npm)";
 // The cut when the package under test ships no requiredText.js: Claude Code's default, the value
 // src/requiredText.ts CLIENT_DESCRIPTION_CUT holds.
 export const DEFAULT_CLIENT_CUT = 2048;
@@ -201,6 +249,21 @@ export function judge(res, tool, expect) {
   const unmet = expect?.(sc);
   if (unmet !== undefined) return { outcome: "failure", reason: "expectation_unmet", state, detail: String(unmet).slice(0, 300) };
   return { outcome: "success", state };
+}
+
+// How a CHAIN_PROBES call is judged (#3011): an invalid_input answer is the specified refusal when it
+// is a failure result (isError) that fits the tool's outputSchema and the probe's `refusal` holds of
+// it; any other answer is judged as a tools/call is, with the probe's `expect` of the arguments sent.
+export function judgeChain(res, tool, probe, args) {
+  const sc = res?.structuredContent;
+  if (res?.isError === true && sc && typeof sc === "object" && sc.state === "invalid_input") {
+    if (!tool?.outputSchema || typeof tool.outputSchema !== "object") return { outcome: "failure", reason: "no_output_schema", state: sc.state };
+    const v = validates(tool.outputSchema, sc);
+    if (!v.valid) return { outcome: "failure", reason: "schema_invalid", state: sc.state, detail: String(v.errorMessage ?? "").slice(0, 300) };
+    const unmet = probe.refusal(sc);
+    return unmet === undefined ? { outcome: "success", state: sc.state } : { outcome: "failure", reason: "expectation_unmet", state: sc.state, detail: String(unmet).slice(0, 300) };
+  }
+  return judge(res, tool, (x) => probe.expect(x, args));
 }
 
 // How a prompts/get answer is judged (#2737): at least one message, every one a user or
@@ -310,6 +373,65 @@ export function judgeTextCut({ instructions, tools }, required) {
   return { outcome: past ? "failure" : "success", ...out };
 }
 
+// #2781: what an answer costs a client, as test/text-bound.mjs measures it (the header says why).
+// `localBase` is the base the package was pointed at, counted as `asBase`, the API's. A prompt's
+// or a resource's answer has no structuredContent, so its line carries text_chars alone.
+export function sizesOf(res, { localBase, asBase } = {}) {
+  const count = (s) => (localBase && asBase && localBase !== asBase ? s.split(localBase).join(asBase) : s).length;
+  if (Array.isArray(res?.contents)) return { text_chars: res.contents.filter((c) => typeof c?.text === "string").reduce((n, c) => n + count(c.text), 0) };
+  if (Array.isArray(res?.messages)) return { text_chars: res.messages.filter((m) => m?.content?.type === "text" && typeof m.content.text === "string").reduce((n, m) => n + count(m.content.text), 0) };
+  const text = (Array.isArray(res?.content) ? res.content : []).filter((c) => c?.type === "text" && typeof c.text === "string");
+  return {
+    text_chars: text.reduce((n, c) => n + count(c.text), 0),
+    structured_chars: res?.structuredContent === undefined ? null : count(JSON.stringify(res.structuredContent)),
+  };
+}
+
+// #3097: what differs between two catalogs of one era, the npm package's and the hosted
+// endpoint's: { differences: [string], compared: { tools, prompts, resources }, uncompared: [string] }.
+// A catalog is { instructions, tools, prompts, resources }; prompts and resources are a list, or
+// { error } when that side could not read it. Objects are compared whole, keys in any order.
+const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
+const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+const firstDiff = (a, b) => {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+};
+function diffField(what, field, a, b) {
+  if (typeof a === "string" && typeof b === "string") return `${what}: ${field} differs at character ${firstDiff(a, b) + 1} (npm ${a.length} characters, hosted ${b.length})`;
+  if (a === undefined) return `${what}: ${field} only on the hosted endpoint`;
+  if (b === undefined) return `${what}: ${field} only on npm`;
+  return `${what}: ${field} differs`;
+}
+function diffItems(kind, key, npm, hosted, out) {
+  const a = new Map(npm.map((x) => [x?.[key], x]));
+  const b = new Map(hosted.map((x) => [x?.[key], x]));
+  for (const k of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+    const what = `${kind} ${k}`;
+    if (!b.has(k)) out.push(`${what}: only on npm`);
+    else if (!a.has(k)) out.push(`${what}: only on the hosted endpoint`);
+    else {
+      const x = a.get(k), y = b.get(k);
+      for (const f of [...new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {})])].sort()) if (!same(x?.[f], y?.[f])) out.push(diffField(what, f, x?.[f], y?.[f]));
+    }
+  }
+  return a.size;
+}
+export function compareCatalogs(npm, hosted) {
+  const differences = [];
+  const uncompared = [];
+  const compared = { tools: diffItems("tool", "name", npm.tools ?? [], hosted.tools ?? [], differences), prompts: 0, resources: 0 };
+  for (const [kind, list, key] of [["prompt", "prompts", "name"], ["resource", "resources", "uri"]]) {
+    const a = npm[list], b = hosted[list];
+    if (Array.isArray(a) && Array.isArray(b)) compared[list] = diffItems(kind, key, a, b, differences);
+    else if (!Array.isArray(a) && !Array.isArray(b) && same(a, b)) compared[list] = 0;
+    else uncompared.push(`${list}/list (${Array.isArray(a) ? "npm read it" : `npm: ${a?.error ?? "unread"}`}, ${Array.isArray(b) ? "hosted read it" : `hosted: ${b?.error ?? "unread"}`})`);
+  }
+  if (!same(npm.instructions, hosted.instructions)) differences.unshift(diffField("the server", "instructions", npm.instructions, hosted.instructions));
+  return { differences, compared, uncompared };
+}
+
 function errorReason(e) {
   if (e instanceof RpcError) return { reason: "rpc_error", rpc_code: e.code };
   if (e instanceof HttpStatusError) return { reason: "http_status", http_status: e.status };
@@ -321,23 +443,72 @@ function errorReason(e) {
 
 const CLIENT_INFO = { name: "echelongraph-mcp-synthetic", version: "1.0.0" };
 
-// Probe one era of the npm package over stdio: one line per tool.
-export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {} }) {
+// #3097: a session's catalog: the instructions, the tools as listed, and prompts/list and
+// resources/list ({ error } where one could not be read).
+async function catalogOf(client, tools, promptsOnce, resourcesOnce) {
+  const settle = async (once, key) => {
+    try {
+      return (await once())[key] ?? [];
+    } catch (e) {
+      const r = errorReason(e);
+      return { error: [r.reason, r.rpc_code ?? r.http_status].filter((x) => x !== undefined).join(" ") };
+    }
+  };
+  return { instructions: client.opening?.instructions, tools, prompts: await settle(promptsOnce, "prompts"), resources: await settle(resourcesOnce, "resources") };
+}
+
+// #3097's review: one era's catalog of the npm package at `serverJs`, listed over stdio, no tool
+// called. Throws when the session or tools/list fails.
+export async function readCatalog({ era, serverJs, env, timeoutMs }) {
+  const client = await connect({ era, command: process.execPath, args: [serverJs], env, stderr: "ignore", clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
+  try {
+    const { tools } = await client.listTools();
+    return await catalogOf(client, tools, () => client.listPrompts(), () => client.listResources());
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+// Probe one era of the npm package over stdio: one line per tool. `measure` sizes an answer
+// (sizesOf, with the forwarder's base counted as the API's).
+export function probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog, measure = sizesOf }) {
   const open = () =>
     connect({ era, command: process.execPath, args: [serverJs], env, stderr: "ignore", clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
-  return probeSession({ era, open, force, emit, onServerInfo, onListed });
+  return probeSession({ era, open, force, emit, onServerInfo, onListed, onCatalog, measure });
 }
 
 // Probe one era of the hosted endpoint over Streamable HTTP (#2737): one line per tool, then one
 // per prompt probe and one for the resource. Its own inputs and expectations where probes.mjs has
 // them (#2774: check_sbom is sent a document past the endpoint's 64 KiB general body cap).
-export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {} }) {
+export function probeHttpEra({ era, url, force, timeoutMs, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog }) {
   const open = () => connectHttp({ era, url, userAgent: UA_TOKEN, clientInfo: CLIENT_INFO, requestTimeoutMs: timeoutMs });
-  return probeSession({ era, open, force, emit, onServerInfo, onListed, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
+  return probeSession({ era, open, force, emit, onServerInfo, onListed, onCatalog, extras: true, probes: { ...PROBES, ...HTTP_PROBES }, expect: { ...EXPECT, ...HTTP_EXPECT } });
 }
 
-// One prompt or resource probe: listed? then called and judged.
-async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
+// #3282: a version as its release triple, or undefined where it is not one ("unknown", "1.2", a
+// tag): such a version gates nothing. A pre-release sorts below its release (2.7.0-rc.1 < 2.7.0).
+function releaseOf(v) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.exec(String(v ?? "").trim());
+  return m ? { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: Boolean(m[4]) } : undefined;
+}
+export function versionAtLeast(version, floor) {
+  const a = releaseOf(version);
+  const b = releaseOf(floor);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if (a.nums[i] !== b.nums[i]) return a.nums[i] > b.nums[i];
+  return !a.pre || b.pre;
+}
+// #3282: the line for a probe the server does not list: a failure, reason not_listed, where the
+// version it reports is at or past the release SHIPPED_IN gives the probe (it should list it),
+// else not_published. `key` is the probe's SHIPPED_IN key; `shipped` the table (probes.mjs's, or a
+// test's).
+export function unlisted(key, served, shipped = SHIPPED_IN) {
+  const since = shipped[key];
+  return since && versionAtLeast(served, since) ? { outcome: "failure", reason: "not_listed", shipped_in: since } : { outcome: "not_published" };
+}
+
+// One prompt or resource probe: listed? then called, sized and judged.
+async function probeExtra({ era, emit, label, list, listed, call, judgeIt, served, shipped, measure }) {
   let items;
   try {
     items = await list();
@@ -346,7 +517,7 @@ async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
     return;
   }
   if (!items.some(listed)) {
-    emit({ tool: label, era, outcome: "not_published" });
+    emit({ tool: label, era, ...unlisted(label, served, shipped) });
     return;
   }
   const t0 = performance.now();
@@ -357,15 +528,20 @@ async function probeExtra({ era, emit, label, list, listed, call, judgeIt }) {
     emit({ tool: label, era, outcome: "failure", latency_ms: Math.round(performance.now() - t0), ...errorReason(e) });
     return;
   }
-  emit({ tool: label, era, latency_ms: Math.round(performance.now() - t0), ...judgeIt(res) });
+  emit({ tool: label, era, latency_ms: Math.round(performance.now() - t0), ...measure(res), ...judgeIt(res) });
 }
 
 // Probe one era of one session, however it is opened: one line per tool (and, with extras, one
 // per VERDICT_PROBES entry not in EXPECT_PENDING (#3135: a pending one is not called and writes no
-// line), one per PROMPT_PROBES entry and one for the resource), with the leg's probe table and
+// line), one per CHAIN_PROBES entry (#3011, not_published where the endpoint does not advertise its
+// fix), one per PROMPT_PROBES entry and one for the resource), with the leg's probe table and
 // expectations.
-// onListed gets the opening exchange's instructions and the tools/list answer (#2842).
-export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, onListed = () => {}, extras = false, probes = PROBES, expect = EXPECT }) {
+// onListed gets the opening exchange's instructions and the tools/list answer (#2842). onCatalog,
+// when given, gets the session's catalog once its probes are done (#3097): the instructions, the
+// tools as listed, and prompts/list and resources/list (each read once per session, shared with
+// the prompt and resource probes; { error } when it could not be read). `measure` sizes each
+// answer for its line (#2781, sizesOf).
+export async function probeSession({ era, open, force, emit, onServerInfo = () => {}, onListed = () => {}, onCatalog, extras = false, probes = PROBES, expect = EXPECT, shipped = SHIPPED_IN, measure = sizesOf }) {
   let client;
   try {
     client = await open();
@@ -373,7 +549,10 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
     emit({ tool: "(session)", era, outcome: "failure", step: "open", ...errorReason(e) });
     return;
   }
-  onServerInfo(client.getServerVersion());
+  const serverInfo = client.getServerVersion();
+  onServerInfo(serverInfo);
+  // #3282: the version the server reports, which a probe it does not list is held to.
+  const served = serverInfo?.version;
   try {
     let tools;
     try {
@@ -383,13 +562,16 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
       return;
     }
     onListed({ instructions: client.opening?.instructions, tools });
+    let promptsP, resourcesP;
+    const promptsOnce = () => (promptsP ??= client.listPrompts());
+    const resourcesOnce = () => (resourcesP ??= client.listResources());
     const byName = new Map(tools.map((t) => [t.name, t]));
     const seen = {};
     for (const name of probeOrder(tools.map((t) => t.name), force)) {
       const tool = byName.get(name);
       const forced = force.includes(name);
       if (!tool && !forced) {
-        emit({ tool: name, era, outcome: "not_published" });
+        emit({ tool: name, era, ...unlisted(name, served, shipped) });
         continue;
       }
       const choice = tool ? chooseInput(name, tool, seen, probes) : { args: {}, index: -1 };
@@ -408,7 +590,7 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
       const latency = Math.round(performance.now() - t0);
       const verdict = judge(res, tool, expect[name]);
       if (verdict.outcome === "success") seen[name] = res.structuredContent;
-      emit({ tool: name, era, latency_ms: latency, input: choice.index, ...verdict });
+      emit({ tool: name, era, latency_ms: latency, input: choice.index, ...measure(res), ...verdict });
     }
     if (extras) {
       // #3135: the matcher's verdicts, each one call of a listed tool under its own label, judged as
@@ -419,7 +601,7 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
         if (EXPECT_PENDING[v.label]) continue;
         const tool = byName.get(v.tool);
         if (!tool) {
-          emit({ tool: v.label, era, outcome: "not_published" });
+          emit({ tool: v.label, era, ...unlisted(v.tool, served, shipped) });
           continue;
         }
         const choice = chooseInput(v.tool, tool, seen, { [v.tool]: [v.arguments] });
@@ -435,12 +617,39 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
           emit({ tool: v.label, era, outcome: "failure", latency_ms: Math.round(performance.now() - t0), ...errorReason(e) });
           continue;
         }
-        emit({ tool: v.label, era, latency_ms: Math.round(performance.now() - t0), ...judge(res, tool, v.expect) });
+        emit({ tool: v.label, era, latency_ms: Math.round(performance.now() - t0), ...measure(res), ...judge(res, tool, v.expect) });
+      }
+      // #3011: the chaining mistake, judged only where the endpoint advertises its fix (`published`).
+      for (const c of CHAIN_PROBES) {
+        const tool = byName.get(c.tool);
+        // #3282: its tool unlisted is held to that tool's release; listed without the fix, the
+        // probe is not_published until the endpoint advertises it.
+        if (!tool) {
+          emit({ tool: c.label, era, ...unlisted(c.tool, served, shipped) });
+          continue;
+        }
+        if (!c.published(tool)) {
+          emit({ tool: c.label, era, outcome: "not_published" });
+          continue;
+        }
+        const choice = chooseInput(c.tool, tool, seen, { [c.tool]: [c.arguments] });
+        if (!choice.args) {
+          emit({ tool: c.label, era, outcome: "failure", reason: choice.reason });
+          continue;
+        }
+        const t0 = performance.now();
+        let res;
+        try {
+          res = await client.callTool({ name: c.tool, arguments: choice.args });
+        } catch (e) {
+          emit({ tool: c.label, era, outcome: "failure", latency_ms: Math.round(performance.now() - t0), ...errorReason(e) });
+          continue;
+        }
+        emit({ tool: c.label, era, latency_ms: Math.round(performance.now() - t0), ...measure(res), ...judgeChain(res, tool, c, choice.args) });
       }
       // One prompts/list per era, read by every prompt probe: a list that fails is a failure line
       // for each prompt's label, as one that answers is read for each.
-      let prompts;
-      const listPrompts = async () => (await (prompts ??= client.listPrompts())).prompts;
+      const listPrompts = async () => (await promptsOnce()).prompts;
       for (const probe of PROMPT_PROBES) {
         await probeExtra({
           era,
@@ -450,18 +659,25 @@ export async function probeSession({ era, open, force, emit, onServerInfo = () =
           listed: (p) => p?.name === probe.name,
           call: () => client.getPrompt({ name: probe.name, arguments: probe.arguments }),
           judgeIt: (res) => judgePrompt(res, probe.expect, probe.unmet),
+          served,
+          shipped,
+          measure,
         });
       }
       await probeExtra({
         era,
         emit,
         label: RESOURCE_PROBE.label,
-        list: async () => (await client.listResources()).resources,
+        list: async () => (await resourcesOnce()).resources,
         listed: (r) => r?.uri === RESOURCE_PROBE.uri,
         call: () => client.readResource({ uri: RESOURCE_PROBE.uri }),
         judgeIt: (res) => judgeResource(res, RESOURCE_PROBE.uri),
+        served,
+        shipped,
+        measure,
       });
     }
+    if (onCatalog) onCatalog(await catalogOf(client, tools, promptsOnce, resourcesOnce));
     if (client.protocolViolation) emit({ tool: "(session)", era, outcome: "failure", step: "stdout", reason: "protocol_violation" });
   } finally {
     await client.close().catch(() => {});
@@ -517,6 +733,16 @@ export async function runSynthetic(opts = {}) {
     write({ severity: "INFO", message: TEXT_CUT_MESSAGE, run_id: runId, package_version: v, transport, era, ...fields, description_heads_basis: basis, required_version: required ? version : null });
   };
 
+  // #3097: each leg's catalog per era, compared when both legs ran.
+  const catalogs = { [STDIO]: {}, [HTTP]: {} };
+  const keep = (transport, era) => (c) => (catalogs[transport][era] = c);
+  let hostedVsNpm;
+  let hostedVsNpmAt;
+  // #3097's review: how npm's package of the hosted version is installed (tests pass their own).
+  const install = opts.installPackage ?? installPackage;
+  let stdioEnv;
+  const tmps = [];
+
   let tmp;
   let forwarder;
   try {
@@ -527,12 +753,81 @@ export async function runSynthetic(opts = {}) {
       const onServerInfo = (info) => {
         if (remoteVersion === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) remoteVersion = info.version;
       };
-      for (const era of eras) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(HTTP, era) });
+      for (const era of eras) await probeHttpEra({ era, url: remoteUrl, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(HTTP, era), onCatalog: keep(HTTP, era) });
+      if (stdio) hostedVsNpm = await compareLegs(emit);
     }
     return finish();
   } finally {
     await forwarder?.close();
-    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+    for (const d of [tmp, ...tmps]) if (d) fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // #3097's review: npm's package of the version the endpoint reports, installed once per run into a
+  // directory of its own, and each era's catalog of it: { catalogs } or { reason, detail }.
+  async function hostedVersionCatalogs() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eg-mcp-synthetic-hosted-"));
+    tmps.push(dir);
+    let installed;
+    try {
+      installed = await install(`echelongraph-mcp@${remoteVersion}`, dir);
+    } catch (e) {
+      const said = String(e?.message ?? e).split("\n")[0].slice(0, 300);
+      return { reason: /\bE(TARGET|404)\b|notarget|No matching version|is not in this registry/i.test(said) ? "hosted_version_not_on_npm" : "hosted_version_install_failed", detail: said };
+    }
+    const out = {};
+    for (const era of eras) {
+      if (!catalogs[HTTP][era]) continue;
+      try {
+        out[era] = await readCatalog({ era, serverJs: installed.serverJs, env: stdioEnv, timeoutMs });
+      } catch (e) {
+        return { reason: "hosted_version_install_failed", detail: `echelongraph-mcp@${remoteVersion} [${era}]: ${errorReason(e).reason}` };
+      }
+    }
+    return { catalogs: out };
+  }
+
+  // #3097: the hosted endpoint against the npm package, era by era: the npm leg's when both report
+  // one version, npm's package of the hosted version when they do not.
+  async function compareLegs(emit) {
+    if (version === "unknown" || remoteVersion === "unknown") return "version_unknown";
+    let against = catalogs[STDIO];
+    let comparedWith = "npm_leg";
+    if (version !== remoteVersion) {
+      comparedWith = "hosted_version";
+      const got = await hostedVersionCatalogs();
+      if (!got.catalogs) {
+        for (const era of eras) {
+          if (catalogs[HTTP][era]) emit({ tool: DRIFT_TOOL, era, outcome: "failure", reason: got.reason, detail: got.detail, npm_version: remoteVersion, compared_with: comparedWith });
+        }
+        hostedVsNpmAt = remoteVersion;
+        return got.reason;
+      }
+      against = got.catalogs;
+    }
+    hostedVsNpmAt = comparedWith === "npm_leg" ? version : remoteVersion;
+    let lines = 0;
+    let differs = false;
+    for (const era of eras) {
+      const npm = against[era];
+      const hosted = catalogs[HTTP][era];
+      if (!npm || !hosted) continue;
+      const r = compareCatalogs(npm, hosted);
+      lines++;
+      differs ||= r.differences.length > 0;
+      emit({
+        tool: DRIFT_TOOL,
+        era,
+        outcome: r.differences.length ? "failure" : "success",
+        ...(r.differences.length ? { reason: "hosted_differs_from_npm", differences: r.differences.length, detail: r.differences.slice(0, 5).join("; ").slice(0, 300) } : {}),
+        npm_version: hostedVsNpmAt,
+        compared_with: comparedWith,
+        compared_tools: r.compared.tools,
+        compared_prompts: r.compared.prompts,
+        compared_resources: r.compared.resources,
+        ...(r.uncompared.length ? { uncompared: r.uncompared.join("; ").slice(0, 300) } : {}),
+      });
+    }
+    return lines === 0 ? "not_compared" : differs ? "differs" : "identical";
   }
 
   // The npm package over stdio. An install that fails is an (install) line per era, and the
@@ -561,11 +856,14 @@ export async function runSynthetic(opts = {}) {
       ECHELONGRAPH_MCP_UA: UA_TOKEN,
       ...(opts.serverEnv ?? {}),
     };
+    stdioEnv = env;
     // The version the server reports in its handshake, when it was not installed by spec here.
     const onServerInfo = (info) => {
       if (version === "unknown" && typeof info?.version === "string" && VERSION_SHAPE.test(info.version)) version = info.version;
     };
-    for (const era of eras) await probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(STDIO, era) });
+    // #2781: the forwarder's base, which the package quotes, counted as the API's.
+    const measure = (res) => sizesOf(res, { localBase: forwarder?.base, asBase: apiBase.replace(/\/+$/, "") });
+    for (const era of eras) await probeEra({ era, serverJs, env, force, timeoutMs, emit, onServerInfo, onListed: textCutLine(STDIO, era), onCatalog: remoteUrl ? keep(STDIO, era) : undefined, measure });
   }
 
   function finish() {
@@ -577,6 +875,10 @@ export async function runSynthetic(opts = {}) {
       eras,
       transports,
       ...(remoteUrl ? { remote_version: remoteVersion } : {}),
+      // #3097: identical, differs, hosted_version_not_on_npm, hosted_version_install_failed,
+      // version_unknown or not_compared (both legs ran, neither era had both catalogs), and
+      // hosted_vs_npm_at, the npm version compared; absent without both legs.
+      ...(remoteUrl && stdio ? { hosted_vs_npm: hostedVsNpm ?? "not_compared", ...(hostedVsNpmAt ? { hosted_vs_npm_at: hostedVsNpmAt } : {}) } : {}),
       ...counts,
       // #2842: the client-cut lines this run wrote, and how many of them were failures.
       text_cut_lines: textCut.lines,

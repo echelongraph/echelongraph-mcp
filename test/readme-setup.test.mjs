@@ -12,14 +12,16 @@
 //     reads the difference as a failed install. It points to the Tools table instead.
 //   * The README never says, unconditionally, that each radar refreshes. A radar refreshes only while
 //     it runs, and four of them were stopped on 8 October 2026 while this README said they refreshed;
-//     the README ships to npm and cannot follow a pause, so its sentence is true either way.
-import { describe, it } from "node:test";
+//     the README ships to npm and cannot follow a pause, so its sentence is true either way. #3246: nor
+//     does any docs/ page, which ships too and now holds exposure_radar's reference (#3012).
+import { after, describe, it } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { readPkgFile } from "./server-under-test.mjs";
+import { readDocs, readPkgFile } from "./server-under-test.mjs";
+import { BOTH_STATES, UNCONDITIONAL_REFRESH } from "./barred-claims.mjs";
 
 const README = readPkgFile("README.md");
 const REMOTE = JSON.parse(readPkgFile("server.json")).remotes?.[0]?.url;
@@ -68,9 +70,6 @@ const REQUIRED = [
 ];
 const missing = (text) => REQUIRED.filter(([, n]) => !text.includes(n)).map(([what, n]) => `${what} (${n})`);
 
-/** A claim that the radars refresh, with no condition: true of a radar only while it runs. */
-const UNCONDITIONAL_REFRESH = /\beach radar refreshes on its own\b|\brefreshes on its own schedule\b/i;
-const BOTH_STATES = "Each radar has its own schedule and refreshes only while it runs";
 
 describe("README Claude Desktop setup (#2813)", () => {
   it("carries every step and the troubleshooting block, the connector before npx", () => {
@@ -90,27 +89,46 @@ describe("README Claude Desktop setup (#2813)", () => {
   });
 });
 
-describe("README freshness (#3010)", () => {
-  it("never says each radar refreshes, and says a radar refreshes only while it runs", () => {
+// The claim and the sentence that replaced it are barred-claims.mjs's (#3246), one wording for every surface.
+const refreshClaims = (pages) =>
+  pages.flatMap(([page, text]) => {
+    const m = prose(text).match(UNCONDITIONAL_REFRESH);
+    return m ? [`${page} says "${m[0]}", which a stopped radar makes false`] : [];
+  });
+
+describe("README and docs/ freshness (#3010, #3246)", () => {
+  it("no page of the package's documentation says each radar refreshes, and the README says a radar refreshes only while it runs", () => {
+    assert.deepEqual(refreshClaims(readDocs()), []);
     const text = prose(README);
-    const m = text.match(UNCONDITIONAL_REFRESH);
-    assert.equal(m, null, `the README says "${m?.[0]}", which a stopped radar makes false`);
     assert.ok(text.includes(BOTH_STATES), `the README no longer says "${BOTH_STATES}"`);
     assert.ok(text.includes("exposure_radar's freshness gives each radar's last completed check (last_run_at)"), "the README no longer says where a radar's last completed check is");
   });
-  it("control: the sentence the README carried through the 2026-10-08 pause fails", () => {
+  it("control: the sentence the README carried through the 2026-10-08 pause fails, on the README and on a docs/ page", () => {
     assert.match("The CVE feed is polled from its sources on a schedule; each radar refreshes on its own.", UNCONDITIONAL_REFRESH);
     assert.doesNotMatch(BOTH_STATES, UNCONDITIONAL_REFRESH);
+    const docs = readDocs();
+    assert.ok(docs.some(([p]) => p === "docs/exposure-radar.md"), "docs/exposure-radar.md is not read: re-aim this control");
+    for (const target of ["README.md", "docs/exposure-radar.md", "docs/tools.md"]) {
+      const mutated = docs.map(([p, t]) => [p, p === target ? `${t}\nEach radar refreshes on its own schedule.\n` : t]);
+      assert.deepEqual(refreshClaims(mutated), [`${target} says "Each radar refreshes on its own", which a stopped radar makes false`]);
+    }
   });
 });
 
 // #3096: the README's "check that the file parses" command, run as printed. Through 2.7.2 it took a
 // quoted "<path to the file>", and the macOS path pasted into it ("~/Library/…") is not expanded
 // inside double quotes, so a valid file answered ENOENT.
+// 3.1.0's final panel: each home it makes is removed when the describe ends. They were left in TMPDIR, three per run
+// of the suite (the repo's, the packed tarball's and the public npm test alike): 195 had piled up on one devbox.
+const HOMES = [];
 describe("README Claude Desktop parse check (#3096)", () => {
+  after(() => {
+    for (const h of HOMES) rmSync(h, { recursive: true, force: true });
+  });
   const CHECK = /node -e "JSON\.parse\(require\('fs'\)\.readFileSync\(process\.argv\[1\], 'utf8'\)\)" "[^"\n]+"/g;
   const home = (json) => {
     const h = mkdtempSync(join(tmpdir(), "eg-3096-"));
+    HOMES.push(h);
     const d = join(h, "Library", "Application Support", "Claude");
     mkdirSync(d, { recursive: true });
     writeFileSync(join(d, "claude_desktop_config.json"), json);
@@ -137,5 +155,13 @@ describe("README Claude Desktop parse check (#3096)", () => {
     const r = run(`node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "~/Library/Application Support/Claude/claude_desktop_config.json"`, home(VALID));
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /ENOENT/);
+  });
+});
+
+// Runs after the describe above, and its after() hook, have finished (node:test runs a file's suites in order).
+describe("README Claude Desktop parse check (#3096): its temporary homes", () => {
+  it("are all removed once it ends, none left in TMPDIR", { skip: process.platform === "win32" }, () => {
+    assert.equal(HOMES.length, 3, `the parse-check cases made ${HOMES.length} homes, not 3: re-aim this check`);
+    assert.deepEqual(HOMES.filter((h) => existsSync(h)), []);
   });
 });

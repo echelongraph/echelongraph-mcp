@@ -31,7 +31,24 @@
 //                    released version's at its default call, is reported instead, marked, and
 //                    compared with nothing but the ceiling.
 //   --answers DIR    exposure_radar's and cve_summary's answers from DIR (files named as
-//                    answerFile names them); only those two are measured.
+//                    answerFile names them); only those two are measured. Nothing is read from
+//                    production, so nothing is dated by this run (#2782): a re-measure of the
+//                    answers kept in fixtures/prod-answers keeps the record's measured_at and
+//                    read_ms (when production was read for them, and how long that took), and
+//                    answers from another directory are dated null.
+//   --fixtures DIR   the record and the kept answers in DIR (DIR/text-bound-live.json,
+//                    DIR/prod-answers/) instead of test/fixtures, so a test can run --record on a
+//                    copy (text-bound.test.mjs does).
+//
+// What --record writes of each case (#2782, #3273): measured_at, when production was read for it
+// (this run's start, for probe-prod or --hosted), read_ms, how long this run's read of production
+// took, and for exposure_radar and cve_summary answers_age_ms, how old each answer kept was, by its
+// own generated_at, at that read (the API can serve an aggregate minutes stale, so only the read can
+// say, and text-bound.test.mjs holds measured_at to it); code_measured_at and code_version, when
+// this checkout's server measured it and which code that was (text-bound.mjs codeVersion:
+// package.json's version, +unreleased when CHANGELOG.md's newest section is unreleased); and
+// data_truncated and truncated, whether that server cut the structured result's data and what it
+// cut. The record's about is text-bound.mjs RECORD_ABOUT.
 //
 //   node test/text-bound-live.mjs [--hosted [URL]]   measure and compare; exit 1 when a case is
 //                                                    past CEILING (or its structured result past
@@ -77,16 +94,19 @@ import {
   LIVE_TOOLS,
   MARGIN,
   PROD_ANSWERS,
+  RECORD_ABOUT,
   SHAPED,
   STRUCTURED_BUDGET,
+  answerAges,
   answerFile,
   argsOf,
+  codeVersion,
   extraAnswers,
   hostedArgs,
   hostedReplay,
   keptSizesOffRecord,
   prefixFor,
-  readLiveRecord,
+  readTimeOf,
   setKeptSize,
   shareOfCeiling,
   structuredSize,
@@ -105,9 +125,13 @@ const record = argv.includes("--record");
 const answersDir = argv.includes("--answers") ? argv[argv.indexOf("--answers") + 1] : undefined;
 const hostedAt = argv.indexOf("--hosted");
 const hosted = hostedAt < 0 ? undefined : argv[hostedAt + 1]?.startsWith("http") ? argv[hostedAt + 1] : HOSTED;
+// --fixtures DIR: the record and the kept answers there (a copy, for a test of --record).
+const fixturesDir = argv.includes("--fixtures") ? argv[argv.indexOf("--fixtures") + 1] : undefined;
+const recordFile = fixturesDir ? path.join(fixturesDir, path.basename(LIVE_RECORD)) : LIVE_RECORD;
+const keptAnswersDir = fixturesDir ? path.join(fixturesDir, path.basename(PROD_ANSWERS)) : PROD_ANSWERS;
 // #2822: the answers kept in fixtures/prod-answers are named as such, so a record re-measured from
 // them says where they came from without a hand edit (KEPT_SOURCE, which text-bound.test.mjs knows).
-const keptDir = answersDir !== undefined && path.resolve(answersDir) === path.resolve(PROD_ANSWERS);
+const keptDir = answersDir !== undefined && path.resolve(answersDir) === path.resolve(keptAnswersDir);
 const source = keptDir ? KEPT_SOURCE : answersDir ? `answers in ${answersDir}` : hosted ? `hosted ${hosted}, its data replayed to this checkout's server` : "probe-prod";
 const run = promisify(execFile);
 
@@ -168,7 +192,7 @@ const client = await connect({ era: MODERN, ...serverCommand(), env, stderr: "ig
 const remote = hosted ? await connectHttp({ era: MODERN, url: hosted, userAgent: SYNTHETIC_UA, requestTimeoutMs: 120_000 }) : undefined;
 const readAt = new Date().toISOString();
 
-const prior = fs.existsSync(LIVE_RECORD) ? readLiveRecord() : { tools: {} };
+const prior = fs.existsSync(recordFile) ? JSON.parse(fs.readFileSync(recordFile, "utf8")) : { tools: {} };
 const cases = answersDir ? SHAPED.filter((c) => c.kept) : SHAPED;
 const measured = {};
 const keptBodies = {};
@@ -210,7 +234,9 @@ try {
     if (!res) res = await client.callTool({ name: c.tool, arguments: args });
     const { total, blocks } = textSize(res, stubbed ? stubBase : undefined);
     const structured = structuredSize(res, stubbed ? stubBase : undefined);
-    const m = { total, blocks, structured, state: res.structuredContent?.state ?? null, isError: res.isError === true, source: how };
+    // #3273: the cut level, on record: whether the server measured cut its structured result's data.
+    const sc = res.structuredContent;
+    const m = { total, blocks, structured, data_truncated: typeof sc?.data_truncated === "boolean" ? sc.data_truncated : null, truncated: sc?.truncated ?? null, state: sc?.state ?? null, isError: res.isError === true, source: how };
     measured[c.label] = m;
     const drift = c.kept && stubbed ? prior.tools?.[c.kept] : undefined;
     const was = prior.cases?.[c.label];
@@ -246,28 +272,45 @@ try {
   await remote?.close();
   stub.close();
 }
+// #2782: how long this run's read of production took (probe-prod or --hosted; --answers reads none).
+const readMs = answersDir ? null : Date.now() - Date.parse(readAt);
 
 if (record) {
   const tools = {};
   const keptAll = !hosted;
   if (keptAll) {
-    fs.mkdirSync(PROD_ANSWERS, { recursive: true });
-    for (const [p, body] of Object.entries(keptBodies)) fs.writeFileSync(answerFile(p), `${JSON.stringify(body, null, 2)}\n`);
+    fs.mkdirSync(keptAnswersDir, { recursive: true });
+    for (const [p, body] of Object.entries(keptBodies)) fs.writeFileSync(path.join(keptAnswersDir, path.basename(answerFile(p))), `${JSON.stringify(body, null, 2)}\n`);
   }
+  // #2782: the code that measured, recorded apart from when production was read.
+  const code = codeVersion(PKG.version, fs.readFileSync(path.join(HERE, "..", "CHANGELOG.md"), "utf8"));
   const cs = {};
   for (const c of cases) {
     const m = measured[c.label];
     if (!m || m.isError) continue;
-    cs[c.label] = { measured_at: readAt, package_version: PKG.version, total: m.total, blocks: m.blocks, structured: m.structured, source: m.source };
-    // #2822: when the answers were read from production. Read here (probe-prod) it is now; the
-    // answers already kept keep the time they were read; answers from another directory carry no
-    // time, so it is null rather than now.
-    const answersReadAt = !answersDir ? readAt : keptDir ? (prior.tools?.[c.kept]?.answers_read_at ?? null) : null;
-    if (c.kept && keptAll) tools[c.kept] = { measured_at: readAt, answers_read_at: answersReadAt, package_version: PKG.version, total: m.total, blocks: m.blocks, structured: m.structured, answers_kept: true };
+    // #2782, #2822: when production was read for this number. Read here (probe-prod, --hosted) it is
+    // now, and read_ms this run's read; the answers already kept keep the read they came from (an
+    // entry written before #2782 says it in answers_read_at, readTimeOf); answers from another
+    // directory carry no time, so it is null rather than now.
+    const was = c.kept ? prior.tools?.[c.kept] : undefined;
+    const readTime = !answersDir ? readAt : keptDir ? readTimeOf(was) : null;
+    const readFor = !answersDir ? readMs : keptDir ? (was?.read_ms ?? null) : null;
+    // #2782: how old each kept answer was, by its own generated_at, when production was read, the
+    // read's own evidence for its date (text-bound.mjs answerAges): at a read, this run's; a
+    // re-measure of the answers kept keeps the read's (derived from its answers_read_at where an
+    // older harness wrote none); answers from another directory, none. Not for --hosted, which
+    // keeps no answers.
+    const ages = !c.kept || hosted ? undefined : !answersDir ? answerAges(readAt, keptAnswersDir) : keptDir ? (was?.answers_age_ms ?? answerAges(readTime, keptAnswersDir)) : null;
+    const dated = { measured_at: readTime, read_ms: readFor, ...(ages === undefined ? {} : { answers_age_ms: ages }), code_measured_at: readAt, code_version: code, package_version: PKG.version };
+    cs[c.label] = { ...dated, total: m.total, blocks: m.blocks, structured: m.structured, data_truncated: m.data_truncated, truncated: m.truncated, source: m.source };
+    if (c.kept && keptAll) {
+      const { measured_at, read_ms, ...rest } = dated;
+      tools[c.kept] = { measured_at, answers_read_at: readTime, read_ms, ...rest, total: m.total, blocks: m.blocks, structured: m.structured, answers_kept: true };
+    }
   }
-  const written = { ...prior, tools: { ...prior.tools, ...tools }, cases: { ...(prior.cases ?? {}), ...cs } };
-  fs.writeFileSync(LIVE_RECORD, `${JSON.stringify(written, null, 2)}\n`);
-  console.log(`recorded ${Object.keys(cs).length} cases${Object.keys(tools).length ? ` and ${Object.keys(tools).join(", ")}, answers in ${PROD_ANSWERS}` : ""} in ${LIVE_RECORD}`);
+  const written = { ...prior, about: RECORD_ABOUT, tools: { ...prior.tools, ...tools }, cases: { ...(prior.cases ?? {}), ...cs } };
+  fs.writeFileSync(recordFile, `${JSON.stringify(written, null, 2)}\n`);
+  console.log(`recorded ${Object.keys(cs).length} cases${Object.keys(tools).length ? ` and ${Object.keys(tools).join(", ")}, answers in ${keptAnswersDir}` : ""} in ${recordFile}`);
   // #2822: the suite measures the kept answers on every run and holds them within MARGIN of
   // SHAPED's size for the case, so a record that moved past it leaves `npm test`, and the release
   // that runs it, red until that size is set. Say which, and fail, so the re-record is not committed alone.
@@ -275,5 +318,7 @@ if (record) {
   for (const o of off) console.log(`SHAPED SIZE STALE: ${setKeptSize(o)}`);
   if (off.length) red = true;
 }
-console.log(JSON.stringify({ check: "text-bound-live", read_at: readAt, package_version: PKG.version, source, ceiling: CEILING, structured_budget: STRUCTURED_BUDGET, margin: MARGIN, measured, red }));
+// #2782: read_at and read_ms are this run's read of production (null with --answers, which reads
+// none); code_measured_at is when this checkout's server measured.
+console.log(JSON.stringify({ check: "text-bound-live", read_at: answersDir ? null : readAt, read_ms: readMs, code_measured_at: readAt, package_version: PKG.version, source, ceiling: CEILING, structured_budget: STRUCTURED_BUDGET, margin: MARGIN, measured, red }));
 process.exit(red ? 1 : 0);

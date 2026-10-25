@@ -63,6 +63,7 @@ import {
   type ToolResult,
 } from "../index.js";
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut } from "../textBudget.js";
+import { ONE_PACKAGE_RULE, packagesListedTwice } from "./packageRecords.js";
 
 const TOOL = "cve_intel";
 
@@ -98,11 +99,57 @@ const LEFT_OUT = ["vendor_advisories", "patches", "ai", "trending", "historical_
 const API_ROW_LIMIT: Partial<Record<ListName, number>> = { exploits: 10, affected_packages: 50, fixed_versions: 200, timeline: 100 };
 const TIMELINE_RELAYED = 20;
 
-const CVE_INTEL_METHOD =
-  "EchelonGraph's per-CVE enrichment (GET /api/v1/public/cves/:id/enrichment). cwes: CWE classifications stored from NVD, GitHub (GHSA) and CVE.org records, each with the source that gave it, named from the MITRE CWE catalog EchelonGraph embeds. exploits: EchelonGraph's cve_exploits records, whose data model holds public exploit code, namely Metasploit modules (metasploit), Exploit-DB entries (exploit_db), GitHub proof-of-concept repositories (github_poc) and vendor proofs of concept (vendor_poc), and Nuclei detection templates (nuclei_template), which check whether a system is affected and are not necessarily exploit code, filled by a curated seed and by one poller per automated source, each run only where it is enabled, so which sources are current depends on the deployment. affected_packages and fixed_versions: package-ecosystem advisory data, each row naming its source. timeline: EchelonGraph's enrichment history for the CVE, newest first.";
 
 const VERIFIED_STATUS_DESCRIPTION =
-  "verified_status is the label stored with each reference: verified for a Metasploit module, for an Exploit-DB entry Exploit-DB marks verified, and for curated seed rows marked so; reported for a public artefact nothing has confirmed works (nuclei templates, GitHub proofs of concept, unverified Exploit-DB entries); unconfirmed where a curated row says so. It is a label from the source, not a guarantee that the exploit works against a given system.";
+  "verified_status is the label stored with each reference: verified for a Metasploit module, for an Exploit-DB entry Exploit-DB marks verified, and for curated seed rows marked so; reported for a public artefact nothing has confirmed works (nuclei templates, GitHub proofs of concept and checker repositories, unverified Exploit-DB entries); unconfirmed where a curated row says so. It is a label from the source, not a guarantee that the exploit works against a given system.";
+
+// #3267: the exploit kinds this server classifies, both lists by name, as core-backend's
+// egkev.ExploitCodeKinds lists exploit code ("the one definition of exploit code", #1213, #3038)
+// and every other kind core-backend holds (exploits.Kind* constants) is a detection kind there.
+// Until #3267 this server named only the detection kinds and counted every other kind as exploit
+// code, the inverse of the backend's list: the two failed in opposite directions. core-backend fails
+// closed (egkev/backfill_exploit_poc_available.sql raises on a kind ExploitCodeKinds does not
+// classify); this server failed open, so a kind core-backend added after a release (another scanner
+// or template source) would have reached every client of that release as "N public exploit
+// references", the claim #3039 removed, with nothing erroring. github_checker did exactly that
+// from #3040 (2026-10-12) to #3221. A kind on neither list is now counted as neither: the note
+// names it as a kind this server does not classify (exploitSentences). test/cve_intel.test.mjs holds both
+// lists to core-backend's source in the monorepo, and the kind field's text to the note everywhere.
+const EXPLOIT_CODE_KINDS = ["metasploit", "exploit_db", "github_poc", "vendor_poc"] as const;
+const DETECTION_KINDS = ["nuclei_template", "github_checker"] as const;
+type DetectionKind = (typeof DETECTION_KINDS)[number];
+const DETECTION_GLOSS: Record<DetectionKind, string> = {
+  nuclei_template: "a Nuclei detection template",
+  github_checker: "a GitHub repository named or described as a checker or scanner",
+};
+const isExploitCodeKind = (k: string | undefined): boolean => (EXPLOIT_CODE_KINDS as readonly (string | undefined)[]).includes(k);
+const isDetectionKind = (k: string | undefined): boolean => (DETECTION_KINDS as readonly (string | undefined)[]).includes(k);
+const orList = (xs: readonly string[]): string => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} or ${xs.at(-1)}`);
+const andList = (xs: readonly string[]): string => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+// #3267's review: the method and exploits_by_kind name the kinds from the same two lists, so neither
+// can name a kind the note counts otherwise; each kind's words are a Record over its list, so a kind
+// added to a list without them does not compile.
+const CODE_NOUN: Record<(typeof EXPLOIT_CODE_KINDS)[number], string> = {
+  metasploit: "Metasploit modules",
+  exploit_db: "Exploit-DB entries",
+  github_poc: "GitHub proof-of-concept repositories",
+  vendor_poc: "vendor proofs of concept",
+};
+const DETECTION_NOUN_METHOD: Record<DetectionKind, string> = {
+  nuclei_template: "Nuclei detection templates (nuclei_template)",
+  github_checker: "GitHub checker repositories (github_checker: GitHub repositories named or described as a checker or scanner)",
+};
+const UNCLASSIFIED_KIND = "A kind on neither list is one this server does not classify: the note counts it as neither.";
+const CVE_INTEL_METHOD = `EchelonGraph's per-CVE enrichment (GET /api/v1/public/cves/:id/enrichment). cwes: CWE classifications stored from NVD, GitHub (GHSA) and CVE.org records, each with the source that gave it, named from the MITRE CWE catalog EchelonGraph embeds. exploits: EchelonGraph's cve_exploits records, whose data model holds public exploit code, namely ${andList(EXPLOIT_CODE_KINDS.map((k) => `${CODE_NOUN[k]} (${k})`))}, and detection checks, namely ${andList(DETECTION_KINDS.map((k) => DETECTION_NOUN_METHOD[k]))}, which check whether a system is affected and are not necessarily exploit code, filled by a curated seed and by one poller per automated source, each run only where it is enabled, so which sources are current depends on the deployment. ${UNCLASSIFIED_KIND} affected_packages and fixed_versions: package-ecosystem advisory data, each row naming its source. timeline: EchelonGraph's enrichment history for the CVE, newest first.`;
+
+// #3221: the kinds, split as egkev.ExploitCodeKinds splits them (#3038, #3040) and /pulse shows
+// them: exploit code, and the two detection kinds. Until #3221 the field listed nuclei_template
+// beside the exploit-code kinds, and not github_checker, a kind core-backend's data model has held
+// since #3040 (exploits.KindGitHubChecker). The text says what each kind is, not which rows carry
+// it. #3267: built from the two lists the note counts by, so the field cannot name a kind the note
+// counts otherwise, and it says what the note does with any other kind.
+const EXPLOIT_KIND_DESCRIPTION = `Exploit code: ${orList(EXPLOIT_CODE_KINDS)}. A detection check, which checks whether a system is affected and is not necessarily exploit code: ${orList(DETECTION_KINDS.map((k) => `${k} (${DETECTION_GLOSS[k]})`))}. A kind not named here is one this server does not classify: the note counts it as neither.`;
+const EXPLOITS_BY_KIND_DESCRIPTION = `Every reference on record counted by kind (the values of each exploit's kind), past the 10 listed; the counts under ${andList(DETECTION_KINDS)} are detection checks, not exploit code, those under ${andList(EXPLOIT_CODE_KINDS)} are exploit code, and those under any other kind are of a kind this server does not classify, counted as neither.`;
 
 const FIXED_BRANCHES_DESCRIPTION =
   'fixed_branches lists each affected range of the package on record: introduced, and fixed (the range\'s fix) or last_affected (its last affected version, where no fix is on record), each null when absent, with advisory_id (the OSV record that published the range) and source (the loader\'s label for that record), both null on a row loaded before they were stored. Ranges with an advisory_id are in the order their record lists them (records in id order); ranges without one are oldest first. To pick the range for an installed version, compare in the ecosystem\'s version order (release numbers part by part, as numbers: 2.4 is below 2.13.0): the version is in a range when it is at or above introduced ("0" is the first version) and below fixed, or at or below last_affected; its fix is that range\'s fixed, or, while another range still holds that, the other range\'s fixed (none past a range without one); a version in no range is outside every range on record. fixed_branches is null where the package\'s ranges were never loaded, and [] where no version range is on record (the advisory gives none, only commit ranges, or more than are stored), which is not a finding that no fix exists: fixed_version can still name one. fixed_version is one range\'s fix, kept for compatibility (one per package: the range the loader kept, the advisory\'s last as a rule), not the fix for every affected range: for CVE-2021-44228, its advisory gives log4j-core three ranges, and fixed_version 2.12.2 is the fix for the one from 2.4, while the range holding 2.14.1 (from 2.13.0) is fixed in 2.15.0.';
@@ -119,7 +166,10 @@ const FIXED_BRANCHES_DESCRIPTION =
 // still-affected 4.17.21 (ranges [0, 4.17.21) and [4.0.0, 4.18.0); the fix is 4.18.0). It now
 // states the walk FIXED_BRANCHES_DESCRIPTION and branchSentences state, in fewer characters than
 // the old rule (a range's bounds folded into the list of its fields), so the headroom holds.
-export const CVE_INTEL_DESCRIPTION = `Weakness, exploit code, detection templates, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
+// #3221: "detection checks", /pulse's word for Nuclei templates and GitHub checker repositories
+// together (ExploitWatch.tsx DETECTION_CHECKS_HEADING), where the head said "detection templates",
+// which a checker repository is not; 3 characters shorter. The kinds are the outputSchema's.
+export const CVE_INTEL_DESCRIPTION = `Weakness, exploit code, detection checks, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
 
 // ── outputSchema ──
 const Rows = (shape: Record<string, z.ZodType>) => z.array(z.looseObject(shape));
@@ -134,7 +184,7 @@ function schemas() {
     cve_id: z.string(),
     cwes: Rows({ cwe_id: opt(z.string()), name: opt(z.string()), source: opt(z.string()) }).optional(),
     exploits: Rows({
-      kind: opt(z.string()).describe("metasploit, exploit_db, nuclei_template, github_poc or vendor_poc."),
+      kind: opt(z.string()).describe(EXPLOIT_KIND_DESCRIPTION),
       source_name: opt(z.string()),
       source_url: opt(z.string()),
       description: opt(z.string()),
@@ -149,7 +199,7 @@ function schemas() {
     }).optional(),
     exploits_total: z.number().int().nullable().optional().describe("Every exploit reference on record for the CVE, not only those listed in exploits."),
     exploits_capped: z.boolean().optional().describe("true: exploits lists fewer references than exploits_total."),
-    exploits_by_kind: CountMap.optional(),
+    exploits_by_kind: CountMap.optional().describe(EXPLOITS_BY_KIND_DESCRIPTION),
     exploits_by_status: CountMap.optional(),
     affected_packages: Rows({
       ecosystem: opt(z.string()),
@@ -228,18 +278,109 @@ function cweSentence(cve: string, cwes: unknown[]): string {
 // one template "1 public exploit reference" (CVE-2026-42018 on the hosted endpoint, 2026-10-10;
 // 2,800 production CVEs hold only Nuclei rows). The kind counts are exploits_by_kind's, and where
 // the answer carries none, the listed rows' when they are every reference on record.
-const DETECTION_KIND = "nuclei_template";
+//
+// #3221: a GitHub checker repository (github_checker) is the second detection kind. #3040 added it
+// to core-backend (exploits.KindGitHubChecker): a GitHub repository whose name or description says
+// it checks, scans for or detects the vulnerability, and never that it exploits it
+// (exploits.GitHubRepositoryKind). egkev.ExploitCodeKinds does not list it, so the API's
+// exploit_poc_available counts a github_checker row as no exploit code, and /pulse shows it as a
+// detection check. Until #3221 this note counted every reference but a Nuclei template as a public
+// exploit reference, a github_checker one included. It now counts each row the API serves as
+// github_checker apart, as a "GitHub checker repository" with /pulse's note on one (marketing-site
+// components/ExploitWatch.tsx KIND_NOUN and CHECKER_REPOSITORY_NOTE; with a Nuclei template too,
+// DETECTION_TEMPLATE_NOTE and then CHECKER_REPOSITORY_NOTE, as the page prints them).
+// The counts are the kinds the API serves; nothing here re-reads a repository's name. A row the API
+// serves as github_poc is a public exploit reference here, as the API counts it, even where /pulse
+// reads that repository as a checker (isCheckerRepository re-reads github_poc rows). The rule is
+// not copied into a third place: #3040's poller stores a new row by it, and its reclassification
+// is what re-kinds a github_poc row stored before #3040. Only a pass that writes changes what the
+// API serves, and every production pass from 2026-10-12 to 2026-10-16 wrote nothing (as a76c06c4
+// records; that commit changes how a pass takes its locks); until one does, a checker repository
+// stored as github_poc is counted here as exploit code. CVE-2020-35489 (1 PoC and 3 checkers on
+// /pulse, 2026-10-11) reads "1 public exploit reference and 3 GitHub checker repositories" only
+// once the API serves the 3 as github_checker; while it serves all 4 as github_poc, it reads
+// "4 public exploit references" (test/cve_intel.test.mjs pins both).
+//
+// #3267: exploit code is counted by name (EXPLOIT_CODE_KINDS), never as what is left when the
+// detection kinds are taken out. A reference of any other kind is "of a kind this server does not
+// classify", with the kind named, and a CVE holding one is never said to hold no exploit code.
+type Detections = Record<DetectionKind, number>;
+// One answer's references by class: exploit code, each detection kind, and the rest, with the
+// kinds of the rest as the answer names them (exploits_by_kind's keys, or the listed rows' kinds).
+type KindCounts = { code: number; detections: Detections; unclassified: number; unknownKinds: string[] };
+const DETECTION_NOUN: Record<DetectionKind, readonly [string, string]> = {
+  nuclei_template: ["Nuclei detection template", "Nuclei detection templates"],
+  github_checker: ["GitHub checker repository", "GitHub checker repositories"],
+};
+// /pulse's DETECTION_TEMPLATE_NOTE and CHECKER_REPOSITORY_NOTE, each lower-cased and without its
+// period, to follow a colon, a semicolon or an opening parenthesis.
 const DETECTION_NOTE = "a detection template checks whether a system is affected; it is not necessarily exploit code";
+const CHECKER_NOTE = "a GitHub repository named or described as a checker or scanner checks whether a system is affected; it is not necessarily exploit code";
+// Both kinds: /pulse's two notes in sequence, as the page prints them, never one merged sentence.
+const BOTH_DETECTION_NOTES = `${DETECTION_NOTE}. ${CHECKER_NOTE[0].toUpperCase()}${CHECKER_NOTE.slice(1)}`;
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-// The number of Nuclei detection templates among the references: exploits_by_kind's count where
-// the answer carries the map, the listed rows' where they are all of them, undefined otherwise.
-function templateCount(d: object, rows: unknown[], total: number | undefined): number | undefined {
-  const byKind = field(d, "exploits_by_kind");
-  if (byKind !== null && typeof byKind === "object" && !Array.isArray(byKind)) return numAt(d, "exploits_by_kind", DETECTION_KIND) ?? 0;
-  const listed = rows.filter((r) => strAt(r, "kind") === DETECTION_KIND).length;
-  return total === undefined || rows.length === total ? listed : undefined;
+const detectedTotal = (c: Detections): number => DETECTION_KINDS.reduce((s, k) => s + c[k], 0);
+// "1 Nuclei detection template", "3 GitHub checker repositories": each detection kind present.
+const detectionParts = (c: Detections): string[] => DETECTION_KINDS.filter((k) => c[k] > 0).map((k) => plural(c[k], ...DETECTION_NOUN[k]));
+// What the detection kinds present are: the template's note, the checker's, or both in sequence.
+const detectionNote = (c: Detections): string =>
+  c.nuclei_template > 0 && c.github_checker > 0 ? BOTH_DETECTION_NOTES : c.github_checker > 0 ? CHECKER_NOTE : DETECTION_NOTE;
+
+// #3267: a kind on neither list. The note names it only when it reads as a kind (a lower-case
+// identifier, as every exploits.Kind* value is), so the note never carries other text the API sent.
+const UNCLASSIFIED_NOUN = ["reference of a kind this server does not classify", "references of a kind this server does not classify"] as const;
+const KIND_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
+const unknownKindsOf = (kinds: (string | undefined)[]): string[] =>
+  [...new Set(kinds.filter((k): k is string => k !== undefined && KIND_TOKEN.test(k) && !isExploitCodeKind(k) && !isDetectionKind(k)))].sort();
+const unclassifiedNote = (kinds: string[]): string =>
+  kinds.length === 0
+    ? "a reference of no kind this server classifies is counted as neither exploit code nor a detection check"
+    : kinds.length === 1
+      ? `the kind ${kinds[0]} is one this server does not classify: it is counted as neither exploit code nor a detection check, and a newer release of this server may classify it`
+      : `the kinds ${listed(kinds)} are ones this server does not classify: they are counted as neither exploit code nor a detection check, and a newer release of this server may classify them`;
+const capitalized = (s: string): string => `${s[0].toUpperCase()}${s.slice(1)}`;
+
+// The listed rows by class.
+function countsIn(rows: unknown[]): KindCounts {
+  const kinds = rows.map((r) => strAt(r, "kind"));
+  const detections = Object.fromEntries(DETECTION_KINDS.map((k) => [k, kinds.filter((x) => x === k).length])) as Detections;
+  const code = kinds.filter(isExploitCodeKind).length;
+  return { code, detections, unclassified: rows.length - code - detectedTotal(detections), unknownKinds: unknownKindsOf(kinds) };
 }
+
+// Every reference on record by class: exploits_by_kind's counts where the answer carries the map,
+// the listed rows' where they are all of them, undefined otherwise. With the map, what its
+// exploit-code and detection kinds do not account for of exploits_total is unclassified.
+function kindCounts(d: object, rows: unknown[], total: number): KindCounts | undefined {
+  const byKind = field(d, "exploits_by_kind");
+  if (byKind !== null && typeof byKind === "object" && !Array.isArray(byKind)) {
+    const at = (k: string) => numAt(d, "exploits_by_kind", k) ?? 0;
+    const detections = Object.fromEntries(DETECTION_KINDS.map((k) => [k, at(k)])) as Detections;
+    const code = EXPLOIT_CODE_KINDS.reduce((s, k) => s + at(k), 0);
+    return {
+      code,
+      detections,
+      unclassified: Math.max(0, total - code - detectedTotal(detections)),
+      unknownKinds: unknownKindsOf(Object.keys(byKind).filter((k) => at(k) > 0)),
+    };
+  }
+  return rows.length === total ? countsIn(rows) : undefined;
+}
+
+// "1 public exploit reference, 1 Nuclei detection template and 1 reference of a kind this server
+// does not classify": each class present, exploit code first.
+const classParts = (c: KindCounts): string[] => [
+  ...(c.code > 0 ? [plural(c.code, "public exploit reference", "public exploit references")] : []),
+  ...detectionParts(c.detections),
+  ...(c.unclassified > 0 ? [plural(c.unclassified, ...UNCLASSIFIED_NOUN)] : []),
+];
+// What the classes present beside exploit code are: the detection note(s), then the unclassified
+// kind's, each its own sentence.
+const classNotes = (c: KindCounts): string =>
+  [...(detectedTotal(c.detections) > 0 ? [detectionNote(c.detections)] : []), ...(c.unclassified > 0 ? [unclassifiedNote(c.unknownKinds)] : [])]
+    .map((n, i) => (i === 0 ? n : capitalized(n)))
+    .join(". ");
 
 function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
   const total = numAt(d, "exploits_total");
@@ -254,14 +395,13 @@ function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
         `exploits is empty and the answer carries no exploits_total, so it does not count the references on record for ${cve}; an empty list is not evidence that no public exploit exists.`,
       ];
     }
-    const listedTemplates = rows.filter((r) => strAt(r, "kind") === DETECTION_KIND).length;
-    const code = rows.length - listedTemplates;
+    const shown = countsIn(rows);
     const what =
-      listedTemplates === 0
+      shown.code === rows.length
         ? `${plural(rows.length, "public exploit reference", "public exploit references")}`
-        : code === 0
-          ? `${plural(rows.length, "Nuclei detection template", "Nuclei detection templates")} and nothing else (${DETECTION_NOTE})`
-          : `${plural(rows.length, "reference", "references")}: ${plural(code, "public exploit reference", "public exploit references")} and ${plural(listedTemplates, "Nuclei detection template", "Nuclei detection templates")} (${DETECTION_NOTE})`;
+        : shown.code === 0 && shown.unclassified === 0
+          ? `${listed([...detectionParts(shown.detections), "nothing else"])} (${classNotes(shown)})`
+          : `${plural(rows.length, "reference", "references")}: ${listed(classParts(shown))} (${classNotes(shown)})`;
     return [`exploits lists ${what} for ${cve}, ${verifiedRows} with verified_status verified; the answer carries no exploits_total, so it does not say how many are on record.${cut}`];
   }
   if (total === 0) {
@@ -271,23 +411,23 @@ function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
   }
   const v = verified === undefined ? "" : `, ${verified} of them with verified_status verified`;
   const cut = capped === true ? ` exploits_capped is true: exploits lists ${rows.length} of the ${total}, verified first.` : "";
-  const templates = templateCount(d, rows, total);
-  if (templates === undefined) {
+  const counts = kindCounts(d, rows, total);
+  if (counts === undefined) {
     return [
-      `EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}; the answer carries no exploits_by_kind, so it does not say how many are exploit code and how many Nuclei detection templates (${DETECTION_NOTE}).${cut}`,
+      `EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}; the answer carries no exploits_by_kind, so it does not say how many are exploit code and how many detection checks, Nuclei detection templates or GitHub checker repositories (${BOTH_DETECTION_NOTES}).${cut}`,
     ];
   }
-  if (templates === 0) {
+  const detected = detectedTotal(counts.detections);
+  if (detected === 0 && counts.unclassified === 0) {
     return [`EchelonGraph holds ${plural(total, "public exploit reference", "public exploit references")} for ${cve} (exploits_total)${v}.${cut}`];
   }
-  if (templates >= total) {
+  // Only detection checks: no exploit code, and no kind this server cannot vouch for.
+  if (counts.code === 0 && counts.unclassified === 0) {
     return [
-      `EchelonGraph holds ${plural(total, "Nuclei detection template", "Nuclei detection templates")} for ${cve} and nothing else in exploits (exploits_total ${total}): ${DETECTION_NOTE}. It holds no Metasploit module, Exploit-DB entry or proof of concept for ${cve}, which is not evidence that none exists.${cut}`,
+      `EchelonGraph holds ${listed(detectionParts(counts.detections))} for ${cve} and nothing else in exploits (exploits_total ${total}): ${detectionNote(counts.detections)}. It holds no Metasploit module, Exploit-DB entry or proof of concept for ${cve}, which is not evidence that none exists.${cut}`,
     ];
   }
-  return [
-    `EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}: ${plural(total - templates, "public exploit reference", "public exploit references")} and ${plural(templates, "Nuclei detection template", "Nuclei detection templates")}; ${DETECTION_NOTE}.${cut}`,
-  ];
+  return [`EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}: ${listed(classParts(counts))}; ${classNotes(counts)}.${cut}`];
 }
 
 function listSentence(name: "affected_packages" | "fixed_versions", rows: unknown[]): string {
@@ -297,6 +437,15 @@ function listSentence(name: "affected_packages" | "fixed_versions", rows: unknow
   return `${name} lists ${rows.length} row${rows.length === 1 ? "" : "s"}${cut}.`;
 }
 
+// #3285 (3.1.0's lane P): affected_packages lists a package once per stored ecosystem string, as
+// cve_remediation's fixed_branches does, so CVE-2025-48013 has two rows for
+// drupal/quick_node_block, under Packagist:https://packages.drupal.org/8 ([0, 2.0.1)) and Packagist
+// ([0, 2.0.0)), each of one range, and "no range of the row holds", read row by row, gave a
+// Packagist 1.0.0 the fix 2.0.0, which the Drupal row still holds affected. Rows the matcher reads
+// as one package (packageRecords.ts, core-backend registryRecordKey: Packagist or Maven, bare or
+// with a repository URL; a release suffix never) are now said of together, with the walk over all
+// their ranges, which gives 2.0.1, the matcher's fixed_in, and the sentence on rows of several
+// ranges names the others.
 // #2817: where fixed_version is not the whole answer. A row with more than one range in
 // fixed_branches has a fix per range; a row with fixed_branches null has only fixed_version on
 // record, and so does a row with fixed_branches [] and a fixed_version (no version range on
@@ -319,9 +468,12 @@ function branchSentences(rows: unknown[]): string[] {
   const multi: string[] = [];
   const unknown: string[] = [];
   const noRange: string[] = [];
+  // #3285: rows the matcher reads as one package (packageRecords.ts) are said of together, below.
+  const { twice } = packagesListedTwice(rows);
+  const together = new Set(twice.flatMap((g) => g.rows));
   rows.forEach((r, i) => {
     const fb = field(r, "fixed_branches");
-    if (Array.isArray(fb) && fb.length > 1) multi.push(named(r, i));
+    if (Array.isArray(fb) && fb.length > 1 && !together.has(i)) multi.push(named(r, i));
     if (fb === null) unknown.push(named(r, i));
     if (Array.isArray(fb) && fb.length === 0 && strAt(r, "fixed_version")) noRange.push(named(r, i));
   });
@@ -329,6 +481,13 @@ function branchSentences(rows: unknown[]): string[] {
   if (multi.length) {
     out.push(
       `${multi.length} affected_packages row${multi.length === 1 ? " lists" : "s list"} more than one affected range in fixed_branches (${few(multi)}): there, fixed_version is one range's fix, and an installed version's fix is the first fixed above it that no range of the row holds: the fixed of the range that holds it, or, while another range still holds that version, that range's fixed (none where a range on the way has no fixed).`,
+    );
+  }
+  if (twice.length) {
+    const rowsOf = twice.reduce((t, g) => t + g.rows.length, 0);
+    const pkgs = twice.map((g) => `${g.name} (${listed(g.ecosystems)})`);
+    out.push(
+      `${rowsOf} affected_packages rows are ${twice.length} package${twice.length === 1 ? "" : "s"} (${few(pkgs)}): ${ONE_PACKAGE_RULE("Rows")}, so there an installed version's fix is the first fixed above it that no range of those rows holds: the fixed of the range that holds it, or, while another range of them still holds that version, that range's fixed (none where a range on the way has no fixed); each row's fixed_version is one range's fix.`,
     );
   }
   if (unknown.length) {

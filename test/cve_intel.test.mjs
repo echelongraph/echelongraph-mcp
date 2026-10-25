@@ -21,7 +21,10 @@
 // Runs against dist/index.js (npm test builds first), or an installed bin (server-under-test.mjs).
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 // #3121: answers are validated against the closed success branch (strict-output.mjs).
 import { StrictOutputValidator } from "./strict-output.mjs";
 import { connect, MODERN } from "./mcp-stdio-client.mjs";
@@ -115,6 +118,51 @@ const BRANCHES = {
     { ecosystem: "Go", package_name: "example.test/commit-ranges-only", fixed_version: "8a5e1f0d3c2b", fixed_branches: [], dependents_count: 0, source: "osv_bulk" },
   ],
 };
+// #3285 (3.1.0's lane P): CVE-2025-48013's two rows for drupal/quick_node_block, as the public API
+// served them (test/fixtures/cve_remediation-CVE-2025-48013.json, the same rows the remediation
+// route lists in fixed_branches): under Packagist:https://packages.drupal.org/8 [0, 2.0.1) and
+// under Packagist [0, 2.0.0). The matcher reads them as one package (core-backend
+// registryRecordKey) and gives 1.0.0 fixed_in 2.0.1.
+const DRUPAL_ROWS = JSON.parse(fs.readFileSync(new URL("./fixtures/cve_remediation-CVE-2025-48013.json", import.meta.url), "utf8")).data.fixed_branches;
+const DRUPAL_48013 = { ...EMPTY_ENRICHMENT, affected_packages: DRUPAL_ROWS };
+// A release suffix is never folded (Debian:11 and Debian:12 stay two packages); Maven with a
+// repository URL is, as Packagist is.
+const FOLD_OR_NOT = {
+  ...EMPTY_ENRICHMENT,
+  affected_packages: [
+    { ecosystem: "Debian:11", package_name: "openssl", fixed_version: "1.1.1", fixed_branches: [RANGE("0", "1.1.1")] },
+    { ecosystem: "Debian:12", package_name: "openssl", fixed_version: "3.0.1", fixed_branches: [RANGE("0", "3.0.1")] },
+    { ecosystem: "Maven:https://repo.spring.io/release", package_name: "org.example:lib", fixed_version: "1.2.0", fixed_branches: [RANGE("0", "1.2.0")] },
+    { ecosystem: "Maven", package_name: "org.example:lib", fixed_version: "1.1.0", fixed_branches: [RANGE("0", "1.1.0")] },
+  ],
+};
+// The note's rule, applied as it reads: an installed version's fix is the first fixed above it
+// that no range of its row holds, walked from the range that holds it; where the note says rows of
+// one package_name under Packagist or Maven, bare or with a repository URL, are one package, the
+// ranges of all those rows. Versions here are plain release numbers.
+const ONE_PACKAGE_ROWS = 'Rows of one package_name under Packagist or Maven, bare or with a repository URL after ":", are one package, its ranges all of theirs together';
+const relNum = (a, b) => {
+  const [pa, pb] = [a, b].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0) ? -1 : 1;
+  return 0;
+};
+const rangeHolds = (r, v) => relNum(v, r.introduced) >= 0 && (r.fixed ? relNum(v, r.fixed) < 0 : r.last_affected ? relNum(v, r.last_affected) <= 0 : true);
+function fixByIntelNote(note, rows, { ecosystem, pkg, installed }) {
+  const base = (e) => e.toLowerCase().split(":")[0];
+  const grouped = note.includes(ONE_PACKAGE_ROWS) && ["packagist", "maven"].includes(base(ecosystem));
+  const mine = rows.filter((e) => e.package_name.toLowerCase() === pkg.toLowerCase() && (grouped ? base(e.ecosystem) === base(ecosystem) : e.ecosystem === ecosystem));
+  const ranges = mine.flatMap((e) => e.fixed_branches ?? []);
+  let r = ranges.find((x) => rangeHolds(x, installed));
+  const walked = new Set();
+  while (r) {
+    if (!r.fixed || walked.has(r)) return null;
+    walked.add(r);
+    const v = r.fixed;
+    r = ranges.find((x) => rangeHolds(x, v));
+    if (!r) return v;
+  }
+  return null;
+}
 // #2876: the exploit rows core-backend serves since #2876 (cve/enrichment_store.go ExploitRow), in
 // its order (verified first, then COALESCE(source_published_at, eg_first_seen_at's UTC date)
 // newest first). An Exploit-DB entry dated by Exploit-DB, as an API past the deprecation cycle
@@ -143,8 +191,188 @@ const { exploits_total: _nt, exploits_capped: _nc, exploits_by_kind: _nk, exploi
 // The positive claims #3039 removes for a template: "public exploit reference(s)", and "exploit
 // code" anywhere but in "not necessarily exploit code".
 const CODE_CLAIM = /public exploit references?|(?<!not necessarily )exploit code/;
+// #3221: GitHub checker repositories (exploit_kind github_checker, #3040), from the list core-backend
+// and /pulse share: core-backend/internal/cve/exploits/testdata/github_repository_kinds.json, each
+// repository with the kind exploits.GitHubRepositoryKind gives it (the kind #3040's poller stores a
+// new row as, and its reclassification re-kinds a stored github_poc row to) and /pulse shows it as
+// (isCheckerRepository). In the monorepo the rows are read from that list. The npm tarball and the
+// public repository carry mcp-server alone, so CVE-2020-35489's four, as /pulse showed them on
+// 2026-10-11 (1 PoC and 3 checkers), are copied here for them, and a test below holds the copy to
+// the list wherever the list is there. These are the kinds the API serves once a reclassification
+// pass has re-kinded the rows; CVE_2020_35489_AS_STORED below is the answer before one has.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const CORE = path.resolve(HERE, "..", "..", "core-backend");
+const IN_MONOREPO = path.basename(path.resolve(HERE, "..")) === "mcp-server" || fs.existsSync(CORE);
+const OUTSIDE = "no core-backend beside this package (the npm tarball or the public repository): the shared list is not here, and the copy of its CVE-2020-35489 rows runs instead";
+const SHARED_KINDS_FILE = path.join(CORE, "internal", "cve", "exploits", "testdata", "github_repository_kinds.json");
+function sharedRepositories() {
+  // In the monorepo the list must be there: a move fails here, it is never skipped.
+  assert.ok(fs.existsSync(SHARED_KINDS_FILE), `${SHARED_KINDS_FILE} is gone: find where #3040's shared list lives now and re-aim this test`);
+  return JSON.parse(fs.readFileSync(SHARED_KINDS_FILE, "utf8")).repositories.map(({ source_name, description, kind }) => ({ source_name, description, kind }));
+}
+const SHARED = IN_MONOREPO ? sharedRepositories() : null;
+const CVE_2020_35489_COPY = [
+  { source_name: "Cappricio-Securities/CVE-2020-35489", description: "WordPress Contact Form 7 - Unrestricted File Upload", kind: "github_poc" },
+  { source_name: "reneoliveirajr/wp_CVE-2020-35489_checker", description: 'WordPress Sites Vulnerability Checker for CVE-2020-35489 - "Educational Use Only"', kind: "github_checker" },
+  { source_name: "X0UCYB3R/Check-WP-CVE-2020-35489", description: "", kind: "github_checker" },
+  { source_name: "dn9uy3n/Check-WP-CVE-2020-35489", description: "The (WordPress) website test script can be exploited for Unlimited File Upload via CVE-2020-35489", kind: "github_checker" },
+];
+const CVE_2020_35489_REPOS = SHARED ? SHARED.filter((r) => r.source_name.includes("CVE-2020-35489")) : CVE_2020_35489_COPY;
+// A repository as /enrichment serves it (core-backend cve/enrichment_store.go ExploitRow): the kind
+// as stored, every GitHub row reported, dated by the repository's created_at where GitHub gives one.
+const servedRepository = (r) => ({
+  kind: r.kind,
+  source_name: r.source_name,
+  source_url: `https://github.com/${r.source_name}`,
+  description: r.description,
+  source_published_at: null,
+  eg_first_seen_at: "2026-10-12T04:00:00Z",
+  verified_status: "reported",
+});
+const kindCounts = (rows) => rows.reduce((m, r) => ({ ...m, [r.kind]: (m[r.kind] ?? 0) + 1 }), {});
+const withExploits = (rows, listed = rows) => ({
+  ...EMPTY_ENRICHMENT,
+  exploits: listed,
+  exploits_total: rows.length,
+  exploits_capped: listed.length < rows.length,
+  exploits_by_kind: kindCounts(rows),
+  exploits_by_status: { reported: rows.length },
+});
+const CVE_2020_35489_ROWS = CVE_2020_35489_REPOS.map(servedRepository);
+const CVE_2020_35489 = withExploits(CVE_2020_35489_ROWS);
+const { exploits_total: _gt, exploits_capped: _gc, exploits_by_kind: _gk, exploits_by_status: _gs, failed_sections: _gf, ...CVE_2020_35489_OLDER } = CVE_2020_35489;
+// The same four as the API serves them while every row is still stored as github_poc, as every
+// GitHub row stored before #3040 is until a reclassification pass re-kinds it (none wrote in
+// production from 2026-10-12 to 2026-10-16, a76c06c4): exploits_by_kind { github_poc: 4 }.
+const CVE_2020_35489_AS_STORED = withExploits(CVE_2020_35489_ROWS.map((r) => ({ ...r, kind: "github_poc" })));
+const CHECKERS_ONLY = withExploits(CVE_2020_35489_ROWS.filter((r) => r.kind === "github_checker"));
+const CODE_NUCLEI_CHECKERS = withExploits([...CVE_2020_35489_ROWS, NUCLEI_ROW]);
+const { exploits_total: _ot, exploits_capped: _oc, exploits_by_kind: _ok, exploits_by_status: _os, failed_sections: _of, ...CODE_NUCLEI_CHECKERS_OLDER } = CODE_NUCLEI_CHECKERS;
+// 12 references counted, 10 listed, no exploits_by_kind: how many are detection checks is unknown.
+const TWELVE_NO_BY_KIND = (() => {
+  const { exploits_by_kind: _, ...rest } = withExploits([...CVE_2020_35489_ROWS, ...CVE_2020_35489_ROWS, ...CVE_2020_35489_ROWS], [...CVE_2020_35489_ROWS, ...CVE_2020_35489_ROWS, NUCLEI_ROW, NUCLEI_ROW]);
+  return rest;
+})();
+// Every repository on the shared list, as one CVE's answer: the first 10 listed, all counted.
+const SHARED_ROWS = SHARED ? SHARED.map(servedRepository) : null;
+// The page's nouns and notes for a checker repository and a detection template (marketing-site
+// components/ExploitWatch.tsx CHECKER_REPOSITORY_NOTE and DETECTION_TEMPLATE_NOTE), lower-cased and
+// without the period, as the note quotes them inside its own sentence.
+const CHECKER_NOTE = "a GitHub repository named or described as a checker or scanner checks whether a system is affected; it is not necessarily exploit code";
+const TEMPLATE_NOTE = "a detection template checks whether a system is affected; it is not necessarily exploit code";
+const capitalized = (s) => `${s[0].toUpperCase()}${s.slice(1)}`;
+// Both kinds: /pulse prints its two notes in turn; this note does the same.
+const BOTH_NOTES = `${TEMPLATE_NOTE}. ${capitalized(CHECKER_NOTE)}`;
+// The one sentence for both kinds this tool printed before #3221's review; /pulse never prints it.
+const MERGED_NOTE = /a detection template or a GitHub repository/;
+// The sentence before #3221: every reference but a Nuclei template counted as exploit code.
+const PRE_3221 = "EchelonGraph holds 4 public exploit references for CVE-2020-35489 (exploits_total).";
 // What a date renderer gets wrong: a null printed as text, a null or a placeholder read as a time.
 const BAD_DATE_TEXT = /"null"|Invalid Date|1970|first seen null|-01-01T00:00:00/i;
+
+// #3267: a kind this server does not classify. Until #3267 this tool counted every kind but its
+// two detection kinds as exploit code, so a kind core-backend added (another scanner or template
+// source) reached every client as "N public exploit references", the claim #3039 removed, while
+// core-backend fails closed on such a kind (egkev/backfill_exploit_poc_available.sql raises on a
+// kind egkev.ExploitCodeKinds does not classify). It now counts the exploit-code kinds by name and
+// reports any other kind as one it does not classify, never as exploit code.
+const UNKNOWN_KIND = "foo_check";
+const kindRow = (kind, i = 1) => ({ ...servedRepository({ source_name: `example/${kind}-${i}`, description: "", kind }), source_url: `https://example.test/${kind}/${i}` });
+const UNCLASSIFIED_NOTE = `the kind ${UNKNOWN_KIND} is one this server does not classify: it is counted as neither exploit code nor a detection check, and a newer release of this server may classify it`;
+const UNKNOWN_BESIDE_CODE = withExploits([kindRow("github_poc"), kindRow(UNKNOWN_KIND)]);
+const UNKNOWN_ONLY = withExploits([kindRow(UNKNOWN_KIND, 1), kindRow(UNKNOWN_KIND, 2)]);
+const { exploits_total: _ut, exploits_capped: _uc, exploits_by_kind: _uk, exploits_by_status: _us, failed_sections: _uf, ...UNKNOWN_BESIDE_TEMPLATE_OLDER } = withExploits([NUCLEI_ROW, kindRow(UNKNOWN_KIND)]);
+// What #3267 removes for a kind this server does not classify: any count of it as exploit code,
+// and the claim that the CVE holds no exploit code, which only a CVE whose every kind is known can
+// carry.
+const UNKNOWN_AS_CODE = /public exploit references?|holds no Metasploit module/;
+
+// #3267's parity guard: core-backend's kinds, read from its source in the monorepo. The kinds are
+// the exploits package's Kind* constants (exploits/types.go), and the exploit-code kinds are
+// egkev.exploitCodeKinds (egkev/exploitkinds.go, "the one definition of exploit code"), which also
+// names vendor_poc, the curated seed's kind, that no constant names. Every other kind is a
+// detection kind there, as egkev reads it. The npm tarball and the public repository carry
+// mcp-server alone, so this part is skipped there; the kind-field test below runs everywhere.
+const OUTSIDE_GO = "no core-backend beside this package (the npm tarball or the public repository): its exploits Kind* constants and egkev.exploitCodeKinds are not here, and the kind-field test runs instead";
+const GO_EXPLOITS_DIR = path.join(CORE, "internal", "cve", "exploits");
+const GO_CODE_KINDS_FILE = path.join(CORE, "internal", "cve", "egkev", "exploitkinds.go");
+// The Go package's non-test source files, as [name, text]; in the monorepo they must be there.
+function goExploitsSources() {
+  assert.ok(fs.existsSync(path.join(GO_EXPLOITS_DIR, "types.go")), `${GO_EXPLOITS_DIR}/types.go is gone: find where the exploit Kind* constants live now and re-aim this test`);
+  return fs.readdirSync(GO_EXPLOITS_DIR).filter((f) => f.endsWith(".go") && !f.endsWith("_test.go")).sort().map((f) => [f, fs.readFileSync(path.join(GO_EXPLOITS_DIR, f), "utf8")]);
+}
+function goCodeKindsSource() {
+  assert.ok(fs.existsSync(GO_CODE_KINDS_FILE), `${GO_CODE_KINDS_FILE} is gone: find egkev.exploitCodeKinds and re-aim this test`);
+  return fs.readFileSync(GO_CODE_KINDS_FILE, "utf8");
+}
+// A Kind* constant in any shape Go allows on one line: in a const block (KindX = "x"), typed
+// (KindX ExploitKind = "x", or KindX string = "x"), or alone (const KindX = "x"). #3267's review:
+// the first version read only the untyped block shape, so a typed or a single-line constant would
+// have been a kind core-backend holds that this test never saw.
+const GO_KIND_CONST = /^\s*(?:const\s+)?(Kind[A-Z]\w*)(?:\s+\w+)?\s*=\s*"([^"]*)"/gm;
+// The Kind* names (*Exploit).Validate() accepts: its `switch e.Kind` case list, which is what the
+// pollers' rows are held to before they are stored.
+function goValidatedKinds(sources) {
+  const names = new Set();
+  for (const [, text] of sources) {
+    const fn = text.match(/^func \(e \*Exploit\) Validate\(\) error \{([\s\S]*?)^\}/m);
+    if (!fn) continue;
+    const sw = fn[1].match(/switch e\.Kind \{([\s\S]*?)default:/);
+    assert.ok(sw, "(*Exploit).Validate() no longer switches on e.Kind before a default: re-aim this test");
+    for (const c of sw[1].matchAll(/case ([^:]+):/g)) for (const n of c[1].split(",")) names.add(n.trim());
+  }
+  assert.ok(names.size > 0, "no (*Exploit).Validate() kind case list in core-backend/internal/cve/exploits: re-aim this test");
+  return [...names].sort();
+}
+// { constants: {KindX: "x"}, validated: [KindX, ...], code: [...exploitCodeKinds], all: every kind, detection: all but code }.
+function goKinds(sources, codeKindsSrc) {
+  const constants = {};
+  for (const [, text] of sources) for (const m of text.matchAll(GO_KIND_CONST)) constants[m[1]] = m[2];
+  assert.ok(Object.keys(constants).length > 0, "no Kind* constant in core-backend/internal/cve/exploits: re-aim this test");
+  const validated = goValidatedKinds(sources);
+  const block = codeKindsSrc.match(/^var exploitCodeKinds = \[\.\.\.\]string\{([^}]*)\}/m);
+  assert.ok(block, "egkev/exploitkinds.go no longer declares exploitCodeKinds as a [...]string literal: re-aim this test");
+  const code = [...block[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  assert.ok(code.length > 0, "egkev.exploitCodeKinds is empty: re-aim this test");
+  const all = [...new Set([...Object.values(constants), ...code])].sort();
+  return { constants, validated, code: [...code].sort(), all, detection: all.filter((k) => !code.includes(k)) };
+}
+// The kinds this server's kind field names (outputSchema exploits[].kind): "Exploit code: a, b or
+// c." and "A detection check, …: d (gloss) or e (gloss)."
+function advertisedKinds(kindDescription) {
+  const code = kindDescription.match(/^Exploit code: ([^.]+)\./);
+  const detection = kindDescription.match(/A detection check, [^:]*: (.+?\))\./);
+  assert.ok(code && detection, `the kind field's text no longer lists the kinds as "Exploit code: …. A detection check, …: … (…)." — re-aim this test: ${kindDescription}`);
+  return {
+    code: code[1].split(/, | or /).map((s) => s.trim()).sort(),
+    detection: [...detection[1].matchAll(/(?:^|, | or )([a-z][a-z0-9_]*) \(/g)].map((m) => m[1]).sort(),
+  };
+}
+// What is wrong between core-backend's kinds and this server's, as sentences: `classified` is how
+// this server's note counts one reference of each kind ("code", "detection" or "unclassified").
+function kindParityProblems(go, advertised, classified) {
+  const out = [];
+  const mcpKnows = new Set([...advertised.code, ...advertised.detection]);
+  for (const k of go.all) {
+    const want = go.code.includes(k) ? "code" : "detection";
+    const where = go.code.includes(k) ? "egkev.exploitCodeKinds lists it" : `core-backend holds it (${Object.keys(go.constants).find((c) => go.constants[c] === k)}) and egkev.exploitCodeKinds does not list it, so it is a detection kind there`;
+    const said = want === "code" ? advertised.code.includes(k) : advertised.detection.includes(k);
+    if (!said) out.push(`${k}: ${where}, and this server's kind field does not name it ${want === "code" ? "as exploit code" : "as a detection check"}`);
+    if (classified[k] !== want) out.push(`${k}: ${where}, and this server's note counts it as ${classified[k] ?? "nothing (not probed)"}`);
+  }
+  for (const k of mcpKnows) if (!go.all.includes(k)) out.push(`${k}: this server classifies it (${advertised.code.includes(k) ? "exploit code" : "a detection check"}), and core-backend holds no such kind (no exploits Kind* constant, not in egkev.exploitCodeKinds)`);
+  // The constants and Validate()'s case list name the same kinds: a constant Validate() refuses is
+  // never stored, and a case no constant this test read declares is a kind it missed.
+  for (const name of Object.keys(go.constants)) if (!go.validated.includes(name)) out.push(`${go.constants[name]}: core-backend declares ${name}, and (*Exploit).Validate() does not accept it`);
+  for (const name of go.validated) if (!Object.hasOwn(go.constants, name)) out.push(`${name}: (*Exploit).Validate() accepts it, and this test read no Kind* constant of that name`);
+  return out;
+}
+// One reference of `kind` per answer, under its own CVE id, as the API serves it with counts.
+const PROBED = new Map();
+const probeCve = (kind) => {
+  if (!PROBED.has(kind)) PROBED.set(kind, `CVE-2099-${3267000 + PROBED.size + 1}`);
+  return PROBED.get(kind);
+};
 
 const CWE79_ROWS = [
   { cve_id: "CVE-2024-27204", severity: "MEDIUM", cvss_v3_score: 6.1, echelongraph_score: 7.2, echelongraph_severity: "HIGH", score_assessed: true, published: "2024-03-01T00:00:00Z", description: "XSS", kev_listed: true },
@@ -195,9 +423,22 @@ const ANSWERS = {
   [ENRICH("CVE-2099-27304")]: ALL_FAILED,
   [ENRICH("CVE-2099-27305")]: { status: 500, body: { error: "boom" } },
   [ENRICH("CVE-2099-28170")]: BRANCHES,
+  [ENRICH("CVE-2025-48013")]: DRUPAL_48013,
+  [ENRICH("CVE-2099-48014")]: FOLD_OR_NOT,
   [ENRICH("CVE-2099-28760")]: DATED,
   [ENRICH("CVE-2026-42018")]: NUCLEI_ONLY,
   [ENRICH("CVE-2099-30390")]: NUCLEI_ONLY_OLDER,
+  [ENRICH("CVE-2020-35489")]: CVE_2020_35489,
+  [ENRICH("CVE-2099-32210")]: CVE_2020_35489_OLDER,
+  [ENRICH("CVE-2099-32211")]: CHECKERS_ONLY,
+  [ENRICH("CVE-2099-32212")]: CODE_NUCLEI_CHECKERS,
+  [ENRICH("CVE-2099-32214")]: CVE_2020_35489_AS_STORED,
+  [ENRICH("CVE-2099-32215")]: TWELVE_NO_BY_KIND,
+  ...(SHARED_ROWS ? { [ENRICH("CVE-2099-32213")]: withExploits(SHARED_ROWS, SHARED_ROWS.slice(0, 10)) } : {}),
+  [ENRICH("CVE-2099-32216")]: CODE_NUCLEI_CHECKERS_OLDER,
+  [ENRICH("CVE-2099-32670")]: UNKNOWN_BESIDE_CODE,
+  [ENRICH("CVE-2099-32671")]: UNKNOWN_ONLY,
+  [ENRICH("CVE-2099-32672")]: UNKNOWN_BESIDE_TEMPLATE_OLDER,
   "/api/v1/public/cwes/CWE-79": CWE79,
   "/api/v1/public/cwes/CWE-79?page=3": { ...CWE79, page: 3 },
   "/api/v1/public/cwes/CWE-79?page=200": { ...CWE79, page: 200, cves: [] },
@@ -350,8 +591,16 @@ for (const era of ERAS) {
       assert.ok(n.includes("timeline relays the 20 newest of the 25 enrichment-history rows the API returned (timeline_total 140)."), n);
       assert.ok(n.includes("Not relayed from the answer: vendor_advisories, patches, ai, trending and historical_incidents."), n);
       assert.doesNotMatch(JSON.stringify(res), /generated text/, "the ai section is not relayed");
-      assert.match(sc.method, /public exploit code, namely Metasploit modules \(metasploit\), Exploit-DB entries \(exploit_db\), GitHub proof-of-concept repositories \(github_poc\) and vendor proofs of concept \(vendor_poc\), and Nuclei detection templates \(nuclei_template\), which check whether a system is affected and are not necessarily exploit code/);
+      // #3221: the detection checks are Nuclei templates and GitHub checker repositories.
+      assert.match(sc.method, /public exploit code, namely Metasploit modules \(metasploit\), Exploit-DB entries \(exploit_db\), GitHub proof-of-concept repositories \(github_poc\) and vendor proofs of concept \(vendor_poc\), and detection checks, namely Nuclei detection templates \(nuclei_template\) and GitHub checker repositories \(github_checker: GitHub repositories named or described as a checker or scanner\), which check whether a system is affected and are not necessarily exploit code/);
       assert.match(sc.method, /each run only where it is enabled, so which sources are current depends on the deployment/);
+      // #3267's review: built from the note's two lists, the method says what any other kind is, and
+      // names exactly the kinds the kind field names, exploit code before detection.
+      assert.match(sc.method, /depends on the deployment\. A kind on neither list is one this server does not classify: the note counts it as neither\./);
+      const [methodCode, methodDetection] = sc.method.split("and detection checks, namely");
+      const kindsIn = (t) => [...t.matchAll(/\(([a-z][a-z0-9_]*)[):]/g)].map((m) => m[1]).sort();
+      const field = advertisedKinds(tools.find((t) => t.name === "cve_intel").outputSchema.oneOf.find((b) => b.properties.state.enum.includes("measured")).properties.data.properties.exploits.items.properties.kind.description);
+      assert.deepEqual([kindsIn(methodCode.slice(methodCode.indexOf("exploits:"))), kindsIn(methodDetection.split(", which check")[0])], [field.code, field.detection]);
       assert.doesNotMatch(sc.method, /\bpolled (daily|every)\b/i, "method claims no source is polled");
       assertTextIsStructure("cve_intel ok", res);
     });
@@ -370,11 +619,12 @@ for (const era of ERAS) {
       }
       // The description and the method name the template as a detection check.
       const d = tools.find((t) => t.name === "cve_intel").description;
-      assert.match(d, /^Weakness, exploit code, detection templates, affected packages and fixed versions for one CVE/);
+      // #3221: "detection checks", templates and GitHub checker repositories together.
+      assert.match(d, /^Weakness, exploit code, detection checks, affected packages and fixed versions for one CVE/);
       assert.doesNotMatch(d, /public exploit code/, "the description calls the whole list public exploit code");
       assert.ok(d.length <= 1948, `${d.length} characters: the budget is 1,948`);
       const [, , ok] = results.find(([n, a]) => n === "cve_intel" && a.cve_id === "CVE-2026-42018");
-      assert.match(ok.structuredContent.method, /Nuclei detection templates \(nuclei_template\), which check whether a system is affected and are not necessarily exploit code/);
+      assert.match(ok.structuredContent.method, /Nuclei detection templates \(nuclei_template\) and GitHub checker repositories \(github_checker: [^)]*\), which check whether a system is affected and are not necessarily exploit code/);
     });
 
     it("#3039 control: the pre-#3039 wording is caught by the claim check", () => {
@@ -384,6 +634,261 @@ for (const era of ERAS) {
         "public exploit code on record.",
       ]) assert.match(old, CODE_CLAIM, old);
       assert.doesNotMatch("it is not necessarily exploit code.", CODE_CLAIM);
+    });
+
+    // #3221: CVE-2020-35489 on /pulse (2026-10-11) is 1 GitHub PoC and 3 GitHub checker
+    // repositories. Served with the 3 as github_checker (the kinds the shared list gives), this
+    // note counts them apart; until #3221 it said "4 public exploit references" for that answer.
+    it("#3221 cve_intel: CVE-2020-35489's 3 GitHub checker repositories are counted apart, never as exploit code", async () => {
+      assert.deepEqual(kindCounts(CVE_2020_35489_ROWS), { github_poc: 1, github_checker: 3 }, "re-aim this test: CVE-2020-35489's rows are no longer 1 PoC and 3 checkers");
+      const res = await call("cve_intel", { cve_id: "CVE-2020-35489" });
+      assert.ok(!res.isError, noteOf(res));
+      const sc = res.structuredContent;
+      // Relayed as sent: each row keeps the kind the API gave it, and the counts are the API's.
+      assert.deepEqual(sc.data.exploits, CVE_2020_35489_ROWS);
+      assert.deepEqual(sc.data.exploits_by_kind, { github_poc: 1, github_checker: 3 });
+      const n = noteOf(res);
+      assert.ok(n.includes(`EchelonGraph holds 4 references for CVE-2020-35489 (exploits_total): 1 public exploit reference and 3 GitHub checker repositories; ${CHECKER_NOTE}.`), n);
+      assert.ok(!n.includes(PRE_3221), n);
+      assert.doesNotMatch(n, /\b[2-9] public exploit references\b/, "a checker repository is counted as exploit code");
+      assertTextIsStructure("cve_intel CVE-2020-35489", res);
+    });
+
+    it("#3221 cve_intel: checker repositories alone, beside a template, and in an answer older than exploits_total", async () => {
+      for (const [cve, want] of [
+        [
+          "CVE-2099-32211",
+          `EchelonGraph holds 3 GitHub checker repositories for CVE-2099-32211 and nothing else in exploits (exploits_total 3): ${CHECKER_NOTE}. It holds no Metasploit module, Exploit-DB entry or proof of concept for CVE-2099-32211, which is not evidence that none exists.`,
+        ],
+        [
+          "CVE-2099-32212",
+          // Both kinds: /pulse's two notes in turn (#3221's review), never one merged sentence.
+          `EchelonGraph holds 5 references for CVE-2099-32212 (exploits_total): 1 public exploit reference, 1 Nuclei detection template and 3 GitHub checker repositories; ${BOTH_NOTES}.`,
+        ],
+        [
+          "CVE-2099-32210",
+          `exploits lists 4 references: 1 public exploit reference and 3 GitHub checker repositories (${CHECKER_NOTE}) for CVE-2099-32210, 0 with verified_status verified; the answer carries no exploits_total, so it does not say how many are on record.`,
+        ],
+      ]) {
+        const res = await call("cve_intel", { cve_id: cve });
+        assert.ok(!res.isError, noteOf(res));
+        const n = noteOf(res);
+        assert.ok(n.includes(want), `${cve}: ${n}`);
+        assertTextIsStructure(`cve_intel ${cve}`, res);
+      }
+      // A checker-only CVE claims no exploit code anywhere in its notes, as a Nuclei-only one does (#3039).
+      const [, , only] = results.find(([name, a]) => name === "cve_intel" && a.cve_id === "CVE-2099-32211");
+      for (const note of only.structuredContent.notes) assert.doesNotMatch(note, CODE_CLAIM, note);
+    });
+
+    // #3221's review: /pulse prints DETECTION_TEMPLATE_NOTE and then CHECKER_REPOSITORY_NOTE where
+    // both kinds are present (ExploitWatch.tsx exploitWatchSummary's notes), and the issue asks for
+    // the page's wording. Every sentence that names both kinds gives the two notes in turn: with
+    // counts, from the listed rows of an answer older than exploits_total, and where the answer
+    // carries no exploits_by_kind, so which kinds are present is unknown.
+    it("#3221 cve_intel: a template beside checker repositories, or kinds unknown, gets /pulse's two notes in turn, never one merged sentence", async () => {
+      const wrong = [];
+      for (const [cve, want] of [
+        ["CVE-2099-32212", `1 public exploit reference, 1 Nuclei detection template and 3 GitHub checker repositories; ${BOTH_NOTES}.`],
+        ["CVE-2099-32216", `exploits lists 5 references: 1 public exploit reference, 1 Nuclei detection template and 3 GitHub checker repositories (${BOTH_NOTES}) for CVE-2099-32216,`],
+        [
+          "CVE-2099-32215",
+          `(exploits_total); the answer carries no exploits_by_kind, so it does not say how many are exploit code and how many detection checks, Nuclei detection templates or GitHub checker repositories (${BOTH_NOTES}). exploits_capped is true: exploits lists 10 of the 12, verified first.`,
+        ],
+      ]) {
+        const res = await call("cve_intel", { cve_id: cve });
+        assert.ok(!res.isError, noteOf(res));
+        const n = noteOf(res);
+        // Every case is read before any fails, so a failure names each sentence that is wrong.
+        if (!n.includes(want) || MERGED_NOTE.test(n)) wrong.push(`${cve}: ${n}`);
+        assertTextIsStructure(`cve_intel ${cve}`, res);
+      }
+      assert.deepEqual(wrong, [], "a sentence naming both kinds does not give /pulse's two notes in turn");
+    });
+
+    // The counts are the kinds the API serves, never re-read from a repository's name. While the
+    // API serves CVE-2020-35489's four rows as github_poc, as it does a row stored before #3040
+    // until a reclassification pass re-kinds it, this note counts all four as public exploit
+    // references, checker-named or not. So the MCP release alone does not change that CVE's
+    // answer: the API serving the 3 checkers as github_checker does.
+    it("#3221 cve_intel: a repository the API serves as github_poc is a public exploit reference, whatever its name says", async () => {
+      const res = await call("cve_intel", { cve_id: "CVE-2099-32214" });
+      assert.ok(!res.isError, noteOf(res));
+      const sc = res.structuredContent;
+      assert.deepEqual(sc.data.exploits_by_kind, { github_poc: 4 });
+      assert.ok(sc.data.exploits.some((r) => /_checker$/.test(r.source_name)), "re-aim this test: the rows hold no checker-named repository");
+      const n = noteOf(res);
+      assert.ok(n.includes("EchelonGraph holds 4 public exploit references for CVE-2099-32214 (exploits_total)."), n);
+      assert.doesNotMatch(n, /GitHub checker repositor/, n);
+      assertTextIsStructure("cve_intel CVE-2099-32214", res);
+    });
+
+    it("#3221 cve_intel: every repository on core-backend's shared list is counted under the kind it is stored as", { skip: SHARED_ROWS ? false : OUTSIDE }, async () => {
+      const kinds = kindCounts(SHARED_ROWS);
+      assert.deepEqual(Object.keys(kinds).sort(), ["github_checker", "github_poc"], "re-aim this test: the shared list holds a kind past the two GitHub ones");
+      const res = await call("cve_intel", { cve_id: "CVE-2099-32213" });
+      assert.ok(!res.isError, noteOf(res));
+      const total = SHARED_ROWS.length;
+      const n = noteOf(res);
+      assert.ok(
+        n.includes(
+          `EchelonGraph holds ${total} references for CVE-2099-32213 (exploits_total): ${kinds.github_poc} public exploit references and ${kinds.github_checker} GitHub checker repositories; ${CHECKER_NOTE}. exploits_capped is true: exploits lists 10 of the ${total}, verified first.`,
+        ),
+        n,
+      );
+      assertTextIsStructure("cve_intel shared list", res);
+    });
+
+    it("#3221: the CVE-2020-35489 rows copied for the tarball are the shared list's", { skip: SHARED ? false : OUTSIDE }, () => {
+      assert.deepEqual(SHARED.filter((r) => r.source_name.includes("CVE-2020-35489")), CVE_2020_35489_COPY);
+    });
+
+    it("#3221: the kind field's text names github_checker a detection check, and the description says detection checks", () => {
+      const intel = tools.find((t) => t.name === "cve_intel");
+      const items = intel.outputSchema.oneOf.find((b) => b.properties.state.enum.includes("measured")).properties.data.properties;
+      const kind = items.exploits.items.properties.kind.description;
+      const [code, detection] = kind.split("A detection check");
+      assert.ok(detection, kind);
+      for (const k of ["metasploit", "exploit_db", "github_poc", "vendor_poc"]) assert.match(code, new RegExp(`\\b${k}\\b`), kind);
+      for (const k of ["nuclei_template", "github_checker"]) {
+        assert.doesNotMatch(code, new RegExp(`\\b${k}\\b`), `${k} is listed with the exploit-code kinds: ${kind}`);
+        assert.match(detection, new RegExp(`\\b${k}\\b`), kind);
+      }
+      assert.match(detection, /github_checker \(a GitHub repository named or described as a checker or scanner\)/);
+      assert.match(items.exploits_by_kind.description, /the counts under nuclei_template and github_checker are detection checks, not exploit code/);
+      // #3267's review: built from the note's two lists, it names the exploit-code kinds and what any other kind is.
+      assert.match(items.exploits_by_kind.description, /those under metasploit, exploit_db, github_poc and vendor_poc are exploit code, and those under any other kind are of a kind this server does not classify, counted as neither\./);
+      assert.match(items.exploits.items.properties.verified_status.description, /GitHub proofs of concept and checker repositories/);
+      assert.doesNotMatch(intel.description, /detection templates/, "a GitHub checker repository is not a detection template");
+    });
+
+    // /pulse's wording, read from the page's own source: its nouns for a github_checker and a
+    // nuclei_template reference and its note on each, which this tool's note repeats.
+    it("#3221: the checker's and the template's nouns and notes are /pulse's (marketing-site components/ExploitWatch.tsx)", { skip: IN_MONOREPO ? false : OUTSIDE }, () => {
+      const page = path.resolve(CORE, "..", "marketing-site", "components", "ExploitWatch.tsx");
+      assert.ok(fs.existsSync(page), `${page} is gone: re-aim this test`);
+      const src = fs.readFileSync(page, "utf8").replace(/\s+/g, " ");
+      assert.ok(src.includes('github_checker: ["GitHub checker repository", "GitHub checker repositories"]'), "/pulse's KIND_NOUN for github_checker changed");
+      assert.ok(src.includes('nuclei_template: ["Nuclei detection template", "Nuclei detection templates"]'), "/pulse's KIND_NOUN for nuclei_template changed");
+      assert.ok(src.includes(`CHECKER_REPOSITORY_NOTE = "${capitalized(CHECKER_NOTE)}."`), "/pulse's CHECKER_REPOSITORY_NOTE changed");
+      assert.ok(src.includes(`DETECTION_TEMPLATE_NOTE = "${capitalized(TEMPLATE_NOTE)}."`), "/pulse's DETECTION_TEMPLATE_NOTE changed");
+      // Both kinds: the template's note, then the checker's (exploitWatchSummary's notes).
+      assert.ok(src.includes("${hasNuclei ? ` ${DETECTION_TEMPLATE_NOTE}` : \"\"}${hasChecker ? ` ${CHECKER_REPOSITORY_NOTE}` : \"\"}"), "/pulse no longer prints the template's note and then the checker's");
+    });
+
+    // #3267: how this server's note counts one reference of `kind`, served with its counts.
+    const classify = async (kind) => {
+      const cve = probeCve(kind);
+      ANSWERS[ENRICH(cve)] = withExploits([kindRow(kind)]);
+      const res = await call("cve_intel", { cve_id: cve });
+      assert.ok(!res.isError, noteOf(res));
+      const n = noteOf(res);
+      if (n.includes(`EchelonGraph holds 1 public exploit reference for ${cve} (exploits_total).`)) return "code";
+      if (n.includes(`for ${cve} and nothing else in exploits (exploits_total 1)`) && !UNKNOWN_AS_CODE.test(n.replace(/It holds no Metasploit module[^.]*\./, ""))) return "detection";
+      if (n.includes(`1 reference of a kind this server does not classify`) && !UNKNOWN_AS_CODE.test(n)) return "unclassified";
+      return `a note this test does not read: ${n}`;
+    };
+    const kindField = () => tools.find((t) => t.name === "cve_intel").outputSchema.oneOf.find((b) => b.properties.state.enum.includes("measured")).properties.data.properties.exploits.items.properties.kind.description;
+
+    it("#3267 cve_intel: a kind this server does not classify is counted as neither exploit code nor a detection check", async () => {
+      const wrong = [];
+      for (const [cve, want] of [
+        ["CVE-2099-32670", `EchelonGraph holds 2 references for CVE-2099-32670 (exploits_total): 1 public exploit reference and 1 reference of a kind this server does not classify; ${UNCLASSIFIED_NOTE}.`],
+        ["CVE-2099-32671", `EchelonGraph holds 2 references for CVE-2099-32671 (exploits_total): 2 references of a kind this server does not classify; ${UNCLASSIFIED_NOTE}.`],
+        [
+          "CVE-2099-32672",
+          `exploits lists 2 references: 1 Nuclei detection template and 1 reference of a kind this server does not classify (${TEMPLATE_NOTE}. ${capitalized(UNCLASSIFIED_NOTE)}) for CVE-2099-32672, 0 with verified_status verified; the answer carries no exploits_total, so it does not say how many are on record.`,
+        ],
+      ]) {
+        const res = await call("cve_intel", { cve_id: cve });
+        assert.ok(!res.isError, noteOf(res));
+        const n = noteOf(res);
+        // Every case is read before any fails, so a failure names each sentence that is wrong.
+        if (!n.includes(want)) wrong.push(`${cve}: ${n}`);
+        assertTextIsStructure(`cve_intel ${cve}`, res);
+      }
+      assert.deepEqual(wrong, [], "a reference of a kind this server does not classify is counted as something");
+      // Relayed as sent: the kind and the counts are the API's.
+      const [, , only] = results.find(([name, a]) => name === "cve_intel" && a.cve_id === "CVE-2099-32671");
+      assert.deepEqual(only.structuredContent.data.exploits_by_kind, { [UNKNOWN_KIND]: 2 });
+      assert.ok(only.structuredContent.data.exploits.every((r) => r.kind === UNKNOWN_KIND));
+      // Nothing of a CVE whose every reference is of an unknown kind calls one exploit code, or says
+      // the CVE holds none.
+      for (const note of only.structuredContent.notes) assert.doesNotMatch(note, UNKNOWN_AS_CODE, note);
+      const [, , beside] = results.find(([name, a]) => name === "cve_intel" && a.cve_id === "CVE-2099-32670");
+      assert.doesNotMatch(noteOf(beside), /\b2 public exploit references\b/, "the unknown kind is counted as exploit code");
+    });
+
+    it("#3267: the kind field names exploit code and detection kinds apart, and the note counts each as the field says and any other kind as neither", async () => {
+      const kinds = advertisedKinds(kindField());
+      assert.ok(kinds.code.length > 0 && kinds.detection.length > 0, JSON.stringify(kinds));
+      assert.deepEqual(kinds.code.filter((k) => kinds.detection.includes(k)), [], "a kind is named both exploit code and a detection check");
+      assert.match(kindField(), /A kind not named here is one this server does not classify/);
+      const got = {};
+      for (const k of [...kinds.code, ...kinds.detection, UNKNOWN_KIND]) got[k] = await classify(k);
+      const want = Object.fromEntries([...kinds.code.map((k) => [k, "code"]), ...kinds.detection.map((k) => [k, "detection"]), [UNKNOWN_KIND, "unclassified"]]);
+      assert.deepEqual(got, want);
+    });
+
+    // core-backend's kinds and this server's are the same two lists: a kind either side adds alone
+    // fails here, before any client is told about it.
+    it("#3267: every core-backend exploit kind is classified here as egkev.ExploitCodeKinds classifies it, and this server names no other", { skip: IN_MONOREPO ? false : OUTSIDE_GO }, async () => {
+      const go = goKinds(goExploitsSources(), goCodeKindsSource());
+      const advertised = advertisedKinds(kindField());
+      const classified = {};
+      for (const k of new Set([...go.all, ...advertised.code, ...advertised.detection])) classified[k] = await classify(k);
+      assert.deepEqual(kindParityProblems(go, advertised, classified), [], `core-backend: exploit code ${go.code.join(", ")}; detection ${go.detection.join(", ")}`);
+    });
+
+    it("#3267 control: a kind added alone to core-backend's constants or exploitCodeKinds, or to this server's lists, fails the parity check", { skip: IN_MONOREPO ? false : OUTSIDE_GO }, async () => {
+      const sources = goExploitsSources();
+      const codeSrc = goCodeKindsSource();
+      const advertised = advertisedKinds(kindField());
+      const probe = async (go, adv = advertised) => {
+        const classified = {};
+        for (const k of new Set([...go.all, ...adv.code, ...adv.detection])) classified[k] = await classify(k);
+        return kindParityProblems(go, adv, classified);
+      };
+      // A new Kind* constant (#3267's control: KindFoo = "foo_check" in types.go).
+      const withConstant = sources.map(([f, t]) => [f, f === "types.go" ? t.replace(/^(\s*KindGitHubPoC\s*=\s*"github_poc")$/m, `$1\n\tKindFoo = "${UNKNOWN_KIND}"`) : t]);
+      assert.notDeepEqual(withConstant, sources, "types.go no longer declares KindGitHubPoC: re-aim this control");
+      const constantProblems = await probe(goKinds(withConstant, codeSrc));
+      assert.ok(constantProblems.some((p) => p.startsWith(`${UNKNOWN_KIND}: core-backend holds it (KindFoo)`) && p.includes("counts it as unclassified")), constantProblems.join("\n"));
+      // #3267's review: the two shapes the first regex missed, each alone in a copy of types.go: a
+      // single-line constant and a typed one in the const block. Each must turn the check red, and the
+      // first version's regex reads neither (so this control is the one that catches the miss).
+      const firstRegex = /^\s*(Kind[A-Z]\w*)(?:\s+string)?\s*=\s*"([^"]*)"/gm;
+      for (const [shape, edit, name, kind] of [
+        ["single-line const", (t) => `${t}\nconst KindSingle = "single_check"\n`, "KindSingle", "single_check"],
+        ["typed in the block", (t) => t.replace(/^(\s*KindGitHubPoC\s*=\s*"github_poc")$/m, `$1\n\tKindTyped ExploitKind = "typed_check"`), "KindTyped", "typed_check"],
+      ]) {
+        const copy = sources.map(([f, t]) => [f, f === "types.go" ? edit(t) : t]);
+        assert.notDeepEqual(copy, sources, `${shape}: the copy of types.go did not change: re-aim this control`);
+        const text = copy.find(([f]) => f === "types.go")[1];
+        assert.ok(![...text.matchAll(firstRegex)].some((m) => m[1] === name), `${shape}: the first version's regex reads ${name}, so this control proves nothing`);
+        const go = goKinds(copy, codeSrc);
+        assert.equal(go.constants[name], kind, `${shape}: goKinds does not read ${name}`);
+        const shapeProblems = await probe(go);
+        assert.ok(shapeProblems.some((p) => p.startsWith(`${kind}: core-backend holds it (${name})`) && p.includes("counts it as unclassified")), `${shape}: ${shapeProblems.join("\n")}`);
+        assert.ok(shapeProblems.includes(`${kind}: core-backend declares ${name}, and (*Exploit).Validate() does not accept it`), `${shape}: ${shapeProblems.join("\n")}`);
+      }
+      // Validate()'s case list drifting from the constants: a constant dropped from it, a case added.
+      const dropped = sources.map(([f, t]) => [f, f === "types.go" ? t.replace(/case (KindMetasploit, [^:]*), KindGitHubChecker:/, "case $1:") : t]);
+      assert.notDeepEqual(dropped, sources, "Validate()'s case list no longer ends with KindGitHubChecker: re-aim this control");
+      assert.ok((await probe(goKinds(dropped, codeSrc))).includes("github_checker: core-backend declares KindGitHubChecker, and (*Exploit).Validate() does not accept it"));
+      const added = sources.map(([f, t]) => [f, f === "types.go" ? t.replace(/(case KindMetasploit, [^:]*):/, "$1, KindNotDeclaredHere:") : t]);
+      assert.ok((await probe(goKinds(added, codeSrc))).includes("KindNotDeclaredHere: (*Exploit).Validate() accepts it, and this test read no Kind* constant of that name"));
+      // A new exploit-code kind in egkev.exploitCodeKinds.
+      const withCode = codeSrc.replace(/("vendor_poc")\}/, '$1, "bar_exploit"}');
+      assert.notEqual(withCode, codeSrc, "exploitCodeKinds no longer ends with vendor_poc: re-aim this control");
+      const codeProblems = await probe(goKinds(sources, withCode));
+      assert.ok(codeProblems.some((p) => p.startsWith("bar_exploit: egkev.exploitCodeKinds lists it") && p.includes("counts it as unclassified")), codeProblems.join("\n"));
+      // A kind this server names that core-backend does not hold.
+      const extra = await probe(goKinds(sources, codeSrc), { ...advertised, detection: [...advertised.detection, "baz_scanner"].sort() });
+      assert.ok(extra.some((p) => p.startsWith("baz_scanner: this server classifies it")), extra.join("\n"));
+      // A kind core-backend moves between the lists (github_checker into exploitCodeKinds).
+      const moved = await probe(goKinds(sources, codeSrc.replace(/("vendor_poc")\}/, '$1, "github_checker"}')));
+      assert.ok(moved.some((p) => p.startsWith("github_checker: egkev.exploitCodeKinds lists it") && p.includes("counts it as detection")), moved.join("\n"));
     });
 
     it("cve_intel: zero references is a counted zero, never 'no exploit exists'", async () => {
@@ -446,6 +951,38 @@ for (const era of ERAS) {
       // An answer older than #2817 (no fixed_branches on any row) is worded as such.
       const older = await call("cve_intel", { cve_id: LOG4SHELL });
       assert.ok(noteOf(older).includes("No affected_packages row carries fixed_branches (an API older than that field): each row's fixed_version is one range's fix, which need not be the fix for a given installed version."), noteOf(older));
+    });
+
+    // #3285 follow-up (3.1.0's lane P): cve_intel's affected_packages lists a package once per
+    // stored ecosystem string, as cve_remediation's fixed_branches does, and its note's rule, "no
+    // range of the row holds", read row by row gave a Packagist drupal/quick_node_block 1.0.0 the
+    // Packagist row's 2.0.0, which the Drupal row ([0, 2.0.1)) still holds affected. The note now
+    // says rows of one package_name under Packagist or Maven, bare or with a repository URL, are one
+    // package, as the matcher reads them. Control: the note as it read at d42d4697 (no such
+    // sentence; each row has one range, so it said nothing of the walk), applied the same way,
+    // gives 2.0.0.
+    it("#3285: cve_intel's note reads CVE-2025-48013's two Packagist rows for drupal/quick_node_block as one package: 1.0.0's fix is 2.0.1, not 2.0.0", async () => {
+      const res = await call("cve_intel", { cve_id: "CVE-2025-48013" });
+      assert.ok(!res.isError, noteOf(res));
+      assert.deepEqual(res.structuredContent.data.affected_packages, DRUPAL_ROWS, "affected_packages relayed as sent");
+      const note = noteOf(res);
+      const said = `2 affected_packages rows are 1 package (drupal/quick_node_block (Packagist:https://packages.drupal.org/8 and Packagist)): ${ONE_PACKAGE_ROWS}, so there an installed version's fix is the first fixed above it that no range of those rows holds: the fixed of the range that holds it, or, while another range of them still holds that version, that range's fixed (none where a range on the way has no fixed); each row's fixed_version is one range's fix.`;
+      assert.ok(note.includes(said), note);
+      const component = { ecosystem: "Packagist", pkg: "drupal/quick_node_block", installed: "1.0.0" };
+      assert.equal(fixByIntelNote(note, DRUPAL_ROWS, component), "2.0.1");
+      // Control: without the sentence, the same rule read row by row gives the still-affected 2.0.0.
+      assert.equal(fixByIntelNote(note.replace(said, ""), DRUPAL_ROWS, component), "2.0.0");
+      assertTextIsStructure("cve_intel CVE-2025-48013", res);
+    });
+    it("#3285: cve_intel folds Maven with a repository URL onto Maven, and never a release suffix (Debian:11, Debian:12)", async () => {
+      const res = await call("cve_intel", { cve_id: "CVE-2099-48014" });
+      const note = noteOf(res);
+      assert.ok(note.includes("2 affected_packages rows are 1 package (org.example:lib (Maven:https://repo.spring.io/release and Maven)):"), note);
+      assert.doesNotMatch(note, /openssl \(Debian/, "a release suffix is folded");
+      const rows = FOLD_OR_NOT.affected_packages;
+      assert.equal(fixByIntelNote(note, rows, { ecosystem: "Maven", pkg: "org.example:lib", installed: "1.0.0" }), "1.2.0");
+      assert.equal(fixByIntelNote(note, rows, { ecosystem: "Debian:12", pkg: "openssl", installed: "1.1.1" }), "3.0.1");
+      assert.equal(fixByIntelNote(note, rows, { ecosystem: "Debian:11", pkg: "openssl", installed: "1.0.0" }), "1.1.1");
     });
 
     it("#2876 cve_intel: source_published_at (null where the source gives none) and eg_first_seen_at relayed as sent, validated, and never rendered as a made-up date", async () => {

@@ -10,7 +10,12 @@ Every field comes from what the API sends; where the API does not say, the field
 a note says so. Per tool:
 
 - `cve_summary` is `measured`, and its `measured_at` is `summary.last_updated`, the newest
-  modification time among the active CVE records it counts.
+  modification time among the active CVE records it counts. Its `freshness.nvd_poll` is the
+  fleet's last completed NVD poll, from the answer's `nvd_poll` block: `last_run_at` is
+  `nvd_poll.last_completed_at` as sent, with `scope` `fleet` and the poll's `interval`. It is
+  relayed only as a real RFC 3339 time at most 5 minutes after this server's clock. `freshness` is
+  `null` where the answer carries no `nvd_poll` (an older API, or the API could not read that time)
+  or one without such a time, and the note says which.
 - `search_cves` is `measured`, with `measured_at` `null`: each record carries its own times. Its
   `coverage` repeats the list's `total`, `total_counted`, `total_is_lower_bound`,
   `search_relaxed`, `limit` and `offset`, and adds `returned`, the rows in the page. When
@@ -39,5 +44,12 @@ a note says so. Per tool:
   then `lookup` (`cpe` or `registry`), `match_layer`, `count`, `capped`, `candidates_capped`,
   `excluded_count`, `undetermined_count`, `not_affected_count` and `degraded`.
 
-The CVE feed tools' `freshness` is `null`: the feed's answers carry no time at which its
-pollers last completed a poll for the feed as a whole.
+`search_cves`' and `get_cve`'s `freshness` is `null`: their answers carry no poll-completion
+time. The fleet's last completed NVD poll is `cve_summary`'s `freshness`, as above.
+
+Arguments that break a tool's `inputSchema` (a number outside its range, a value outside its
+`enum`, the wrong JSON type, a required argument left out) are refused before any request is
+made, with the same envelope as every other refusal: `state` `invalid_input`, `error.kind`
+`invalid_input`, `isError` true, and notes that name each argument and the rule it broke (by its
+JSON type, never by a value sent). Through 3.0.2 the MCP SDK answered those itself, with one
+`Input validation error` text block and no `structuredContent` (#3015).
