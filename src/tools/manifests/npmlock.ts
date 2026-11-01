@@ -12,7 +12,7 @@
 // An entry installed from git (resolved git+…, or a v1 version that is a git URL) is vcs_source;
 // from a directory or file (file:…) local_path; from a tarball URL unsupported_line; an entry
 // without a version version_unresolved. Each is listed, never sent.
-import { Unreadable, emptyParsed, isObj, purlOf, specOf, usableVersion, type NotCheckedReason, type Parsed } from "./common.js";
+import { SPEC_MAX, Unreadable, addNotChecked, callBounds, clip, emptyParsed, isObj, parseLockfileJson, purlOf, specOf, usableVersion, type Bounds, type NotCheckedReason, type Parsed } from "./common.js";
 
 const NM = "node_modules/";
 const GIT = /^(git(\+[a-z]+)?:|github:|gitlab:|bitbucket:|gist:)/i;
@@ -26,18 +26,17 @@ function source(s: string | undefined): { reason: NotCheckedReason; detail: stri
   return null;
 }
 
-export function readNpmLock(text: string): Parsed {
-  let doc: unknown;
-  try {
-    doc = JSON.parse(text);
-  } catch {
-    throw new Unreadable("is not JSON");
-  }
+export function readNpmLock(text: string, bounds: Bounds = callBounds()): Parsed {
+  const doc = parseLockfileJson(text, bounds);
   if (!isObj(doc)) throw new Unreadable("is not a JSON object");
   const p = emptyParsed();
   const lv = doc.lockfileVersion;
   if (isObj(doc.packages)) {
-    for (const [key, e] of Object.entries(doc.packages)) {
+    // #3434: for...in, not Object.entries, which built a [key, value] array per entry beside the parsed object (the same
+    // keys, in the same order, as JSON.parse makes no inherited enumerable key).
+    const packages = doc.packages;
+    for (const key in packages) {
+      const e = packages[key];
       if (key === "") {
         p.skipped++;
         continue;
@@ -48,13 +47,13 @@ export function readNpmLock(text: string): Parsed {
       const name = typeof entry.name === "string" && entry.name ? entry.name : (folder ?? key);
       const version = typeof entry.version === "string" ? entry.version : undefined;
       const miss = (reason: NotCheckedReason, detail: string) =>
-        p.not_checked.push({ name, spec: specOf(`${key}${version ? ` ${version}` : ""}`), reason, line: null, detail });
+        addNotChecked(p, { name: clip(name), spec: specOf(`${key}${version ? ` ${version}` : ""}`), reason, line: null, detail });
       if (folder === null) {
         miss("local_path", "a workspace member of this project, not an npm release");
         continue;
       }
       if (entry.link === true) {
-        miss("local_path", `a link to ${typeof entry.resolved === "string" ? entry.resolved : "a local directory"}, not an npm release`);
+        miss("local_path", `a link to ${typeof entry.resolved === "string" ? clip(entry.resolved) : "a local directory"}, not an npm release`);
         continue;
       }
       const src = source(typeof entry.resolved === "string" ? entry.resolved : undefined);
@@ -71,11 +70,14 @@ export function readNpmLock(text: string): Parsed {
     return p;
   }
   if (lv !== undefined && lv !== 1) throw new Unreadable(`has lockfileVersion ${JSON.stringify(lv)} and no packages object`);
-  // Version 1: the dependencies tree, each node's own dependencies nested below it.
+  // Version 1: the dependencies tree, each node's own dependencies nested below it. #3434: `at`, the parent's install
+  // path, is passed down as its first SPEC_MAX characters, a string of its own (clip's copy, uncut): a spec shows no
+  // more of a path (specOf), so each spec is as before, and no entry flattens or keeps a path longer than that.
   const walk = (deps: unknown, at: string, depth: number) => {
     if (!isObj(deps)) return;
     if (depth > 64) throw new Unreadable("nests its dependencies deeper than 64 levels");
-    for (const [key, e] of Object.entries(deps)) {
+    for (const key in deps) {
+      const e = deps[key];
       const entry = isObj(e) ? e : {};
       const path = `${at}${NM}${key}`;
       let name = key;
@@ -83,12 +85,12 @@ export function readNpmLock(text: string): Parsed {
       // An alias: "npm:real-name@1.2.3".
       const alias = version ? /^npm:((?:@[^/@]+\/)?[^@]+)@(.+)$/.exec(version) : null;
       if (alias) [, name, version] = alias;
-      const miss = (reason: NotCheckedReason, detail: string) => p.not_checked.push({ name, spec: specOf(`${path}${version ? ` ${version}` : ""}`), reason, line: null, detail });
+      const miss = (reason: NotCheckedReason, detail: string) => addNotChecked(p, { name: clip(name), spec: specOf(`${path}${version ? ` ${version}` : ""}`), reason, line: null, detail });
       const src = source(version) ?? source(typeof entry.resolved === "string" ? entry.resolved : undefined);
       if (src) miss(src.reason, src.detail);
       else if (!usableVersion(version)) miss("version_unresolved", "the entry carries no version");
       else p.pinned.push({ purl: purlOf("npm", name, version), line: null });
-      walk(entry.dependencies, `${path}/`, depth + 1);
+      if (isObj(entry.dependencies)) walk(entry.dependencies, clip(`${path}/`.slice(0, SPEC_MAX), SPEC_MAX), depth + 1);
     }
   };
   if (!isObj(doc.dependencies)) throw new Unreadable("has neither a packages nor a dependencies object");

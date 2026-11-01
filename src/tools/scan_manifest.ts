@@ -23,7 +23,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
 import { sbomData, sbomText, type CheckSbomDeps } from "./check_sbom.js";
-import { FORMAT_NAMES, FORMATS, NOT_CHECKED_REASONS, detect, readFile, type Format, type NotChecked, type NotCheckedReason } from "./manifests/index.js";
+import { FORMAT_NAMES, FORMATS, NOT_CHECKED_MAX, NOT_CHECKED_REASONS, PastBound, SPEC_MAX, callBounds, detect, jsonEscaped, readFile, type Bounds, type Format, type NotChecked, type NotCheckedReason } from "./manifests/index.js";
 import {
   CLEAN_NOTE,
   DISTRO_NOTE,
@@ -51,6 +51,14 @@ export const SCAN_MANIFEST = "scan_manifest";
 // document cap, so the hosted endpoint's 6 MiB body cap holds a call at this size (httpPolicy.ts).
 export const MAX_FILES = 20;
 export const MAX_MANIFEST_CHARS = 5_000_000;
+// #3434: the longest filename taken, a path in a repository (the inputSchema's maxLength too), and the characters it may
+// not hold: any JSON writes as an escape of six characters or a quote (manifests/common.ts jsonEscaped; the
+// inputSchema's pattern too, but for a lone surrogate, which a pattern cannot say alike in every validator). Each entry
+// of data.not_checked carries its file's name, so this bounds what a call's NOT_CHECKED_MAX entries repeat of it, as an
+// answer carries it: at most 1,024 characters, which JSON writes in at most 2,048 (a backslash as two).
+export const MAX_FILENAME_CHARS = 1_024;
+const FILENAME_PATTERN = /^[^\x00-\x1f"]*$/;
+const FILENAME_RULE = "must hold no control character (U+0000 to U+001F), quote or lone surrogate, which a portable path does not hold";
 // How many files the note names one by one.
 const NOTE_FILES_MAX = 20;
 // How many entries of data.not_checked the text keeps once it must be cut.
@@ -68,9 +76,15 @@ const NOT_CHECKED_NOTE =
 // (time_budget), and a 429 refused (rate_limited) or a batch failed (request_failed) after the first
 // also answers partial, the rest in not_sent_purls. 3.0.2's "within 50 seconds" said so; the
 // description says it again, the room from shorter wording elsewhere (every claim kept).
+// #3434: data.not_checked lists a call's first NOT_CHECKED_MAX entries and counts all, and a call past a per-call bound
+// or with a filename past MAX_FILENAME_CHARS is refused; the description says both, within its 1,948 characters, the
+// room from fixed_in_reason, not_assessed_reason, matched_via and "require" (the outputSchema describes each), the
+// format sentence (files' own descriptions say it) and "unchecked" (not_sent_purls are not clean). The refusals come
+// before the budget sentence, which test/scan_manifest.test.mjs (#3100) reads with the API's sentence after it. Its
+// numbers are literals, as marketing-site's check reads them; test/manifest-lines.test.mjs holds them to the constants.
 export const SCAN_MANIFEST_TITLE = "Check a lockfile against the advisory corpus";
 export const SCAN_MANIFEST_DESCRIPTION =
-  "Check a project's lockfile or pinned manifest against EchelonGraph's advisory corpus, one verdict per dependency. Pass files: 1 to 20 of filename and content, up to 5,000,000 characters in all; the filename or format gives the format. Read: requirements.txt (== and === pins only), go.mod (require, after replace and exclude), package-lock.json and npm-shrinkwrap.json (v1-v3), Cargo.lock, Gemfile.lock, composer.lock, poetry.lock and gradle.lockfile. package.json, pyproject.toml, Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle hold ranges and are refused, naming the lockfile; go.sum is refused: it lists versions the build does not select. The server reads the files into purls; only the purls are sent to the API, in POST bodies of at most 200, never in a URL; filenames and file contents are not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body, up to 6 MiB. data.results holds a row per distinct purl, with verdict (affected, not_affected, undetermined or not_assessed), not_assessed_reason, cve_ids and matched_via; each match carries kev_listed, epss_score and fixed_in or null with fixed_in_reason. not_affected is the only clean verdict. data.not_checked lists each entry not sent (file, line, reason); not_checked entries are not clean. At most 2,000 distinct purls and 50 seconds a call. The API allows 1,200 components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls, unchecked, not clean." +
+  "Check a project's lockfile or pinned manifest against EchelonGraph's advisory corpus, one verdict per dependency. Pass files: 1 to 20 of filename and content, up to 5,000,000 characters in all. Read: requirements.txt (== and === pins only), go.mod (after replace and exclude), package-lock.json and npm-shrinkwrap.json (v1-v3), Cargo.lock, Gemfile.lock, composer.lock, poetry.lock and gradle.lockfile. package.json, pyproject.toml, Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle hold ranges and are refused, naming the lockfile; go.sum is refused: it lists versions the build does not select. The server reads the files into purls; only the purls are sent to the API, in POST bodies of at most 200, never in a URL; filenames and file contents are not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body, up to 6 MiB. data.results holds a row per distinct purl, with verdict (affected, not_affected, undetermined or not_assessed) and cve_ids; each match carries kev_listed, epss_score and fixed_in. not_affected is the only clean verdict. data.not_checked lists the first 2,000 entries not sent (file, line, reason), counting all; not_checked entries are not clean. Refused: over 40,000 lines or 300,000 JSON/TOML values a call, a filename over 1,024 characters. At most 2,000 distinct purls and 50 seconds a call. The API allows 1,200 components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls, not clean." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
   " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least; not_checked its first 20.";
@@ -80,7 +94,9 @@ export const SCAN_MANIFEST_DESCRIPTION =
 // #3132's second review: check_sbom's sentence on not_sent_purls says a second call can send them
 // without reading the list, from their positions in the input; here those positions index purls
 // read from the files, which a client cannot rebuild, so the sentence names full: true instead.
-export function manifestText(sent: number): TextCut {
+// #3434: `notChecked`, the entries not checked the call counted, of which data.not_checked lists at most
+// NOT_CHECKED_MAX.
+export function manifestText(sent: number, notChecked?: number): TextCut {
   const sbom = sbomText(sent);
   return {
     ...sbom,
@@ -97,7 +113,7 @@ export function manifestText(sent: number): TextCut {
       {
         list: "not_checked",
         cap: TEXT_NOT_CHECKED,
-        said: (inText, total) => `coverage.not_checked_by_reason counts all ${total} entries not checked, ${inText} of them in the text.`,
+        said: (inText, total) => `coverage.not_checked_by_reason counts all ${notChecked ?? total} entries not checked, ${inText} of them in the text.`,
       },
     ],
     // #3269's second review: no page sentence, as for check_sbom's text (sbomText says why).
@@ -127,7 +143,29 @@ type FileRead = {
   notes: string[];
   replaced: { from: string; to: string }[];
 };
-type Read = { files: FileRead[]; purls: string[]; read_purls: number; duplicates_removed: number; not_checked: (NotChecked & { file: string })[] };
+// #3434: not_checked, the first NOT_CHECKED_MAX entries not sent (counted, all of them, in not_checked_total and
+// not_checked_by_reason), and the files' replaced lists the first NOT_CHECKED_MAX replaces applied (replaced_total).
+type Read = {
+  files: FileRead[];
+  purls: string[];
+  read_purls: number;
+  duplicates_removed: number;
+  not_checked: (NotChecked & { file: string })[];
+  not_checked_total: number;
+  not_checked_by_reason: Record<NotCheckedReason, number>;
+  replaced_total: number;
+};
+
+// #3434: why a call whose files pass one of the readers' bounds (manifests/common.ts) is refused, naming the bound, and
+// what each of its files counted against it, as purlsRefusal lists each file's purls, so a caller can split the call.
+// `counted`: each file read so far, the last the one that passed the bound (counted to that point).
+function pastBound(e: PastBound, bounds: Bounds, counted: { filename: string; counts: Record<keyof Bounds, number> }[]): string {
+  const b = e.bound;
+  const key = (Object.keys(bounds) as (keyof Bounds)[]).find((k) => bounds[k] === b) ?? "lines";
+  const how = key === "lines" ? " (blank and comment lines are not counted)" : key === "json" ? " (counted before each file is parsed)" : "";
+  const each = counted.filter((f) => f.counts[key] > 0).map((f, i, all) => `${f.filename} ${f.counts[key]}${i === all.length - 1 ? " when the bound was passed" : ""}`);
+  return `the ${b.formats} files hold more than ${b.max} ${b.what} in all, counted per call${how}: ${each.join(", ")}; at most ${b.max} are read per call, so no file is read: pass these files over more calls, or a lockfile's purls to check_sbom in parts`;
+}
 
 export function readFiles(a: { files?: unknown }): Read | string {
   if (!Array.isArray(a.files)) return "files must be a list of {filename, content}";
@@ -136,6 +174,8 @@ export function readFiles(a: { files?: unknown }): Read | string {
   let total = 0;
   for (const [n, f] of (a.files as FileIn[]).entries()) {
     if (f === null || typeof f !== "object" || typeof f.filename !== "string" || typeof f.content !== "string") return `files[${n}] must be {filename, content}, both strings`;
+    if (f.filename.length > MAX_FILENAME_CHARS) return `files[${n}].filename is ${f.filename.length} characters; at most ${MAX_FILENAME_CHARS} are taken (a path in a repository)`;
+    if (jsonEscaped(f.filename)) return `files[${n}].filename ${FILENAME_RULE}`;
     if (f.format !== undefined && f.format !== null && !(FORMAT_NAMES as string[]).includes(f.format as string)) {
       return `files[${n}].format ${JSON.stringify(f.format)} is not one of ${FORMAT_NAMES.join(", ")}`;
     }
@@ -146,6 +186,14 @@ export function readFiles(a: { files?: unknown }): Read | string {
   const files: FileRead[] = [];
   const all: string[] = [];
   const notChecked: (NotChecked & { file: string })[] = [];
+  const by = Object.fromEntries(NOT_CHECKED_REASONS.map((r) => [r, 0])) as Record<NotCheckedReason, number>;
+  let notCheckedTotal = 0;
+  let replacedKept = 0;
+  let replacedTotal = 0;
+  // #3434: one set of bounds for the whole call, every file's reader taking from it, and what each file counted.
+  const bounds = callBounds();
+  const counted: { filename: string; counts: Record<keyof Bounds, number> }[] = [];
+  const counts = (): Record<keyof Bounds, number> => ({ lines: bounds.lines.count, json: bounds.json.count, toml: bounds.toml.count });
   for (const f of a.files as { filename: string; content: string; format?: Format | null }[]) {
     const out: FileRead = { filename: f.filename, format: null, ecosystem: null, read: false, refused: null, purls: 0, not_checked: 0, skipped: 0, notes: [], replaced: [] };
     files.push(out);
@@ -156,35 +204,60 @@ export function readFiles(a: { files?: unknown }): Read | string {
     }
     out.format = d.format;
     out.ecosystem = FORMATS[d.format].ecosystem;
-    const r = readFile(d.format, f.content);
+    let r: ReturnType<typeof readFile>;
+    const before = counts();
+    const mine = (): Record<keyof Bounds, number> => {
+      const now = counts();
+      return { lines: now.lines - before.lines, json: now.json - before.json, toml: now.toml - before.toml };
+    };
+    try {
+      r = readFile(d.format, f.content, bounds);
+    } catch (e) {
+      if (e instanceof PastBound) return pastBound(e, bounds, [...counted, { filename: f.filename, counts: mine() }]);
+      throw e;
+    }
+    counted.push({ filename: f.filename, counts: mine() });
     if ("unreadable" in r) {
       out.refused = `read as ${d.format}, ${r.unreadable}`;
       continue;
     }
     out.read = true;
     out.purls = r.pinned.length;
-    out.not_checked = r.not_checked.length;
+    out.not_checked = NOT_CHECKED_REASONS.reduce((n, reason) => n + r.counted[reason], 0);
     out.skipped = r.skipped;
     out.notes = r.notes;
-    out.replaced = r.replaced ?? [];
+    // #3434: the call lists the first NOT_CHECKED_MAX replaces applied, and counts them all.
+    const replaced = r.replaced ?? [];
+    out.replaced = replaced.length <= NOT_CHECKED_MAX - replacedKept ? replaced : replaced.slice(0, NOT_CHECKED_MAX - replacedKept);
+    replacedKept += out.replaced.length;
+    replacedTotal += replaced.length;
     // One by one, never push(...list): a 5,000,000-character requirements.txt of unpinned lines
     // is some 170,000 entries, and, spread into push() as that many arguments, they overflowed
     // V8's stack ("Maximum call stack size exceeded", #3013's review): the call crashed.
     for (const p of r.pinned) all.push(p.purl);
-    for (const n of r.not_checked) notChecked.push({ file: f.filename, ...n });
+    // #3434: the call lists the first NOT_CHECKED_MAX entries not checked, and counts them all.
+    notCheckedTotal += out.not_checked;
+    for (const reason of NOT_CHECKED_REASONS) by[reason] += r.counted[reason];
+    for (const n of r.not_checked) {
+      if (notChecked.length >= NOT_CHECKED_MAX) break;
+      notChecked.push({ file: f.filename, ...n });
+    }
   }
   if (files.every((f) => !f.read)) return `no file could be read: ${files.map((f) => `${f.filename}: ${f.refused}`).join("; ")}`;
   const { purls, removed } = dedupe(all);
-  return { files, purls, read_purls: all.length, duplicates_removed: removed, not_checked: notChecked };
+  return {
+    files,
+    purls,
+    read_purls: all.length,
+    duplicates_removed: removed,
+    not_checked: notChecked,
+    not_checked_total: notCheckedTotal,
+    not_checked_by_reason: by,
+    replaced_total: replacedTotal,
+  };
 }
 
 // ── The answer ──
-
-const byReason = (rows: { reason: NotCheckedReason }[]): Record<NotCheckedReason, number> => {
-  const by = Object.fromEntries(NOT_CHECKED_REASONS.map((r) => [r, 0])) as Record<NotCheckedReason, number>;
-  for (const r of rows) by[r.reason]++;
-  return by;
-};
 
 function noteFor(head: string, x: Read, d: object | null, g: Sending): { note: string; assessed: number } {
   const out: string[] = [head];
@@ -193,21 +266,30 @@ function noteFor(head: string, x: Read, d: object | null, g: Sending): { note: s
   out.push(`Read ${plural(read.length, "file", "files")}: ${shown.join("; ")}${read.length > NOTE_FILES_MAX ? `; and ${read.length - NOTE_FILES_MAX} more in data.manifest.files` : ""}.`);
   for (const f of x.files.filter((f) => !f.read)) out.push(`NOT READ, so nothing in it is checked: ${f.filename}: ${f.refused}.`);
   for (const f of read) for (const n of f.notes) out.push(`${f.filename}: ${n}`);
-  const replaced = read.flatMap((f) => f.replaced);
-  if (replaced.length) out.push(`${plural(replaced.length, "go.mod replace was", "go.mod replaces were")} applied, each module checked at its replacement (data.manifest.files lists them).`);
+  const replaced = x.replaced_total;
+  const listed = read.reduce((n, f) => n + f.replaced.length, 0);
+  if (replaced) {
+    out.push(
+      `${plural(replaced, "go.mod replace was", "go.mod replaces were")} applied, each module checked at its replacement (data.manifest.files lists ${listed === replaced ? "them" : `the first ${listed}, as many as a call lists`}).`,
+    );
+  }
   out.push(
     `${plural(x.purls.length, "distinct purl", "distinct purls")}${x.duplicates_removed ? ` (${plural(x.duplicates_removed, "duplicate was", "duplicates were")} sent once)` : ""}; sent ${g.sent}.`,
   );
-  const by = byReason(x.not_checked);
-  const nc = x.not_checked.length;
+  const by = x.not_checked_by_reason;
+  const nc = x.not_checked_total;
   if (nc) {
     const parts = NOT_CHECKED_REASONS.filter((r) => by[r] > 0).map((r) => `${r} ${by[r]}`);
     // #3013's review: the note is written before the structured result is cut, and a DATA CUT can
     // cut data.not_checked (it goes before any row), so this says the list is whole with full:
     // true, as the sentence on data.not_sent_purls does (match_batch.ts sendingSentences); the
     // counts above are coverage.not_checked_by_reason's, which no cut touches.
+    // #3434: past NOT_CHECKED_MAX, the list is the first entries read, and the rest are counted only.
+    const listed = x.not_checked.length;
     out.push(
-      `${plural(nc, "entry was", "entries were")} NOT checked and ${nc === 1 ? "is" : "are"} not clean (${parts.join(", ")}): data.not_checked lists each with its file, line and reason, whole with full: true (past the structured result's budget, that list can be cut by default), and none was sent to the API.`,
+      listed === nc
+        ? `${plural(nc, "entry was", "entries were")} NOT checked and ${nc === 1 ? "is" : "are"} not clean (${parts.join(", ")}): data.not_checked lists each with its file, line and reason, whole with full: true (past the structured result's budget, that list can be cut by default), and none was sent to the API.`
+        : `${plural(nc, "entry was", "entries were")} NOT checked and are not clean (${parts.join(", ")}): data.not_checked lists the first ${listed} read, each with its file, line and reason (at most ${NOT_CHECKED_MAX} a call, full: true included; past the structured result's budget, that list can be cut further by default), and the other ${nc - listed} are counted in coverage.not_checked_by_reason and data.manifest.files, not listed; none was sent to the API.`,
     );
   }
   out.push(...sendingSentences(g, x.purls.length, READ_ORDER, "check_sbom with purls set to", false));
@@ -235,14 +317,14 @@ export async function scanManifest<F extends FailureLike>(deps: CheckSbomDeps<F>
       `pass fewer files per call (${x.files.filter((f) => f.read).map((f) => `${f.filename}: ${f.purls}`).join(", ")}), or pass a lockfile's purls to check_sbom in parts of ${MAX_PURLS} or fewer`,
     );
     if (refused) return deps.badInput(tool, refused);
-    const by = byReason(x.not_checked);
+    const by = x.not_checked_by_reason;
     const fileCoverage = {
       files: x.files.length,
       files_read: x.files.filter((f) => f.read).length,
       files_not_read: x.files.filter((f) => !f.read).length,
       entries_pinned: x.read_purls,
       duplicates_removed: x.duplicates_removed,
-      not_checked: x.not_checked.length,
+      not_checked: x.not_checked_total,
       not_checked_by_reason: by,
     };
     const notes = [NOT_CHECKED_NOTE, CLEAN_NOTE, DISTRO_NOTE, MEASURED_AT_NOTE, FRESHNESS_NOTE];
@@ -260,7 +342,7 @@ export async function scanManifest<F extends FailureLike>(deps: CheckSbomDeps<F>
         coverage: { ...fileCoverage, ...sendingCoverage(g, 0, undefined) },
         freshness: null,
         notes,
-      }, manifestText(0));
+      }, manifestText(0, x.not_checked_total));
     }
 
     // match_batch.ts: one batch at a time, Retry-After waited out within the budget, stopped on
@@ -277,7 +359,7 @@ export async function scanManifest<F extends FailureLike>(deps: CheckSbomDeps<F>
       coverage: { ...fileCoverage, ...sendingCoverage(g, x.purls.length, field(data, "summary")) },
       freshness: null,
       notes,
-    }, manifestText(g.sent));
+    }, manifestText(g.sent, x.not_checked_total));
   } catch (e) {
     return deps.crashed(tool, e);
   }
@@ -286,6 +368,8 @@ export async function scanManifest<F extends FailureLike>(deps: CheckSbomDeps<F>
 // ── Schemas ──
 
 const reasonEnum = z.enum(NOT_CHECKED_REASONS);
+// #3434: NOT_CHECKED_MAX as the schema's descriptions say it.
+const LISTED = NOT_CHECKED_MAX.toLocaleString("en-US");
 const formatEnum = z.enum(FORMAT_NAMES as [Format, ...Format[]]);
 
 export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["envelopeSchema"]): z.ZodType {
@@ -302,10 +386,12 @@ export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["e
               read: z.boolean().describe("false: the file was refused or could not be read, and nothing in it is checked (not clean)."),
               refused: z.string().nullable().describe("Why the file was not read, and the file to pass instead where there is one; null when it was read."),
               purls: z.number().int().describe("Entries pinned to one version, read as purls (duplicates included)."),
-              not_checked: z.number().int().describe("Entries not sent, listed in data.not_checked: not clean."),
+              not_checked: z.number().int().describe(`Entries not sent, every one counted; data.not_checked lists the call's first ${LISTED}: not clean.`),
               skipped: z.number().int().describe("Entries that are not dependencies (a package-lock's root entry, the project itself)."),
               notes: z.array(z.string()).describe("How this file was read where that limits what its verdicts cover (a go.mod below go 1.17)."),
-              replaced: z.array(z.object({ from: z.string(), to: z.string() })).describe("go.mod replace directives applied: the module required, and the module and version checked instead."),
+              replaced: z
+                .array(z.object({ from: z.string(), to: z.string() }))
+                .describe(`go.mod replace directives applied: the module required, and the module and version checked instead (a call lists at most ${LISTED}; the note counts them all).`),
             }),
           ),
         })
@@ -314,7 +400,7 @@ export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["e
         .array(
           z.object({
             file: z.string(),
-            name: z.string().nullable(),
+            name: z.string().nullable().describe(`The package's name, as the file gives it (at most ${SPEC_MAX} characters).`),
             spec: z.string().describe("What the file says for the entry: its line, or its lockfile key and version (at most 200 characters)."),
             reason: reasonEnum.describe(
               "version_unpinned: a range or wildcard, not one version; version_unresolved: no single registry version (none given, a branch, or an excluded go.mod version); local_path: a directory, file or workspace member; vcs_source: a VCS checkout; unsupported_line: a line or entry this tool does not read (another file named by -r or -c, a direct URL, another registry).",
@@ -323,7 +409,9 @@ export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["e
             detail: z.string(),
           }),
         )
-        .describe("Each entry not sent to the API, with its file, line and reason: not checked, and not clean."),
+        .describe(
+          `Each entry not sent to the API, with its file, line and reason: not checked, and not clean. A call lists its first ${LISTED} read; coverage.not_checked counts them all.`,
+        ),
     }),
     coverage: z.strictObject({
       files: z.number().int().describe("Files passed."),
@@ -331,7 +419,7 @@ export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["e
       files_not_read: z.number().int().describe("The ones refused or unreadable: nothing in them is checked, and none is clean."),
       entries_pinned: z.number().int().describe("Entries pinned to one version across the files, duplicates included."),
       duplicates_removed: z.number().int().describe("Purls read more than once (the same package and version in two places) and sent once."),
-      not_checked: z.number().int().describe("Entries not sent (data.not_checked): not clean."),
+      not_checked: z.number().int().describe(`Entries not sent, every one counted (data.not_checked lists the first ${LISTED}): not clean.`),
       not_checked_by_reason: z.strictObject(Object.fromEntries(NOT_CHECKED_REASONS.map((r) => [r, z.number().int()])) as Record<NotCheckedReason, z.ZodNumber>).describe("not_checked, counted by reason."),
       ...sendingCoverageShape,
     }),
@@ -358,7 +446,12 @@ export function registerScanManifest<F extends FailureLike>(server: McpServer, d
         files: z
           .array(
             z.object({
-              filename: z.string().describe("the file's name, e.g. package-lock.json or services/api/go.mod; it picks the format unless format is set"),
+              // #3434: bounded, as readFiles bounds it (MAX_FILENAME_CHARS).
+              filename: z
+                .string()
+                .max(MAX_FILENAME_CHARS)
+                .regex(FILENAME_PATTERN, FILENAME_RULE)
+                .describe("the file's name, e.g. package-lock.json or services/api/go.mod; it picks the format unless format is set"),
               content: z.string().describe("the file's text, as it is on disk"),
               format: formatEnum.optional().describe("the format to read the file as, when its name does not say"),
             }),

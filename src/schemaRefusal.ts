@@ -122,6 +122,9 @@ export function issueText(issue: Issue, input: unknown): string {
       return keys.length ? `${listOf(keys)} ${keys.length === 1 ? "is not an argument" : "are not arguments"} this tool takes` : `${name}: ${issue.message}`;
     }
     case "invalid_format":
+      // #3434: a pattern's own message is its rule (scan_manifest's filename); zod's default message names only the
+      // pattern, and "a valid regex" would say the value should be one.
+      if (issue.format === "regex") return issue.message && !/^Invalid string/.test(issue.message) ? `${name} ${issue.message}` : `${name} must match the pattern the inputSchema gives`;
       return `${name} must be ${issue.format ? `a valid ${issue.format}` : "in the format the inputSchema gives"}`;
     case "invalid_union": {
       // #3345: the value is of the type one branch takes and broke that branch's rule (an sbom

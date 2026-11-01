@@ -2,13 +2,29 @@
 // basename. A manifest that holds ranges, not resolved versions, is refused with the lockfile to
 // pass instead; formats not read yet are refused as such. Nothing here guesses a format from a
 // file's content.
-import { Unreadable, type Parsed } from "./common.js";
+import { Unreadable, callBounds, type Bounds, type Parsed } from "./common.js";
 import { readGoMod } from "./gomod.js";
 import { readCargoLock, readComposerLock, readGemfileLock, readGradleLockfile, readPoetryLock } from "./lockfiles.js";
 import { readNpmLock } from "./npmlock.js";
 import { readRequirements } from "./requirements.js";
 
-export { NOT_CHECKED_REASONS, Unreadable, type NotChecked, type NotCheckedReason, type Parsed, type Pinned } from "./common.js";
+export {
+  MAX_JSON_VALUES,
+  MAX_MANIFEST_LINES,
+  MAX_TOML_VALUES,
+  NOT_CHECKED_MAX,
+  NOT_CHECKED_REASONS,
+  PastBound,
+  SPEC_MAX,
+  Unreadable,
+  callBounds,
+  jsonEscaped,
+  type Bounds,
+  type NotChecked,
+  type NotCheckedReason,
+  type Parsed,
+  type Pinned,
+} from "./common.js";
 
 // The formats read, by the name the `format` argument takes, each with its purl type's ecosystem.
 export const FORMATS = {
@@ -64,13 +80,17 @@ export function detect(filename: string): { format: Format } | { refused: string
   return { refused: `${base || "(no filename)"} is not a file name this tool reads; the formats read are ${FORMAT_NAMES.join(", ")} (and npm-shrinkwrap.json, gems.locked): name the file so, or set its format` };
 }
 
-// One file read, or why it could not be.
-export function readFile(format: Format, content: string): Parsed | { unreadable: string } {
+// One file read, or why it could not be. `bounds`: the call's (common.ts), which every file of a call shares; a reader
+// past one throws PastBound, which goes to the caller. #3434: a RangeError from a reader (a limit of the engine's own:
+// the stack, a string's or an array's length) is that file unreadable, as an Unreadable is, so one file never fails
+// the whole call.
+export function readFile(format: Format, content: string, bounds: Bounds = callBounds()): Parsed | { unreadable: string } {
   try {
     // A byte-order mark, which some Windows editors write, is not part of the file's text.
-    return FORMATS[format].read(content.replace(/^\uFEFF/, ""));
+    return FORMATS[format].read(content.replace(/^\uFEFF/, ""), bounds);
   } catch (e) {
     if (e instanceof Unreadable) return { unreadable: `it ${e.message}` };
+    if (e instanceof RangeError) return { unreadable: `it could not be read: ${e.message.slice(0, 120)}` };
     throw e;
   }
 }

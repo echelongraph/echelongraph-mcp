@@ -156,24 +156,29 @@ describe("#2835 requirements.txt", () => {
 
 // #3013's review: readFiles spread each file's entries into push() as arguments, and a
 // 4.9-million-character requirements.txt of unpinned lines (some 173,000 entries) passed V8's stack:
-// "Maximum call stack size exceeded", and the call crashed. 200,000 entries, unpinned and pinned,
-// each through the same path at about a quarter of the size; on the code before the fix both throw.
-describe("#3013's review: readFiles takes 200,000 entries of one file without spreading them as arguments", () => {
-  const many = (line) => `${Array.from({ length: 200_000 }, (_, i) => line(i)).join("\n")}\n`;
-  it("200,000 unpinned lines: every one in not_checked, none thrown", () => {
-    const content = many((i) => `p${i}`);
-    assert.ok(content.length < SM.MAX_MANIFEST_CHARS);
-    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content }] });
+// "Maximum call stack size exceeded", and the call crashed. #3434: a call now reads at most
+// MAX_MANIFEST_LINES lines of the line formats (40,000, counted per call), and lists at most
+// NOT_CHECKED_MAX entries not checked (2,000), counting the rest; so 20,000 lines, unpinned and pinned,
+// each through the same path, and 200,000 are refused, nothing thrown.
+describe("#3013's review, #3434: readFiles takes as many entries of one file as a call reads, without spreading them as arguments", () => {
+  const many = (n, line) => `${Array.from({ length: n }, (_, i) => line(i)).join("\n")}\n`;
+  it("20,000 unpinned lines: the first 2,000 in not_checked, all 20,000 counted, none thrown", () => {
+    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content: many(20_000, (i) => `p${i}`) }] });
     assert.equal(typeof r, "object", r);
-    assert.equal(r.not_checked.length, 200_000);
-    assert.deepEqual(r.not_checked[199_999], { file: "requirements.txt", ...M.readFile("requirements.txt", "p199999\n").not_checked[0], line: 200_000 });
+    assert.deepEqual([r.not_checked.length, r.not_checked_total, r.not_checked_by_reason.version_unpinned], [M.NOT_CHECKED_MAX, 20_000, 20_000]);
+    assert.deepEqual(r.not_checked[1_999], { file: "requirements.txt", ...M.readFile("requirements.txt", "p1999\n").not_checked[0], line: 2_000 });
     assert.deepEqual(r.purls, []);
   });
-  it("200,000 pinned lines: every purl read, none thrown (the call then refuses more than 2,000, as it says)", () => {
-    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content: many((i) => `p${i}==1.0`) }] });
+  it("20,000 pinned lines: every purl read, none thrown (the call then refuses more than 2,000, as it says)", () => {
+    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content: many(20_000, (i) => `p${i}==1.0`) }] });
     assert.equal(typeof r, "object", r);
-    assert.equal(r.purls.length, 200_000);
-    assert.equal(r.purls[199_999], "pkg:pypi/p199999@1.0");
+    assert.equal(r.purls.length, 20_000);
+    assert.equal(r.purls[19_999], "pkg:pypi/p19999@1.0");
+  });
+  it("200,000 lines: refused at the bound, naming it, nothing thrown", () => {
+    for (const line of [(i) => `p${i}`, (i) => `p${i}==1.0`]) {
+      assert.match(SM.readFiles({ files: [{ filename: "requirements.txt", content: many(200_000, line) }] }), new RegExp(`hold more than ${M.MAX_MANIFEST_LINES} lines in all`));
+    }
   });
 });
 

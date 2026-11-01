@@ -13,12 +13,25 @@
 //
 // Each table's line (1-based, its header's) is kept in `lines`, so an entry not checked can say
 // where it is.
-import { Unreadable } from "./common.js";
+//
+// #3434: what it builds is bounded. Each table, array entry and key it makes is taken from the call's MAX_TOML_VALUES
+// (`values`, common.ts) as it is made; arrays and inline tables nest at most NEST_MAX deep (value() recurses, and a
+// deeper nest would end in the engine's own stack); and a string with many escapes is joined in chunks.
+import { Unreadable, callBounds, clip, type Bound } from "./common.js";
 
 export type TomlTable = { [k: string]: TomlValue };
 export type TomlValue = string | number | boolean | TomlValue[] | TomlTable;
 
-export function readToml(text: string): { root: TomlTable; lines: WeakMap<object, number> } {
+// #3434: no lockfile nests arrays and inline tables more than a few deep (every Cargo.lock measured 1, a dependencies
+// list; every poetry.lock 2, a files list of inline tables).
+const NEST_MAX = 64;
+// #3434: no lockfile's key or table header has more than a few parts (of 43 measured, every Cargo.lock's 1, a
+// poetry.lock's 2: [package.extras]).
+const KEY_PARTS_MAX = 64;
+// #3434: how many runs and escapes basic() holds before it joins them into one chunk.
+const PARTS_MAX = 4_096;
+
+export function readToml(text: string, values: Bound = callBounds().toml): { root: TomlTable; lines: WeakMap<object, number> } {
   const s = text.replace(/\r\n/g, "\n");
   let i = 0;
   let line = 1;
@@ -55,42 +68,66 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
     if (i < s.length && peek() !== "\n") fail(`unexpected "${peek()}"`);
   };
 
+  // #3434: basic() keeps a string as the runs of the text between its escapes, never appended a character at a time,
+  // which V8 kept as a string node per character; and every PARTS_MAX of those it joins into one chunk, so a string of
+  // many escapes holds no more than its characters and PARTS_MAX entries at once, not two entries per escape.
   const ESC: Record<string, string> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", '"': '"', "\\": "\\", e: "\x1b" };
   const basic = (multi: boolean): string => {
-    let out = "";
+    const parts: string[] = [];
+    const chunks: string[] = [];
+    const add = (x: string): void => {
+      parts.push(x);
+      if (parts.length < PARTS_MAX) return;
+      chunks.push(parts.join(""));
+      parts.length = 0;
+    };
     advance(multi ? 3 : 1);
     if (multi && peek() === "\n") advance();
+    let run = i;
+    const flush = (): void => {
+      if (i > run) add(s.slice(run, i));
+    };
     for (;;) {
       if (i >= s.length) fail("an unterminated string");
       // A closing """ may follow up to two quotes of the string's own: """" ends it with one.
       if (multi ? s.startsWith('"""', i) && s[i + 3] !== '"' : peek() === '"') {
+        flush();
         advance(multi ? 3 : 1);
-        return out;
+        if (chunks.length === 0) return parts.length === 1 ? parts[0] : parts.join("");
+        chunks.push(parts.join(""));
+        return chunks.join("");
       }
       const c = peek();
       if (!multi && c === "\n") fail("a newline in a string");
       if (c === "\\") {
+        flush();
         const n = peek(1);
         if (multi && (n === "\n" || n === " " || n === "\t")) {
           // A line-ending backslash: the newline and the whitespace after it are dropped.
           advance();
           while (peek() === " " || peek() === "\t" || peek() === "\n") advance();
+          run = i;
           continue;
         }
         if (n === "u" || n === "U") {
           const len = n === "u" ? 4 : 8;
           const hex = s.slice(i + 2, i + 2 + len);
           if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== len) fail("a bad unicode escape");
-          out += String.fromCodePoint(parseInt(hex, 16));
+          // #3434: TOML escapes a Unicode scalar value only: none past U+10FFFF (String.fromCodePoint throws a
+          // RangeError on it), and no surrogate.
+          const cp = parseInt(hex, 16);
+          if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) fail("a bad unicode escape");
+          add(String.fromCodePoint(cp));
           advance(2 + len);
+          run = i;
           continue;
         }
         if (ESC[n] === undefined) fail(`an unknown escape \\${n}`);
-        out += ESC[n];
+        add(ESC[n]);
         advance(2);
+        run = i;
         continue;
       }
-      out += c;
       advance();
     }
   };
@@ -116,15 +153,22 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
     advance(m![0].length);
     return m![0];
   };
+  // #3434: a key or table header is read part by part, each part after its first taken from `values` as it is read (the
+  // first is taken where the key is set or the header's table made), and one of more than KEY_PARTS_MAX parts is
+  // refused there, before more of its parts are built.
   const dottedKey = (): string[] => {
     const parts = [key()];
     for (;;) {
       skipWs();
       if (peek() !== ".") return parts;
+      if (parts.length === KEY_PARTS_MAX) fail(`a dotted key of more than ${KEY_PARTS_MAX} parts`);
+      values.take();
       advance();
       parts.push(key());
     }
   };
+  // How deep the arrays and inline tables value() is inside are (#3434).
+  let nest = 0;
   const value = (): TomlValue => {
     skipWs();
     const c = peek();
@@ -132,6 +176,7 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
     if (c === '"') return basic(false);
     if (s.startsWith("'''", i)) return literal(true);
     if (c === "'") return literal(false);
+    if ((c === "[" || c === "{") && ++nest > NEST_MAX) fail(`arrays and inline tables nested more than ${NEST_MAX} deep`);
     if (c === "[") {
       advance();
       const arr: TomlValue[] = [];
@@ -139,8 +184,10 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
         skipAll();
         if (peek() === "]") {
           advance();
+          nest--;
           return arr;
         }
+        values.take();
         arr.push(value());
         skipAll();
         if (peek() === ",") advance();
@@ -154,6 +201,7 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
       skipWs();
       if (peek() === "}") {
         advance();
+        nest--;
         return t;
       }
       for (;;) {
@@ -169,6 +217,7 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
         }
         if (peek() === "}") {
           advance();
+          nest--;
           return t;
         }
         fail("a missing , in an inline table");
@@ -187,27 +236,35 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
     if (/^\d{4}-\d{2}-\d{2}|^\d{2}:\d{2}/.test(raw)) return raw;
     return fail(`an unreadable value "${raw.slice(0, 40)}"`);
   };
+  // #3434: each key set, and each table a dotted key makes, is taken from `values`; a key named in a reason is clip()'d.
   const setPath = (t: TomlTable, path: string[], v: TomlValue) => {
     let at = t;
     for (const k of path.slice(0, -1)) {
       if (at[k] === undefined) {
+        values.take();
         at[k] = {};
         lines.set(at[k] as object, line);
       }
       const next = at[k];
-      if (typeof next !== "object" || Array.isArray(next)) fail(`the key ${k} is not a table`);
+      if (typeof next !== "object" || Array.isArray(next)) fail(`the key ${clip(k)} is not a table`);
       at = next as TomlTable;
     }
+    values.take();
     at[path[path.length - 1]] = v;
   };
-  // The table a header names, made as needed; [[x]] appends a new table to the array x.
+  // The table a header names, made as needed; [[x]] appends a new table to the array x. #3434: each table or array it
+  // makes is taken from `values`; the header named in a reason is clip()'d.
   const header = (path: string[], array: boolean): TomlTable => {
     let at = root;
     path.forEach((k, n) => {
       const last = n === path.length - 1;
       if (last && array) {
-        if (at[k] === undefined) at[k] = [];
-        if (!Array.isArray(at[k])) fail(`[[${path.join(".")}]] names a key that is not an array of tables`);
+        if (at[k] === undefined) {
+          values.take();
+          at[k] = [];
+        }
+        if (!Array.isArray(at[k])) fail(`[[${clip(path.join("."))}]] names a key that is not an array of tables`);
+        values.take();
         const t: TomlTable = {};
         lines.set(t, line);
         (at[k] as TomlValue[]).push(t);
@@ -216,13 +273,14 @@ export function readToml(text: string): { root: TomlTable; lines: WeakMap<object
       }
       let next = at[k];
       if (next === undefined) {
+        values.take();
         next = {};
         lines.set(next, line);
         at[k] = next;
       }
       // A dotted header through an array of tables goes into its last table.
       if (Array.isArray(next)) next = next[next.length - 1];
-      if (typeof next !== "object" || next === null || Array.isArray(next)) fail(`[${path.join(".")}] names a key that is not a table`);
+      if (typeof next !== "object" || next === null || Array.isArray(next)) fail(`[${clip(path.join("."))}] names a key that is not a table`);
       at = next as TomlTable;
     });
     return at;

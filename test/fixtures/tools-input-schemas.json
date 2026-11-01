@@ -234,6 +234,8 @@
           "properties": {
             "filename": {
               "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\x00-\\x1f\"]*$",
               "description": "the file's name, e.g. package-lock.json or services/api/go.mod; it picks the format unless format is set"
             },
             "content": {

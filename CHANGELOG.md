@@ -6,6 +6,54 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.1.3 — 2026-11-01
+
+`scan_manifest`'s go.mod, requirements.txt, Cargo.lock and poetry.lock readers now take time linear in
+what they read, and what a call's files make the server build is bounded per call: a call whose files
+pass one of the new per-call bounds is refused (`invalid_input`, naming the bound and each file's count),
+and none of its files is read (#3434). `inputSchema`: `files[].filename` has `maxLength` 1024 and a
+`pattern`. No `outputSchema` type or `required` changes; the descriptions of five of its fields change
+(`data.not_checked` and its `name`, each file's `not_checked` and `replaced`, `coverage.not_checked`),
+and the tool's description says what `data.not_checked` lists and what a call refuses.
+
+- **go.mod** (#3434). Each line is read in time linear in its length. A line of more than 16 tokens, or
+  of more than 65,536 characters from its first token to its comment (no directive holds more than six
+  tokens, nor a module path, version or directory near that length), is listed in `data.not_checked` as
+  `unsupported_line` with its line number, and the rest of the file is read.
+- **requirements.txt** (#3434). A logical line of more than 65,536 characters, its continuation lines
+  joined (a requirement with every `--hash` pip-compile writes for a release is some tens of thousands),
+  or with a version specifier of more than 64 clauses, is listed as `unsupported_line`; a comment and a
+  `name @ url` requirement are found in time linear in the line. Every other line is read as before.
+- **Cargo.lock and poetry.lock** (#3434). A string is built from slices of the file, joined in chunks. An
+  escape of no Unicode scalar value (past U+10FFFF, or a surrogate), arrays or inline tables nested more
+  than 64 deep, and a dotted key or table header of more than 64 parts make the file unreadable: it is
+  reported as not read, with the line, and the call's other files are read (real lockfiles nest 1 or 2
+  deep and have keys of 1 or 2 parts). A file that meets one of the JavaScript engine's own limits while
+  it is read is reported the same way, never failing the whole call.
+- **Per-call bounds** (#3434). Counted across all the files of a call: at most 40,000 lines of go.mod,
+  requirements.txt, Gemfile.lock and gradle.lockfile files (blank and comment lines not counted), 300,000
+  objects, arrays and entries of package-lock.json and composer.lock files (counted before each is
+  parsed), and 300,000 tables, array entries and keys of Cargo.lock and poetry.lock files (each part of a
+  dotted key one). Past one, the call is refused, `invalid_input` naming the bound and each file's count,
+  and nothing more is read. Measured on calls of real files: GitLab's 20 largest Gemfile.locks, 15,535
+  lines; 20 Gemfile.locks of five repositories, 20,778; 7 composer.locks, 128,335 values; 5 poetry.locks,
+  86,205.
+- **`data.not_checked` lists a call's first 2,000 entries, and counts all** (#3434).
+  `coverage.not_checked`, `coverage.not_checked_by_reason` and each file's `not_checked` count every one,
+  and past 2,000 the note says how many are listed and how many are counted only (the most in one real
+  file measured is 598). `data.manifest.files[].replaced` lists a call's first 2,000 go.mod replaces
+  applied, and the note counts them all. Every string of a file that an entry carries (its `spec`, its
+  `name`, and any its `detail` names) is at most 200 characters, a character JSON writes as a
+  six-character escape counted six, ending in "…" where it is cut.
+- **Filenames** (#3434). A filename longer than 1,024 characters, or holding a control character (U+0000
+  to U+001F), a quote or a lone surrogate, is refused, `invalid_input` naming the rule; a portable
+  path holds none (Windows refuses each of them in a file name). A backslash is still read as a path separator.
+- Repository only, not in the package: `test/manifest-lines.test.mjs` reads each such file in a process
+  started with the hosted image's heap flags, under a timeout, so a reader that does not finish fails its
+  case instead of holding the suite; and it sends such files, and files at and past each bound, to
+  `dist/http.js` started as its image starts it (`test/image-server.mjs`), which answers each, two at
+  once where its two large-body slots allow, and the next `tools/list`.
+
 ## 3.1.2 — 2026-10-25
 
 The hosted endpoint no longer loses a large-body slot to a request that never ends (#3362), a TEXT

@@ -10,28 +10,45 @@
 // file, which is not read here (unsupported_line: pass it as its own file); -e, a direct URL
 // (name @ https://…) and a bare path or URL are vcs_source, local_path or unsupported_line. Global
 // options (--index-url and the rest) are not dependencies and are not counted.
-import { emptyParsed, pep503, purlOf, specOf, usableVersion, type NotCheckedReason, type Parsed } from "./common.js";
+import { addNotChecked, callBounds, clip, eachLine, emptyParsed, pep503, purlOf, specOf, usableVersion, type Bounds, type NotCheckedReason, type Parsed } from "./common.js";
 
 // The logical lines: comments removed (a line starting with #, or whitespace then #), a trailing
-// backslash joining the next line, each with the 1-based number of its first physical line.
-function logicalLines(text: string): { text: string; line: number }[] {
+// backslash joining the next line, each with the 1-based number of its first physical line. #3434: one physical line at
+// a time (eachLine), each logical line taken from the call's MAX_MANIFEST_LINES (common.ts), so no file builds more.
+function logicalLines(text: string, bounds: Bounds): { text: string; line: number }[] {
   const out: { text: string; line: number }[] = [];
+  // #3434: the logical line being joined is past LINE_MAX characters: no more is joined to it.
+  let over = false;
   let buf = "";
   let start = 0;
-  text.split(/\r?\n/).forEach((raw, i) => {
+  const push = (t: string) => {
+    bounds.lines.take();
+    out.push({ text: t, line: start });
+  };
+  eachLine(text, true, (raw, i) => {
     if (buf === "") start = i + 1;
+    if (buf === "") over = false;
     let l = raw;
     if (/^\s*#/.test(l)) l = "";
-    else l = l.replace(/\s#.*$/, "");
+    else l = withoutComment(l);
     if (/\\$/.test(l)) {
-      buf += l.slice(0, -1) + " ";
+      // #3434: readRequirements reports a logical line past LINE_MAX characters, unread, so once this one is, its
+      // further continuation lines are passed over, and what one logical line joins stays bounded. Past twice
+      // LINE_MAX, what is joined is trimmed (a run of whitespace reads as one here) and found past LINE_MAX or not:
+      // at most once each LINE_MAX characters it grows by, so the joining stays linear.
+      if (!over) buf += l.slice(0, -1) + " ";
+      if (!over && buf.length > 2 * LINE_MAX) {
+        const t = buf.trim();
+        over = t.length > LINE_MAX;
+        buf = over ? t : `${t} `;
+      }
       return;
     }
     buf += l;
-    if (buf.trim()) out.push({ text: buf.trim(), line: start });
+    if (buf.trim()) push(buf.trim());
     buf = "";
   });
-  if (buf.trim()) out.push({ text: buf.trim(), line: start });
+  if (buf.trim()) push(buf.trim());
   return out;
 }
 
@@ -51,11 +68,40 @@ const NAME = /^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(\[[^\]]*\])?\s*(.
 const CLAUSE = /^(===|==|!=|~=|<=|>=|<|>)\s*(\S+)$/;
 // Per-requirement options pip takes after a specifier: not part of it.
 const PER_REQUIREMENT = /\s--?(hash|global-option|install-option|config-settings)\b.*$/s;
+// #3434: the longest logical line read, and the most clauses of one specifier. A requirement with every --hash
+// pip-compile writes for a release's wheels is some tens of thousands of characters, and a specifier a handful of
+// clauses; a line past either is reported (unsupported_line), before any of it is split or matched.
+const LINE_MAX = 65_536;
+const CLAUSES_MAX = 64;
+// "name @": a named requirement whose source follows. One run of whitespace on either side of the extras, never two runs
+// in a row (\s*(\[…\])?\s*), which backtrack quadratically where no @ follows (#3434).
+const NAMED_AT = /^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\]\s*)?@/;
 
-export function readRequirements(text: string): Parsed {
+// A line's comment, whitespace then # to its end, removed, as l.replace(/\s#.*$/, "") removes it: the first such # that
+// no \r, U+2028 or U+2029 follows ('.' matches none of them, and $ is the line's end). Without backtracking (#3434):
+// that regex retried each " #" to the line's end, quadratic in the line; this looks only past the last of those.
+function withoutComment(l: string): string {
+  const re = /\s#/g;
+  re.lastIndex = Math.max(0, l.lastIndexOf("\r"), l.lastIndexOf("\u2028"), l.lastIndexOf("\u2029"));
+  const m = re.exec(l);
+  return m ? l.slice(0, m.index) : l;
+}
+
+// The clauses a specifier's commas make, counted to CLAUSES_MAX + 1 at most.
+function clauseCount(rest: string): number {
+  let n = 1;
+  for (let at = rest.indexOf(","); at >= 0 && n <= CLAUSES_MAX; at = rest.indexOf(",", at + 1)) n++;
+  return n;
+}
+
+export function readRequirements(text: string, bounds: Bounds = callBounds()): Parsed {
   const p = emptyParsed();
-  for (const { text: l, line } of logicalLines(text)) {
-    const miss = (name: string | null, reason: NotCheckedReason, detail: string) => p.not_checked.push({ name, spec: specOf(l), reason, line, detail });
+  for (const { text: l, line } of logicalLines(text, bounds)) {
+    const miss = (name: string | null, reason: NotCheckedReason, detail: string) => addNotChecked(p, { name: name === null ? null : clip(name), spec: specOf(l), reason, line, detail });
+    if (l.length > LINE_MAX) {
+      miss(null, "unsupported_line", `a line of more than ${LINE_MAX} characters, which no requirement is: not read`);
+      continue;
+    }
     if (l.startsWith("-")) {
       const m = /^(-[a-zA-Z]|--[a-z-]+)(?:\s*=\s*|\s+)?(.*)$/s.exec(l);
       const opt = m?.[1] ?? l;
@@ -71,7 +117,7 @@ export function readRequirements(text: string): Parsed {
     }
     const spec = l.replace(PER_REQUIREMENT, "").trim();
     // A bare path, archive or URL; "name @ url" is a named requirement, read below.
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?\s*@/.test(spec) && (VCS.test(spec) || URL.test(spec) || LOCAL.test(spec))) {
+    if (!NAMED_AT.test(spec) && (VCS.test(spec) || URL.test(spec) || LOCAL.test(spec))) {
       const s = sourceReason(spec);
       miss(/[#&]egg=([A-Za-z0-9._-]+)/.exec(spec)?.[1] ?? null, s.reason, s.detail);
       continue;
@@ -93,6 +139,10 @@ export function readRequirements(text: string): Parsed {
     if (rest.startsWith("(") && rest.endsWith(")")) rest = rest.slice(1, -1).trim();
     if (rest === "") {
       miss(name, "version_unpinned", "no version is given, so any release may be installed");
+      continue;
+    }
+    if (clauseCount(rest) > CLAUSES_MAX) {
+      miss(name, "unsupported_line", `a version specifier of more than ${CLAUSES_MAX} clauses, which no requirement has: not read`);
       continue;
     }
     const clauses = rest.split(",").map((c) => c.trim()).filter(Boolean);

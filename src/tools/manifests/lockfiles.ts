@@ -21,12 +21,13 @@
 //   gradle.lockfile        group:artifact:version=configurations lines (and the older
 //                          per-configuration lockfiles' group:artifact:version); empty= lists the
 //                          configurations with no dependency, and is skipped.
-import { Unreadable, emptyParsed, isObj, pep503, purlOf, seg, specOf, usableVersion, type NotCheckedReason, type Parsed } from "./common.js";
+import { Unreadable, addNotChecked, callBounds, clip, eachLine, emptyParsed, isObj, parseLockfileJson, pep503, purlOf, seg, specOf, usableVersion, type Bounds, type NotCheckedReason, type Parsed } from "./common.js";
 import { readToml, type TomlTable } from "./toml.js";
 
-// [[package]] tables of a TOML lockfile, each with its header's line.
-function packagesOf(text: string): { t: TomlTable; line: number | null }[] {
-  const { root, lines } = readToml(text);
+// [[package]] tables of a TOML lockfile, each with its header's line. #3434: what it holds is taken from the call's
+// MAX_TOML_VALUES (common.ts) as it is read.
+function packagesOf(text: string, bounds: Bounds): { t: TomlTable; line: number | null }[] {
+  const { root, lines } = readToml(text, bounds.toml);
   const pkgs = root.package;
   if (pkgs === undefined) return [];
   if (!Array.isArray(pkgs)) throw new Unreadable("has a package key that is not an array of [[package]] tables");
@@ -35,13 +36,14 @@ function packagesOf(text: string): { t: TomlTable; line: number | null }[] {
 
 const CRATES_IO = new Set(["registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"]);
 
-export function readCargoLock(text: string): Parsed {
+export function readCargoLock(text: string, bounds: Bounds = callBounds()): Parsed {
   const p = emptyParsed();
-  for (const { t, line } of packagesOf(text)) {
+  for (const { t, line } of packagesOf(text, bounds)) {
     const name = typeof t.name === "string" ? t.name : null;
     const version = typeof t.version === "string" ? t.version : undefined;
     const src = typeof t.source === "string" ? t.source : undefined;
-    const miss = (reason: NotCheckedReason, detail: string) => p.not_checked.push({ name, spec: specOf(`${name ?? "?"} ${version ?? ""}${src ? ` (${src})` : ""}`), reason, line, detail });
+    const miss = (reason: NotCheckedReason, detail: string) =>
+      addNotChecked(p, { name: name === null ? null : clip(name), spec: specOf(`${name ?? "?"} ${version ?? ""}${src ? ` (${src})` : ""}`), reason, line, detail });
     if (!name || !usableVersion(version)) miss("version_unresolved", "the [[package]] table names no package and version");
     else if (src === undefined) miss("local_path", "no source: a workspace member or path dependency, not a crates.io release");
     else if (src.startsWith("git+")) miss("vcs_source", "a git dependency, whose code need not match the crates.io release of the same version");
@@ -51,14 +53,15 @@ export function readCargoLock(text: string): Parsed {
   return p;
 }
 
-export function readPoetryLock(text: string): Parsed {
+export function readPoetryLock(text: string, bounds: Bounds = callBounds()): Parsed {
   const p = emptyParsed();
-  for (const { t, line } of packagesOf(text)) {
+  for (const { t, line } of packagesOf(text, bounds)) {
     const name = typeof t.name === "string" ? t.name : null;
     const version = typeof t.version === "string" ? t.version : undefined;
     const source = isObj(t.source) ? t.source : null;
     const type = source && typeof source.type === "string" ? source.type : null;
-    const miss = (reason: NotCheckedReason, detail: string) => p.not_checked.push({ name, spec: specOf(`${name ?? "?"} ${version ?? ""}${type ? ` (source ${type})` : ""}`), reason, line, detail });
+    const miss = (reason: NotCheckedReason, detail: string) =>
+      addNotChecked(p, { name: name === null ? null : clip(name), spec: specOf(`${name ?? "?"} ${version ?? ""}${type ? ` (source ${type})` : ""}`), reason, line, detail });
     if (!name || !usableVersion(version)) miss("version_unresolved", "the [[package]] table names no package and version");
     else if (type === "git") miss("vcs_source", "a git dependency, whose code need not match the PyPI release of the same version");
     else if (type === "directory" || type === "file") miss("local_path", `a local ${type}, not a PyPI release`);
@@ -68,13 +71,15 @@ export function readPoetryLock(text: string): Parsed {
   return p;
 }
 
-export function readGemfileLock(text: string): Parsed {
+export function readGemfileLock(text: string, bounds: Bounds = callBounds()): Parsed {
   const p = emptyParsed();
   let section: string | null = null;
   let inSpecs = false;
-  text.split(/\r?\n/).forEach((raw, i) => {
+  // #3434: one line at a time (eachLine), each that is not blank taken from the call's MAX_MANIFEST_LINES.
+  eachLine(text, true, (raw, i) => {
     const line = i + 1;
     if (raw.trim() === "") return;
+    bounds.lines.take();
     if (!/^\s/.test(raw)) {
       section = raw.trim();
       inSpecs = false;
@@ -91,27 +96,23 @@ export function readGemfileLock(text: string): Parsed {
     // A spec: four spaces, then name (version). Six spaces is one of its own requirements.
     if (!inSpecs || !/^ {4}\S/.test(raw)) return;
     const m = /^ {4}([^\s(]+) \(([^)]+)\)\s*$/.exec(raw);
-    const miss = (name: string | null, reason: NotCheckedReason, detail: string) => p.not_checked.push({ name, spec: specOf(raw), reason, line, detail });
+    const miss = (name: string | null, reason: NotCheckedReason, detail: string) => addNotChecked(p, { name: name === null ? null : clip(name), spec: specOf(raw), reason, line, detail });
     if (!m) return miss(null, "unsupported_line", "a spec line this reader cannot read (name (version))");
     const [, name, full] = m;
     // RubyGems versions carry no '-': what follows the first one is the platform.
     const version = full.split("-")[0];
     if (section === "PATH") return miss(name, "local_path", "a gem from a local path (PATH section), not a RubyGems release");
     if (section === "GIT") return miss(name, "vcs_source", "a gem from a git repository (GIT section), whose code need not match the RubyGems release of the same version");
-    if (section !== "GEM") return miss(name, "unsupported_line", `a gem from a ${section ?? "unnamed"} section, not a RubyGems source`);
+    // #3434: the section clip()'d, as every spec of it carries it.
+    if (section !== "GEM") return miss(name, "unsupported_line", `a gem from a ${section === null ? "unnamed" : clip(section)} section, not a RubyGems source`);
     if (!usableVersion(version)) return miss(name, "version_unresolved", "the spec carries no version");
     p.pinned.push({ purl: purlOf("gem", name, version), line });
   });
   return p;
 }
 
-export function readComposerLock(text: string): Parsed {
-  let doc: unknown;
-  try {
-    doc = JSON.parse(text);
-  } catch {
-    throw new Unreadable("is not JSON");
-  }
+export function readComposerLock(text: string, bounds: Bounds = callBounds()): Parsed {
+  const doc = parseLockfileJson(text, bounds);
   if (!isObj(doc)) throw new Unreadable("is not a JSON object");
   if (!Array.isArray(doc.packages) && !Array.isArray(doc["packages-dev"])) throw new Unreadable("has neither a packages nor a packages-dev list");
   const p = emptyParsed();
@@ -122,7 +123,8 @@ export function readComposerLock(text: string): Parsed {
       if (!isObj(e)) continue;
       const name = typeof e.name === "string" ? e.name : null;
       const raw = typeof e.version === "string" ? e.version : undefined;
-      const miss = (reason: NotCheckedReason, detail: string) => p.not_checked.push({ name, spec: specOf(`${list}: ${name ?? "?"} ${raw ?? ""}`), reason, line: null, detail });
+      const miss = (reason: NotCheckedReason, detail: string) =>
+        addNotChecked(p, { name: name === null ? null : clip(name), spec: specOf(`${list}: ${name ?? "?"} ${raw ?? ""}`), reason, line: null, detail });
       const dist = isObj(e.dist) ? e.dist : null;
       if (!name || !usableVersion(raw)) miss("version_unresolved", "the entry names no package and version");
       else if (dist && dist.type === "path") miss("local_path", "installed from a local path, not a Packagist release");
@@ -133,16 +135,19 @@ export function readComposerLock(text: string): Parsed {
   return p;
 }
 
-export function readGradleLockfile(text: string): Parsed {
+export function readGradleLockfile(text: string, bounds: Bounds = callBounds()): Parsed {
   const p = emptyParsed();
-  text.split(/\r?\n/).forEach((raw, i) => {
+  // #3434: one line at a time (eachLine), each that is neither blank nor a comment taken from the call's
+  // MAX_MANIFEST_LINES.
+  eachLine(text, true, (raw, i) => {
     const l = raw.trim();
     if (l === "" || l.startsWith("#")) return;
+    bounds.lines.take();
     if (/^empty=/.test(l)) return;
     const coords = l.split("=")[0];
     const m = /^([^:\s]+):([^:\s]+):([^:\s]+)$/.exec(coords);
     if (!m) {
-      p.not_checked.push({ name: null, spec: specOf(raw), reason: "unsupported_line", line: i + 1, detail: "not a group:artifact:version line" });
+      addNotChecked(p, { name: null, spec: specOf(raw), reason: "unsupported_line", line: i + 1, detail: "not a group:artifact:version line" });
       return;
     }
     const [, group, artifact, version] = m;
