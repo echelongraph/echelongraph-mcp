@@ -2,8 +2,8 @@
 
 Part of the [README](../README.md), whose Tools table says what each tool answers. This page says,
 field by field, how `cve_summary`, `get_cve`, `search_cves`, `cve_exposure` and `check_affected`
-read the API's answer, and how `check_sbom` and `scan_manifest` cut their rows past the
-structured result's budget; `exposure_radar` has [a page of its own](exposure-radar.md). It is kept out
+read the API's answer, how `check_sbom` and `scan_manifest` cut their rows past the
+structured result's budget, and how the vendor-advisory tools read each vendor's window; `exposure_radar` has [a page of its own](exposure-radar.md). It is kept out
 of the README because npm keeps only the first 65,536 characters of a package's README, and the
 package ships it in `docs/`. Exposure counts are derived from Shodan data. Shodan data is owned by
 Shodan, which holds its copyright (© Shodan).
@@ -329,3 +329,35 @@ them keeps its first 100 characters where one is longer. The text names no page 
 #3269's review it said "check N or fewer purls per call", N the rows it kept, and a call of the
 first N purls kept fewer in 34 of 89 mixes); its note says how many rows it leaves out, of which
 kinds, and that `structuredContent.data` holds them.
+
+## How the vendor-advisory tools read each vendor's window
+
+`vendor_advisories_for_cve`, `get_vendor_advisory` and `search_vendor_advisories` relay every
+vendor's window in `coverage` (`vendor_windows`, or `vendor_window` for the detail): the advisories
+held, the earliest and latest `vendor_published_at` among them, `held_since`, `feed_held_since`,
+`history_backfill` and `history_scope`.
+
+- `held_since` is the start of the window EchelonGraph has read the vendor's advisories from: one
+  published before it may not be held. For a vendor with no history read (`history_backfill`
+  `not_supported`) it can be years after the earliest advisory held: Cisco's poller first read the
+  advisories changed in the last 90 days, Red Hat's and GitHub's in the last 7, so an older
+  advisory revised later is held while those published beside it are not.
+- `history_scope` says what a vendor's history read covers: `all`, or `reviewed` for GitHub, whose
+  read covers its reviewed advisories and not its unreviewed ones. Once that read is done,
+  `history_backfill` is `complete_reviewed_only` and `held_since` is where the reviewed advisories
+  are held from (2017-10-24 in the coverage answer of 2026-11-07); the unreviewed ones are held only
+  from `feed_held_since`, the start of the window GitHub's own feed has read every advisory from
+  (2026-05-15). For a vendor with no history read, `feed_held_since` is its `held_since`; from an
+  API older than the two fields, both are null and a window reads as it did before them.
+- `vendor_advisories_for_cve` lists in `vendors_not_fully_held` each vendor with no advisory in the
+  answer of which EchelonGraph holds none, whose `held_since` is after 1 January of the CVE ID's year
+  or not known, whose history is still being read (`history_backfill` `in_progress` or
+  `not_started`), or whose history read covers only part of its advisories with a
+  `feed_held_since` after that 1 January or not known. The year is the CVE ID's: a CVE-2026 ID's
+  year begins on 2026-01-01, before 2026-05-15, so GitHub is listed for a CVE-2026 ID whenever the
+  answer holds no GitHub advisory. The note names each listed vendor with its dates, GitHub as
+  "github (reviewed advisories held from 2017-10-24 to …; unreviewed advisories held only from
+  2026-05-15)". No advisory from a listed vendor is not a finding that it published none.
+- `search_vendor_advisories` and `get_vendor_advisory` name, in the note, each vendor whose history
+  is still being read, and each whose history read covers only part of its advisories, with the
+  same dates: none found from such a vendor is not a finding that it published none.

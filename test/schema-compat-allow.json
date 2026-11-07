@@ -105,6 +105,21 @@
       "against": "3.0.2",
       "finding": "search_vendor_advisories: freshness: widens its type from null to null|object",
       "reason": "#3268's review: published open, still answered null (as cve_summary's coverage)."
+    },
+    {
+      "against": "3.1.3",
+      "finding": "vendor_advisories_for_cve: coverage.vendor_windows[]: adds feed_held_since, history_scope under an object the old release closed",
+      "reason": "#3472: a vendor window relays the coverage API's feed_held_since and history_scope, so a vendor whose history read covers only part of its advisories (GitHub: reviewed only) is not read as fully held. The object is closed only in the failure branch, and every failure of the three vendor-advisory tools answers coverage null (index.ts failure's default; none of them passes one), so no answer a client holding 3.1.3's list receives carries the added fields there; the success branch is open since 3.1.0 (CHANGELOG Unreleased)."
+    },
+    {
+      "against": "3.1.3",
+      "finding": "get_vendor_advisory: coverage.vendor_window: adds feed_held_since, history_scope under an object the old release closed",
+      "reason": "#3472: as vendor_advisories_for_cve's vendor_windows[]."
+    },
+    {
+      "against": "3.1.3",
+      "finding": "search_vendor_advisories: coverage.vendor_windows[]: adds feed_held_since, history_scope under an object the old release closed",
+      "reason": "#3472: as vendor_advisories_for_cve's vendor_windows[]."
     }
   ]
 }

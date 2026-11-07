@@ -269,15 +269,13 @@ names each one, and the search leaves them out).
 
 Each also relays every vendor's window in `coverage` (`vendor_windows`, or `vendor_window` for the
 detail): the advisories held, the earliest and latest `vendor_published_at` among them,
-`held_since` and `history_backfill`. `held_since` is the start of the window EchelonGraph has read the
-vendor's advisories from: one published before it may not be held. For a vendor with no history read (`history_backfill`
-`not_supported`) it can be years after the earliest advisory held: Cisco's poller first read the
-advisories changed in the last 90 days, Red Hat's and GitHub's in the last 7, so an older
-advisory revised later is held while those published beside it are not.
-`vendor_advisories_for_cve` lists in `vendors_not_fully_held` each vendor with no advisory in the
-answer of which EchelonGraph holds none, whose `held_since` is after 1 January of the CVE ID's year
-or not known, or whose history is still being read: no advisory from such a vendor is not a finding
-that it published none.
+`held_since`, `feed_held_since`, `history_backfill` and `history_scope`. An advisory published
+before its vendor's `held_since` may not be held, nor, where a vendor's history read covers only
+part of its advisories (`history_scope` `reviewed`: GitHub's), one outside that part published
+before its `feed_held_since`. `vendor_advisories_for_cve` lists in `vendors_not_fully_held` each
+vendor absent from its answer that may not hold every advisory for the CVE ID's year: no advisory
+from such a vendor is not a finding that it published none
+([how each window is read](https://github.com/echelongraph/echelongraph-mcp/blob/main/docs/tools.md#how-the-vendor-advisory-tools-read-each-vendors-window)).
 
 Every figure is as fresh as the last check that produced it. The CVE feed is polled from its
 sources on a schedule. Each radar has its own schedule and refreshes only while it runs, and

@@ -6,6 +6,48 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.1.4 — 2026-11-07
+
+`vendor_advisories_for_cve` no longer reads GitHub as fully held for a CVE year from 2018 now that
+GitHub's reviewed-only history read is done (#3472). Two `outputSchema` fields are added to each
+vendor window and `history_backfill` names one more value; no type or `required` changes, and no
+client needs to reconnect (below).
+
+- **A history read that covers only part of a vendor's advisories** (#3472). EchelonGraph's
+  coverage API reads GitHub's history back for its reviewed advisories only (#3443): once that read
+  is done, GitHub's `history_backfill` is `complete_reviewed_only` and its `held_since` the earliest
+  advisory held (2017-10-24 in production's coverage answer of 2026-11-07), while its unreviewed
+  advisories, not read back, are held only from the start of its feed's own window,
+  `feed_held_since` (2026-05-15). The API serves `history_scope` (`all`, or `reviewed`) and
+  `feed_held_since` beside it, and the server read neither: `complete_reviewed_only` was not a
+  history still being read and `held_since` was before every year from 2018, so
+  `vendor_advisories_for_cve` left GitHub out of `vendors_not_fully_held` for a CVE ID of 2018 or
+  later, which said every GitHub advisory for that CVE was held, where an unreviewed one published
+  before 2026-05-15 may not be. A vendor whose `history_scope` is a part of its advisories is now
+  listed for a CVE ID whose year begins before its `feed_held_since`, or when that is not known, and
+  the note gives both dates: "github (reviewed advisories held from 2017-10-24 to …; unreviewed
+  advisories held only from 2026-05-15)". The year compared is the CVE ID's: a CVE-2026 ID's year
+  begins on 2026-01-01, before 2026-05-15, so GitHub is listed for it too. `search_vendor_advisories`
+  and `get_vendor_advisory` name such a vendor in their note, and while its read is in progress the
+  note's item says it reads its reviewed advisories only. An answer that says
+  `complete_reviewed_only` without `history_scope` is read as `reviewed`, never as a complete read,
+  and against an API without the two fields every window reads as before.
+- `outputSchema`: each vendor window (`coverage.vendor_windows[]` of `vendor_advisories_for_cve`
+  and `search_vendor_advisories`, `coverage.vendor_window` of `get_vendor_advisory`) adds
+  `feed_held_since` and `history_scope`, each a string or null (null from an API without them), and
+  its `history_backfill` lists `complete_reviewed_only` beside its other values and any string. The
+  descriptions of the window, `held_since`, `history_backfill`, `vendor_windows` and
+  `vendors_not_fully_held` say what the two fields mean. A success's schema is open, so a client
+  holding an older tool list takes the added fields. The failure branch's window objects, which stay
+  closed, add them too (`test/schema-compat-allow.json`), but no failure carries a window: a failure's
+  `coverage` is null.
+- Descriptions: `vendor_advisories_for_cve`'s says `vendors_not_fully_held` also lists a vendor whose
+  `feed_held_since` is after 1 January of `cve_year`, outside its `history_scope`;
+  `search_vendor_advisories`' and `get_vendor_advisory`'s name `history_scope` and `feed_held_since`
+  among a window's fields.
+- README: what a vendor window holds is said in brief, with the `history_scope` rule; the detail
+  moved to docs/tools.md, "How the vendor-advisory tools read each vendor's window".
+
 ## 3.1.3 — 2026-11-01
 
 `scan_manifest`'s go.mod, requirements.txt, Cargo.lock and poetry.lock readers now take time linear in

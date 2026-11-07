@@ -792,7 +792,7 @@ export const SHAPED = [
     live: "a forced cut: no page the API serves reaches it (each row's description is cut to 240 characters at the source)",
     size: 20_557, structured: 29_519,
   },
-  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 18_686, structured: 14_983 },
+  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 19_326, structured: 15_423 },
   // #2800 review: nor does any answer reach vendor_advisories_for_cve's cut: the API sends at most 20
   // advisories for a CVE (core-backend vendoradv/store.go ListAdvisoriesByCVE, LIMIT 20), each
   // without summary, affected_products or cve_ids: CVE-2021-44228's 20 are 9,753 characters of
@@ -802,6 +802,11 @@ export const SHAPED = [
   // #2803: re-measured for held_since. The coverage answer in the fixture is 2.6.4's API, which has
   // no held_since, so each vendor with no complete history read is written "not known to be
   // without a gap" and relayed with held_since null (the two search cases below likewise).
+  // #3472: re-measured for feed_held_since and history_scope, which each of the fixture's 10 windows
+  // (one for get_vendor_advisory) now relays, null from that API: +640 characters of text and +440
+  // of structured result, +60 and +44 for the detail. No text cut changes level; search's largest
+  // page, already at the structured budget, keeps 41 rows of 50 in data where it kept 42, and its
+  // note gives the offset of the rest.
   // Forced: CVE-2021-44228's rows, each title twenty times over.
   {
     label: "vendor_advisories_for_cve, CVE-2021-44228, each title twenty times over (a forced cut)",
@@ -813,11 +818,11 @@ export const SHAPED = [
     stretch: { advisories: { title: 20 } },
     extra: ["coverage"],
     live: "a forced cut: no answer the API serves reaches it (at most 20 advisories, each a few hundred characters)",
-    size: 17_914, structured: 29_170,
+    size: 18_554, structured: 29_610,
   },
-  { label: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", page: "default", args: { vendor: "aws", advisory_id: "2026-098-AWS" }, fixture: "get_vendor_advisory", answers: ["aws 2026-098-AWS"], extra: ["coverage"], size: 3_091, structured: 2_855 },
-  { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 34_472, structured: 23_851 },
-  { label: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", page: "max", args: { query: "log4j", limit: 50 }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 50 }, set: { limit: 50 }, extra: ["coverage"], size: 23_483, structured: 29_833 },
+  { label: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", page: "default", args: { vendor: "aws", advisory_id: "2026-098-AWS" }, fixture: "get_vendor_advisory", answers: ["aws 2026-098-AWS"], extra: ["coverage"], size: 3_151, structured: 2_899 },
+  { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 35_112, structured: 24_291 },
+  { label: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", page: "max", args: { query: "log4j", limit: 50 }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 50 }, set: { limit: 50 }, extra: ["coverage"], size: 24_123, structured: 29_044 },
 ];
 
 // How far a case's size may be from production's text for the same call, as text-bound-live.mjs

@@ -104,7 +104,9 @@ const relayed = (w) => ({
   earliest_vendor_published_at: w.earliest_vendor_published_at || null,
   latest_vendor_published_at: w.latest_vendor_published_at || null,
   held_since: w.held_since || null,
+  feed_held_since: w.feed_held_since || null,
   history_backfill: w.history_backfill,
+  history_scope: w.history_scope || null,
 });
 // #2803: production's Cisco and Red Hat on 2026-10-04, as the API served them before held_since:
 // Cisco's continuous run starts 2026-02-25, its three earlier advisories revised later (the
@@ -121,6 +123,41 @@ const DETAIL_BY_VENDOR_ID = { ...row(), cve_ids: [CVE], known_cve_ids: [CVE], de
 const UUID_SHAPED_VENDOR_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const DETAIL_UUID_SHAPED = { ...DETAIL, advisory_id: "6f1c7d2e-0000-4000-8000-0000000000aa", vendor: "gitlab", vendor_display_name: "GitLab", vendor_advisory_id: UUID_SHAPED_VENDOR_ID };
 const CVE_OLD = "CVE-2010-0249"; // older than Microsoft's earliest held advisory
+// #3472: GitHub's row once its reviewed-only history read is done, as production's coverage answered
+// it on 2026-11-07 (advisories, the earliest, held_since, history_backfill, history_scope and
+// feed_held_since; latest_vendor_published_at and the history bookkeeping are the stub's):
+// reviewed advisories held from 2017-10-24, unreviewed ones only from the feed's start, 2026-05-15.
+// Beside it, a vendor whose read covers all (history_scope all) and one from an API without the
+// two fields, both complete.
+const GITHUB_REVIEWED = {
+  ...win("github", "GitHub Security Advisories", 99802, "2017-10-24T18:33:35Z", "2026-11-06T22:10:00Z", "complete_reviewed_only", 110, "2017-10-24T18:33:35Z"),
+  history_completed_at: "2026-11-05T03:00:00Z",
+  feed_held_since: "2026-05-15T08:09:51Z",
+  history_scope: "reviewed",
+};
+const MSFT_ALL = {
+  ...win("microsoft", "Microsoft", 1311, "2016-01-12T08:00:00Z", "2026-09-30T07:00:00Z", "complete", 193),
+  history_completed_at: "2026-10-04T08:00:00Z",
+  feed_held_since: "2026-05-20T10:00:00Z",
+  history_scope: "all",
+};
+const PALOALTO_DONE = { ...win("paloalto", "Palo Alto Networks", 573, "2012-04-27T00:00:00Z", "2026-10-02T21:00:00Z", "complete", 6), history_completed_at: "2026-10-04T09:00:00Z" };
+const CVE_2021 = "CVE-2021-30001"; // a 2021 CVE ID no held advisory names (the stub answers none)
+const CVE_2026 = "CVE-2026-30001"; // its year begins 2026-01-01, before GitHub's feed_held_since
+const CVE_2027 = "CVE-2027-30001"; // its year begins after GitHub's feed_held_since
+const DETAIL_GHSA = {
+  ...DETAIL,
+  advisory_id: "6f1c7d2e-0000-4000-8000-0000000000bb",
+  vendor: "github",
+  vendor_display_name: "GitHub Security Advisories",
+  vendor_advisory_id: "GHSA-jfh8-c2jp-5v3q",
+  cve_ids: ["CVE-2021-44228"],
+  known_cve_ids: ["CVE-2021-44228"],
+};
+// The item and the rule the by-CVE note gives for GitHub's row.
+const GITHUB_ITEM = "github (reviewed advisories held from 2017-10-24 to 2026-11-06; unreviewed advisories held only from 2026-05-15)";
+const PART_RULE =
+  "An advisory a vendor published before the date EchelonGraph holds that vendor from (held_since) may not be held, even when an older one is, an advisory outside the part of a vendor's advisories its history read covers (history_scope reviewed) may not be held when published before that vendor's feed_held_since, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from that vendor is not a finding that it published none.";
 
 // A stub that records every request's URL and search header, and answers per path.
 async function startStub() {
@@ -135,7 +172,7 @@ async function startStub() {
     };
     if (pathname === COVERAGE_PATH) return state.coverage.status ? send(state.coverage.status, state.coverage.body) : send(200, state.coverage);
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE}`) return send(200, { cve_id: CVE, advisories: [row(), WITHDRAWN], total: 2 });
-    for (const empty of [CVE_3400, CVE_OLD, CVE_20188, CVE_HEARTBLEED]) if (pathname === `/api/v1/public/vendor-advisories/by-cve/${empty}`) return send(200, { cve_id: empty, advisories: [], total: 0 });
+    for (const empty of [CVE_3400, CVE_OLD, CVE_20188, CVE_HEARTBLEED, CVE_2021, CVE_2026, CVE_2027]) if (pathname === `/api/v1/public/vendor-advisories/by-cve/${empty}`) return send(200, { cve_id: empty, advisories: [], total: 0 });
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_FULL}`) return send(200, { cve_id: CVE_FULL, advisories: Array.from({ length: 20 }, () => row()), total: 20 });
     // #2865
     if (pathname === `/api/v1/public/vendor-advisories/by-cve/${CVE_REJ}`) return send(200, { cve_id: CVE_REJ, cve_rejected: true, advisories: [REJ_ROW, REJ_MULTI], total: 2 });
@@ -149,6 +186,7 @@ async function startStub() {
     if (pathname === `/api/v1/public/vendor-advisories/microsoft/${CVE}`) return send(200, DETAIL_BY_VENDOR_ID);
     if (pathname === `/api/v1/public/vendor-advisories/gitlab/${UUID_SHAPED_VENDOR_ID}`) return send(200, DETAIL_UUID_SHAPED);
     if (pathname === "/api/v1/public/vendor-advisories/redhat/RHSA-2024%3A0001") return send(200, DETAIL_WITHDRAWN);
+    if (pathname === "/api/v1/public/vendor-advisories/github/GHSA-jfh8-c2jp-5v3q") return send(200, DETAIL_GHSA);
     if (pathname === "/api/v1/public/vendor-advisories") {
       const searched = req.headers[HEADER] !== undefined;
       const body = { advisories: [row()], total: 7, limit: Number(searchParams.get("limit")), offset: Number(searchParams.get("offset")) };
@@ -608,7 +646,8 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.ok(d("search_vendor_advisories").includes("A query of 1 or 2 characters matches whole words only (search_match word)"), d("search_vendor_advisories"));
       assert.ok(d("search_vendor_advisories").includes("past that, total is 1000 and total_capped is true, which means 1,000 or more (the note writes 1,000+), never exactly 1,000"));
       for (const n of ["vendor_advisories_for_cve", "search_vendor_advisories", "get_vendor_advisory"]) {
-        for (const f of ["earliest_vendor_published_at", "latest_vendor_published_at", "held_since", "history_backfill", "in_progress", "not_started"]) assert.ok(d(n).includes(f), `${n}: ${f}`);
+        // #3472: and the two fields of a history read that covers a part of a vendor's advisories.
+        for (const f of ["earliest_vendor_published_at", "latest_vendor_published_at", "held_since", "history_backfill", "in_progress", "not_started", "history_scope", "feed_held_since"]) assert.ok(d(n).includes(f), `${n}: ${f}`);
       }
       assert.ok(d("vendor_advisories_for_cve").includes("vendors_not_fully_held"));
       for (const n of ["vendor_advisories_for_cve", "search_vendor_advisories"]) {
@@ -630,7 +669,8 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.ok(s.includes("the advisories EchelonGraph holds") && s.includes("not that no vendor published one"), `an empty answer is read as the vendors publishing none: "${s}"`);
       }
       // Every reason a vendor is listed in vendors_not_fully_held, as notFullyHeld() lists it.
-      for (const why of ["of which EchelonGraph holds none", "whose held_since is after 1 January of cve_year or not known", "whose history is still being read"]) {
+      // #3472: the fourth, a history read of a part, whose rest is held from feed_held_since.
+      for (const why of ["of which EchelonGraph holds none", "whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since)", "whose history is still being read"]) {
         assert.ok(d.includes(why), `vendors_not_fully_held: ${why}`);
       }
     });
@@ -686,6 +726,183 @@ for (const era of [MODERN, "2025-06-18"]) {
       } finally {
         stub.state.coverage = COVERAGE;
       }
+    });
+
+    // ── #3472: a history read that covers only part of a vendor's advisories ──
+    it("#3472: a 2021 CVE with no GitHub row lists github in vendors_not_fully_held, with its reviewed and its unreviewed advisories' dates, though its held_since is 2017-10-24", async () => {
+      stub.state.coverage = { vendors: [GITHUB_REVIEWED, MSFT_ALL, PALOALTO_DONE] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_2021 });
+        assert.notEqual(res.isError, true, textOf(res));
+        const sc = res.structuredContent;
+        assert.equal(sc.state, "measured");
+        assert.deepEqual(sc.coverage.vendor_windows, [GITHUB_REVIEWED, MSFT_ALL, PALOALTO_DONE].map(relayed));
+        assert.deepEqual(
+          sc.coverage.vendor_windows.map((w) => [w.vendor, w.history_backfill, w.history_scope, w.feed_held_since]),
+          [
+            ["github", "complete_reviewed_only", "reviewed", "2026-05-15T08:09:51Z"],
+            ["microsoft", "complete", "all", "2026-05-20T10:00:00Z"],
+            ["paloalto", "complete", null, null],
+          ],
+        );
+        // Microsoft (history_scope all) and Palo Alto (no history_scope) are held from before 2021, as before.
+        assert.deepEqual(sc.coverage.vendors_not_fully_held, ["github"]);
+        assert.ok(
+          noteOf(res).endsWith(` ${CVE_2021} is a 2021 CVE ID, and EchelonGraph may not hold every advisory 1 vendor published for it (vendors_not_fully_held): ${GITHUB_ITEM}. ${PART_RULE}`),
+          noteOf(res),
+        );
+        assert.doesNotMatch(noteOf(res), /microsoft \(|paloalto \(/);
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    // The rule compares feed_held_since with 1 January of the CVE ID's year, never with the CVE's own
+    // dates: a CVE-2026 ID's year begins 2026-01-01, before 2026-05-15, so GitHub is still listed for
+    // it, even for a CVE published after 2026-05-15. A CVE-2027 ID's year begins after both dates.
+    it("#3472: a CVE-2026 ID still lists github (its year begins 2026-01-01, before feed_held_since 2026-05-15); a CVE-2027 ID does not", async () => {
+      stub.state.coverage = { vendors: [GITHUB_REVIEWED, MSFT_ALL, PALOALTO_DONE] };
+      try {
+        const y26 = await call("vendor_advisories_for_cve", { cve_id: CVE_2026 });
+        assert.notEqual(y26.isError, true, textOf(y26));
+        assert.equal(y26.structuredContent.coverage.cve_year, 2026);
+        assert.deepEqual(y26.structuredContent.coverage.vendors_not_fully_held, ["github"]);
+        assert.ok(noteOf(y26).includes(`(vendors_not_fully_held): ${GITHUB_ITEM}. `), noteOf(y26));
+        const y27 = await call("vendor_advisories_for_cve", { cve_id: CVE_2027 });
+        assert.notEqual(y27.isError, true, textOf(y27));
+        assert.deepEqual(y27.structuredContent.coverage.vendors_not_fully_held, []);
+        assert.doesNotMatch(noteOf(y27), /vendors_not_fully_held|unreviewed/);
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3472 regression: history_backfill complete without history_scope, from an API without either new field, reads exactly as before", async () => {
+      // The same windows without the two fields, GitHub's as a complete read (2.6.6 to 3.1.2's API shape).
+      const old = (w) => {
+        const { feed_held_since, history_scope, ...rest } = w;
+        return rest;
+      };
+      const githubComplete = { ...old(GITHUB_REVIEWED), history_backfill: "complete" };
+      stub.state.coverage = { vendors: [githubComplete, old(MSFT_ALL), PALOALTO_DONE] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_2021 });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.deepEqual(res.structuredContent.coverage.vendor_windows.map((w) => [w.vendor, w.history_scope, w.feed_held_since]), [["github", null, null], ["microsoft", null, null], ["paloalto", null, null]]);
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, []);
+        assert.doesNotMatch(noteOf(res), /vendors_not_fully_held|history_scope|unreviewed/);
+        // A 2010 CVE lists all three in the wording of #2729 and #2803, with no history_scope clause.
+        const y10 = await call("vendor_advisories_for_cve", { cve_id: CVE_OLD });
+        assert.deepEqual(y10.structuredContent.coverage.vendors_not_fully_held, ["github", "microsoft", "paloalto"]);
+        assert.ok(
+          noteOf(y10).endsWith(
+            ` ${CVE_OLD} is a 2010 CVE ID, and EchelonGraph may not hold every advisory 3 vendors published for it (vendors_not_fully_held): github (held only from 2017-10-24 to 2026-11-06); microsoft (held only from 2016-01-12 to 2026-09-30); paloalto (held only from 2012-04-27 to 2026-10-02). An advisory a vendor published before the date EchelonGraph holds that vendor from (held_since) may not be held, even when an older one is, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from those vendors is not a finding that they published none.`,
+          ),
+          noteOf(y10),
+        );
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3472: history_scope decides, whatever history_backfill says: a later value with history_scope reviewed still lists github", async () => {
+      stub.state.coverage = { vendors: [{ ...GITHUB_REVIEWED, history_backfill: "paused" }] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_2021 });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["github"]);
+        assert.ok(noteOf(res).includes(`(vendors_not_fully_held): ${GITHUB_ITEM}. `), noteOf(res));
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3472: complete_reviewed_only without history_scope, feed_held_since or held_since is read as reviewed, its rest held from a date not known, never as complete", async () => {
+      const { held_since, feed_held_since, history_scope, ...bare } = GITHUB_REVIEWED;
+      stub.state.coverage = { vendors: [bare] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_2021 });
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.deepEqual(res.structuredContent.coverage.vendor_windows.map((w) => [w.held_since, w.feed_held_since, w.history_scope]), [[null, null, null]]);
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["github"]);
+        // held from its earliest, as a finished read is (heldFrom), and the rest from a date not known.
+        assert.ok(
+          noteOf(res).includes("(vendors_not_fully_held): github (reviewed advisories held from 2017-10-24 to 2026-11-06; unreviewed advisories held from a date not known). "),
+          noteOf(res),
+        );
+        // Nor is it read as a history still being read.
+        assert.doesNotMatch(noteOf(res), /history_backfill complete_reviewed_only/);
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3472: while GitHub's reviewed-only read is in progress, its item says so; the rest is held from the same date as held_since, so the two are not given apart", async () => {
+      const reading = { ...GITHUB_REVIEWED, held_since: GITHUB_REVIEWED.feed_held_since, history_backfill: "in_progress", history_completed_at: "" };
+      stub.state.coverage = { vendors: [reading] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_2021 });
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["github"]);
+        assert.ok(
+          noteOf(res).includes(
+            "(vendors_not_fully_held): github (held only from 2026-05-15 to 2026-11-06, and before that only in part, the earliest held dated 2017-10-24; history_backfill in_progress, which reads its reviewed advisories only (history_scope reviewed)). ",
+          ),
+          noteOf(res),
+        );
+        const s = await call("search_vendor_advisories", {});
+        assert.ok(noteOf(s).includes("are still being read (history_backfill in_progress or not_started): github (held from 2026-05-15 to 2026-11-06, and before that only in part"), noteOf(s));
+        assert.doesNotMatch(noteOf(s), /covers only part/, "a vendor still being read is named once");
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3472: search_vendor_advisories and get_vendor_advisory name GitHub's reviewed-only read, which is not a history still being read", async () => {
+      stub.state.coverage = { vendors: [GITHUB_REVIEWED, MSFT_ALL, PALOALTO_DONE] };
+      stub.state.searchApplied = false;
+      const sentence =
+        " The history read of 1 vendor covers only part of its advisories (history_scope): github (reviewed advisories held from 2017-10-24 to 2026-11-06; unreviewed advisories held only from 2026-05-15). An advisory outside that part published before its feed_held_since may not be held, so none found from it is not a finding that it published none.";
+      try {
+        const s = await call("search_vendor_advisories", {});
+        assert.notEqual(s.isError, true, textOf(s));
+        assert.deepEqual(s.structuredContent.coverage.vendor_windows, [GITHUB_REVIEWED, MSFT_ALL, PALOALTO_DONE].map(relayed));
+        assert.ok(noteOf(s).endsWith(sentence), noteOf(s));
+        assert.doesNotMatch(noteOf(s), /still being read/);
+        // Filtered to a vendor whose read covers all, nothing is said.
+        const m = await call("search_vendor_advisories", { vendor: "microsoft" });
+        assert.doesNotMatch(noteOf(m), /covers only part|still being read/);
+        stub.state.searchApplied = true;
+        const d = await call("get_vendor_advisory", { vendor: "github", advisory_id: "GHSA-jfh8-c2jp-5v3q" });
+        assert.notEqual(d.isError, true, textOf(d));
+        assert.deepEqual(d.structuredContent.coverage, { vendor_window: relayed(GITHUB_REVIEWED) });
+        assert.ok(noteOf(d).endsWith(sentence), noteOf(d));
+      } finally {
+        stub.state.coverage = COVERAGE;
+        stub.state.searchApplied = true;
+      }
+    });
+
+    it("#3472: every outputSchema that carries a vendor window documents history_scope and feed_held_since, and history_backfill lists complete_reviewed_only", async () => {
+      const success = (s) => s.oneOf.find((b) => b.properties.state.enum.includes("measured"));
+      const nonNull = (n) => n.anyOf?.find((b) => b.type !== "null") ?? n;
+      const windowsOf = {
+        vendor_advisories_for_cve: (s) => nonNull(nonNull(success(s).properties.coverage).properties.vendor_windows).items,
+        search_vendor_advisories: (s) => nonNull(nonNull(success(s).properties.coverage).properties.vendor_windows).items,
+        get_vendor_advisory: (s) => nonNull(nonNull(success(s).properties.coverage).properties.vendor_window),
+      };
+      for (const [name, at] of Object.entries(windowsOf)) {
+        const w = at(schemas[name]);
+        assert.ok(w?.properties, `${name}: no vendor window schema found: re-aim this check`);
+        assert.match(w.properties.history_scope?.description ?? "", /What this vendor's history read covers: all .* or reviewed \(GitHub: its reviewed advisories, not its unreviewed ones, which are held only from feed_held_since\)/, name);
+        assert.match(w.properties.feed_held_since?.description ?? "", /an advisory outside it published before feed_held_since may not be held, however early held_since is/, name);
+        assert.ok(JSON.stringify(w.properties.history_backfill).includes('"complete_reviewed_only"'), `${name}: history_backfill does not list complete_reviewed_only`);
+        assert.match(w.description ?? "", /complete_reviewed_only \(the vendor's reviewed advisories have been read back/, name);
+      }
+      const listed = nonNull(success(schemas.vendor_advisories_for_cve).properties.coverage).properties.vendors_not_fully_held;
+      assert.match(
+        listed?.description ?? nonNull(listed ?? {}).description ?? "",
+        /a history_scope that is a part of the vendor's advisories \(reviewed\) with feed_held_since after 1 January of cve_year or not known/,
+      );
     });
 
     // #2865: an advisory that names a rejected CVE, while its vendor has not withdrawn it.
