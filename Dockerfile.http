@@ -9,22 +9,23 @@
 #
 # The lockfile is the source of the dependency set (npm ci), as for the npm release.
 #
-# Base: node 22.23.3 on Alpine 3.24, pinned by its multi-platform index digest (#3018), the base
-# mcp-server/Dockerfile pins: on 2026-10-18 the tag node:22-alpine, which this file named with no
-# digest until then, resolved to it (registry-1.docker.io). A moving tag let two deploys of one
+# Base: node 22.23.4 on Alpine 3.24 (node:22-alpine3.24 at 2026-11-07), pinned by its multi-platform
+# index digest (#3018), the base mcp-server/Dockerfile pins. It moved from 22.23.3 on 2026-11-07: that
+# base's musl and zlib carried fixed HIGHs (CVE-2026-107891, CVE-2026-85091) and Trivy refused it. Until
+# 2026-10-18 this file named the moving tag node:22-alpine with no digest. A moving tag let two deploys of one
 # commit ship different base images with no record of the difference. Written on each FROM line,
 # not as an ARG, so no --build-arg can swap it. To move it, resolve the new tag's index digest and
 # change both FROM lines here and NODE_IMAGE in Dockerfile together (a base with a fixed HIGH or
 # CRITICAL is what deploy-all.sh's Trivy scan refuses, #3018); test/dockerfile-base.test.mjs holds
 # the two files to one pinned base.
-FROM node:22.23.3-alpine3.24@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
+FROM node:22.23.4-alpine3.24@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202 AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci --ignore-scripts
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22.23.3-alpine3.24@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+FROM node:22.23.4-alpine3.24@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202
 ENV NODE_ENV=production
 # #3345: the base image's own npm, npx and corepack leave the runtime stage. Nothing here runs them:
 # the CMD below is node on dist/http.js, Cloud Run's probe is an HTTP GET of /health

@@ -16,9 +16,10 @@
 # The server sends no telemetry and makes no request other than the API call a tool needs to
 # answer; it runs as the image's unprivileged `node` user (uid 1000).
 #
-# Base: node 22.23.3 on Alpine 3.24 (the node:22-alpine tag at 2026-10-03). To move it, resolve
+# Base: node 22.23.4 on Alpine 3.24 (the node:22-alpine3.24 tag at 2026-11-07, moved for #3018's scan:
+# musl 1.2.6-r3 and zlib 1.3.2-r1 fix CVE-2026-107891 and CVE-2026-85091). To move it, resolve
 # the new tag's index digest and change both parts together.
-ARG NODE_IMAGE=node:22.23.3-alpine3.24@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+ARG NODE_IMAGE=node:22.23.4-alpine3.24@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202
 
 # ── build: compile src/ to dist/ with the locked dev dependencies ──────────────
 FROM ${NODE_IMAGE} AS build

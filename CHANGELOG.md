@@ -6,6 +6,17 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.1.5 — 2026-11-07
+
+The hosted endpoint's image moves to a patched base; the package's code is 3.1.4's, unchanged.
+
+- **The Docker images' base is node 22.23.4 on Alpine 3.24** (`node:22.23.4-alpine3.24@sha256:0e1754758c2d…`,
+  in `Dockerfile` and `Dockerfile.http`). The 22.23.3 base carried three HIGH vulnerabilities with fixed
+  versions in its own packages (CVE-2026-107891 in musl and musl-utils 1.2.6-r2, fixed in r3;
+  CVE-2026-85091 in zlib 1.3.2-r0, fixed in r1), and the hosted deploy's image scan refused it. The
+  hosted endpoint is built from a published release's bytes only, so the move is released here. The npm
+  package does not ship a Dockerfile: installing 3.1.5 runs exactly 3.1.4's code.
+
 ## 3.1.4 — 2026-11-07
 
 `vendor_advisories_for_cve` no longer reads GitHub as fully held for a CVE year from 2018 now that
