@@ -540,8 +540,15 @@ export const SHAPED = [
   // thinned rows to the fields the record's keep). Its truncated, {"cves":{"total":20,"returned":20,
   // "thinned":true}}, is what the first level writes too. Every 5th of the 50, repeated to 20, fit at
   // the first level (28,336, every row's description kept), three times production's size.
-  { label: "search_cves, default page (search openssl)", tool: "search_cves", page: "default", args: { search: "openssl" }, fixture: "search_cves", answers: ["openssl"], take: { cves: 4 }, repeat: { cves: 20 }, set: { limit: 20 }, size: 15_780, structured: 8_927 },
-  { label: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", page: "max", args: { search: "openssl", limit: 50 }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 50 }, set: { limit: 50 }, size: 18_717, structured: 17_409 },
+  // #3448 (3.2.1): search_cves' and get_cve's method (CVE_FEED_METHOD) says which identifiers resolve, in the
+  // founder's limits, where it said "ENISA EUVD identifiers resolve to their CVE.": 196 characters longer, in the
+  // text's envelope block and in the structured result, so each of their cases here was re-measured on purpose, +196
+  // in both on what is measured (search_cves 15,828 / 8,975 and 18,765 / 17,457 measured by 3.2.0, whose records,
+  // 15,780 / 8,927 and 18,717 / 17,409, were 48 under it, within MARGIN, so those records move +244; get_cve 20,268 /
+  // 29,780, the cut keeping the same entries, 24 characters under the 30,000 budget; the cve:// resource 20,179).
+  // cve_summary's method is the feed's first sentence alone, 45 characters shorter, within MARGIN of its record.
+  { label: "search_cves, default page (search openssl)", tool: "search_cves", page: "default", args: { search: "openssl" }, fixture: "search_cves", answers: ["openssl"], take: { cves: 4 }, repeat: { cves: 20 }, set: { limit: 20 }, size: 16_024, structured: 9_171 },
+  { label: "search_cves, largest page (search openssl, limit 50)", tool: "search_cves", page: "max", args: { search: "openssl", limit: 50 }, fixture: "search_cves", answers: ["openssl"], repeat: { cves: 50 }, set: { limit: 50 }, size: 18_961, structured: 17_653 },
   // #3084 (merged from 24dad5eb): the KEV note names BOD 26-04, which replaced BOD 22-01, 43 characters longer in
   // the text and in the structured result's notes; the cut then keeps 86 cpe_match and references entries, not 87
   // (24,833 and 29,963 before).
@@ -557,7 +564,7 @@ export const SHAPED = [
   // Through 3.1.1 it was 2.6.2's answer (2026-10-04), cpe_match and references repeated to
   // production's counts and the KEV text set on it: 24,876 / 29,705, +22.7% from production's text,
   // which the record kept from 2026-10-11 (27,380) hid until the review.
-  { label: "get_cve, CVE-2021-44228", tool: "get_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "get_cve", answers: ["CVE-2021-44228"], size: 20_268, structured: 29_780 },
+  { label: "get_cve, CVE-2021-44228", tool: "get_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "get_cve", answers: ["CVE-2021-44228"], size: 20_464, structured: 29_976 },
   // #2801: the cve:// resource reads get_cve's answer; through 2.6.3 it was that answer's structured
   // result pretty-printed whole, 86,559 characters for this CVE on the hosted endpoint (2026-10-04).
   {
@@ -581,7 +588,8 @@ export const SHAPED = [
     // truncated naming cpe_match and references), +155. #3084 (merged from 24dad5eb): 24,837 until
     // get_cve's KEV note named BOD 26-04, which replaced BOD 22-01, +43. #3273's review: 24,880 on
     // 2.6.2's answer repeated; production's whole (above), its cpe_configurations cut too, 20,179.
-    size: 20_179,
+    // #3448: 20,375, +196, the get_cve method's identifier sentences (the get_cve case above).
+    size: 20_375,
   },
   // #3467: 4,392 / 4,803 through 3.1.5. The last_seen note no longer says Shodan's banner time is not stored (untrue
   // since #2438): it is stored for rows matched since 2026-10-06T15:09Z, this per-CVE answer does not serve it, and

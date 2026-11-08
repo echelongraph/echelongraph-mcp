@@ -642,10 +642,34 @@ export const realInstant = (s: string | undefined): s is string => s !== undefin
 // theirs is null. The summary's poller.last_poll_at is the answering instance's own NVD poller
 // (cve/poller.go Stats, in memory), and is relayed in data but never presented as the feed's
 // freshness; the note says what the whole poller block is (summaryPollerNote, #2647).
-// #2868: the API resolves ENISA EUVD (and GHSA, OSV and GCVE-0) identifiers to their CVE; the
-// method says so, since ENISA's notice asks for acknowledgement wherever its data is used.
-const CVE_FEED_METHOD =
-  "EchelonGraph's CVE Pulse feed: CVE records compiled from NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, each polled from its source on a schedule. ENISA EUVD identifiers resolve to their CVE.";
+// #3448 (the founder's claim limits of 2026-11-08, binding): what this server says resolves to a CVE,
+// in every text that says it. core-backend parses a CVE, ENISA EUVD, GCVE, GitHub GHSA or OSV-family
+// id (PYSEC, GO, RUSTSEC, GSD, MAL; cve/vulnid) and maps it to its CVE through its alias table, or a
+// GCVE-0 id by the GCVE specification (cve/vuln_ids.go), and how many of a namespace's ids map
+// differs by namespace. EUVD and GCVE-0 are the only namespaces that resolve across the corpus.
+// GitHub's is said in its measured form alone, GHSA_RESOLUTION, verbatim: 195 of a seeded random draw
+// of 200 reviewed, non-withdrawn GHSA ids with exactly one CVE alias, from a population of 32,959 (a
+// probe of production on 2026-11-07). The OSV family is never said to resolve beyond EchelonGraph's
+// alias table, and no OSV rate is claimed (the founder's limit for #3448): a text that lists it as
+// accepted says OSV_RESOLUTION beside it, which is conditional and gives no rate. Through 3.2.0 the
+// method named EUVD alone, and get_cve's cve_id said every namespace it named resolves.
+// test/id-resolution.test.mjs holds every served text to this, and each namespace it names to what
+// resolved_from carries and core-backend parses.
+const GHSA_RESOLUTION = "97.5% of a random 200 reviewed GitHub advisories resolve to their CVE.";
+const ID_RESOLUTION = `ENISA EUVD and GCVE-0 IDs resolve to their CVE. ${GHSA_RESOLUTION}`;
+const OSV_RESOLUTION = "An OSV ID resolves only where EchelonGraph's alias table maps it to a CVE.";
+// #2868: search_cves' and get_cve's method names ENISA EUVD, since ENISA's notice asks for
+// acknowledgement wherever its data is used, and resolving an EUVD id uses ENISA's mapping. #3448: it
+// names each namespace that resolves with its source, and says coverage differs.
+// cve_summary's is the feed's first sentence alone (#3448): it takes no identifier and resolves none,
+// and its answer carries no ENISA field. Through 3.2.0 it carried the EUVD sentence too, one constant for
+// the three; carrying the #3448 sentences, its text on production's kept answers (2,964) would move 239
+// from test/fixtures/text-bound-live.json's 2,725, which only a probe-prod re-read on the dev box
+// re-records whole (text-bound.mjs CVE_SUMMARY_KEPT).
+const CVE_FEED_SOURCES =
+  "EchelonGraph's CVE Pulse feed: CVE records compiled from NVD, MITRE-CNA pre-NVD records, CISA-KEV, EPSS and GitHub GHSA, each polled from its source on a schedule.";
+const CVE_SUMMARY_METHOD = CVE_FEED_SOURCES;
+const CVE_FEED_METHOD = `${CVE_FEED_SOURCES} Coverage of other identifiers differs by namespace: ENISA EUVD IDs resolve to their CVE (source enisa_euvd), and GCVE-0 IDs by the GCVE specification (source gcve_gna0). ${GHSA_RESOLUTION}`;
 // #3276: search_cves' and get_cve's, whose answers carry no poll-completion time. Through 3.0.2 it
 // said "the CVE feed's answer" carries none, read as the feed's, while cve_summary's answer carries
 // the fleet's last completed NVD poll; it now says where that is. Within 3 characters of the old
@@ -972,7 +996,7 @@ async function cveSummary(): Promise<ToolResult> {
     const env = {
       state: "measured" as const,
       measured_at: instantOrNull(updated),
-      method: CVE_FEED_METHOD,
+      method: CVE_SUMMARY_METHOD,
       coverage: null,
       freshness: fresh.freshness,
       notes: [
@@ -1124,8 +1148,9 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
   }
 }
 
-// #2868: an identifier other than a CVE id. core-backend resolves an ENISA EUVD, GitHub GHSA, OSV
-// (PYSEC, GO, RUSTSEC, GSD, MAL) or GCVE-0 id to its CVE (cve/vuln_ids.go) and says so in
+// #2868: an identifier other than a CVE id. core-backend takes an ENISA EUVD, GitHub GHSA, OSV
+// (PYSEC, GO, RUSTSEC, GSD, MAL) or GCVE-0 id, maps it to its CVE where it can (cve/vuln_ids.go;
+// #3448: how many map differs by namespace, ID_RESOLUTION), and says so in
 // resolved_from: on get_cve's record, and at the top of a search page whose term was one. A
 // GCVE-0 id is its CVE id by the GCVE specification (source gcve_gna0); any other came through
 // EchelonGraph's alias table, from the source named. Nothing is said when the answer carries no
@@ -3420,9 +3445,11 @@ const SEARCH_CVES_OUTPUT = envelopeSchema({
     total_counted: opt(z.boolean()).describe("false: the matches were not counted, so total is not a count."),
     total_is_lower_bound: opt(z.boolean()).describe("true: there are at least total matches."),
     search_relaxed: opt(z.boolean()).describe("true: a search phrase was relaxed to all of its words."),
-    // #2868: a search for an EUVD, GHSA, OSV or GCVE-0 id (see searchResolvedNote).
+    // #2868: a search for an EUVD, GHSA, OSV or GCVE-0 id (see searchResolvedNote). #3448: one that
+    // core-backend mapped to a CVE (resolveListAlias serves none for an id that maps to nothing), and
+    // which of them resolve, in the limits' words (ID_RESOLUTION).
     resolved_from: opt(resolvedFrom).describe(
-      "Present when the search term was an EUVD, GHSA, OSV or GCVE-0 id: what it was, and what mapped it (enisa_euvd, github or osv through EchelonGraph's alias table; gcve_gna0, the GCVE specification), with attribution, Source: ENISA EUVD, when enisa_euvd mapped it. The rows are then exactly the CVEs it names.",
+      `Present when the search term was an EUVD, GHSA, OSV or GCVE-0 id that EchelonGraph mapped to a CVE: what it was, and what mapped it (enisa_euvd, github or osv through EchelonGraph's alias table; gcve_gna0, the GCVE specification), with attribution, Source: ENISA EUVD, when enisa_euvd mapped it. The rows are then exactly the CVEs it names. ${ID_RESOLUTION} ${OSV_RESOLUTION}`,
     ),
     limit: opt(z.number()),
     offset: opt(z.number()),
@@ -3606,10 +3633,14 @@ const INSTRUCTIONS = [
 
 export const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
-// #2868: get_cve's alone; every other CVE tool takes a CVE ID (CVE_ID_ARG, shared).
+// #2868: get_cve's alone; every other CVE tool takes a CVE ID (CVE_ID_ARG, shared). #3448: through
+// 3.2.0 it said EchelonGraph resolves every one of these to its CVE; it now lists what is accepted,
+// then what resolves in the limits' words (ID_RESOLUTION), and when an OSV id does (OSV_RESOLUTION).
 const VULN_ID_ARG = z
   .string()
-  .describe("a CVE ID, e.g. CVE-2023-44487, or an ENISA EUVD (EUVD-2026-90503), GitHub GHSA, OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) or GCVE-0 (GCVE-0-2024-3094) ID, which EchelonGraph resolves to its CVE");
+  .describe(
+    `a CVE ID, e.g. CVE-2023-44487, or an ENISA EUVD (EUVD-2026-90503), GCVE-0 (GCVE-0-2024-3094), GitHub GHSA or OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) ID. ${ID_RESOLUTION} ${OSV_RESOLUTION}`,
+  );
 
 // What each description says about its structured result, naming only fields its schema holds.
 // #2842: the generic rule for the result's last text block is in the README and the methodology
@@ -3623,7 +3654,7 @@ const FEED_ENVELOPE = "freshness is null: this answer carries no poll-completion
 // six words ("any", "not", "rating", "scored", "source", "yet").
 // #3276: freshness is the answer's nvd_poll (nvdPollFreshness). It replaces "The feed is polled from
 // its sources on a schedule; this is the state as of that update." too, which fit the #2924
-// headroom only with it gone; CVE_FEED_METHOD still says each source is polled on a schedule. Its
+// headroom only with it gone; CVE_SUMMARY_METHOD still says each source is polled on a schedule. Its
 // "from" is the one outside SUMMARY_NONE_DESCRIPTION that backs the /pulse/mcp row's "from" (the
 // site's #2610 control fails without it).
 const CVE_SUMMARY_ENVELOPE =
@@ -3729,11 +3760,14 @@ export function createServer(): McpServer {
     async (a) => checked("search_cves", SEARCH_CVES_OUTPUT, await answering(a.full, SEARCH_CVES_DATA, () => searchCVEs(a))),
   );
 
+  // #3448: through 3.2.0 the description said "Pass a CVE, EUVD or GHSA ID.", a GHSA claim wider than
+  // the limits allow. It names the two namespaces that resolve across the corpus; GitHub's measured
+  // sentence (70 characters) does not fit the #2924 headroom here, so cve_id's description carries it.
   server.registerTool(
     "get_cve",
     {
       title: "CVE detail",
-      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity, echelongraph_score, echelongraph_severity and score_confidence, epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, kev_due_date, kev_ransomware) and, if KEV-listed, CISA's own text relayed verbatim (kev_required_action, not EchelonGraph's advice; kev_short_description; kev_notes_urls), ghsa_id, references, cpe_match (one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator; absent where none is stored, which is not a finding that no product is affected), remediation (a capped summary of its fix), published, modified and updated_at; each field only where the record has it. Pass a CVE, EUVD or GHSA ID. ${SCORE_ASSESSED_DESCRIPTION} ${PATCH_AVAILABLE_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
+      description: `One CVE's record: description, severity, cvss_v3_score, cvss_v4_score and cvss_v4_severity, echelongraph_score, echelongraph_severity and score_confidence, epss_score and epss_percentile, CISA-KEV status (kev_listed, kev_added_date, kev_due_date, kev_ransomware) and, if KEV-listed, CISA's own text relayed verbatim (kev_required_action, not EchelonGraph's advice; kev_short_description; kev_notes_urls), ghsa_id, references, cpe_match (one flat list) and cpe_configurations (NVD's configurations as NVD sent them, with each AND/OR operator; absent where none is stored, which is not a finding that no product is affected), remediation (a capped summary of its fix), published, modified and updated_at; each field only where the record has it. Pass a CVE, EUVD or GCVE-0 ID. ${SCORE_ASSESSED_DESCRIPTION} ${PATCH_AVAILABLE_DESCRIPTION} ${FEED_ENVELOPE} ${TEXT_BUDGET_DESCRIPTION} Cut, each list in the record keeps its first entries, and the note names each list cut with its full length.`,
       inputSchema: z.object({ cve_id: VULN_ID_ARG, full: FULL_ARG }),
       outputSchema: GET_CVE_OUTPUT,
       annotations: ANNOTATIONS,

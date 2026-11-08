@@ -5032,16 +5032,22 @@ describe(`against a stub API [${ERA}]`, () => {
     // CVE's alone (the sentence 277 characters longer, the text 304). The other bounds are unchanged. At #3467's round-10
     // review (2026-11-03, d1-3467 F4) it was re-measured on purpose, from 4,209 to 4,243: the banner time is stored "where
     // Shodan gives a usable one", the poller storing none for a time absent, unreadable or more than 5 minutes ahead.
+    // At #3448 (3.2.1, 2026-11-08) search_cves and get_cve were re-measured on purpose, each +196 measured: search_cves
+    // 1,190 to 1,386 and with a row not yet scored 1,878 to 2,074, get_cve 1,138 to 1,334 and not yet scored 1,658 to
+    // 1,854 (3.2.0 measured each 3 over its bound of 1,187, 1,875, 1,135 and 1,655, within MARGIN). Their
+    // method (CVE_FEED_METHOD), in the envelope block, says which identifiers resolve in the founder's limits, where it
+    // said "ENISA EUVD identifiers resolve to their CVE."; data and the note are unchanged. cve_summary's method is the
+    // feed's first sentence alone, 45 characters shorter (2,734 measured); its bound is unchanged.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_698], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out; #3010: the thresholds sentence
       ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 4_243],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_781],
-      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_187],
-      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_135],
+      ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_386],
+      ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_334],
       ["get_cve, failed (the API's 404)", "get_cve", CALLS.get_cve, "empty", {}, { state: "failed" }, 565],
       ["search_cves, failed (an edge's HTTP 403 page)", "search_cves", CALLS.search_cves, "403", {}, { state: "failed" }, 705],
-      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_655],
-      ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 1_875],
+      ["get_cve, not yet scored (the placeholders 0, NONE and 0)", "get_cve", { cve_id: CVE_UNSCORED_ZERO }, "ok", { [`/api/v1/public/cves/${CVE_UNSCORED_ZERO}`]: SCORE_ROWS[CVE_UNSCORED_ZERO] }, { state: "measured" }, 1_854],
+      ["search_cves, a page with one row not yet scored", "search_cves", CALLS.search_cves, "ok", { "/api/v1/public/cves": { ...BODIES["/api/v1/public/cves"].ok, cves: [...BODIES["/api/v1/public/cves"].ok.cves, SCORE_ROWS[CVE_UNSCORED_ZERO]], total: 2 } }, { state: "measured" }, 2_074],
     ];
     // #2531: the check itself, one function, so the control below runs the predicate the cases
     // run. The text is every text block, with the stub's base URL counted as production's.

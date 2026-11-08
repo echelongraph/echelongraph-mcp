@@ -73,20 +73,26 @@ Both tools relay the API's JSON as it was sent, and the note says what the score
 ## How `get_cve` and `search_cves` take an EUVD, GHSA, OSV or GCVE-0 ID
 
 `get_cve`'s `cve_id` may be a CVE ID or another identifier of the same vulnerability: an ENISA
-EUVD ID (`EUVD-2026-90503`), a GitHub Security Advisory ID (`GHSA-xxxx-xxxx-xxxx`), an OSV ID
-that aliases a CVE (`PYSEC-`, `GO-`, `RUSTSEC-`, `GSD-`, `MAL-`) or a GCVE-0 ID
-(`GCVE-0-2024-3094`), in any letter case. The server sends it as asked; EchelonGraph's API
-resolves it to its CVE and answers with that CVE's record, carrying `resolved_from`: the ID asked
-for, its `namespace`, and the `source` that mapped it — `enisa_euvd`, `github` or `osv` through
-EchelonGraph's alias table, or `gcve_gna0`, the GCVE specification itself, under which
-GCVE-0-YYYY-N is CVE-YYYY-N. The note says so: "Resolved EUVD-2026-90503 (euvd) to
-CVE-2026-80276 through EchelonGraph's alias table (source enisa_euvd). Source: ENISA EUVD." An ID the table maps to
-no CVE is the API's 404, one that names several CVEs (a GHSA can) its 300 listing them, and an
-alias table that could not be read its 503: each is a failed result quoting the API's message,
-never an empty one.
+EUVD ID (`EUVD-2026-90503`), a GCVE-0 ID (`GCVE-0-2024-3094`), a GitHub Security Advisory ID
+(`GHSA-xxxx-xxxx-xxxx`) or an OSV ID (`PYSEC-`, `GO-`, `RUSTSEC-`, `GSD-`, `MAL-`), in any letter
+case. The server sends it as asked, and EchelonGraph's API looks it up. Coverage differs by
+namespace. ENISA EUVD and GCVE-0 IDs resolve to their CVE: an EUVD ID through EchelonGraph's alias
+table (source `enisa_euvd`) while EchelonGraph displays ENISA's data, and a GCVE-0 ID by the GCVE
+specification itself (source `gcve_gna0`), under which GCVE-0-YYYY-N is CVE-YYYY-N. 97.5% of a
+random 200 reviewed GitHub advisories resolve to their CVE. An OSV ID resolves only where
+EchelonGraph's alias table maps it to a CVE.
 
-A `search_cves` search for such an ID lists exactly the CVEs it names, and the page carries
-`resolved_from` too; the note says the rows are exactly those CVEs.
+An ID the API maps to its CVE is answered with that CVE's record, carrying `resolved_from`: the ID
+asked for, its `namespace`, and the `source` that mapped it — `enisa_euvd`, `github` or `osv`
+through EchelonGraph's alias table, or `gcve_gna0`. The note says so:
+"Resolved EUVD-2026-90503 (euvd) to CVE-2026-80276 through EchelonGraph's alias table (source enisa_euvd). Source: ENISA EUVD."
+An ID the table maps to no CVE is the API's 404, one that names several CVEs (a GHSA can) its 300
+listing them, and an alias table that could not be read its 503: each is a failed result quoting
+the API's message, never an empty one.
+
+A `search_cves` search for such an ID lists exactly the CVEs it names, none for an ID the table
+maps to no CVE, and the page carries `resolved_from` when it names any; the note says the rows are
+exactly those CVEs.
 
 The record's `aliases` lists the CVE's other identifiers with their sources. Its `eu_kev`, where
 present, is the CVE's listing on ENISA's EU Known Exploited Vulnerabilities catalogue: ENISA's

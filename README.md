@@ -28,10 +28,7 @@ API call a tool needs to answer.
   Registry: `io.echelongraph/echelongraph-mcp` · Docs: <https://echelongraph.io/pulse/mcp>
 - Source: <https://github.com/echelongraph/echelongraph-mcp> · Changes:
   [CHANGELOG.md](CHANGELOG.md) · Security: [SECURITY.md](SECURITY.md)
-- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp), a registry
-  entry for `https://mcp.echelongraph.io/mcp` (its proxy, API and CLI
-  [shut down on 2026-10-31](https://smithery.ai/future)) ·
-  [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)
+- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)
 
 ## Quick start
 

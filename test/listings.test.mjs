@@ -414,39 +414,45 @@ describe("#3266: no listing surface carries a phrase a tool's description has re
   });
 });
 
-// Smithery's "Link to Smithery" verification check scans this README (served from the public repo) for a
-// link to the server's page (#2723, 2026-10-05). Removing the line un-verifies the listing with no other
-// signal, so it is pinned here, with Glama beside it.
-// #3356: Smithery shuts its proxy (run.tools, server.smithery.ai), API and CLI on 2026-10-31 and stays a
-// registry (https://smithery.ai/future). The link stays (it is the registry entry, and verification is
-// what gives a page a direct URL); the line must also say what the entry is and that Smithery's own
-// URLs stop, dated and sourced, so no reader connects through one. The README is held under a ceiling
-// (readme.test.mjs, #3012), so the line says only that; listings/README.md, "Smithery", says the rest.
+// The README links the directories that list us (#2723), Glama today. Smithery's link went on
+// 2026-11-08: https://smithery.ai/servers/echelongraph/echelongraph-mcp answered 308, then 404 at
+// www.smithery.ai, in both of its views, so "Also listed on: Smithery" was a claim the page refuted
+// (it had pointed there since 2026-10-05; #3356 had made it say the entry is a registry entry after
+// Smithery's 2026-10-31 shutdown). scripts/check-mcp-listings.mjs's smithery row reads the page on
+// every production deploy: if Smithery lists us again, that row reads LISTED, and the link can come
+// back, saying what the entry is (a registry entry for https://mcp.echelongraph.io/mcp) and dated.
+// Until then no README line may link Smithery's page or say it lists us.
 const OUR_URL = "https://mcp.echelongraph.io/mcp";
-function smitheryLineProblems(readme) {
-  const flat = readme.replace(/\s+/g, " ");
-  const at = flat.indexOf("Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp)");
-  if (at < 0) return ["README lost the Smithery backlink that Smithery's verification looks for"];
-  const line = flat.slice(at, flat.indexOf("[Glama]", at) >>> 0);
+// Both read the text as written, not flattened: the claim is any "listed on" item, its indented continuation
+// lines included, up to the next item or a blank line, so a Smithery named after the Glama link (whose URL has
+// a dot in it) is caught; the link is any smithery.ai /server/ or /servers/ page.
+function smitheryClaimProblems(readme) {
   const out = [];
-  if (!line.includes(`a registry entry for \`${OUR_URL}\``)) out.push(`the Smithery link does not say it is a registry entry for ${OUR_URL}`);
-  if (!/its proxy, API and CLI \[shut down on 2026-10-31\]/.test(line)) out.push("the Smithery link does not say Smithery's proxy, API and CLI shut down on 2026-10-31");
-  if (!line.includes("](https://smithery.ai/future)")) out.push("the 2026-10-31 shutdown is not sourced (https://smithery.ai/future)");
+  if (/\]\(https:\/\/(?:www\.)?smithery\.ai\/servers?\//.test(readme)) out.push("README links a Smithery server page, which answered 404 on 2026-11-08: no link, until the listing check's smithery row reads LISTED again");
+  if (/listed on:?(?:[^\n]*\n[ \t]+(?!- ))*[^\n]*\bSmithery\b/i.test(readme)) out.push("README says Smithery lists us, which its page refuted on 2026-11-08");
   return out;
 }
 describe("README links the directories that list us", () => {
-  it("links the Smithery server page and the Glama listing", () => {
-    const readme = read("README.md");
-    assert.ok(readme.includes("(https://smithery.ai/servers/echelongraph/echelongraph-mcp)"), "README lost the Smithery backlink that Smithery's verification looks for");
-    assert.ok(readme.includes("(https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)"), "README lost the Glama link");
+  it("links the Glama listing", () => {
+    assert.ok(read("README.md").includes("(https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)"), "README lost the Glama link");
   });
-  it("#3356: the Smithery link says it is a registry entry for our URL, and that Smithery's proxy, API and CLI shut down on 2026-10-31 (sourced)", () => {
-    assert.deepEqual(smitheryLineProblems(read("README.md")), []);
+  it("2026-11-08: no link to Smithery's page and no claim that Smithery lists us (its page answers 404)", () => {
+    assert.deepEqual(smitheryClaimProblems(read("README.md")), []);
   });
-  it("#3356 control: the line as it stood before #3356 is caught on each count; a README without the link on the first", () => {
-    const before = "- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp) ·\n  [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n";
-    assert.equal(smitheryLineProblems(before).length, 3, smitheryLineProblems(before).join(" | "));
-    assert.deepEqual(smitheryLineProblems("- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n"), ["README lost the Smithery backlink that Smithery's verification looks for"]);
+  it("control: the #3356 line, and the line before it, are each caught on both counts; Glama alone passes", () => {
+    const line3356 = "- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp), a registry\n  entry for `https://mcp.echelongraph.io/mcp` (its proxy, API and CLI\n  [shut down on 2026-10-31](https://smithery.ai/future)) ·\n  [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n";
+    const line2723 = "- Also listed on: [Smithery](https://smithery.ai/servers/echelongraph/echelongraph-mcp) ·\n  [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n";
+    for (const line of [line3356, line2723]) assert.equal(smitheryClaimProblems(line).length, 2, smitheryClaimProblems(line).join(" | "));
+    assert.deepEqual(smitheryClaimProblems("- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n"), []);
+    // A Smithery URL in prose that is not a listing claim (its shutdown notice) is not a claim it lists us.
+    assert.deepEqual(smitheryClaimProblems("Smithery's proxy shut down on 2026-10-31 (https://smithery.ai/future)."), []);
+    // Smithery named after the Glama link (the dot in glama.ai), and linked on a continuation line at /server/.
+    const afterGlama = "- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp) and Smithery\n";
+    assert.equal(smitheryClaimProblems(afterGlama).length, 1, smitheryClaimProblems(afterGlama).join(" | "));
+    const linkedAfter = "- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp) ·\n  [Smithery](https://smithery.ai/server/echelongraph/echelongraph-mcp)\n";
+    assert.equal(smitheryClaimProblems(linkedAfter).length, 2, smitheryClaimProblems(linkedAfter).join(" | "));
+    // A separate item after the Glama one is not part of its "listed on" claim.
+    assert.deepEqual(smitheryClaimProblems("- Also listed on: [Glama](https://glama.ai/mcp/servers/echelongraph/echelongraph-mcp)\n- Smithery's proxy shut down on 2026-10-31.\n"), []);
   });
 });
 

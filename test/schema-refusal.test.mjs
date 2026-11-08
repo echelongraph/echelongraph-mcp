@@ -15,7 +15,8 @@
 // nothing else changed. Then #3345's review re-recorded check_sbom's purls: maxItems 2000 became
 // 10000 (MAX_PURL_ENTRIES, entries; the 2,000 is distinct purls, check_sbom's own rule), and its
 // description says both. #3434 re-recorded it for scan_manifest's files[].filename maxLength 1024
-// (MAX_FILENAME_CHARS) and pattern (no control character or quote); nothing else changed.
+// (MAX_FILENAME_CHARS) and pattern (no control character or quote); nothing else changed. #3448 (3.2.1) re-recorded
+// it for get_cve's cve_id description, which says what resolves in the founder's limits; nothing else changed.
 //
 // Every API request goes to a stub on 127.0.0.1, which counts them: a refusal makes none.
 import { describe, it, before, after } from "node:test";

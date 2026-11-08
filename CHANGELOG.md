@@ -6,6 +6,60 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.1 — 2026-11-08
+
+What the server says resolves to a CVE now holds to what EchelonGraph has measured, namespace by namespace
+(#3448), and a correction to 3.1.2's entry, below. Only descriptions and the CVE feed tools' `method` change: no
+type, enum or `required` changes, and no client needs to reconnect.
+
+- **Which identifiers resolve to their CVE, and from what** (#3448). Through 3.2.0 the CVE feed's `method` (in
+  `cve_summary`, `search_cves` and `get_cve` answers) said "ENISA EUVD identifiers resolve to their CVE." and
+  named no other namespace, while `get_cve`'s `cve_id` description said "a CVE ID, e.g. CVE-2023-44487, or an
+  ENISA EUVD (EUVD-2026-90503), GitHub GHSA, OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) or GCVE-0 (GCVE-0-2024-3094)
+  ID, which EchelonGraph resolves to its CVE": a claim for every namespace it named, wider than what EchelonGraph
+  has measured. The `method` of `search_cves` and `get_cve` now says that coverage differs by namespace and names
+  what resolves with its source: ENISA EUVD IDs resolve to their CVE (source `enisa_euvd`), and GCVE-0 IDs by the
+  GCVE specification (source `gcve_gna0`), the only two namespaces that resolve across the corpus. GitHub's is
+  said in its measured form alone: "97.5% of a random 200 reviewed GitHub advisories resolve to their CVE." That
+  is a probe of production on 2026-11-07: a seeded random draw of 200 reviewed, non-withdrawn GHSA IDs with
+  exactly one CVE alias, from a population of 32,959, of which 195 resolved to that CVE (195/200). OSV IDs are
+  still accepted, and no text gives a rate for them: `cve_id` lists them as accepted and says "An OSV ID resolves
+  only where EchelonGraph's alias table maps it to a CVE." A `search_cves` or `get_cve` answer that carries the
+  `method` is 196 characters longer, in its text and in its structured result, unless its data is cut to fit the
+  30,000-character structured budget, where it may keep fewer entries and its note gives the counts (`get_cve`
+  CVE-2021-44228's structured result, cut, is 29,976 characters of its 30,000 on production's answer of
+  2026-10-25 that the suite replays). A failed answer carries none, and is unchanged.
+- `cve_summary` takes no identifier, so its `method` is the feed's first sentence alone, without the identifier
+  sentences (45 characters shorter than 3.2.0's).
+- `get_cve`'s description said "Pass a CVE, EUVD or GHSA ID.", a GitHub claim wider than the measured one; it
+  says "Pass a CVE, EUVD or GCVE-0 ID.", and `cve_id`'s description carries GitHub's sentence. The description is
+  1,944 characters, 4 under the 1,948 its 100-character headroom under the 2,048-character client cut allows: too
+  few for the sentence's 70.
+- `search_cves`' top-level `resolved_from` was described as present whenever the search term was an EUVD, GHSA,
+  OSV or GCVE-0 ID; it is present only when EchelonGraph mapped that ID to a CVE (the API serves none for an ID
+  that maps to nothing, and the page then lists no rows), and its description carries the same sentences as
+  `cve_id`'s. docs/tools.md, "How `get_cve` and `search_cves` take an EUVD, GHSA, OSV or GCVE-0 ID", says the
+  same, and that an EUVD ID resolves while EchelonGraph displays ENISA's data.
+- `test/id-resolution.test.mjs` reads every text the server serves (the instructions, tools/list, the answers'
+  `method`, notes and coverage, each prompt's description and `prompts/get` text, every resource's description
+  and contents) and the package's pages (README.md, docs/, server.json, package.json's description, every text
+  file under listings/, and this entry). It holds them to the limits: the texts that say which identifiers
+  resolve carry GitHub's sentence verbatim, and OSV's beside a list of OSV IDs; no text says a GHSA or OSV ID
+  resolves outside those sentences; EUVD and GCVE-0 alone are said to resolve, each with its own source; no text
+  names a namespace the test does not know. Each namespace named has its source among those `resolved_from`
+  carries, and, in EchelonGraph's repository, a pattern in core-backend's identifier parser (core-backend's Go
+  tests own how that parser behaves).
+
+### Corrections
+
+- **Correction to 3.1.2's entry** (#3448). It said that, for an ENISA EUVD, GitHub GHSA, OSV or GCVE-0 ID,
+  "EchelonGraph's API resolves it to its CVE", and that "`search_cves` with an EUVD, GHSA, OSV or GCVE-0 ID as
+  its search lists exactly the CVEs it names, with `resolved_from` on the page". That holds for ENISA EUVD and
+  GCVE-0 IDs. For GitHub, what holds is the measured sentence above: "97.5% of a random 200 reviewed GitHub
+  advisories resolve to their CVE." OSV IDs are accepted: "An OSV ID resolves only where EchelonGraph's alias
+  table maps it to a CVE." A `search_cves` page carries `resolved_from` only when EchelonGraph mapped the ID to a
+  CVE.
+
 ## 3.2.0 — 2026-11-08
 
 The hosted endpoint bounds what parsing a request may take before it parses it, for each request and for all of

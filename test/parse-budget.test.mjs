@@ -984,23 +984,29 @@ describe("#3381: check_sbom counts an sbom passed as text before it parses it", 
 // and of a disputed match is what the code does. Each was a sentence the code contradicted.
 describe("#3381's round-4 review: the docs say what the budget and the relay do", () => {
   const read = (f) => fs.readFileSync(path.join(PKG_DIR, f), "utf8").replace(/\s+/g, " ");
-  // The newest entry: "## Unreleased" until the release renames it "## <version> — <date>".
-  const unreleased = () => read("CHANGELOG.md").split(/(?:^| )## /).find((s) => s.startsWith("Unreleased") || /^\d/.test(s));
+  // The entry of the release that shipped these: "## Unreleased" until the release renamed it "## 3.2.0 — <date>".
+  // 3.2.1 (#3448) put its own entry above it, so the newest entry is no longer the one these sentences belong to: the
+  // 3.2.0 section is read by its heading, and a missing one fails rather than reading another release's entry.
+  const entry320 = () => {
+    const s = read("CHANGELOG.md").split(/(?:^| )## /).find((x) => x.startsWith("3.2.0 — "));
+    assert.ok(s, "CHANGELOG.md has no '## 3.2.0 — <date>' section: re-aim this check");
+    return s;
+  };
   it("the second a waiter waits before a large body that fits is held back (BUDGET_STARVE_MS), in rate-limits.md and the changelog; no sentence says a body that fits is let in at once", () => {
     assert.equal(B.BUDGET_STARVE_MS, 1000, "the docs say a second");
-    for (const [f, t] of [["docs/rate-limits.md", read("docs/rate-limits.md")], ["CHANGELOG.md", unreleased()]]) {
+    for (const [f, t] of [["docs/rate-limits.md", read("docs/rate-limits.md")], ["CHANGELOG.md", entry320()]]) {
       assert.match(t, /A body that fits is let in ahead of one that waits and does not, until that one has waited a second; from then on a body above the general 64 KiB cap is let in only if the room the waiter needs is left beside it/, f);
       assert.doesNotMatch(t, /A body that fits is let in at once/, f);
       assert.match(t, /three quarters of the budget/, `${f}: the most one request may hold`);
     }
   });
   it("a scan_manifest file past the bound is not read, and the call is invalid_input only when no file could be read, in structured-results.md and the changelog", () => {
-    for (const [f, t] of [["docs/structured-results.md", read("docs/structured-results.md")], ["CHANGELOG.md", unreleased()]]) {
+    for (const [f, t] of [["docs/structured-results.md", read("docs/structured-results.md")], ["CHANGELOG.md", entry320()]]) {
       assert.match(t, /`read` false and `refused` saying so, reads the call's other files, and answers `invalid_input` only when no file could be read/, f);
     }
   });
   it("tools.md and the changelog name cna_range_default, call no CNA range the record's own words, and do not take a missing dispute for agreement", () => {
-    for (const [f, t] of [["docs/tools.md", read("docs/tools.md")], ["CHANGELOG.md", unreleased()]]) {
+    for (const [f, t] of [["docs/tools.md", read("docs/tools.md")], ["CHANGELOG.md", entry320()]]) {
       assert.match(t, /`cna_range_default` true, a span no entry writes that the record's `defaultStatus` covers/, f);
       assert.doesNotMatch(t, /as its record writes them|the advisory interval that holds the version/, f);
       assert.match(t, /is not a finding that the CNA agrees/, f);
@@ -1027,13 +1033,13 @@ describe("#3381's round-4 review: the docs say what the budget and the relay do"
   // "Through 3.1.5" of what 3.1.5 and every earlier release lacked (d4-release R10-2; 3.1.4 and 3.1.5 shipped these paths unchanged).
   it("R10-B1, R10-M1, R10-m1, R10-2: the per-request bound, the answer read, the local server and the versions, as the code has them", () => {
     const readme = read("README.md");
-    const docs = [["CHANGELOG.md", unreleased()], ["docs/rate-limits.md", read("docs/rate-limits.md")], ["docs/structured-results.md", read("docs/structured-results.md")]];
+    const docs = [["CHANGELOG.md", entry320()], ["docs/rate-limits.md", read("docs/rate-limits.md")], ["docs/structured-results.md", read("docs/structured-results.md")]];
     for (const [f, t] of [...docs, ["README.md", readme]]) assert.doesNotMatch(t, /one request holds at most|holds one request, its body|one request may hold, its body|holds a request, body and reads/, f);
     for (const [f, t] of docs) assert.match(t, /may reserve (at most 31,457,280 bytes \(30 MiB\) of the instance's memory )?before it reads|reserve more than 31,457,280 bytes \(30 MiB\) of its memory before it reads/, f);
     for (const [f, t] of docs.slice(0, 2)) assert.match(t, /read only to (the room left|what the call's reservation still covers of it and what the budget has left)/, f);
     assert.match(read("docs/rate-limits.md"), /A server run locally \(stdio\) holds only a document it parses from text to the same share of its own heap/);
     assert.doesNotMatch(read("docs/rate-limits.md"), /a server run locally holds itself to the same shares of its own heap/);
-    const u = unreleased();
+    const u = entry320();
     assert.doesNotMatch(u.replace(/### Corrections.*/s, ""), /[Tt]hrough 3\.1\.[2-4]\b/);
     assert.equal((u.match(/Through 3\.1\.5 /g) ?? []).length >= 4, true);
     assert.match(u, /Correction to 3\.1\.2's entry/);
@@ -1042,7 +1048,8 @@ describe("#3381's round-4 review: the docs say what the budget and the relay do"
 
 // #3381's round-7 verification (R7V-2.1): every regex this release runs on a caller's text before or while it is read
 // (the estimators of parseBudget.ts, scan_manifest.ts's, and the readers'), on adversarial single lines of 300,000
-// characters and more, each shaped at its own pattern's quantifiers: each call within 100 ms, under the image's flags.
+// characters and more, each shaped at its own pattern's quantifiers: each call within 250 ms (the fastest of three
+// runs), under the image's flags.
 // Through round 7 tomlPackages' header pattern took 10 s on '[["\\' and 120,000 spaces, and 81 s at 300,000, while the
 // instance answered nothing.
 describe("#3381's round-7 verification: no estimator's or reader's regex is worse than linear in one line", () => {
@@ -1084,7 +1091,10 @@ const M = await import(${JSON.stringify(url("tools/manifests/index.js"))});
 const C = await import(${JSON.stringify(url("tools/manifests/common.js"))});
 const cases = JSON.parse(process.env.REGEX_CASES);
 const IMG = B.budgetsFor(B.IMAGE_HEAP_LIMIT);
-const time = (fn) => { const t0 = performance.now(); fn(); return Math.round((performance.now() - t0) * 10) / 10; };
+// The fastest of three runs: a super-linear pattern on 300,000 characters takes seconds to minutes on every run, so
+// the minimum loses nothing it is here to catch, and drops a load spike on the machine (2026-11-08: one run of
+// scanJson took 106.7 ms on the busy dev box during the 3.2.0 release, against the old single-run 100 ms bound).
+const time = (fn) => { let best = Infinity; for (let i = 0; i < 3; i++) { const t0 = performance.now(); fn(); best = Math.min(best, performance.now() - t0); } return Math.round(best * 10) / 10; };
 const out = [];
 for (const [name, filename, parts] of cases) {
   const text = parts.map(([x, n]) => x.repeat(n)).join("");
@@ -1100,14 +1110,14 @@ for (const [name, filename, parts] of cases) {
 }
 console.log(JSON.stringify(out));
 `;
-  it("each estimator and reader, on each adversarial line of 300,000 characters or more, within 100 ms", { skip: IMAGE_SKIP }, (t) => {
+  it("each estimator and reader, on each adversarial line of 300,000 characters or more, within 250 ms (the fastest of three runs)", { skip: IMAGE_SKIP }, (t) => {
     const out = JSON.parse(execFileSync(process.execPath, [...imageNodeFlags(), "--input-type=module", "-e", CHILD], { encoding: "utf8", env: { ...process.env, REGEX_CASES: JSON.stringify(CASES) }, timeout: 120_000 }));
     assert.equal(out.length, CASES.length);
     for (const r of out) t.diagnostic(JSON.stringify(r));
     const slow = [];
     for (const r of out) {
       assert.ok(r.chars >= N, `${r.name}: ${r.chars} characters`);
-      for (const [k, v] of Object.entries(r)) if (k !== "name" && k !== "chars" && v >= 100) slow.push(`${r.name}: ${k} ${v} ms`);
+      for (const [k, v] of Object.entries(r)) if (k !== "name" && k !== "chars" && v >= 250) slow.push(`${r.name}: ${k} ${v} ms`);
     }
     assert.deepEqual(slow, [], JSON.stringify(out));
   });
