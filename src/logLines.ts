@@ -27,6 +27,8 @@ export const LOG_LINES = {
       "duration_ms",
       // A method MCP defines for a client (httpPolicy.ts MCP_METHODS), else "(other)"; "(none)", "(unparseable)",
       // "(batch)" or "(response)" for a body with no one method. Never the client's own string (#2923's review).
+      // #3381: "(unparseable)" too for a large body refused unparsed as too dense (refused "body_dense"), whose method
+      // no parse read.
       "rpc_method",
       "protocol_version",
       "origin_present",

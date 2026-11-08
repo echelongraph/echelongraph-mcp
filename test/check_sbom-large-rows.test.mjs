@@ -351,7 +351,8 @@ describe("#3132's review: the synthetic's 201-purl probe keeps compact matches, 
     const { sentences } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "index.js")).href);
     const fieldsOf = (keep) => keep.find((k) => Array.isArray(k) && k[0] === "matches")[1];
     assert.ok(fieldsOf(S.SBOM_ROW_THIN).includes("fixed_in_reason"));
-    assert.deepEqual(fieldsOf(S.SBOM_ROW_THIN).filter((f) => !fieldsOf(S.SBOM_ROW_COMPACT).includes(f)), ["fixed_in_reason"]);
+    // #3391: fixed_in_dispute, kept beside fixed_in_reason where it is kept, stays out of the compact level with it.
+    assert.deepEqual(fieldsOf(S.SBOM_ROW_THIN).filter((f) => !fieldsOf(S.SBOM_ROW_COMPACT).includes(f)), ["fixed_in_reason", "fixed_in_dispute"]);
     const wholeSc = await call({ purls: SBOM_PROBE_PURLS, full: true });
     const sc = await call({ purls: SBOM_PROBE_PURLS });
     const at = sc.notes.findIndex((n) => n.startsWith("DATA CUT:"));

@@ -583,7 +583,13 @@ export const SHAPED = [
     // 2.6.2's answer repeated; production's whole (above), its cpe_configurations cut too, 20,179.
     size: 20_179,
   },
-  { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_392, structured: 4_803 },
+  // #3467: 4,392 / 4,803 through 3.1.5. The last_seen note no longer says Shodan's banner time is not stored (untrue
+  // since #2438): it is stored for rows matched since 2026-10-06T15:09Z, this per-CVE answer does not serve it, and
+  // exposure_radar serves its earliest and latest over all KEV-listed rows together; the sentence is 277 characters
+  // longer, +277 to each (the text holds it once, in the envelope block; structuredContent once, in notes).
+  // #3467's round-10 review (d1-3467 F4): 4,669 / 5,080 through round 10. The banner time is stored "where Shodan gives a
+  // usable one" (the poller stores none for a time absent, unreadable or more than 5 minutes ahead), +34 to each.
+  { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_703, structured: 5_114 },
   { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 43_702, structured: 29_962 }, // #3010: three radars past their threshold on these 2026-10-05 answers, and the last sentence
   { label: "kev_recent, default page (limit 50)", tool: "kev_recent", page: "default", args: {}, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 50 }, set: { limit: 50, count: 50 }, size: 29_187, structured: 23_257 },
   { label: "kev_recent, largest page (limit 200)", tool: "kev_recent", page: "max", args: { limit: 200 }, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 200 }, set: { limit: 200, count: 200 }, size: 32_672, structured: 29_778 },
@@ -612,7 +618,8 @@ export const SHAPED = [
   // #2834: the first thinned data level keeps a CPE match's cpe_version_end_excluding and
   // cpe_version_end_including, and the DATA CUT note, which the text carries too, names that
   // level's fields, so it names them here as well: 24,807 / 14,352 before (54 characters each).
-  { label: "check_affected, PyPI django 1.11.0 (the registry path)", tool: "check_affected", page: "default", args: { ecosystem: "PyPI", package: "django", version: "1.11.0" }, fixture: "check_affected", answers: ["django"], repeat: { matches: 29 }, size: 24_861, structured: 14_406 },
+  // Round 11 (3.2.0): +94 in each, REGISTRY_METHOD's clause on the CNA statements the API reads beside each advisory.
+  { label: "check_affected, PyPI django 1.11.0 (the registry path)", tool: "check_affected", page: "default", args: { ecosystem: "PyPI", package: "django", version: "1.11.0" }, fixture: "check_affected", answers: ["django"], repeat: { matches: 29 }, size: 24_955, structured: 14_500 },
   // #3013's review: each thinned match keeps ransomware, effective_score and score_assessed too,
   // which workload_triage reads (structured 17,122 before, text 31,303: the DATA CUT sentence names
   // the fields); all 50 rows still stay.

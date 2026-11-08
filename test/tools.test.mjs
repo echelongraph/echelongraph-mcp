@@ -2410,7 +2410,7 @@ describe(`against a stub API [${ERA}]`, () => {
     it("kev_exposure: a window over every counted pair is relayed and labelled as Shodan's banner times, and the envelope stays undated", async () => {
       const { r, relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, observed_window: W("2026-09-02T03:04:05Z", "2026-10-04T22:10:00Z") } });
       assert.deepEqual(relayed.kev_exposure.window, { from: "2026-09-02T03:04:05Z", to: "2026-10-04T22:10:00Z" });
-      assert.match(n, /kev_exposure\.window\.from \(2026-09-02T03:04:05Z\) and kev_exposure\.window\.to \(2026-10-04T22:10:00Z\) are timestamps, not counts: when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, Shodan's own times, not when EchelonGraph stored or re-checked a pair\. They span observations made at different times, not one observation time\./);
+      assert.match(n, /kev_exposure\.window\.from \(2026-09-02T03:04:05Z\) and kev_exposure\.window\.to \(2026-10-04T22:10:00Z\) are timestamps, not counts: Shodan's own timestamps, on Shodan's clock, for the banners of the oldest and the newest of the service×CVE pairs counted, over all KEV-listed rows together \(never one CVE's alone\), not when EchelonGraph stored or re-checked a pair, and some run up to 5 minutes ahead of EchelonGraph's last_seen for the same row\. They span observations made at different times, not one observation time\./);
       assert.doesNotMatch(n, /observed_window/, "a served window was named as left out");
       const sc = r.structuredContent;
       assert.equal(sc.state, "not_assessed");
@@ -2425,13 +2425,38 @@ describe(`against a stub API [${ERA}]`, () => {
       const { r, relayed, n } = await run({ [KEV]: { ...PROD_KEV_STATS, correlations: 66756, observed_window: W("2026-10-01T00:00:00Z", "2026-10-04T22:10:00Z", 26855) } });
       assert.equal(relayed.kev_exposure.window, undefined, "a window over only some rows was relayed as the window");
       assert.deepEqual(relayed.kev_exposure.dated_window, { from: "2026-10-01T00:00:00Z", to: "2026-10-04T22:10:00Z", undated: 26855 });
-      assert.match(n, /kev_exposure carries no window over every row it counts: 26855 of them have no observation time on record \(kev_exposure\.dated_window\.undated\)\. kev_exposure\.dated_window\.from \(2026-10-01T00:00:00Z\) and kev_exposure\.dated_window\.to \(2026-10-04T22:10:00Z\) are timestamps, not counts, over 39901 of the 66756 rows it counts only: when Shodan collected the banners/);
+      assert.match(n, /kev_exposure carries no window over every row it counts: 26855 of them have no observation time on record \(kev_exposure\.dated_window\.undated\)\. kev_exposure\.dated_window\.from \(2026-10-01T00:00:00Z\) and kev_exposure\.dated_window\.to \(2026-10-04T22:10:00Z\) are timestamps, not counts, over 39901 of the 66756 rows it counts only: Shodan's own timestamps, on Shodan's clock, for the banners of the oldest and the newest of the service×CVE pairs counted, over the dated KEV-listed rows together \(never one CVE's alone\), not when EchelonGraph stored or re-checked a pair, and some run up to 5 minutes ahead of EchelonGraph's last_seen for the same row\. /);
       assert.match(n, /do not describe the undated rows\./);
+      // #3467's round-10 review (d1-3467 F1): the dated window's sentence does not say it spans every KEV-listed row,
+      // which the undated ones are outside of. Control: round 10's sentence.
+      const ALL_ROWS = /over \d+ of the \d+ rows it counts only: [^.]*over all KEV-listed rows together/;
+      assert.doesNotMatch(n, ALL_ROWS);
+      assert.match("are timestamps, not counts, over 39901 of the 66756 rows it counts only: Shodan's own timestamps, on Shodan's clock, for the banners of the oldest and the newest of the service×CVE pairs counted, over all KEV-listed rows together (never one CVE's alone)", ALL_ROWS);
       assert.doesNotMatch(n, /observed_window/, "a served window was named as left out");
       const sc = r.structuredContent;
       assert.equal(sc.state, "not_assessed");
       assert.equal(sc.measured_at, null, "a dated window's end is not measured_at");
       assert.deepEqual(unlabelledIn(relayed), []);
+    });
+
+    // #3467: tools/list says it too: the description (within the client cut), and the outputSchema's description of
+    // kev_exposure, say the window's times are Shodan's own, on Shodan's clock, over all KEV-listed rows together (never
+    // one CVE's, which cve_exposure's note points to); the outputSchema adds that some run ahead of last_seen. Control:
+    // 3.1.3's sentences ("when Shodan collected the banners", no clock, no rows named) fail each check.
+    it("#3467: exposure_radar's description and kev_exposure's outputSchema say the window is Shodan's clock, over all KEV-listed rows together", async () => {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "exposure_radar");
+      const kevSchema = branchOf(strictOutputSchema(t.outputSchema), "not_assessed").properties.data.properties.kev_exposure.description;
+      const DESCRIPTION = /kev_exposure's window: Shodan's own timestamps, on Shodan's clock, over all KEV-listed rows together\./;
+      const SCHEMA = /kev_exposure\.window\.from and kev_exposure\.window\.to are timestamps, not counts: Shodan's own timestamps, on Shodan's clock \(some up to 5 minutes ahead of EchelonGraph's last_seen for the same row\), for the banners of the oldest and the newest of the service×CVE pairs counted, over all KEV-listed rows together, never one CVE's alone,/;
+      assert.match(t.description, DESCRIPTION);
+      assert.ok(t.description.search(DESCRIPTION) + t.description.match(DESCRIPTION)[0].length <= REQUIRED.CLIENT_DESCRIPTION_CUT, "past the client cut");
+      assert.match(kevSchema, SCHEMA);
+      const OLD_DESCRIPTION = "A kev_exposure.newest_kev CVE whose exposure_state is not_assessed has no measurement in the answer: its 0 is not one.";
+      const OLD_SCHEMA =
+        "kev_exposure.window.from and kev_exposure.window.to are timestamps, not counts: when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, a span of observations made at different times;";
+      assert.doesNotMatch(OLD_DESCRIPTION, DESCRIPTION, "control: 3.1.3's description");
+      assert.doesNotMatch(OLD_SCHEMA, SCHEMA, "control: 3.1.3's outputSchema sentence");
     });
 
     it("kev_exposure: every counted pair undated (from and to null) relays no dated_window, and the note says how many", async () => {
@@ -3555,9 +3580,20 @@ describe(`against a stub API [${ERA}]`, () => {
       );
       assert.equal(
         sc.notes[1],
-        "last_seen (2026-09-15T04:02:09Z) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows (when a Shodan search matched the banner, or a re-check found the port still listed), not when any service was observed, and Shodan's own banner time is not stored.",
+        // #3467: through 3.1.5 this pinned "and Shodan's own banner time is not stored", untrue since #2438.
+        // #3467's round-10 review (d1-3467 F4): "where Shodan gives a usable one": the poller stores none for a banner
+        // whose time is absent, unreadable or more than 5 minutes ahead of its clock.
+        "last_seen (2026-09-15T04:02:09Z) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows (when a Shodan search matched the banner, or a re-check found the port still listed), not when any service was observed. Shodan's own banner time is stored, where Shodan gives a usable one, for rows matched since 2026-10-06T15:09Z, but this per-CVE answer does not serve it: exposure_radar serves its earliest and latest as kev_exposure's window (or dated_window), over all KEV-listed rows together, never this CVE's alone, and over no row of a CVE tracked only for its EPSS.",
       );
       assert.match(noteOf(res), /\(exposure_state: exposed\) The radar has 6213 internet-facing services \(distinct ip:port, the exposed_hosts field\) on record/);
+    });
+    // #3467: no shipped text says Shodan's banner time is not stored, which is untrue since #2438 (banner_seen_at): the
+    // server's code, where every note is written, the README and docs/. Control: 3.1.3's two sentences.
+    it("#3467: no shipped text says Shodan's banner time is not stored", () => {
+      const NOT_STORED = /banner (?:time|timestamp)[^.]{0,40}\b(?:is |are )?(?:not|never) stored|time for the banner is not stored/i;
+      const texts = [["dist/index.js", readPkgFile("dist/index.js")], ...readDocs()];
+      assert.deepEqual(texts.filter(([, t]) => NOT_STORED.test(t)).map(([f]) => f), []);
+      for (const old of ["not when any service was observed, and Shodan's own banner time is not stored.", "Shodan's own time for the banner is not stored."]) assert.ok(NOT_STORED.test(old), `control: ${old}`);
     });
     // The production-shaped case the post-close review of #2313 replayed: 2.0.0 answered it
     // state measured, measured_at 21:52:34.976885Z, the poller's write time.
@@ -4988,10 +5024,17 @@ describe(`against a stub API [${ERA}]`, () => {
     // 1,655. The feed's method (CVE_FEED_METHOD), in the envelope block, gained "ENISA EUVD
     // identifiers resolve to their CVE." (45 characters, and the JSON around it); data and the note
     // are unchanged. The failed answers carry no method and are unchanged. The other bounds are
-    // unchanged.
+    // unchanged. At #3467 (2026-11-01) cve_exposure exposed (production's recorded answer) was
+    // re-measured on purpose, from 3,905 to 4,209: its last_seen note no longer says Shodan's banner
+    // time is not stored (untrue since #2438), but that it is stored for rows matched since
+    // 2026-10-06T15:09Z, that this per-CVE answer does not serve it, and that exposure_radar serves
+    // its earliest and latest as kev_exposure's window, over all KEV-listed rows together, never this
+    // CVE's alone (the sentence 277 characters longer, the text 304). The other bounds are unchanged. At #3467's round-10
+    // review (2026-11-03, d1-3467 F4) it was re-measured on purpose, from 4,209 to 4,243: the banner time is stored "where
+    // Shodan gives a usable one", the poller storing none for a time absent, unreadable or more than 5 minutes ahead.
     const CASES = [
       ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_698], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out; #3010: the thresholds sentence
-      ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 3_905],
+      ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 4_243],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_781],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_187],
       ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_135],

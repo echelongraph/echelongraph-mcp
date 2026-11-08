@@ -134,7 +134,8 @@ const field = (o: unknown, k: string): unknown => (isPlainObject(o) ? o[k] : und
 const listed = (xs: string[]): string => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
 
 // What a row keeps at one level of a cut: the fields named (in the row's own order; [field,
-// subfields] keeps a list of objects inside the row, each cut to its subfields), every string to
+// subfields] keeps a list of objects inside the row, each cut to its subfields, or an object, cut to
+// its subfields: check_affected's leanest match keeps fixed_in_dispute without its note), every string to
 // its first `clip` characters and, with `cap`, every list inside the row to its first `cap` entries.
 export type RowKeep = readonly (string | readonly [string, readonly string[]])[];
 export type TextCutLevel = { keep: RowKeep; clip: number; cap?: number };
@@ -240,6 +241,9 @@ function cutRow(row: Record<string, unknown>, keep: RowKeep, level: TextCutLevel
     if (sub && Array.isArray(v)) {
       if (s && v.length > cap) s.capped++;
       out[k] = v.slice(0, cap).map((e) => (isPlainObject(e) ? cutRow(e, sub, level, s, `${prefix}${k}[].`) : cutValue(e, level.clip, cap, s)));
+    } else if (sub && isPlainObject(v)) {
+      // Round 11 (the round-10 verify's d5 F6): an object kept to its subfields.
+      out[k] = cutRow(v, sub, level, s, `${prefix}${k}.`);
     } else {
       out[k] = cutValue(v, level.clip, cap, s);
     }
@@ -1625,8 +1629,15 @@ export function cutData(
         fits = size(lists, top, base) <= STRUCTURED_BUDGET;
         break;
       }
-      // #3132's review: entries leave at the step's leaveAt level, where it names one.
+      // #3132's review: entries leave at the step's leaveAt level, where it names one. Round 11 (the round-10
+      // verify's d5 F6): only when not even the leanest level keeps every entry, as leaveAt says: where it does, every
+      // entry is kept at it (check_affected's note-less level, which exists to keep every match).
       if (step.leaveAt && step.thin) {
+        if (size(lists, top, base) <= STRUCTURED_BUDGET) {
+          k = top;
+          fits = true;
+          break;
+        }
         const { level, cap } = step.leaveAt;
         lists = at(step.thin[level], cap, level);
       }

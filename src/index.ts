@@ -63,14 +63,15 @@ import * as z from "zod";
 import { registerKevRecent } from "./tools/kev_recent.js";
 import { registerEPSSHistory } from "./tools/epss_history.js";
 import { registerCheckAffected } from "./tools/check_affected.js";
-import { MAX_PURL_ENTRIES, MAX_SBOM_CHARS, registerCheckSbom } from "./tools/check_sbom.js";
+import { MAX_PURL_ENTRIES, MAX_SBOM_CHARS, purlsHint, registerCheckSbom } from "./tools/check_sbom.js";
 import { MAX_FILES, registerScanManifest } from "./tools/scan_manifest.js";
-import { realSleep } from "./tools/match_batch.js";
+import { realSleep, type ApiCut } from "./tools/match_batch.js";
 import { registerCveIntel } from "./tools/cve_intel.js";
 import { registerCveRemediation } from "./tools/cve_remediation.js";
 import { fixStatusSchema } from "./fixStatus.js";
+import { affectedRangeVersionSchema } from "./fixedInDispute.js";
 import { registerGetCwe } from "./tools/get_cwe.js";
-import { holdRequest, isHttpEntrypoint, networkFailureClass, requestSignal, upstreamFailed, upstreamHeaders, upstreamUserAgent, type UpstreamFailureClass } from "./runtime.js";
+import { holdRequest, isHttpEntrypoint, networkFailureClass, requestSignal, reserveParse, upstreamFailed, upstreamHeaders, upstreamUserAgent, type UpstreamFailureClass } from "./runtime.js";
 import { registerVendorAdvisoryTools } from "./tools/vendor_advisories.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
@@ -160,7 +161,7 @@ type Failure = {
   timeoutMs?: number;
   detail: string;
 };
-export type ApiResult = { ok: true; status: number; data: object } | Failure;
+export type ApiResult = { ok: true; status: number; data: object; bytes?: number } | Failure;
 
 // Collapse a response body to something quotable: one line, at most 160 characters.
 function snippet(body: string): string {
@@ -195,6 +196,8 @@ function describeError(e: unknown): string {
 // The API's error envelope is {"error": "..."}; quote that string when a non-2xx carries it.
 function apiMessage(body: string): string {
   try {
+    // #3381: an answer from EchelonGraph's own API, the one upstream this server calls, is parsed unbounded: the
+    // parse budget (parseBudget.ts) bounds what a client sends, which a client chooses; the API's answers it does not.
     const parsed: unknown = JSON.parse(body);
     const msg = (parsed as { error?: unknown } | null)?.error;
     if (typeof msg === "string" && msg) return msg;
@@ -226,10 +229,15 @@ function retryAfterSeconds(v: string | null): number | undefined {
 // network failure saying so, which nobody reads, since the SDK sends nothing for a cancelled call.
 // Every other failure is reported (runtime.ts upstreamFailed, #2948): on the hosted endpoint, one
 // mcp_upstream_failed line; on stdio, nothing.
-export async function api(
-  path: string,
-  init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal },
-): Promise<ApiResult> {
+// #3381's round-10 review (R10-M1): init.maxBytes, the most of a 2xx answer's body read (check_sbom's and scan_manifest's
+// batches on the hosted endpoint, match_batch.ts sendBatches): one whose Content-Length, or whose body as it comes, is
+// past it is read no further, the request ended, and answered ApiCut, neither data nor a failure of the API's. Through
+// round 10 a batch's answer was read whole and parsed whatever its size: one of 26 MB ended the hosted process (heap out
+// of memory), and the client chooses the size by the purls it sends.
+type ApiInit = { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal };
+export function api(path: string, init?: ApiInit): Promise<ApiResult>;
+export function api(path: string, init: ApiInit & { maxBytes?: number }): Promise<ApiResult | ApiCut>;
+export async function api(path: string, init?: ApiInit & { maxBytes?: number }): Promise<ApiResult | ApiCut> {
   const limitMs = init?.timeoutMs === undefined ? TIMEOUT_MS : Math.max(0, Math.min(TIMEOUT_MS, Math.floor(init.timeoutMs)));
   const m = init?.method && init.method.toUpperCase() !== "GET" ? { method: init.method.toUpperCase() } : {};
   const callers = [init?.signal, requestSignal()].filter((s): s is AbortSignal => s !== undefined);
@@ -271,8 +279,12 @@ export async function api(
     }
     let body: string;
     try {
-      body = await res.text();
+      body = res.ok && init?.maxBytes !== undefined ? await readAtMost(res, init.maxBytes) : await res.text();
     } catch (e) {
+      if (e instanceof PastMaxBytes) {
+        ctrl.abort();
+        return { ok: false, cut: true, path, status: res.status, bytes: e.bytes, maxBytes: e.maxBytes };
+      }
       return timedOut
         ? timeout()
         : cancelled
@@ -285,6 +297,8 @@ export async function api(
     }
     let data: unknown;
     try {
+      // #3381: EchelonGraph's own API, trusted, is not counted against the parse budget (parseBudget.ts), which bounds
+      // what a client sends: its answer is read whole and parsed unbounded, as apiMessage parses an error's.
       data = JSON.parse(body);
     } catch {
       const ctype = res.headers.get("content-type") ?? "no content-type";
@@ -293,11 +307,47 @@ export async function api(
     if (data === null || typeof data !== "object") {
       return reported({ ok: false, kind: "not_object", path, ...m, status: res.status, detail: `body was ${snippet(body)}` }, "not_object");
     }
-    return { ok: true, status: res.status, data };
+    // #3381's round-4 review: bytes, the answer's length, which check_sbom and scan_manifest count (match_batch.ts).
+    return { ok: true, status: res.status, data, bytes: body.length };
   } finally {
     clearTimeout(timer);
     for (const s of callers) s.removeEventListener("abort", cancel);
   }
+}
+
+// #3381's round-10 review (R10-M1): a 2xx answer's body, as res.text() gives it (UTF-8, its byte-order mark dropped), read
+// to at most `max` bytes: past them (its Content-Length, or what has come of it) PastMaxBytes, its chunks so far dropped
+// and the stream cancelled, so no more than `max` bytes of it are ever held.
+class PastMaxBytes extends Error {
+  constructor(
+    readonly bytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(`the answer is more than ${maxBytes} bytes`);
+  }
+}
+async function readAtMost(res: Response, max: number): Promise<string> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => {});
+    throw new PastMaxBytes(declared, max);
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > max) {
+      chunks.length = 0;
+      await reader.cancel().catch(() => {});
+      throw new PastMaxBytes(n, max);
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks, n));
 }
 
 // #3362: check_sbom's and scan_manifest's Retry-After wait (tools/match_batch.ts) ends when the call's signal aborts,
@@ -469,6 +519,18 @@ export const badInput = (tool: string, why: string): ToolResult =>
     status: null,
     message: why,
   });
+
+// #3381: on the hosted endpoint, what the call would parse found no room in the instance's parse budget (runtime.ts
+// reserveParse), after waiting for it: nothing was read or looked up, and the call may be retried. #3381's round-5 review
+// (C5): status 503 is this server's, no API answered (ErrorSchema.status says so), and the closing sentence is its own:
+// NOT_A_FINDING's "check ECHELONGRAPH_API_BASE" is no cause of it, and a hosted client cannot set it.
+const BUSY_NOT_A_FINDING = "Nothing was read or sent to the API, so this is not a finding: do not report it as zero, none found, absent, or unexposed.";
+// #3381's round-10 review (R10-M1): `unread`, the API's answer that was not read, past what this instance had room for
+// (match_batch.ts sendBatches, a call's first batch): the request was made and the API answered, so error.path and
+// error.status are that request's (ErrorSchema), and the closing sentence says what was not read.
+const UNREAD_NOT_A_FINDING = "The API's answer was not read, so this is not a finding: do not report it as zero, none found, absent, or unexposed.";
+export const busy = (tool: string, why: string, unread?: { path: string; status: number }): ToolResult =>
+  failure("failed", `${tool} FAILED: ${why}. ${unread ? UNREAD_NOT_A_FINDING : BUSY_NOT_A_FINDING}`, { kind: "internal", path: unread?.path ?? null, status: unread?.status ?? 503, message: why });
 
 // A bug in this server is still not a finding — it must never surface as an empty success.
 export const crashed = (tool: string, e: unknown): ToolResult =>
@@ -1432,7 +1494,12 @@ function cveExposureEnvelope(cve: string, d: object) {
       why[exposureState ?? "none"],
       ...(realInstant(last)
         ? [
-            `last_seen (${last}) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows (when a Shodan search matched the banner, or a re-check found the port still listed), not when any service was observed, and Shodan's own banner time is not stored.`,
+            // #3467: through 3.1.5 this denied that Shodan's own banner time is kept, true only until #2438's change reached production (2026-10-06T15:09Z):
+            // it is (banner_seen_at), from the first rows matched after that deploy, but only the stats answer serves
+            // it, its MIN and MAX over every KEV-listed row together, never one CVE's (the comment above CVE_ID).
+            // #3467's round-10 review (d1-3467 F4): where Shodan gives a usable one: the poller stores none for a banner
+            // whose time is absent, unreadable or more than 5 minutes ahead of its clock (poller.go bannerSeenAt).
+            `last_seen (${last}) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows (when a Shodan search matched the banner, or a re-check found the port still listed), not when any service was observed. Shodan's own banner time is stored, where Shodan gives a usable one, for rows matched since 2026-10-06T15:09Z, but this per-CVE answer does not serve it: exposure_radar serves its earliest and latest as kev_exposure's window (or dated_window), over all KEV-listed rows together, never this CVE's alone, and over no row of a CVE tracked only for its EPSS.`,
           ]
         : []),
       tracked === undefined
@@ -1665,16 +1732,18 @@ function readWindow(v: unknown): WindowRead {
 }
 
 // The sentence for a radar's window, or for the rows it leaves undated. `total`, where the answer
-// carries it, is how many rows the counts count, so the dated ones can be named too.
-function windowSentences(prefix: string, w: WindowRead, what: string, total?: number): string[] {
+// carries it, is how many rows the counts count, so the dated ones can be named too. `what`: what the window's times
+// are, or, where the dated window's sentence must say it otherwise (#3467's round-10 review, d1-3467 F1), each.
+function windowSentences(prefix: string, w: WindowRead, what: string | { window: string; dated: string }, total?: number): string[] {
+  const said = typeof what === "string" ? { window: what, dated: what } : what;
   if (w.window) {
-    return [`${prefix}.window.from (${w.window.from}) and ${prefix}.window.to (${w.window.to}) are timestamps, not counts: ${what}. They span observations made at different times, not one observation time.`];
+    return [`${prefix}.window.from (${w.window.from}) and ${prefix}.window.to (${w.window.to}) are timestamps, not counts: ${said.window}. They span observations made at different times, not one observation time.`];
   }
   if (w.dated) {
     const d = w.dated;
     const of = total !== undefined && total >= d.undated ? `${total - d.undated} of the ${total} rows it counts` : "the rows it counts that carry an observation time";
     return [
-      `${prefix} carries no window over every row it counts: ${d.undated} of them have no observation time on record (${prefix}.dated_window.undated). ${prefix}.dated_window.from (${d.from}) and ${prefix}.dated_window.to (${d.to}) are timestamps, not counts, over ${of} only: ${what}. They span observations made at different times, not one observation time, and do not describe the undated rows.`,
+      `${prefix} carries no window over every row it counts: ${d.undated} of them have no observation time on record (${prefix}.dated_window.undated). ${prefix}.dated_window.from (${d.from}) and ${prefix}.dated_window.to (${d.to}) are timestamps, not counts, over ${of} only: ${said.dated}. They span observations made at different times, not one observation time, and do not describe the undated rows.`,
     ];
   }
   if (w.undated !== undefined) {
@@ -1874,8 +1943,10 @@ const be = (n: number): string => (n === 1 ? "is" : "are");
 //   last_run_at       the radar's last completed check, KeyKEVExposureCheckCompleted (#2335; see
 //                     LAST_CHECK). Its own row: KeyKEVExposure is the Shodan-credit watermark.
 //   observed_window   MIN/MAX(banner_seen_at) and the rows with none, over the same KEV rows,
-//                     in the headline's statement (#2438): when Shodan collected the banners
-//                     matched. The InternetDB re-check (Touch) never moves it; last_seen is not it.
+//                     in the headline's statement (#2438): Shodan's own timestamps of the banners
+//                     matched, on Shodan's clock (#3467: 3,648 rows hold one later than their own
+//                     last_seen, by up to the 5 minutes poller.go's clamp allows), over all KEV-listed
+//                     rows together. The InternetDB re-check (Touch) never moves it; last_seen is not it.
 // So newest_kev[].exposed_hosts is 0 for every CVE the radar holds no row for, whether or not
 // it could ever hold one: the join default, not a measurement. The per-CVE endpoint decides
 // that with `tracked` (store.go trackedVerdict), which is true ONLY when rows exist
@@ -2005,7 +2076,15 @@ function readKEVExposure(body: unknown, now: number): RadarNote {
     ...windowSentences(
       "kev_exposure",
       { window: data.window as WindowRead["window"], dated: data.dated_window as WindowRead["dated"], undated, bad: false },
-      "when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, Shodan's own times, not when EchelonGraph stored or re-checked a pair",
+      // #3467: Shodan's own timestamps, on Shodan's clock (3,648 rows on 2026-11-01 ran ahead of EchelonGraph's own
+      // last_seen for the row, by up to poller.go's 5-minute clamp), over all KEV-listed rows together; through 3.1.5
+      // "when Shodan collected the banners", on no clock named. #3467's round-10 review (d1-3467 F1): the dated window
+      // spans the dated KEV-listed rows only, which its sentence has just said: through round 10 it said "over all
+      // KEV-listed rows together" there too, of a window the undated KEV-listed rows are outside of.
+      {
+        window: "Shodan's own timestamps, on Shodan's clock, for the banners of the oldest and the newest of the service×CVE pairs counted, over all KEV-listed rows together (never one CVE's alone), not when EchelonGraph stored or re-checked a pair, and some run up to 5 minutes ahead of EchelonGraph's last_seen for the same row",
+        dated: "Shodan's own timestamps, on Shodan's clock, for the banners of the oldest and the newest of the service×CVE pairs counted, over the dated KEV-listed rows together (never one CVE's alone), not when EchelonGraph stored or re-checked a pair, and some run up to 5 minutes ahead of EchelonGraph's last_seen for the same row",
+      },
       n("correlations"),
     ),
   );
@@ -2563,11 +2642,14 @@ function readMCPServers(src: Record<string, unknown>, now: number): RadarNote {
 // #2842: the description is a head that fits the client cut (requiredText.ts); what each radar's
 // numbers count, field by field, is the outputSchema's description of that radar (RADAR_*_FIELDS
 // below), and the result's note labels every number relayed in the same words. Each text below
-// that names Shodan carries SHODAN_OWNERSHIP (#2306).
+// that names Shodan carries SHODAN_OWNERSHIP (#2306). #3467: its last sentence says whose clock kev_exposure's
+// window is on and which rows it spans, so that it is never read as one CVE's (cve_exposure's note points to it); the
+// window's field description (RADAR_KEV_FIELDS) says the rest. To keep #2924's 100 characters of headroom, the same
+// change dropped "and" before two "then"s, "The result's" for "The", ", and" for ";" and "still" from the suffix below.
 const EXPOSURE_RADAR_DESCRIPTION =
-  `Aggregate totals from EchelonGraph's internet-exposure radars: kev_exposure, internet-facing services running actively-exploited (CISA-KEV) CVEs, plus the ransomware-linked subset, derived from Shodan data; exposed_databases, unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low) and then confirmed by EchelonGraph's own identified check (not a pure read: on Redis it names its client, and on ClickHouse its query is recorded in the server's query log); leaked_credentials, sampled from public GitHub push events; and shadow_ai, services found through Certificate Transparency logs and Shodan and then checked by EchelonGraph's identified probes. ${SHODAN_OWNERSHIP} It also gives MCP-server counts: hostnames named like an MCP server in EchelonGraph's own Certificate Transparency feed (no Shodan data), each counted once by its latest verdict from EchelonGraph's identified MCP probe, which never sends tools/call. Service counts are distinct ip:port services, not machines. The result's note, and the outputSchema's description of each radar, label every number by what it counts. Of the shadow_ai numbers, only confirmed_exposed counts exposed services. A kev_exposure.newest_kev CVE whose exposure_state is not_assessed has no measurement in the answer: its 0 is not one.`;
+  `Aggregate totals from EchelonGraph's internet-exposure radars: kev_exposure, internet-facing services running actively-exploited (CISA-KEV) CVEs, plus the ransomware-linked subset, derived from Shodan data; exposed_databases, unauthenticated data stores and observability UIs, found through Shodan (LeakIX when Shodan query credits run low), then confirmed by EchelonGraph's own identified check (not a pure read: on Redis it names its client; on ClickHouse its query is recorded in the server's query log); leaked_credentials, sampled from public GitHub push events; and shadow_ai, services found through Certificate Transparency logs and Shodan, then checked by EchelonGraph's identified probes. ${SHODAN_OWNERSHIP} It also gives MCP-server counts: hostnames named like an MCP server in EchelonGraph's own Certificate Transparency feed (no Shodan data), each counted once by its latest verdict from EchelonGraph's identified MCP probe, which never sends tools/call. Service counts are distinct ip:port services, not machines. The note, and the outputSchema's description of each radar, label every number by what it counts. Of the shadow_ai numbers, only confirmed_exposed counts exposed services. A kev_exposure.newest_kev CVE whose exposure_state is not_assessed has no measurement in the answer: its 0 is not one. kev_exposure's window: Shodan's own timestamps, on Shodan's clock, over all KEV-listed rows together.`;
 const RADAR_KEV_FIELDS =
-  `kev_exposure: kev_exposure.distinct_hosts counts distinct ip:port services, not machines (a machine answering on two ports counts twice), with at least one CISA-KEV-listed CVE on record, and kev_exposure.ransomware_hosts those with a ransomware-linked one; kev_exposure.kev_cves_exposed and kev_exposure.ransomware_cves count distinct CVEs with at least one such service; kev_exposure.correlations counts service×CVE pairs, not services, so a service with three KEV CVEs counts three times. kev_exposure.top_products, kev_exposure.top_countries and kev_exposure.top_cves rank up to 12 products, 10 countries and 12 CVEs by those services; kev_exposure.top_cves[].cvss_v3_score and kev_exposure.top_cves[].epss_score are the highest CVSS v3 base score and EPSS probability recorded on that CVE's observations. kev_exposure.trend counts service×CVE pairs still on record by the week in which each was first recorded, over 12 weeks, so earlier weeks read low. kev_exposure.newest_kev lists the 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed, each with an exposure_state: exposed, where kev_exposure.newest_kev[].exposed_hosts counts distinct ip:port services on record with it; or not_assessed, where the API's answer holds no measurement for that CVE (its 0 is not one) and no count is relayed, and this answer does not say whether the radar tracks that CVE: tracking is answered per CVE. kev_exposure.newest_kev[].cvss_v3_score and kev_exposure.newest_kev[].epss_score are the CVE record's CVSS v3 base score and EPSS probability. kev_exposure.window.from and kev_exposure.window.to are timestamps, not counts: when Shodan collected the banners of the oldest and the newest of the service×CVE pairs counted, a span of observations made at different times; with a counted pair that has no such time on record there is no window, and kev_exposure.dated_window.from and kev_exposure.dated_window.to span the dated pairs only, while kev_exposure.dated_window.undated counts the pairs with none. ${SHODAN_OWNERSHIP}`;
+  `kev_exposure: kev_exposure.distinct_hosts counts distinct ip:port services, not machines (a machine answering on two ports counts twice), with at least one CISA-KEV-listed CVE on record, and kev_exposure.ransomware_hosts those with a ransomware-linked one; kev_exposure.kev_cves_exposed and kev_exposure.ransomware_cves count distinct CVEs with at least one such service; kev_exposure.correlations counts service×CVE pairs, not services, so a service with three KEV CVEs counts three times. kev_exposure.top_products, kev_exposure.top_countries and kev_exposure.top_cves rank up to 12 products, 10 countries and 12 CVEs by those services; kev_exposure.top_cves[].cvss_v3_score and kev_exposure.top_cves[].epss_score are the highest CVSS v3 base score and EPSS probability recorded on that CVE's observations. kev_exposure.trend counts service×CVE pairs still on record by the week in which each was first recorded, over 12 weeks, so earlier weeks read low. kev_exposure.newest_kev lists the 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed, each with an exposure_state: exposed, where kev_exposure.newest_kev[].exposed_hosts counts distinct ip:port services on record with it; or not_assessed, where the API's answer holds no measurement for that CVE (its 0 is not one) and no count is relayed, and this answer does not say whether the radar tracks that CVE: tracking is answered per CVE. kev_exposure.newest_kev[].cvss_v3_score and kev_exposure.newest_kev[].epss_score are the CVE record's CVSS v3 base score and EPSS probability. kev_exposure.window.from and kev_exposure.window.to are timestamps, not counts: Shodan's own timestamps, on Shodan's clock (some up to 5 minutes ahead of EchelonGraph's last_seen for the same row), for the banners of the oldest and the newest of the service×CVE pairs counted, over all KEV-listed rows together, never one CVE's alone, a span of observations made at different times; with a counted pair that has no such time on record there is no window, and kev_exposure.dated_window.from and kev_exposure.dated_window.to span the dated pairs only, while kev_exposure.dated_window.undated counts the pairs with none. ${SHODAN_OWNERSHIP}`;
 const RADAR_DB_FIELDS =
   `exposed_databases: exposed_databases.distinct_hosts counts distinct ip:port services the check confirmed answering without authentication, and exposed_databases.engines the distinct engine types among them; exposed_databases.top_engines and exposed_databases.top_countries rank up to 15 engines and 10 countries by those services. exposed_databases.pii_likely and exposed_databases.pci_likely count services whose schema names (never record values) pass a high-confidence, precision-first gate for personal or payment-card data, so a service outside them is not shown to hold no such data. exposed_databases.window.from and exposed_databases.window.to are timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted, a span of checks made at different times; with a counted service that has no such time on record there is no window, and exposed_databases.dated_window.from and exposed_databases.dated_window.to span the dated services only, while exposed_databases.dated_window.undated counts those with none.`;
 const RADAR_LEAKED_FIELDS =
@@ -2734,7 +2816,7 @@ const ERROR_KINDS = ["network", "timeout", "http", "not_json", "not_object", "in
 const ErrorSchema = z.strictObject({
   kind: z.enum(ERROR_KINDS).describe("What failed: the request (network, timeout), the answer (http, not_json, not_object, unexpected_shape), the input, or this server."),
   path: z.string().nullable().describe("The API path requested, when a request was made."),
-  status: z.number().int().nullable().describe("The HTTP status, when the API answered one."),
+  status: z.number().int().nullable().describe("The HTTP status, when the API answered one; 503 with kind internal and path null where this server was too busy to make the call."),
   message: z.string().describe("The cause: the API's own message, or what went wrong."),
 });
 export const NOTES = z.array(z.string()).describe("Caveats, one sentence each.");
@@ -2810,9 +2892,13 @@ const TRUNCATED = z.record(
 const STRICT = new WeakMap<z.ZodType, z.ZodType>();
 // Every envelope built in this process (16, one a tool, each built once), for closedOutputSchema.
 const ENVELOPES = new Set<z.ZodType>();
+// #3381's round-10 review (d4-release R10-1): `failureCoverage`, the failure branch's coverage where it is not the success
+// branch's (check_sbom's and scan_manifest's: a failure carries coverage null, and its schema keeps 3.1.5's closed
+// not_sent_reason enum, so a client holding 3.1.5's tool list validates every answer of this release).
 export function envelopeSchema(o: {
   data: z.ZodType;
   coverage: z.ZodType | null;
+  failureCoverage?: z.ZodType | null;
   freshness: z.ZodType | null;
   extra?: Record<string, z.ZodType>;
   error?: z.ZodType;
@@ -2944,6 +3030,7 @@ function envelopeOf(
   success: typeof z.looseObject | typeof z.strictObject,
 ) {
   const coverage = o.coverage ? o.coverage.nullable() : z.null();
+  const failureCoverage = o.failureCoverage === undefined ? coverage : o.failureCoverage ? o.failureCoverage.nullable() : z.null();
   return z.discriminatedUnion("state", [
     success({
       state: z.enum(["measured", "not_assessed"]).describe(SUCCESS_STATE),
@@ -2961,7 +3048,7 @@ function envelopeOf(
       state: z.enum(["failed", "invalid_input"]).describe("failed: the lookup did not complete. invalid_input: the input was refused, so nothing was looked up. Neither is a finding."),
       measured_at: z.null(),
       method: z.null(),
-      coverage,
+      coverage: failureCoverage,
       freshness: z.null(),
       notes: NOTES,
       error: o.error ?? ErrorSchema,
@@ -3006,6 +3093,13 @@ const DATE_PUBLIC_FIELD =
   CVE_CNA_ABSENT;
 const DATE_PUBLIC_SOURCE_FIELD = "Whose date date_public is: cna, the CVE record's CNA. Absent whenever date_public is.";
 const CNA_FIELD = "The CNA that wrote the CVE record: short_name as the record gives it, and name, the CVE Program's name for that CNA (the short name where its list does not hold it). " + CVE_CNA_ABSENT;
+// #3381's round-10 review (d5-3391relay F2): the fields #3391's API lane adds are described as what a product carries
+// once EchelonGraph's API serves them (fixedInDispute.ts says why); the API this release ships beside serves source,
+// vendor, product, default_status and versions' version, status, less_than, less_than_or_equal and version_type, and
+// cuts a product's versions and a source's products past its caps without saying so.
+const AFFECTED_RANGES_FIELD =
+  "The CVE record's affected ranges, each a product as its CNA (source cna) or CISA's ADP (source cisa-adp) writes it: vendor, product (the product or package the entry names, as the API stores it), default_status (the status of versions it lists none for), and versions, the version entries the API stores of it, each as written (version, status, less_than or less_than_or_equal, version_type). Once EchelonGraph's API serves them: package_name (the entry's packageName, where it names one); collection_url and package_url (the package collection, and purl, the record's entry names, as written); a version entry's changes, each {at, status}, where its status changes inside it, with changes_truncated where it held more than are kept; versions_truncated: the product held more entries than are kept, and what those said is not known; dropped_products: on the product kept last before each cut, so a source's may be spread over several of its products (read every product's), the products past the cap that a registry package's answer could read, not stored (what they said is not known, and one may name a product that is kept), with dropped_products_truncated where more were cut than it names; dropped_other_products: on the same products, how many more past the cap no registry package's answer reads (one whose purl or collection_url names a collection no registry package is read from, such as a distro's packages, a container image, conda-forge or CPAN; a product whose every version is rpm, deb, dpkg, apk or ebuild; or one with no packageName or purl whose product name holds a space), counted, not named; and stored_form, the form the entry was stored in. A product without stored_form comes from an API or a writer that sends none of these: its versions or its source's products may have been cut, with no flag saying so. The record's own words, not a verdict for any version. Fields a later API adds are relayed. " +
+  CVE_CNA_ABSENT;
 const CNA_SOLUTION_FIELD =
   "The sentence of the CVE record's solutions or workarounds, written by its CNA, that names a released fix, verbatim: what makes cna_solution patch evidence. It is the CNA's text, not EchelonGraph's advice. cna_solution_section says which of the two sections it is. Absent where the record's solutions name no fixed version, as well as where the field itself is: " +
   CVE_CNA_ABSENT;
@@ -3078,6 +3172,35 @@ const resolvedFrom = z.looseObject({
   source: opt(z.union([z.enum([...ALIAS_SOURCES, "gcve_gna0"]), z.string()])),
   attribution: opt(z.string()),
 });
+// #3190, #3391: the record's affected ranges, as its CNA and CISA-ADP write them (core-backend cna_record.go
+// AffectedRange); #3391 added each entry's changes and the caps' flags. Relayed, never read here. One schema for
+// get_cve's record and search_cves' rows, each with its own description (round 11: a search row never carries it).
+function affectedRangesSchema() {
+  return opt(
+    z.array(
+      z.looseObject({
+        source: opt(z.string()),
+        vendor: opt(z.string()),
+        product: opt(z.string()),
+        default_status: opt(z.string()),
+        // #3391's fourth round: which package collection the entry is about, and the products a source's cap cut.
+        collection_url: opt(z.string()),
+        package_url: opt(z.string()),
+        // #3391's fifth round: the entry's packageName, beside its product.
+        package_name: opt(z.string()),
+        versions: opt(z.array(affectedRangeVersionSchema())),
+        versions_truncated: opt(z.boolean()),
+        dropped_products: opt(z.array(z.string())),
+        dropped_products_truncated: opt(z.boolean()),
+        // Round 11 (the round-10 verify's d5 N2): #3391's count of the cut products no registry answer reads.
+        dropped_other_products: opt(z.number()),
+        stored_form: opt(z.number()),
+      }),
+    ),
+  );
+}
+const SEARCH_AFFECTED_RANGES_FIELD =
+  "Never on a search row: EchelonGraph's API serves a CVE record's affected ranges only on the lookup of that one CVE, so a search row without them says nothing of the record's ranges. Named here because a search row shares the one-CVE record's schema.";
 const CVERecord = z.looseObject({
   cve_id: opt(z.string()),
   resolved_from: opt(resolvedFrom).describe(RESOLVED_FROM_FIELD),
@@ -3182,6 +3305,7 @@ const CVERecord = z.looseObject({
   cna_solution: opt(z.string()).describe(CNA_SOLUTION_FIELD),
   // #3178: a section the API adds later is relayed, never a failed call (as patch_evidence's labels).
   cna_solution_section: opt(z.union([z.enum(["solution", "workaround"]), z.string()])).describe(CNA_SOLUTION_SECTION_FIELD),
+  affected_ranges: affectedRangesSchema().describe(AFFECTED_RANGES_FIELD),
   references: z.unknown().optional(),
   // #2720: NVD's configurations, losslessly, beside the flat list (see cpeConfigurationsNote).
   cpe_match: z.unknown().optional().describe(CPE_MATCH_DESCRIPTION),
@@ -3291,7 +3415,7 @@ const CVE_SUMMARY_OUTPUT = envelopeSchema({
 
 const SEARCH_CVES_OUTPUT = envelopeSchema({
   data: z.looseObject({
-    cves: z.array(CVERecord).optional(),
+    cves: z.array(CVERecord.extend({ affected_ranges: affectedRangesSchema().describe(SEARCH_AFFECTED_RANGES_FIELD) })).optional(),
     total: opt(z.number()),
     total_counted: opt(z.boolean()).describe("false: the matches were not counted, so total is not a count."),
     total_is_lower_bound: opt(z.boolean()).describe("true: there are at least total matches."),
@@ -3568,8 +3692,9 @@ export function createServer(): McpServer {
   // #3015: arguments that break a tool's inputSchema get badInput's envelope (state invalid_input,
   // notes naming each argument and its rule), not the SDK's bare "Input validation error" text.
   // Before the first registerTool, so every tool below and in src/tools/ is covered; tools/list's
-  // inputSchemas are unchanged (schemaRefusal.ts).
-  withSchemaRefusal(server, badInput);
+  // inputSchemas are unchanged (schemaRefusal.ts). #3467: check_sbom's refusal of a purl list sent in the wrong shape
+  // says where it goes (check_sbom.ts purlsHint).
+  withSchemaRefusal(server, badInput, { check_sbom: purlsHint });
 
   server.registerTool(
     "cve_summary",
@@ -3632,7 +3757,7 @@ export function createServer(): McpServer {
     "exposure_radar",
     {
       title: "Exposure radar totals",
-      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null, since no radar dates what it counts; each count is still relayed as what that radar holds on record. freshness gives each radar's last_run_at where the API serves one; coverage names the radars that answered. ${TEXT_BUDGET_DESCRIPTION}`,
+      description: `${EXPOSURE_RADAR_DESCRIPTION} Its structured result's state is not_assessed with measured_at null, since no radar dates what it counts; each count is relayed as what its radar holds on record. freshness gives each radar's last_run_at where the API serves one; coverage names the radars that answered. ${TEXT_BUDGET_DESCRIPTION}`,
       inputSchema: z.object({ full: FULL_ARG }),
       outputSchema: EXPOSURE_RADAR_OUTPUT,
       annotations: ANNOTATIONS,
@@ -3649,10 +3774,10 @@ export function createServer(): McpServer {
   // (#2775): on the hosted endpoint, a call keeps its request's admission and large-body slot
   // until it has stopped, not only until its answer, or its client, has gone. batchSleep (#3362): its Retry-After wait
   // also ends when its hosted request's own signal aborts.
-  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest, sleep: batchSleep });
+  registerCheckSbom(server, { api, failed, describeFailure, badInput, crashed, busy, reserve: reserveParse, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest, sleep: batchSleep });
   // #2835: a project's lockfiles read into purls here and checked through the same batch loop
   // (tools/scan_manifest.ts, tools/match_batch.ts), held on the hosted endpoint the same way.
-  registerScanManifest(server, { api, failed, describeFailure, badInput, crashed, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest, sleep: batchSleep });
+  registerScanManifest(server, { api, failed, describeFailure, badInput, crashed, busy, reserve: reserveParse, checked, succeeded, okHead, envelopeSchema, annotations: ANNOTATIONS, hold: holdRequest, sleep: batchSleep });
 
   registerCveIntel(server);
   // #2841: how one CVE is fixed, as its sources state it (tools/cve_remediation.ts).

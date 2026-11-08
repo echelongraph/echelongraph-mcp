@@ -40,6 +40,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { ANNOTATIONS, CVE_ID, SHOWN_BASE, api, badInput, checked, crashed, envelopeSchema, failed, failure, field, NOT_A_FINDING, okHead, opt, strAt, succeeded, type ToolResult } from "../index.js";
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type DataCut, type RowKeep, type TextCut } from "../textBudget.js";
 import { fixStatusSchema } from "../fixStatus.js";
+import { blankUnreadableDisputes, clipDisputeNote, disputeNote, fixedInDisputeSchema, isDispute, isUnreadDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
 import { MATCH_HEADERS } from "./check_affected.js";
 import { ONE_PACKAGE_RULE, packagesListedTwice } from "./packageRecords.js";
 
@@ -111,19 +112,23 @@ function schemas() {
         verdict: opt(z.union([z.enum(VERDICTS), z.string()])).describe(
           "affected (a range on record holds the version), not_affected (no range on record holds it), undetermined (a range could not be decided at it) or not_assessed (the record names no such package for this CVE, or the lookup did not run).",
         ),
-        version_evidence: opt(z.string()),
+        version_evidence: versionEvidenceSchema(),
         interval: opt(z.looseObject({ introduced: opt(z.string()), fixed: opt(z.string()), last_affected: opt(z.string()) })).describe(
-          "The affected range holding the version (fixed is exclusive, last_affected inclusive); absent when none holds it.",
+          "The affected range holding the version (fixed is exclusive, last_affected inclusive): the advisory's, or, where version_evidence is cna_affected_range, the CVE record's CNA range; absent when none holds it.",
         ),
+        // #3391: where the API carries it on the installed version itself.
+        fixed_in_dispute: fixedInDisputeSchema(),
       }),
     ).describe("The installed version asked for, as the API read it from the request headers, and its verdict against this CVE; absent when none was asked."),
     fixed_in: opt(z.string()).describe(
-      "With an installed version: the first version above it that no affected range on record holds, always above it, as the advisory states it: the fixed bound of the range holding it, moved past any overlapping range that still holds that bound (fixed_in_detail then names it). null when no range on record holds it, no fix is on record past the ranges holding it, or the version was not assessed, with fixed_in_reason saying which. Absent when no installed version was asked.",
+      "With an installed version: the first version above it that no affected range on record holds, always above it, as the advisory states it: the fixed bound of the range holding it, moved past any overlapping range that still holds that bound (fixed_in_detail then names it). null when no range on record holds it, no fix is on record past the ranges holding it, or the version was not assessed, with fixed_in_reason saying which. Absent when no installed version was asked. Where fixed_in_dispute is set, the CVE record's CNA and the advisory disagree on the range that holds the version, and fixed_in follows the source its higher names (its note says how), not the advisory alone.",
     ),
     fixed_in_reason: opt(z.string()).describe("Why fixed_in is null; absent when fixed_in is a version."),
     fixed_in_detail: opt(z.string()).describe(
       "Set when fixed_in is not the fixed bound of the range holding the installed version: the overlapping ranges of the same record it moved past, which still hold that bound.",
     ),
+    // #3391: the CVE's own record and the advisory disagree on the range holding the installed version.
+    fixed_in_dispute: fixedInDisputeSchema(),
     cisa: z
       .looseObject({
         kev_listed: opt(z.boolean()),
@@ -445,8 +450,26 @@ function fixStatusSentence(cve: string, fs: unknown): string | null {
   return `fix_status for ${cve} is ${state}${basis ? ` (basis ${basis})` : ""}, the API's fix-status rule${why}${qualifier}${notRead}.`;
 }
 
-// The sentence on the installed version asked: what the API answered for it, relayed.
+// The sentence on the installed version asked: what the API answered for it, relayed. #3391: and, where the answer
+// carries a fixed_in_dispute, its note beside it, verbatim. #3381's review: a disputed answer's fixed_in follows the
+// source the dispute's higher names, so it is not said to be "as the advisory states it". #3381's round-4 review: the
+// answer is disputed where it carries the object, with a note or without; the note is quoted where there is one.
 function installedSentence(asked: { ecosystem: string; package: string; version: string }, d: object): string {
+  const dispute = [field(d, "fixed_in_dispute"), field(field(d, "installed"), "fixed_in_dispute")].find(isDispute);
+  const s = installedVerdictSentence(asked, d, dispute !== undefined);
+  if (dispute === undefined) return s;
+  const note = disputeNote(dispute);
+  // Round 11 (the round-10 verify's d5 F5): clipped as the other tools' notes clip it; whole in data.fixed_in_dispute.
+  // Round 11's final check (F1-a, F1-c): a value this server could not read is said to be so, and the clause ends.
+  const said = isUnreadDispute(dispute)
+    ? "its value was not in the shape this server reads."
+    : note
+      ? `the API's note, verbatim: "${clipDisputeNote(note)}".`
+      : "the API sent no note on it.";
+  return `${s} fixed_in_dispute: the CVE record's CNA and the advisory disagree on the range that holds it; ${said}`;
+}
+function installedVerdictSentence(asked: { ecosystem: string; package: string; version: string }, d: object, disputed = false): string {
+  const source = disputed ? "as the API answers it, following the source fixed_in_dispute's higher names" : "as the advisory states it";
   const who = `${asked.ecosystem} ${asked.package} ${asked.version}`;
   if (!("fixed_in" in d)) {
     return `The answer carries no fixed_in for the installed version asked (${who}): the API did not assess it, which is not a finding either way.`;
@@ -458,11 +481,11 @@ function installedSentence(asked: { ecosystem: string; package: string; version:
     // #3074: fixed_in moved past an overlapping range, so it is not the holding range's bound.
     const detail = strAt(d, "fixed_in_detail");
     if (detail) {
-      return `For the installed version asked (${who}), installed.verdict is ${verdict ?? "not given"} and fixed_in is ${fixedIn}: the first version above it that no affected range on record holds (${detail}), as the advisory states it; EchelonGraph has not tested it.`;
+      return `For the installed version asked (${who}), installed.verdict is ${verdict ?? "not given"} and fixed_in is ${fixedIn}: the first version above it that no affected range on record holds (${detail}), ${source}; EchelonGraph has not tested it.`;
     }
     const lo = strAt(field(inst, "interval"), "introduced");
     const range = lo ? ` [${lo}, ${fixedIn})` : "";
-    return `For the installed version asked (${who}), installed.verdict is ${verdict ?? "not given"} and fixed_in is ${fixedIn}: the fixed bound of the affected range${range} that holds it, as the advisory states it; EchelonGraph has not tested it.`;
+    return `For the installed version asked (${who}), installed.verdict is ${verdict ?? "not given"} and fixed_in is ${fixedIn}: the fixed bound of the affected range${range} that holds it, ${source}; EchelonGraph has not tested it.`;
   }
   const reason = strAt(d, "fixed_in_reason") ?? "the answer gives no fixed_in_reason";
   return `For the installed version asked (${who}), installed.verdict is ${verdict ?? "not given"} and fixed_in is null: ${reason}.`;
@@ -491,6 +514,7 @@ export async function cveRemediation(args: CveRemediationArgs): Promise<ToolResu
     const r = await api(path, headers ? { headers } : undefined);
     if (!r.ok) return failed(TOOL, r);
     const d = r.data;
+    const unreadDisputes = blankUnreadableDisputes(d);
     const state = strAt(d, "state");
     if (state !== "assessed" && state !== "not_assessed") {
       const why = "the answer carries no state (assessed or not_assessed)";
@@ -531,6 +555,9 @@ export async function cveRemediation(args: CveRemediationArgs): Promise<ToolResu
     const fixSaid = fixStatusSentence(cve, field(d, "fix_status"));
     if (fixSaid) said.push(fixSaid);
     if (asked) said.push(installedSentence(asked, d));
+    // Round 11's final check (F1-b): named as what this tool answers, the installed version asked or the CVE.
+    const unreadWhere = unreadDisputes.map((w) => (w === "the answer" && asked ? `the installed version asked (${asked.ecosystem} ${asked.package} ${asked.version})` : w));
+    if (unreadDisputes.length > 0) said.push(unreadDisputesSentence(unreadWhere, "answer").trim());
     const cisa = field(d, "cisa");
     const action = strAt(cisa, "required_action");
     if (field(cisa, "kev_listed") === true) {

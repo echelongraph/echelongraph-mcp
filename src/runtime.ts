@@ -35,6 +35,9 @@ export function isHttpEntrypoint(): boolean {
 //   protocolVersion  the request's MCP-Protocol-Version as httpPolicy.ts revisionLabel gives it (#2923):
 //              a date-shaped revision, "(other)" or "(none)"; with rpcMethod, what mcp_handler_error
 //              says of the request it arose in (requestLabels)
+//   reserve    #3381: holds bytes of the process's parse budget (parseBudget.ts ParseBudget, http.ts) for what a
+//              tool parses from a string, until the tool makes it smaller or the request ends (reserveParse); with
+//              answers, for what the API's answers to its purls hold (#3381's round-4 review)
 type RequestScope = {
   clientIp?: string;
   synthetic?: boolean;
@@ -43,18 +46,79 @@ type RequestScope = {
   rpcMethod?: string;
   tool?: string;
   protocolVersion?: string;
+  reserve?: (bytes: number, opts?: ReserveFor) => Promise<Reservation>;
 };
 const clientStore = new AsyncLocalStorage<RequestScope>();
 
 export function withClient<T>(
   clientIp: string | undefined,
   fn: () => T,
-  opts: { synthetic?: boolean; signal?: AbortSignal; work?: Set<Promise<unknown>>; rpcMethod?: string; tool?: string; protocolVersion?: string } = {},
+  opts: {
+    synthetic?: boolean;
+    signal?: AbortSignal;
+    work?: Set<Promise<unknown>>;
+    rpcMethod?: string;
+    tool?: string;
+    protocolVersion?: string;
+    reserve?: (bytes: number, opts?: ReserveFor) => Promise<Reservation>;
+  } = {},
 ): T {
   return clientStore.run(
-    { clientIp, synthetic: opts.synthetic === true, signal: opts.signal, work: opts.work, rpcMethod: opts.rpcMethod, tool: opts.tool, protocolVersion: opts.protocolVersion },
+    {
+      clientIp,
+      synthetic: opts.synthetic === true,
+      signal: opts.signal,
+      work: opts.work,
+      rpcMethod: opts.rpcMethod,
+      tool: opts.tool,
+      protocolVersion: opts.protocolVersion,
+      reserve: opts.reserve,
+    },
     fn,
   );
+}
+
+/**
+ * #3381: what reserveParse answers.
+ *   held       the bytes are held until the request ends; keep() sets the hold to what is left of it (what the parse
+ *              built is dropped, and what the answer keeps of it is left, which may be more: #3381's round-4 review),
+ *              and charge() adds to it what was built past the reservation (the API's answers), room or no room,
+ *              answering whether the budget still holds all it has taken and the request no more than the most one
+ *              request may reserve (#3381's round-10 review, R10-B1); room(), where there is a budget, how much
+ *              more each of the two may take before it answers no (Room);
+ *   busy       no room came within the request's wait: the budget is held by other requests, so the same call may
+ *              find room later;
+ *   too_large  never: the request already holds heldBytes, and with these it would hold more than maxBytes, all a
+ *              request may hold at once, so it is refused at once (#3381's review: through round 3 it waited for room
+ *              only its own end could free, and answered busy).
+ */
+export type Reservation =
+  | { state: "held"; keep: (bytes: number) => void; charge: (bytes: number) => boolean; room?: () => Room }
+  | { state: "busy" }
+  | { state: "too_large"; heldBytes: number; maxBytes: number };
+/** #3381's round-10 review (R10-B1, R10-M1): what a held reservation's charge() has left, in bytes, each negative once
+ *  passed: `budget`, the instance's parse budget before it is past its overdraft (max + overdraft, less what it holds);
+ *  `request`, the reserving request before it holds more than `requestMax`, the most one request may reserve. */
+export type Room = { budget: number; request: number; requestMax: number };
+const UNBUDGETED: Reservation = { state: "held", keep: () => {}, charge: () => true };
+/** answers: the reservation is for the API's answers to a call's purls, small only for one batch's worth
+ *  (parseBudget.ts SMALL_ANSWERS_BYTES: the small share is for small bodies, the documents they carry and the answers to
+ *  a few purls, which the round-3 review kept from waiting behind a large one). */
+export type ReserveFor = { answers?: boolean };
+
+/** #3381: holds `bytes` of the hosted endpoint's parse budget before a tool parses a document from a string (http.ts
+ *  gives them back as the request ends, or keep() gives some back sooner). On stdio, and outside a request, there is
+ *  no such budget: always held. */
+export function reserveParse(bytes: number, opts: ReserveFor = {}): Promise<Reservation> {
+  const reserve = httpEntrypoint ? clientStore.getStore()?.reserve : undefined;
+  return reserve ? reserve(bytes, opts) : Promise.resolve(UNBUDGETED);
+}
+
+/** #3381's round-6 verification (R6V-2.4): whether this call is served under the hosted endpoint's parse budget (the
+ *  HTTP entrypoint, inside a request it serves). Anywhere else reserveParse answers held at once, so what a tool would
+ *  estimate for it bounds nothing. */
+export function parseBudgeted(): boolean {
+  return httpEntrypoint && clientStore.getStore()?.reserve !== undefined;
 }
 
 /** #2923: the fixed labels of the request being served, for a line the SDK's onerror writes (it is handed only the

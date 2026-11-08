@@ -11,6 +11,7 @@
 // (a scope's '@' as %40), '@', the version as the file states it (Go keeps its leading v). The
 // backend reads them with url.PathUnescape (core-backend internal/cve/matchbatch.go
 // purlNameVersion) and normalises names on lookup (pkgmatch.go), so the case a file uses is kept.
+import { PARSE_BUDGET_BYTES, documentCost } from "../../parseBudget.js";
 
 // Why an entry was not sent to the API. Each is not clean: the entry was not checked at all.
 //   version_unpinned    the entry gives a range or a wildcard, not one version (django>=4, ==1.4.*);
@@ -215,9 +216,15 @@ export function jsonValues(text: string, max: number): number {
 }
 
 /** A JSON lockfile's text parsed, once its objects, arrays and entries are taken from the call's MAX_JSON_VALUES: a
- *  text past it is never parsed. */
-export function parseLockfileJson(text: string, bounds: Bounds): unknown {
+ *  text past it is never parsed. #3381: and once what its parse would retain beside its text (parseBudget.ts
+ *  documentCost) is within `parseBytes` (PARSE_BUDGET_BYTES, the bound in force, unless the caller names another): one
+ *  past it is unreadable, never parsed, and the call's other files are read. */
+export function parseLockfileJson(text: string, bounds: Bounds, parseBytes: number = PARSE_BUDGET_BYTES): unknown {
   bounds.json.take(jsonValues(text, bounds.json.left));
+  const { structure: s, bytes } = documentCost(text);
+  if (bytes > parseBytes) {
+    throw new Unreadable(`is too dense to read: its ${s.containers} objects and arrays, ${s.elements} entries and ${s.keys} keys, parsed, are estimated at ${bytes} bytes, past the ${parseBytes} bytes a file's parse may take`);
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -241,14 +248,85 @@ export function eachLine(text: string, crlf: boolean, fn: (raw: string, i: numbe
   }
 }
 
+// #3460: a name or version a reader takes from a file holds at most NAME_MAX characters before anything splits,
+// matches, encodes or replaces in it. Through 3.1.5 segPath split a name with no bound on its length: one package-lock
+// name of 4.9 million '/' was split into as many strings, and the hosted endpoint's container ended (heap out of
+// memory, exit 139). match_batch.ts MAX_PURL_LEN refuses a purl of more than 512 characters, so no name or version
+// longer than that makes a purl the API checks: past it the entry is listed not checked (unsupported_line), as go.mod's
+// reader lists a line past its LINE_MAX, and the call's other entries are read.
+export const NAME_MAX = 512;
+export const LONG_NAME_DETAIL = `a name or version of more than ${NAME_MAX} characters, which no purl the API checks holds: not read`;
+// #3381's round-7 verification (R7V-2.2, 2.3): and a purl made of a name and a version each within NAME_MAX can still
+// be longer than the 512 characters the API takes once percent-encoded (512 x U+4E00 is 4,608): that entry is listed too
+// (LONG_PURL_DETAIL), and no purl is kept for it. Through round 7 it was kept, what readFiles held of the purls up to
+// some 6 times what was reserved for them, and the whole call was refused for it ("purl N is longer than 512
+// characters", N an index the caller could not map to a file). #3460's round-10 review (F3, F6, F7): purlOf counts it
+// before it builds it, and builds none past PURL_MAX: through round 10 every purl was built, and readFile dropped the
+// long ones only once the reader had returned them all (one 5,000,000-character file of CJK names held some 43 MB of
+// purls built to be dropped, against 3 to 17 MB reserved), a go.mod replace so dropped was still listed as applied, and
+// the entry was listed after every other, its name null and its spec the purl, not the file's text.
+export const PURL_MAX = NAME_MAX;
+export const LONG_PURL_DETAIL = `its purl, percent-encoded, is longer than the ${PURL_MAX} characters the API takes: not read`;
+// #3460's round-10 review (F4): a lone surrogate (half of a UTF-16 pair, which a JSON lockfile's \ud800 escape gives) has
+// no UTF-8 form, so no purl holds it: encodeURIComponent throws on one. Through round 10 that URIError failed the whole
+// call, blaming the API.
+export const LONE_SURROGATE_DETAIL = "a name or version holding a lone surrogate (half of a UTF-16 pair), which no purl can encode: not read";
+/** Whether one of a reader's names or versions is past NAME_MAX (null or undefined is not). */
+export const tooLong = (...parts: (string | null | undefined)[]): boolean => parts.some((x) => typeof x === "string" && x.length > NAME_MAX);
+
 // One purl segment, percent-encoded as the purl spec asks; '+' is left as it is (Go's
 // +incompatible, a PyPI local version), which url.PathUnescape reads back unchanged.
-export const seg = (s: string): string => encodeURIComponent(s).replace(/%2B/g, "+");
+const seg = (s: string): string => encodeURIComponent(s).replace(/%2B/g, "+");
 // A hierarchical name (a Go module path, an npm @scope/name, a Packagist vendor/name): each
 // '/'-separated segment encoded, the separators kept.
-export const segPath = (s: string): string => s.split("/").map(seg).join("/");
+const segPath = (s: string): string => s.split("/").map(seg).join("/");
 
-export const purlOf = (type: string, name: string, version: string): string => `pkg:${type}/${segPath(name)}@${seg(version)}`;
+// #3460's round-10 review (F3, F4): what seg() makes of each ASCII character, its length: 1 for what encodeURIComponent
+// leaves as it is, and '+' (seg puts it back), 3 for the rest.
+const ASCII_SEG = Array.from({ length: 128 }, (_, c) => seg(String.fromCharCode(c)).length);
+/**
+ * The length seg(s) has, or segPath(s) with `slash` (a '/' kept), counted from s without building it: UTF-8 percent-
+ * encodes a character of up to U+07FF in 6, the rest of the BMP in 9, and a surrogate pair in 12. -1 where s holds a
+ * lone surrogate, which has no UTF-8 form (seg throws on it).
+ */
+function segLength(s: string, slash: boolean): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += slash && c === 0x2f ? 1 : ASCII_SEG[c];
+    else if (c < 0x800) n += 6;
+    else if (c < 0xd800 || c > 0xdfff) n += 9;
+    else if (c <= 0xdbff && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      n += 12;
+      i++;
+    } else return -1;
+  }
+  return n;
+}
+
+/**
+ * The purl of `name` at `version`, or why none is built: LONG_PURL_DETAIL where it would be longer than PURL_MAX, and
+ * LONE_SURROGATE_DETAIL where name or version holds a lone surrogate. Counted first (segLength), so no purl the API
+ * would not take is built. `name`: a hierarchical name, each '/'-separated segment encoded and the separators kept; or
+ * its segments, each encoded whole (a '/' in one encoded too) and joined by '/' (maven's group and artifact).
+ */
+export function purlOf(type: string, name: string | readonly string[], version: string): { purl: string } | { why: string } {
+  const parts = typeof name === "string" ? [segLength(name, true)] : name.map((x) => segLength(x, false));
+  const v = segLength(version, false);
+  if (v < 0 || parts.some((n) => n < 0)) return { why: LONE_SURROGATE_DETAIL };
+  // "pkg:", the type and '/'; the name's segments and the '/' between them; '@' and the version.
+  const length = 5 + type.length + parts.reduce((t, n) => t + n, parts.length - 1) + 1 + v;
+  if (length > PURL_MAX) return { why: LONG_PURL_DETAIL };
+  return { purl: `pkg:${type}/${typeof name === "string" ? segPath(name) : name.map(seg).join("/")}@${seg(version)}` };
+}
+
+/** An entry pinned to `version`: its purl kept in p.pinned at `line`, or, where none is built (purlOf), why, to
+ *  `notBuilt`, which lists it not checked at its own place (unsupported_line), with its own name and text. */
+export function pin(p: Parsed, line: number | null, type: string, name: string | readonly string[], version: string, notBuilt: (why: string) => void): void {
+  const b = purlOf(type, name, version);
+  if ("why" in b) notBuilt(b.why);
+  else p.pinned.push({ purl: b.purl, line });
+}
 
 // PEP 503: a PyPI name lowercased, each run of '-', '_' and '.' one '-' (the purl spec's pypi rule).
 export const pep503 = (name: string): string => name.toLowerCase().replace(/[-_.]+/g, "-");

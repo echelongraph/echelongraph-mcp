@@ -96,6 +96,17 @@ describe("directory listings (#2723)", { skip: SKIP }, () => {
   const manifest = HAVE ? JSON.parse(read("listings/mcpb/manifest.json")) : {};
   const dockerYaml = HAVE ? read("listings/docker/server.yaml") : "";
 
+  // Round 11 (the round-10 verify's R10-7): the four version fields the public release.yml checks on the pushed tag are
+  // held to package.json's here, before any tag: server.json's version and its npm package's, and package-lock.json's
+  // own and its root package's. Through 3.2.0's round 10 only the MCPB manifest was, and the rest were first checked on
+  // the tag release.yml runs on, after it was pushed.
+  it("server.json and package-lock.json name package.json's version in each of their four fields", () => {
+    const lock = JSON.parse(read("package-lock.json"));
+    assert.equal(serverJson.version, pkg.version, "server.json version: bump it with package.json");
+    assert.equal(serverJson.packages?.[0]?.version, pkg.version, "server.json packages[0].version: bump it with package.json");
+    assert.equal(lock.version, pkg.version, "package-lock.json version: bump it with package.json");
+    assert.equal(lock.packages?.[""]?.version, pkg.version, 'package-lock.json packages[""].version: bump it with package.json');
+  });
   it("the MCPB manifest is at package.json's version and carries server.json's description and title", () => {
     assert.equal(manifest.version, pkg.version, "listings/mcpb/manifest.json version: bump it with package.json");
     assert.equal(manifest.name, pkg.name);

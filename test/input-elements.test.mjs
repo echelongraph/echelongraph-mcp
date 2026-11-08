@@ -13,7 +13,11 @@
 //     holds that shape, so a later SDK that changes it is seen;
 //   - a large real SBOM (2,000 components, each with licences, a hash and properties, as Syft
 //     writes them) is far below the limit and is checked.
-// Both eras over stdio, and the hosted endpoint, each against a stub API on 127.0.0.1.
+// Both eras over stdio, and the hosted endpoint, each against a stub API on 127.0.0.1. #3381: over the hosted endpoint
+// a body that large is refused before the SDK counts it, by the hosted endpoint's own estimate of what parsing a body
+// retains (parseBudget.ts PARSE_BUDGET_BYTES), a share of its heap, which Dockerfile.http's flags set; the SDK's limit is
+// never reached there. A local server's heap is Node's own, several GiB, and its bound proportionally larger: over stdio
+// a call one over the limit is the SDK's to refuse, as below.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -24,6 +28,7 @@ import { connect, MODERN } from "./mcp-stdio-client.mjs";
 import { post, modernHeaders, modernMeta } from "./mcp-http-client.mjs";
 import { PKG_DIR, serverCommand } from "./server-under-test.mjs";
 import { BATCH_PATH, ROWS, batchAnswer } from "./fixtures/match-batch.mjs";
+import { IMAGE_SKIP, imageBudgets, imageNodeFlags } from "./image-server.mjs";
 
 const LEGACY = "2025-06-18";
 const { MAX_SBOM_CHARS, MAX_PURL_ENTRIES } = await import(pathToFileURL(path.join(PKG_DIR, "dist", "tools", "check_sbom.js")).href);
@@ -158,10 +163,15 @@ for (const era of [MODERN, LEGACY]) {
   });
 }
 
-describe("#3345: the hosted endpoint applies the same limit (Streamable HTTP, both eras)", { timeout: 180_000 }, () => {
+// #3381: through 3.1.5 this held that the hosted endpoint answered as stdio does, the SDK's refusal one over the limit and
+// check_sbom's own at it. Both bodies are ~5 MB of 2,500,000 elements, estimated far past what one request's parse may
+// take in the hosted image (parseBudget.ts PARSE_BUDGET_BYTES, from the heap Dockerfile.http's flags give): each is now
+// refused 413 by the body's estimate, unparsed, before the SDK or any API request. So http.js is started here as the
+// image starts it.
+describe("#3345, #3381: over the hosted endpoint a call at or one over the limit is refused by the body's count, before the SDK (Streamable HTTP, both eras)", { timeout: 180_000, skip: IMAGE_SKIP }, () => {
   let proc, url, exited;
   before(async () => {
-    proc = spawn(process.execPath, [path.join(PKG_DIR, "dist", "http.js")], { env: { ...env(), PORT: "0", MCP_RATE_LIMIT_PER_MIN: "1000" }, stdio: ["ignore", "pipe", "pipe"] });
+    proc = spawn(process.execPath, [...imageNodeFlags(), path.join(PKG_DIR, "dist", "http.js")], { env: { ...env(), PORT: "0", MCP_RATE_LIMIT_PER_MIN: "1000" }, stdio: ["ignore", "pipe", "pipe"] });
     exited = new Promise((resolve) => proc.once("exit", resolve));
     url = await new Promise((resolve, reject) => {
       let buf = "";
@@ -191,20 +201,29 @@ describe("#3345: the hosted endpoint applies the same limit (Streamable HTTP, bo
 
   const call = async (era, args) => {
     const params = { name: "check_sbom", arguments: args };
-    const r =
-      era === MODERN
-        ? await post(url, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { ...params, _meta: modernMeta() } }, modernHeaders("tools/call", params))
-        : await post(url, { jsonrpc: "2.0", id: 1, method: "tools/call", params }, { "MCP-Protocol-Version": LEGACY });
-    assert.equal(r.status, 200, r.text.slice(0, 300));
-    return r.message.result;
+    return era === MODERN
+      ? await post(url, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { ...params, _meta: modernMeta() } }, modernHeaders("tools/call", params))
+      : await post(url, { jsonrpc: "2.0", id: 1, method: "tools/call", params }, { "MCP-Protocol-Version": LEGACY });
   };
 
   for (const era of [MODERN, LEGACY]) {
-    it(`[${era}] one over the limit is the SDK's isError result; at the limit check_sbom answers it`, async () => {
+    it(`[${era}] one over the limit, and at it: 413, the body's estimate naming the hosted bound, before any API request`, async () => {
+      const P = await import(pathToFileURL(path.join(PKG_DIR, "dist", "httpPolicy.js")).href);
+      const B = await import(pathToFileURL(path.join(PKG_DIR, "dist", "parseBudget.js")).href);
+      const hosted = imageBudgets().PARSE_BUDGET_BYTES;
+      assert.ok(B.scanJson(JSON.stringify(flat(LIMIT))).estimate > hosted, "the hosted bound no longer refuses a call at the SDK's limit: re-aim this test");
       const before = requests.length;
-      assertOver(await call(era, flat(LIMIT + 1)));
-      assert.equal(requests.length, before, "a call over the limit reached the API");
-      assertAtLimit(await call(era, flat(LIMIT)));
+      for (const total of [LIMIT + 1, LIMIT]) {
+        const r = await call(era, flat(total));
+        assert.equal(r.status, 413, r.text.slice(0, 300));
+        const e = JSON.parse(r.text).error;
+        assert.equal(e.code, P.BODY_DENSE_CODE);
+        assert.match(e.message, /^Request body too dense to parse: its \d+ objects and arrays, \d+ elements \(list entries and object members\) and \d+ keys/);
+        assert.doesNotMatch(r.text, /maximum of \d+ elements/, "the SDK counted it: the body was parsed");
+        // Every element the SDK would count, and the envelope's few more.
+        assert.ok(e.data.elements >= total && e.data.estimated_bytes > e.data.max_bytes && e.data.max_bytes === hosted, JSON.stringify(e.data));
+      }
+      assert.equal(requests.length, before, "a call refused by the body's count reached the API");
     });
   }
 });

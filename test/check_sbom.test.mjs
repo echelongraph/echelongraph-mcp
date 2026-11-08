@@ -162,6 +162,9 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.match(tool.description, /up to 2,000 distinct/);
       assert.match(tool.description, /more than 2,000 distinct purls is refused, not truncated/);
       assert.match(tool.description, /Retry-After/);
+      // #3467: the title names purls first, its first argument. Control: 3.1.5's title, which named only an SBOM.
+      assert.equal(tool.title, "Check purls or an SBOM against the advisory corpus");
+      assert.notEqual("Check an SBOM against the advisory corpus", tool.title, "control: 3.1.5's title");
     });
 
     describe("a real CycloneDX SBOM (OWASP Juice Shop 11.1.2, 50 components)", () => {
@@ -470,6 +473,8 @@ for (const era of [MODERN, "2025-06-18"]) {
     });
 
     describe("refused locally: invalid_input, and no request is made", () => {
+      // #3467: check_sbom.ts PURLS_HINT, as a pattern.
+      const HINT = 'a list of purls goes in purls, e\\.g\\. purls: \\["pkg:npm/lodash@4\\.17\\.20"\\]; one purl still goes in a list';
       const cases = [
         ["neither argument", {}, /exactly one of purls/],
         ["both arguments", { purls: ["pkg:npm/a@1"], sbom: CDX }, /exactly one of purls/],
@@ -488,6 +493,19 @@ for (const era of [MODERN, "2025-06-18"]) {
         ["a JSON object that is neither format", { sbom: { hello: "world" } }, /neither a CycloneDX JSON document .* nor an SPDX JSON document/],
         ["a CycloneDX document whose components carry no purl", { sbom: { bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "x", version: "1" }] } }, /holds 1 components and none carries a purl/],
         ["an oversized sbom", { sbom: "x".repeat(5_000_001) }, /at most 5000000 are read/],
+        // #3467: a list of purls sent in the wrong shape is told where it goes. Through 3.1.5 none of these named purls:
+        // the founder's "check_sbom does not accept a plain purl list" was a purl sent as sbom.
+        ["#3467: one purl as sbom", { sbom: "pkg:npm/lodash@4.17.20" }, new RegExp(`^check_sbom FAILED \\(state: invalid_input\\): sbom is not JSON: pass a CycloneDX JSON or SPDX JSON document \\(XML and SPDX tag-value are not read\\); ${HINT}`)],
+        ["#3467: purls on lines as sbom", { sbom: " pkg:npm/a@1\npkg:npm/b@2\n" }, new RegExp(`^check_sbom FAILED \\(state: invalid_input\\): sbom is not JSON: .*; ${HINT}`)],
+        ["#3467: a JSON array of purls as sbom's text", { sbom: '["pkg:npm/lodash@4.17.20"]' }, new RegExp(`^check_sbom FAILED \\(state: invalid_input\\): sbom must be a JSON object: a CycloneDX JSON or SPDX JSON document; ${HINT}`)],
+        ["#3467: a JSON array of purls as sbom (the inputSchema's refusal)", { sbom: ["pkg:npm/lodash@4.17.20"] }, new RegExp(`sbom must be a string or an object, not an array; ${HINT}`)],
+        ["#3467: one purl as a string in purls (the inputSchema's refusal)", { purls: "pkg:npm/lodash@4.17.20" }, new RegExp(`purls must be an array, not a string; ${HINT}`)],
+        ["#3467: purls inside an sbom of neither format", { sbom: { purls: ["pkg:npm/lodash@4.17.20"] } }, new RegExp(`neither a CycloneDX JSON document .* nor an SPDX JSON document \\(spdxVersion "SPDX-…"\\); ${HINT}`)],
+        // Round 11 (the round-10 verify's d1 F3): quoted, a list of quoted ones, and a bracketed list in single quotes.
+        // Control in 3.2.0's round 10: each was refused with no hint.
+        ["#3467: one purl, quoted, as sbom's text", { sbom: '"pkg:npm/lodash@4.17.20"' }, new RegExp(`^check_sbom FAILED \\(state: invalid_input\\): sbom must be a JSON object: a CycloneDX JSON or SPDX JSON document; ${HINT}`)],
+        ["#3467: quoted purls, comma-separated, as sbom's text", { sbom: '"pkg:npm/a@1", "pkg:npm/b@2"' }, new RegExp(`^check_sbom FAILED \\(state: invalid_input\\): sbom is not JSON: .*; ${HINT}`)],
+        ["#3467: a bracketed list in single quotes as sbom's text", { sbom: "['pkg:npm/a@1']" }, new RegExp(`^check_sbom FAILED \\(state: invalid_input\\): sbom is not JSON: .*; ${HINT}`)],
       ];
       for (const [name, args, why] of cases) {
         it(name, async () => {
@@ -500,6 +518,33 @@ for (const era of [MODERN, "2025-06-18"]) {
           assert.equal(stub.state.requests.length, 0, `${name}: a request was made`);
         });
       }
+      // Round 11 (the round-10 verify's d1 F5): a document saved with a leading byte-order mark is read as the document;
+      // control in round 10: "sbom is not JSON".
+      it("a CycloneDX JSON text with a leading byte-order mark is read", async () => {
+        const { extract } = await import("../dist/tools/check_sbom.js");
+        const bom = { bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "a", version: "1", purl: "pkg:npm/a@1" }] };
+        const r = extract({ sbom: "\uFEFF" + JSON.stringify(bom) });
+        assert.equal(typeof r, "object", String(r));
+        assert.deepEqual(r.purls, ["pkg:npm/a@1"]);
+        assert.match(extract({ sbom: "\uFEFF<bom/>" }), /^sbom is not JSON/);
+      });
+      // #3467: and only those: a document of another kind, or another wrong type, is not told about purls.
+      it("#3467: an XML document, a JSON object of neither format, and a number as sbom carry no purls hint", async () => {
+        for (const args of [{ sbom: "<bom xmlns='http://cyclonedx.org/schema/bom/1.5'/>" }, { sbom: { hello: "world" } }, { sbom: 5 }, { purls: [5] }]) {
+          fresh();
+          const res = await call(args);
+          assert.equal(res.structuredContent.state, "invalid_input", JSON.stringify(args));
+          assert.doesNotMatch(textBlocks(res)[0], /goes in purls/, JSON.stringify(args));
+        }
+      });
+      // #3467: extract's own refusal, for a caller in process that the inputSchema does not stand before, says the same,
+      // in the issue's words. Control: a list holding a non-string is refused without it.
+      it("#3467: extract() refuses one purl as a string in purls with the hint, and a list of non-strings without it", async () => {
+        const { extract, PURLS_HINT } = await import("../dist/tools/check_sbom.js");
+        assert.equal(PURLS_HINT, 'a list of purls goes in purls, e.g. purls: ["pkg:npm/lodash@4.17.20"]; one purl still goes in a list');
+        assert.equal(extract({ purls: "pkg:npm/lodash@4.17.20" }), `purls must be a list of strings; ${PURLS_HINT}`);
+        assert.equal(extract({ purls: [5] }), "purls must be a list of strings");
+      });
     });
 
     describe("upstream failures are failures, never an all-clear", () => {
@@ -557,7 +602,7 @@ for (const era of [MODERN, "2025-06-18"]) {
       assert.equal(got.matches[1].fixed_in, null);
       const note = noteOf(res);
       assert.match(note, /1 component was matched by the source package its purl's upstream qualifier names \(matched_via upstream, matched_package\)/);
-      assert.match(note, /Each match's fixed_in is the first version above the component's that no affected interval of the advisory holds/);
+      assert.match(note, /Each match's fixed_in is the first version above the component's that no affected interval of the CVE's record holds/);
       const v = validator.getValidator(tool.outputSchema)(res.structuredContent);
       assert.ok(v.valid, v.errorMessage);
       // Control: fixed_in typed as a number is refused, so the schema does describe it.

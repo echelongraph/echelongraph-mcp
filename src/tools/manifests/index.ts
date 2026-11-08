@@ -2,6 +2,7 @@
 // basename. A manifest that holds ranges, not resolved versions, is refused with the lockfile to
 // pass instead; formats not read yet are refused as such. Nothing here guesses a format from a
 // file's content.
+import { PARSE_BUDGET_BYTES } from "../../parseBudget.js";
 import { Unreadable, callBounds, type Bounds, type Parsed } from "./common.js";
 import { readGoMod } from "./gomod.js";
 import { readCargoLock, readComposerLock, readGemfileLock, readGradleLockfile, readPoetryLock } from "./lockfiles.js";
@@ -76,21 +77,29 @@ export function detect(filename: string): { format: Format } | { refused: string
   // gradle/dependency-locks/<configuration>.lockfile.
   if (lower.endsWith(".lockfile")) return { format: "gradle.lockfile" };
   if (lower.endsWith(".txt") && /requirements|constraints/.test(lower)) return { format: "requirements.txt" };
-  if (REFUSED[lower]) return { refused: REFUSED[lower] };
+  // #3460's round-10 review (F5): an own key only: a basename of __proto__ or constructor read Object.prototype's, and the
+  // call failed its outputSchema.
+  if (Object.hasOwn(REFUSED, lower)) return { refused: REFUSED[lower] };
   return { refused: `${base || "(no filename)"} is not a file name this tool reads; the formats read are ${FORMAT_NAMES.join(", ")} (and npm-shrinkwrap.json, gems.locked): name the file so, or set its format` };
 }
 
 // One file read, or why it could not be. `bounds`: the call's (common.ts), which every file of a call shares; a reader
 // past one throws PastBound, which goes to the caller. #3434: a RangeError from a reader (a limit of the engine's own:
 // the stack, a string's or an array's length) is that file unreadable, as an Unreadable is, so one file never fails
-// the whole call.
-export function readFile(format: Format, content: string, bounds: Bounds = callBounds()): Parsed | { unreadable: string } {
+// the whole call. #3460's round-10 review (F4): so is a URIError, which no reader throws now (purlOf builds no purl of a
+// lone surrogate): through round 10 one failed the whole call.
+// #3381: `parseBytes`, what one file's parse or read may be estimated to retain (parseBudget.ts PARSE_BUDGET_BYTES, the
+// bound in force, unless the caller names another), which the JSON and TOML lockfiles' readers hold it to.
+export function readFile(format: Format, content: string, bounds: Bounds = callBounds(), parseBytes: number = PARSE_BUDGET_BYTES): Parsed | { unreadable: string } {
   try {
+    const read: (text: string, bounds: Bounds, parseBytes: number) => Parsed = FORMATS[format].read;
     // A byte-order mark, which some Windows editors write, is not part of the file's text.
-    return FORMATS[format].read(content.replace(/^\uFEFF/, ""), bounds);
+    // R7V-2.2, 2.3 (common.ts PURL_MAX): an entry whose purl is past what the API takes is listed by its reader, at its
+    // own place, and no purl is built for it (purlOf).
+    return read(content.replace(/^\uFEFF/, ""), bounds, parseBytes);
   } catch (e) {
     if (e instanceof Unreadable) return { unreadable: `it ${e.message}` };
-    if (e instanceof RangeError) return { unreadable: `it could not be read: ${e.message.slice(0, 120)}` };
+    if (e instanceof RangeError || e instanceof URIError) return { unreadable: `it could not be read: ${e.message.slice(0, 120)}` };
     throw e;
   }
 }

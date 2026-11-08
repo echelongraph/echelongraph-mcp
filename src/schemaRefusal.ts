@@ -174,19 +174,24 @@ type Register = (name: string, config: { inputSchema?: unknown } & Record<string
 const isStandardSchema = (s: unknown): s is StandardSchemaWithJSON =>
   typeof s === "object" && s !== null && typeof (s as { "~standard"?: { validate?: unknown } })["~standard"]?.validate === "function";
 
+/** #3467: a tool's own hint for arguments its inputSchema refused, from the arguments as sent, added after the reason
+ *  (check_sbom.ts purlsHint: where a list of purls goes), or undefined. */
+export type SchemaHint = (input: unknown) => string | undefined;
+
 /**
  * Makes every tool `server` registers from now on answer arguments that break its inputSchema with
  * `refuse(tool, reason)` (index.ts badInput: the invalid_input envelope), not the SDK's bare error.
- * Call it before the first registerTool. tools/list is unchanged.
+ * Call it before the first registerTool. tools/list is unchanged. `hints`: each tool's own SchemaHint, by name.
  */
-export function withSchemaRefusal<R>(server: McpServer, refuse: (tool: string, reason: string) => R): McpServer {
+export function withSchemaRefusal<R>(server: McpServer, refuse: (tool: string, reason: string) => R, hints: Record<string, SchemaHint> = {}): McpServer {
   const register = server.registerTool.bind(server) as unknown as Register;
   const wrapped: Register = (name, config, cb) => {
     if (!isStandardSchema(config.inputSchema)) return register(name, config, cb);
     return register(name, { ...config, inputSchema: lenientSchema(config.inputSchema) }, (args, ctx) => {
       if (!isRefused(args)) return cb(args, ctx);
       const { issues, input } = args[REFUSED];
-      return refuse(name, refusalReason(issues, input));
+      const hint = Object.hasOwn(hints, name) ? hints[name](input) : undefined;
+      return refuse(name, hint ? `${refusalReason(issues, input)}; ${hint}` : refusalReason(issues, input));
     });
   };
   (server as unknown as { registerTool: Register }).registerTool = wrapped;

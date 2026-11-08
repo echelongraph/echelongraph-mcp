@@ -16,6 +16,15 @@
 //   - per call: past MAX_MANIFEST_LINES lines of the line formats, MAX_JSON_VALUES objects, arrays and entries of the
 //     JSON lockfiles (counted before they are parsed), or MAX_TOML_VALUES tables, array entries and keys of the TOML
 //     ones, the call is refused (invalid_input naming the bound), nothing more read.
+//   - #3460 (3.2.0): every name and version a reader takes from a file is bounded (NAME_MAX, 512 characters, the
+//     longest purl match_batch.ts sends) before anything splits, matches, encodes or replaces in it; past it the entry
+//     is listed not checked (unsupported_line), and the call's other entries are read. Through 3.1.5 a package-lock name
+//     of 4.9 million '/' was split into as many strings, and the hosted container ended (heap out of memory).
+//   - #3381 (3.2.0), beside them: a Cargo.lock, poetry.lock or JSON lockfile whose read is estimated past the parse
+//     bound (parseBudget.ts PARSE_BUDGET_BYTES, 28 MiB in the image) is unreadable before it is read ("too dense to
+//     read"), and on the hosted endpoint a call whose body and read are estimated past what one request may hold is
+//     refused before it is read. Where a case here is past both, the parse bound refuses it first; each case below
+//     says which bound it reaches, and the cases past KEY_PARTS_MAX read with the parse bound lifted as well.
 // Each case reads its file in a process of its own, started with the hosted image's node flags (Dockerfile.http's CMD,
 // test/image-server.mjs), under a timeout: a reader that does not finish fails its case as a timeout, and one that
 // exhausts the heap as an abort, never by holding the suite. Where Dockerfile.http is not in the package (the
@@ -38,6 +47,7 @@ const M = await import(dist("tools/manifests/index.js"));
 const SM = await import(SCAN_MANIFEST_JS);
 const { readToml } = await import(dist("tools/manifests/toml.js"));
 const C = await import(dist("tools/manifests/common.js"));
+const B = await import(dist("parseBudget.js"));
 // index.js's envelopeSchema, for scan_manifest's outputSchema (marked the HTTP entry point, so no stdio server starts).
 (await import(dist("runtime.js"))).markHttpEntrypoint();
 const I = await import(dist("index.js"));
@@ -97,9 +107,11 @@ it("the description and the README row say what data.not_checked lists and what 
 const CHILD = `
 import v8 from "node:v8";
 const { readFiles } = await import(process.env.SCAN_MANIFEST_JS);
+// #3381: MANIFEST_PARSE_BYTES, where set, is the parse bound the read takes ("Infinity" lifts it).
+const budgets = process.env.MANIFEST_PARSE_BYTES ? { ...(await import(process.env.PARSE_BUDGET_JS)).BUDGETS, parseBytes: Number(process.env.MANIFEST_PARSE_BYTES) } : undefined;
 const files = JSON.parse(process.env.MANIFEST_CASE).map(({ filename, segments }) => ({ filename, content: segments.map(([s, n]) => s.repeat(n)).join("") }));
 const t0 = performance.now();
-const r = readFiles({ files });
+const r = readFiles({ files }, budgets);
 const ms = Math.round(performance.now() - t0);
 const used_mb = Math.round(v8.getHeapStatistics().used_heap_size / 1e5) / 10;
 const entry = ({ spec, name, detail, ...n }) => ({ ...n, name: name?.slice(0, 60) ?? null, name_chars: name?.length ?? 0, spec: spec.slice(0, 60), spec_chars: spec.length, detail: detail.slice(0, 300), detail_chars: detail.length });
@@ -115,13 +127,14 @@ console.log(JSON.stringify({ chars: files.reduce((n, f) => n + f.content.length,
 `;
 
 /** readFiles on the files built from their segments, in a process of their own with the image's flags (or `flags`),
- *  under a timeout. `refused`: the call may be refused (else a refusal fails the case). */
-function readAllInChild(files, { flags = FLAGS, refused = false } = {}) {
+ *  under a timeout. `refused`: the call may be refused (else a refusal fails the case). `parseBytes`: the parse bound
+ *  the read takes, in place of the process's own (Infinity lifts it). */
+function readAllInChild(files, { flags = FLAGS, refused = false, parseBytes } = {}) {
   const chars = files.reduce((n, f) => n + f.segments.reduce((k, [s, times]) => k + s.length * times, 0), 0);
   const what = files.map((f) => f.filename).join(", ");
   assert.ok(chars <= MAX_CHARS, `${what}: the case's files are ${chars} characters, past what scan_manifest reads`);
   const r = spawnSync(process.execPath, [...flags, "--input-type=module", "-e", CHILD], {
-    env: { ...process.env, SCAN_MANIFEST_JS, MANIFEST_CASE: JSON.stringify(files) },
+    env: { ...process.env, SCAN_MANIFEST_JS, PARSE_BUDGET_JS: dist("parseBudget.js"), MANIFEST_CASE: JSON.stringify(files), ...(parseBytes === undefined ? {} : { MANIFEST_PARSE_BYTES: String(parseBytes) }) },
     encoding: "utf8",
     timeout: CASE_TIMEOUT_MS,
     maxBuffer: 64 * 1024 * 1024,
@@ -142,6 +155,8 @@ const reported = (out) => out.not_checked.filter((n) => n.reason === "unsupporte
 const GOMOD_OVER = /^more than 16 tokens or 65536 characters before its comment, which no go\.mod directive has: not read$/;
 const REQ_LONG = /^a line of more than 65536 characters, which no requirement is: not read$/;
 const REQ_CLAUSES = /^a version specifier of more than 64 clauses, which no requirement has: not read$/;
+// #3381's round-7 verification (R7V-2.2, 2.3): an entry whose purl, percent-encoded, is past what the API takes.
+const LONG_PURL = /^its purl, percent-encoded, is longer than the 512 characters the API takes: not read$/;
 const ERRORS = "pkg:golang/github.com/pkg/errors@v0.9.1";
 // A string of `n` characters as an entry shows it, past SPEC_MAX: its first SPEC_MAX - 1, then "…".
 const clipped = (s) => (s.length > SPEC_MAX ? `${s.slice(0, SPEC_MAX - 1)}…` : s);
@@ -150,6 +165,11 @@ const clipped = (s) => (s.length > SPEC_MAX ? `${s.slice(0, SPEC_MAX - 1)}…` :
 const PAST_LINES = new RegExp(`^the go\\.mod, requirements\\.txt, Gemfile\\.lock and gradle\\.lockfile files hold more than ${MAX_MANIFEST_LINES} lines in all, counted per call \\(blank and comment lines are not counted\\): .+ when the bound was passed; at most ${MAX_MANIFEST_LINES} are read per call, so no file is read`);
 const PAST_JSON = new RegExp(`^the package-lock\\.json and composer\\.lock files hold more than ${MAX_JSON_VALUES} objects, arrays and entries in all, counted per call \\(counted before each file is parsed\\): .+ when the bound was passed; at most ${MAX_JSON_VALUES} are read per call`);
 const PAST_TOML = new RegExp(`^the Cargo\\.lock and poetry\\.lock files hold more than ${MAX_TOML_VALUES} tables, array entries and keys in all, counted per call: .+ when the bound was passed; at most ${MAX_TOML_VALUES} are read per call`);
+// #3381: a TOML lockfile past the parse bound, and on the hosted endpoint what the refusal adds (scan_manifest.ts
+// HOSTED_READS): the bound in files, and what to do instead.
+const TOML_DENSE = /it is too dense to read: its tables, keys and values are estimated at \d+ bytes read, past the 29360128 bytes a file's read may take/;
+const JSON_DENSE = /it is too dense to read: its \d+ objects and arrays, \d+ entries and \d+ keys, parsed, are estimated at \d+ bytes, past the 29360128 bytes a file's parse may take/;
+const HOSTED_HINT = /; on this endpoint one file's read may take 29360128 bytes \(28 MiB\) of its memory: run this server locally \(npx -y echelongraph-mcp\), whose bounds are a share of its own machine's memory, not this endpoint's, or pass the lockfile's purls to check_sbom, in calls of 2,000 or fewer$/;
 const FILENAME_RULE = /^files\[0\]\.filename must hold no control character \(U\+0000 to U\+001F\), quote or lone surrogate, which a portable path does not hold$/;
 const PAST_FILENAME = new RegExp(`^files\\[0\\]\\.filename is ${MAX_FILENAME_CHARS + 1} characters; at most ${MAX_FILENAME_CHARS} are taken`);
 
@@ -215,11 +235,18 @@ describe("#3434 go.mod: one line past what any directive holds is reported, not 
     assert.deepEqual(reported(past).map(([line]) => line), [5]);
     assert.match(reported(past)[0][1], GOMOD_OVER);
     // From its first token, a line of exactly LINE_MAX characters is read (indentation before it is not counted).
+    // #3460: read, its module path (past NAME_MAX, 512 characters) is reported as such, not past the line's bound.
     const path = (n) => `example.com/${"p".repeat(n - "require example.com/ v1.0.0".length)}`;
     const fits = readInChild("go.mod", [[`${head}\t\trequire ${path(GOMOD_LINE_MAX)} v1.0.0\n`, 1]]);
-    assert.deepEqual(fits.not_checked, []);
-    assert.equal(fits.purls.length, 1);
-    assert.equal(fits.purls[0].length, `pkg:golang/${path(GOMOD_LINE_MAX)}@v1.0.0`.length);
+    assert.deepEqual(fits.purls, []);
+    assert.deepEqual(reported(fits), [[5, `a name or version of more than ${C.NAME_MAX} characters, which no purl the API checks holds: not read`]]);
+    // Control: a path of NAME_MAX characters, on the same line's tokenizer, is within the name's bound, and is listed
+    // for its purl instead ("pkg:golang/" and "@v1.0.0" take it past 512 characters, #3381's round-7 verification,
+    // R7V-2.2: through round 7 it was kept, and the call refused for it); one whose purl is 512 characters is read.
+    const named = readInChild("go.mod", [[`${head}\t\trequire example.com/${"p".repeat(C.NAME_MAX - "example.com/".length)} v1.0.0\n`, 1]]);
+    assert.deepEqual([named.purls, reported(named).map(([line, detail]) => [line, LONG_PURL.test(detail)])], [[], [[5, true]]]);
+    const atPurl = readInChild("go.mod", [[`${head}\t\trequire example.com/${"p".repeat(C.PURL_MAX - "pkg:golang/example.com/@v1.0.0".length)} v1.0.0\n`, 1]]);
+    assert.deepEqual([atPurl.not_checked, atPurl.purls.map((x) => x.length)], [[], [C.PURL_MAX]]);
     const over = readInChild("go.mod", [[`${head}\t\trequire ${path(GOMOD_LINE_MAX + 1)} v1.0.0\n`, 1]]);
     assert.deepEqual(over.purls, []);
     assert.match(reported(over)[0][1], GOMOD_OVER);
@@ -397,7 +424,13 @@ describe("#3434 Cargo.lock and poetry.lock: a dotted key or table header of more
   it("a key, a header, an array-of-tables header and an inline table's key of 1,666,000 parts in 5 MB: unreadable at its 65th part, in the image's heap", () => {
     for (const [what, at] of shapes) {
       const [open, close] = at("\0").split("\0");
-      const out = readInChild("Cargo.lock", [[open, 1], ["ab.", 1_666_000], [`a${close}`, 1]], { refused: true });
+      const segments = [[open, 1], ["ab.", 1_666_000], [`a${close}`, 1]];
+      // #3381: estimated past the parse bound (1,666,000 dots), so unreadable before it is read; with that bound
+      // lifted, the reader refuses it at its 65th part, in the image's heap. The image's bound is passed, not taken
+      // from this process's heap, so the packed tarball's run (no Dockerfile.http, Node's own heap) asserts the same.
+      const imageParse = B.budgetsFor(B.IMAGE_HEAP_LIMIT).parseBytes;
+      assert.match(readInChild("Cargo.lock", segments, { refused: true, parseBytes: imageParse }).refused ?? "", new RegExp(`${TOML_DENSE.source}$`), what);
+      const out = readInChild("Cargo.lock", segments, { refused: true, parseBytes: Infinity });
       assert.match(out.refused ?? "", new RegExp(`a dotted key of more than ${KEY_PARTS_MAX} parts on line 1$`), what);
     }
   });
@@ -457,14 +490,17 @@ console.log(JSON.stringify({ lengths: [...new Set(kept.map((s) => s.length))], l
   });
   it("names are clipped: a 4,900,000-character Cargo.lock package name in a not_checked entry is its first 199 characters and …", () => {
     const out = readInChild("Cargo.lock", [['[[package]]\nname = "', 1], ["n", 4_900_000], ['"\nversion = "1"\n', 1]]);
-    assert.deepEqual(out.not_checked.map((n) => [n.reason, n.name_chars, n.spec_chars]), [["local_path", SPEC_MAX, SPEC_MAX]]);
+    // #3460: past NAME_MAX, so reported as such (unsupported_line), before its missing source is looked at.
+    assert.deepEqual(out.not_checked.map((n) => [n.reason, n.name_chars, n.spec_chars]), [["unsupported_line", SPEC_MAX, SPEC_MAX]]);
   });
   it("package-lock.json v1: 1,999 dependencies under a 4,900,000-character one: each spec is the first 199 characters of its install path, read in linear time", () => {
     const kids = Array.from({ length: NOT_CHECKED_MAX - 1 }, (_, k) => `"k${k}":{}`).join(",");
     const out = readInChild("package-lock.json", [['{"lockfileVersion":1,"dependencies":{"', 1], ["a", 4_900_000], [`":{"version":"1.0.0","dependencies":{${kids}}}}}`, 1]]);
-    assert.equal(out.not_checked.length, NOT_CHECKED_MAX - 1);
+    // #3460: the parent's name is past NAME_MAX, so it is listed too (unsupported_line), first; its children as before.
+    assert.equal(out.not_checked.length, NOT_CHECKED_MAX);
     const spec = clipped(`node_modules/${"a".repeat(SPEC_MAX)}`);
-    for (const n of out.not_checked) assert.deepEqual([n.spec, n.spec_chars, n.reason], [spec.slice(0, 60), SPEC_MAX, "version_unresolved"]);
+    assert.deepEqual([out.not_checked[0].spec, out.not_checked[0].reason], [spec.slice(0, 60), "unsupported_line"]);
+    for (const n of out.not_checked.slice(1)) assert.deepEqual([n.spec, n.spec_chars, n.reason], [spec.slice(0, 60), SPEC_MAX, "version_unresolved"]);
     // Each child's path is built on its parent's first SPEC_MAX characters, never flattened whole: 1,999 flattenings of
     // the 4,900,000-character path take seconds.
     assert.ok(out.ms < 2_000, `read in ${out.ms} ms`);
@@ -638,6 +674,286 @@ describe("#3434 the per-call bounds: past one, the call is refused, naming it", 
   });
 });
 
+// #3460: one case per reader, each a name or version of millions of the character its reader split it on (or would
+// encode a segment at a time), beside an entry of the same file that is read. N: what fits the 5,000,000-character cap.
+const N3460 = 4_900_000;
+const LONG = new RegExp(`^a name or version of more than ${C.NAME_MAX} characters, which no purl the API checks holds: not read$`);
+const REGISTRY = 'source = "registry+https://github.com/rust-lang/crates.io-index"';
+const CASES_3460 = [
+  ["package-lock.json v1, a dependency's key of '/'", "package-lock.json", [['{"lockfileVersion":1,"dependencies":{"', 1], ["/", N3460], ['":{"version":"1.0.0"},"ok":{"version":"1.0.0"}}}', 1]], ["pkg:npm/ok@1.0.0"]],
+  ["package-lock.json v2, an entry's name of '/'", "package-lock.json", [['{"lockfileVersion":2,"packages":{"node_modules/x":{"name":"', 1], ["/", N3460], ['","version":"1.0.0"},"node_modules/ok":{"version":"1.0.0"}}}', 1]], ["pkg:npm/ok@1.0.0"]],
+  ["package-lock.json v3, an install path of '/'", "package-lock.json", [['{"lockfileVersion":3,"packages":{"node_modules/', 1], ["/", N3460], ['":{"version":"1.0.0"},"node_modules/ok":{"version":"1.0.0"}}}', 1]], ["pkg:npm/ok@1.0.0"]],
+  ["Cargo.lock, a package name of '/'", "Cargo.lock", [['[[package]]\nname = "', 1], ["/", N3460], [`"\nversion = "1.0.0"\n${REGISTRY}\n\n[[package]]\nname = "ok"\nversion = "1.0.0"\n${REGISTRY}\n`, 1]], ["pkg:cargo/ok@1.0.0"]],
+  ["poetry.lock, a package name of '/'", "poetry.lock", [['[[package]]\nname = "', 1], ["/", N3460], ['"\nversion = "1.0.0"\n\n[[package]]\nname = "ok"\nversion = "1.0.0"\n', 1]], ["pkg:pypi/ok@1.0.0"]],
+  ["composer.lock, a package name of '/'", "composer.lock", [['{"packages":[{"name":"', 1], ["/", N3460], ['","version":"1.0.0"},{"name":"v/ok","version":"1.0.0"}]}', 1]], ["pkg:composer/v/ok@1.0.0"]],
+  ["Gemfile.lock, a version of '-' and a gem name of '/'", "Gemfile.lock", [["GEM\n  remote: https://rubygems.org/\n  specs:\n    a (", 1], ["-", N3460 / 2], [")\n    ", 1], ["/", N3460 / 2], [" (1.0.0)\n    ok (1.0.0)\n", 1]], ["pkg:gem/ok@1.0.0"]],
+  ["gradle.lockfile, a line of '=' after its coordinates, and an artifact past the bound", "gradle.lockfile", [["a:b:1.0=", 1], ["=", N3460], [`\ng:${"x".repeat(600)}:1.0=compileClasspath\nc:ok:2.0=compileClasspath\n`, 1]], ["pkg:maven/a/b@1.0", "pkg:maven/c/ok@2.0"]],
+];
+
+describe("#3460 every name and version a reader takes from a file is bounded before it is split: a file of millions of the split character is read, in the image's heap", () => {
+  it("NAME_MAX is the longest purl match_batch.ts sends (MAX_PURL_LEN)", async () => {
+    const MB = await import(dist("tools/match_batch.js"));
+    assert.equal(C.NAME_MAX, MB.MAX_PURL_LEN);
+  });
+  for (const [what, filename, segments, read] of CASES_3460) {
+    it(`${what}: that entry not checked (unsupported_line), the others read, quickly`, () => {
+      const out = readInChild(filename, segments);
+      for (const purl of read) assert.ok(out.purls.includes(purl), `${what}: ${purl} not read: ${JSON.stringify(out.purls)}`);
+      const long = out.not_checked.filter((n) => n.reason === "unsupported_line" && LONG.test(n.detail));
+      const want = filename === "Gemfile.lock" ? 2 : 1;
+      assert.equal(long.length, want, `${what}: ${JSON.stringify(out.not_checked).slice(0, 600)}`);
+    });
+  }
+});
+
+// #3460, end to end: each such file sent to dist/http.js started as its image starts it, an instance of its own for
+// each (one that ends does not hide the next): answered, that entry not checked, the instance alive.
+describe("#3460 the hosted endpoint, started as its image starts it, answers each format's file of millions of its split character", { skip: IMAGE_SKIP }, () => {
+  let api;
+  before(async () => {
+    api = await stubApi();
+  });
+  after(async () => {
+    await api?.close();
+  });
+  for (const [what, filename, segments, read] of CASES_3460) {
+    it(`${what}: answered, the entry not checked, the instance alive`, async () => {
+      const srv = await startServer(api.base);
+      try {
+        const content = segments.map(([x, n]) => x.repeat(n)).join("");
+        const t0 = Date.now();
+        const r = await post(srv.port, toolCall("scan_manifest", { files: [{ filename, content }] }));
+        const ms = Date.now() - t0;
+        assert.equal(r.status, 200, `${what}: ${JSON.stringify(r).slice(0, 300)}`);
+        const sc = resultOf(r)?.structuredContent;
+        assert.equal(sc?.state, "measured", `${what}: ${String(r.text).slice(0, 300)}`);
+        assert.ok(ms < 10_000, `${what}: answered after ${ms} ms`);
+        assert.equal(sc.coverage.sent, read.length, what);
+        assert.equal(sc.data.not_checked.filter((n) => n.reason === "unsupported_line" && LONG.test(n.detail)).length, filename === "Gemfile.lock" ? 2 : 1, `${what}: ${JSON.stringify(sc.data.not_checked).slice(0, 300)}`);
+        await assertAlive(srv, what);
+      } finally {
+        await srv.stop();
+      }
+    });
+  }
+});
+
+// #3381's round-7 verification (R7V-2.2, R7V-2.3): a name and version each within NAME_MAX can still make a purl past
+// the 512 characters the API takes, once percent-encoded ('%' is %25, U+4E00 is %E4%B8%80). Through round 7 such a purl
+// was kept, what readFiles held of the purls up to some 6 times what was reserved for them, and the whole call was
+// refused for it ("purl 2 is longer than 512 characters", an index the caller could not map to a file or line). Now
+// that entry is listed not checked (unsupported_line), no purl is kept for it, and the call's other entries are read.
+describe("#3381's round-7 verification: an entry whose purl, percent-encoded, is past 512 characters is listed, the rest read", () => {
+  it("requirements.txt: a version of 200 '%' between two pins: the two read, it listed on its line", () => {
+    const out = readInChild("requirements.txt", [["django==4.2.7\na==", 1], ["%", 200], ["\nflask==2.0.0\n", 1]]);
+    assert.deepEqual(out.purls, ["pkg:pypi/django@4.2.7", "pkg:pypi/flask@2.0.0"]);
+    assert.deepEqual(reported(out).map(([line, detail]) => [line, LONG_PURL.test(detail)]), [[2, true]]);
+  });
+  it("requirements.txt: 4,070 versions of 512 x U+4E00 (4,620-character purls) after a pin: each listed, no purl kept for any", () => {
+    const out = readInChild("requirements.txt", [["ok==1.0.0\n", 1], [`a==${"一".repeat(512)}\n`, 4070]]);
+    assert.deepEqual(out.purls, ["pkg:pypi/ok@1.0.0"]);
+    assert.equal(out.not_checked_by_reason.unsupported_line, 4070, JSON.stringify(out.not_checked_by_reason));
+    assert.ok(out.not_checked.every((n) => n.reason === "unsupported_line" && LONG_PURL.test(n.detail)), JSON.stringify(out.not_checked[0]));
+  });
+  it("at the bound: a purl of 512 characters is read, one of 513 listed", () => {
+    const v = (n) => "b".repeat(n - "pkg:pypi/a@".length);
+    const at = readInChild("requirements.txt", [[`a==${v(C.PURL_MAX)}\n`, 1]]);
+    assert.deepEqual([at.not_checked, at.purls.map((x) => x.length)], [[], [C.PURL_MAX]]);
+    const past = readInChild("requirements.txt", [[`a==${v(C.PURL_MAX + 1)}\nok==1.0.0\n`, 1]]);
+    assert.deepEqual([past.purls, reported(past).map(([line, detail]) => [line, LONG_PURL.test(detail)])], [["pkg:pypi/ok@1.0.0"], [[1, true]]]);
+  });
+  it("hosted, as its image starts it: the reviewer's call is measured, its two pins sent, the third listed", { skip: IMAGE_SKIP }, async () => {
+    const api = await stubApi();
+    const srv = await startServer(api.base);
+    try {
+      for (const [content, sent] of [[`django==4.2.7\na==${"%".repeat(200)}\nflask==2.0.0\n`, 2], [`ok==1.0.0\n${`a==${"一".repeat(512)}\n`.repeat(4070)}`, 1]]) {
+        const r = await post(srv.port, toolCall("scan_manifest", { files: [{ filename: "requirements.txt", content }] }));
+        assert.equal(r.status, 200, JSON.stringify(r).slice(0, 300));
+        const sc = resultOf(r)?.structuredContent;
+        assert.equal(sc?.state, "measured", String(r.text).slice(0, 300));
+        assert.equal(sc.coverage.sent, sent);
+        assert.ok(sc.data.not_checked.length > 0 && sc.data.not_checked.every((n) => n.reason === "unsupported_line" && LONG_PURL.test(n.detail)), JSON.stringify(sc.data.not_checked).slice(0, 300));
+        await assertAlive(srv, `${content.length} characters`);
+      }
+    } finally {
+      await srv.stop();
+      await api.close();
+    }
+  });
+});
+
+// #3460's round-10 review (d2-3460). F1: a TOML key from the file never reaches Object.prototype (toml.ts table());
+// F2: no reason or note repeats a value of the file unbounded; F3, F6, F7: a purl past PURL_MAX is counted, never
+// built, and its entry listed by its reader at its own place, with its own name and text (common.ts purlOf); F4: a lone
+// surrogate in one entry lists that entry, and the file's other entries are read; F5: a basename of __proto__ or
+// constructor is refused as any other unknown name.
+const LONE = /^a name or version holding a lone surrogate \(half of a UTF-16 pair\), which no purl can encode: not read$/;
+// Reads each file in a process of its own and prints what reading them left on Object.prototype.
+const PROTO_CHILD = `
+const { readFile } = await import(process.env.MANIFESTS_JS);
+const before = Object.getOwnPropertyNames(Object.prototype).sort().join();
+const read = JSON.parse(process.env.PROTO_CASE).map(([format, content]) => readFile(format, content));
+const after = Object.getOwnPropertyNames(Object.prototype).sort().join();
+console.log(JSON.stringify({ read, x: ({}).x, link: ({}).link, hasOwnProperty: typeof Object.prototype.hasOwnProperty, same: before === after }));
+`;
+function protoInChild(files) {
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", PROTO_CHILD], {
+    env: { ...process.env, MANIFESTS_JS: dist("tools/manifests/index.js"), PROTO_CASE: JSON.stringify(files) },
+    encoding: "utf8",
+    timeout: CASE_TIMEOUT_MS,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout.trim().split("\n").at(-1));
+}
+describe("#3460's round-10 review: what a file holds never reaches Object.prototype, a reason or note, or a purl past PURL_MAX", () => {
+  it("F1: a Cargo.lock or poetry.lock key named __proto__, as a table header, a dotted key or quoted, is unreadable on its line; Object.prototype is untouched", () => {
+    const out = protoInChild([
+      ["Cargo.lock", "[__proto__]\nhasOwnProperty = 1\n"],
+      ["Cargo.lock", "__proto__.x = 1\n"],
+      ["Cargo.lock", "[__proto__]\nlink = true\npackage = \"x\"\n"],
+      ["poetry.lock", '[[package]]\nname = "a"\nversion = "1.0"\n\n[package."__proto__"]\nx = 1\n'],
+      ["Cargo.lock", "[a]\nb = { __proto__ = { x = 1 } }\n"],
+    ]);
+    assert.deepEqual([out.x, out.link, out.hasOwnProperty, out.same], [undefined, undefined, "function", true], JSON.stringify(out));
+    for (const r of out.read) assert.match(r.unreadable, /^it is not TOML this reader can read: a key named __proto__, which no lockfile writes on line \d+$/, JSON.stringify(r));
+  });
+  it("F1: keys named constructor and prototype (PyPI holds packages of both names) are read as the table's own, and a [[package]] beside them is checked", () => {
+    const poetry = '[[package]]\nname = "app"\nversion = "1.0.0"\n\n[package.dependencies]\nconstructor = ">=3"\nprototype = "*"\nhasOwnProperty = "1"\n\n[metadata.files]\nconstructor = []\nprototype = []\n';
+    const out = protoInChild([["poetry.lock", poetry], ["Cargo.lock", '[[package]]\nname = "constructor"\nversion = "0.1.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n\n[constructor]\nprototype = 1\n']]);
+    assert.deepEqual([out.x, out.hasOwnProperty, out.same], [undefined, "function", true], JSON.stringify(out));
+    assert.deepEqual(out.read.map((r) => r.pinned?.map((p) => p.purl)), [["pkg:pypi/app@1.0.0"], ["pkg:cargo/constructor@0.1.0"]], JSON.stringify(out.read));
+  });
+  it("F2: a package-lock.json's lockfileVersion of 3,100,000 characters, and a go directive of 65,000, are named in under 1,000 characters", () => {
+    const lv = `{"lockfileVersion":"${"\\\\".repeat(1_550_000)}"}`;
+    const refused = SM.readFiles({ files: [{ filename: "package-lock.json", content: lv }] });
+    assert.equal(typeof refused, "string");
+    assert.ok(refused.length < 1_000, `${refused.length} characters: ${refused.slice(0, 200)}`);
+    assert.match(refused, /has lockfileVersion "(\\\\){39}…" and no packages object/);
+    for (const [v, said] of [[[1, 2], "an array"], [{ a: "b".repeat(100_000) }, "an object"], [2.5, "2.5"], [null, "null"]]) {
+      const r = M.readFile("package-lock.json", JSON.stringify({ lockfileVersion: v }));
+      assert.equal(r.unreadable, `it has lockfileVersion ${said} and no packages object`);
+    }
+    const go = M.readFile("go.mod", `module m\n\ngo 1.16${"x".repeat(65_000)}\n\nrequire a v1.0.0\n`);
+    assert.equal(go.notes.length, 1);
+    assert.ok(go.notes[0].length < 1_000, `${go.notes[0].length} characters`);
+    assert.match(go.notes[0], /^Its go directive is 1\.16x{195}…, below 1\.17/);
+  });
+  // One entry each whose name and version are within NAME_MAX but whose purl is not, between two that are read.
+  const C512 = "一".repeat(512);
+  const LONG_CASES = [
+    ["requirements.txt", `ok==1.0.0\na==${C512}\nflask==2.0.0\n`, 2, "a", ["pkg:pypi/ok@1.0.0", "pkg:pypi/flask@2.0.0"]],
+    ["go.mod", `module m\n\ngo 1.21\n\nrequire ok v1.0.0\nrequire ${C512} v1.0.0\nrequire b v1.0.0\n`, 6, C512, ["pkg:golang/ok@v1.0.0", "pkg:golang/b@v1.0.0"]],
+    ["package-lock.json", JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/ok": { version: "1.0.0" }, "node_modules/a": { version: C512 }, "node_modules/b": { version: "1.0.0" } } }), null, "a", ["pkg:npm/ok@1.0.0", "pkg:npm/b@1.0.0"]],
+    ["package-lock.json", JSON.stringify({ lockfileVersion: 1, dependencies: { ok: { version: "1.0.0" }, a: { version: C512 }, b: { version: "1.0.0" } } }), null, "a", ["pkg:npm/ok@1.0.0", "pkg:npm/b@1.0.0"]],
+    ["Cargo.lock", `[[package]]\nname = "ok"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n\n[[package]]\nname = "a"\nversion = "${C512}"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n\n[[package]]\nname = "b"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n`, 6, "a", ["pkg:cargo/ok@1.0.0", "pkg:cargo/b@1.0.0"]],
+    ["poetry.lock", `[[package]]\nname = "ok"\nversion = "1.0.0"\n\n[[package]]\nname = "a"\nversion = "${C512}"\n\n[[package]]\nname = "b"\nversion = "1.0.0"\n`, 5, "a", ["pkg:pypi/ok@1.0.0", "pkg:pypi/b@1.0.0"]],
+    ["Gemfile.lock", `GEM\n  specs:\n    ok (1.0.0)\n    a (${C512})\n    b (1.0.0)\n`, 4, "a", ["pkg:gem/ok@1.0.0", "pkg:gem/b@1.0.0"]],
+    ["composer.lock", JSON.stringify({ packages: [{ name: "v/ok", version: "1.0.0" }, { name: "v/a", version: C512 }, { name: "v/b", version: "1.0.0" }] }), null, "v/a", ["pkg:composer/v/ok@1.0.0", "pkg:composer/v/b@1.0.0"]],
+    ["gradle.lockfile", `g:ok:1.0.0=c\ng:a:${C512}=c\ng:b:1.0.0=c\n`, 2, "a", ["pkg:maven/g/ok@1.0.0", "pkg:maven/g/b@1.0.0"]],
+  ];
+  for (const [format, content, line, name, purls] of LONG_CASES) {
+    it(`F3, F7: ${format}${format === "package-lock.json" ? ` v${JSON.parse(content).lockfileVersion}` : ""}: the reader builds no purl past ${C.PURL_MAX} characters, and lists that entry at its own place, with its name and the file's text`, () => {
+      const r = M.FORMATS[format].read(content);
+      assert.deepEqual(r.pinned.map((p) => p.purl), purls, format);
+      assert.equal(r.not_checked.length, 1, JSON.stringify(r.not_checked).slice(0, 300));
+      const [n] = r.not_checked;
+      assert.deepEqual([n.reason, n.detail, n.line, n.name], ["unsupported_line", C.LONG_PURL_DETAIL, line, M.SPEC_MAX < name.length ? `${name.slice(0, M.SPEC_MAX - 1)}…` : name]);
+      assert.ok(!n.spec.startsWith("pkg:"), `${format}: its spec is the purl, not the file's text: ${n.spec.slice(0, 80)}`);
+    });
+  }
+  it("F3: the purl's length is counted as seg() and segPath() build it, for every ASCII character, two- to four-byte UTF-8, and a '/' in a name or a maven segment", () => {
+    const cs = [...Array.from({ length: 128 }, (_, c) => String.fromCharCode(c)), "é", "ߧ", "一", "￿", "😀"];
+    for (const c of cs) {
+      for (const [n, at] of [[Math.floor(400 / 12), "under"], [600, "past"]]) {
+        const v = c.repeat(n);
+        const b = C.purlOf("npm", `@s/${v}`, v);
+        const enc = (x) => encodeURIComponent(x).replace(/%2B/g, "+");
+        const built = `pkg:npm/${`@s/${v}`.split("/").map(enc).join("/")}@${enc(v)}`;
+        if (built.length <= C.PURL_MAX) assert.deepEqual(b, { purl: built }, `${JSON.stringify(c)} ${at}`);
+        else assert.deepEqual(b, { why: C.LONG_PURL_DETAIL }, `${JSON.stringify(c)} ${at}: ${built.length}`);
+        const m = C.purlOf("maven", [`g${v}`, `a${v}`], "1");
+        const mb = `pkg:maven/${encodeURIComponent(`g${v}`).replace(/%2B/g, "+")}/${encodeURIComponent(`a${v}`).replace(/%2B/g, "+")}@1`;
+        assert.deepEqual(m, mb.length <= C.PURL_MAX ? { purl: mb } : { why: C.LONG_PURL_DETAIL }, `maven ${JSON.stringify(c)} ${at}`);
+      }
+    }
+  });
+  it("F6: a go.mod replace whose replacement's purl is past PURL_MAX is not listed as applied: the require is listed, naming the replace", () => {
+    const r = SM.readFiles({ files: [{ filename: "go.mod", content: `require example.com/a v1.0.0\nrequire golang.org/x/net v0.1.0\nreplace example.com/a => example.com/${"一".repeat(60)} v1.2.3\n` }] });
+    assert.deepEqual([r.purls, r.replaced_total, r.files[0].replaced], [["pkg:golang/golang.org/x/net@v0.1.0"], 0, []]);
+    assert.equal(r.not_checked.length, 1);
+    assert.deepEqual([r.not_checked[0].name, r.not_checked[0].line, r.not_checked[0].reason], ["example.com/a", 1, "unsupported_line"]);
+    assert.match(r.not_checked[0].detail, /^replaced by example\.com\/一{60} \(replace on line 3\): its purl, percent-encoded, is longer than the 512 characters the API takes: not read$/);
+    // Control: a replacement whose purl fits is applied as before.
+    const ok = SM.readFiles({ files: [{ filename: "go.mod", content: `require example.com/a v1.0.0\nreplace example.com/a => example.com/b v1.2.3\n` }] });
+    assert.deepEqual([ok.purls, ok.files[0].replaced], [["pkg:golang/example.com/b@v1.2.3"], [{ from: "example.com/a@v1.0.0", to: "example.com/b@v1.2.3" }]]);
+  });
+  it("F7: a long-purl entry first in a file of 2,000 more is listed first, as the first of the 2,000 read", () => {
+    const content = `a==${"%".repeat(200)}\n${Array.from({ length: 2_000 }, (_, i) => `p${i}>=1\n`).join("")}`;
+    const r = SM.readFiles({ files: [{ filename: "requirements.txt", content }] });
+    assert.deepEqual([r.not_checked.length, r.not_checked_total], [NOT_CHECKED_MAX, 2_001]);
+    assert.deepEqual([r.not_checked[0].line, r.not_checked[0].name, r.not_checked[0].detail], [1, "a", C.LONG_PURL_DETAIL]);
+    assert.equal(r.not_checked[0].spec, clipped(`a==${"%".repeat(200)}`));
+    assert.equal(r.not_checked.at(-1).line, NOT_CHECKED_MAX);
+  });
+  const LONE_CASES = [
+    ["requirements.txt", "django==4.2.7\na==1.0\ud800\nflask==2.0.0\n", "a"],
+    ["go.mod", "require ok v1.0.0\nrequire a\ud800 v1.0.0\nrequire b v1.0.0\n", "a\ud800"],
+    ["package-lock.json", '{"lockfileVersion":3,"packages":{"node_modules/ok":{"version":"1.0.0"},"node_modules/a":{"name":"\\ud800","version":"1.0.0"},"node_modules/b":{"version":"1.0.0"}}}', "\ud800"],
+    ["Cargo.lock", `[[package]]\nname = "ok"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n\n[[package]]\nname = 'a\ud800'\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n`, "a\ud800"],
+    ["poetry.lock", '[[package]]\nname = "ok"\nversion = "1.0.0"\n\n[[package]]\nname = "a"\nversion = "1.0\ud800"\n', "a"],
+    ["Gemfile.lock", "GEM\n  specs:\n    ok (1.0.0)\n    a\ud800 (1.0.0)\n", "a\ud800"],
+    ["composer.lock", '{"packages":[{"name":"v/ok","version":"1.0.0"},{"name":"v/\\udc00","version":"1.0.0"}]}', "v/\udc00"],
+    ["gradle.lockfile", "g:ok:1.0.0=c\ng:a\ud800:1.0=c\n", "a\ud800"],
+  ];
+  for (const [format, content, name] of LONE_CASES) {
+    it(`F4: ${format}: an entry holding a lone surrogate is listed unsupported_line, and the file's other entries are read`, () => {
+      const r = SM.readFiles({ files: [{ filename: format, content }, { filename: "requirements.txt", content: "requests==2.31.0\n" }] });
+      assert.equal(typeof r, "object", String(r));
+      assert.equal(r.files[0].read, true, r.files[0].refused);
+      assert.ok(r.purls.length >= 2, JSON.stringify(r.purls));
+      assert.ok(r.purls.includes("pkg:pypi/requests@2.31.0"));
+      assert.equal(r.not_checked.length, 1, JSON.stringify(r.not_checked));
+      assert.deepEqual([r.not_checked[0].reason, r.not_checked[0].name], ["unsupported_line", name]);
+      assert.match(r.not_checked[0].detail, LONE);
+    });
+  }
+  it("F5: a file whose basename is __proto__, constructor, hasOwnProperty or toString is refused as a name this tool does not read, and the call's other files are read", () => {
+    for (const f of ["__proto__", "src/constructor", "a/hasOwnProperty", "toString", "valueOf"]) {
+      const d = M.detect(f);
+      assert.equal(typeof d.refused, "string", f);
+      assert.match(d.refused, /is not a file name this tool reads/, f);
+      const r = SM.readFiles({ files: [{ filename: f, content: "x" }, { filename: "requirements.txt", content: "django==4.2.7\n" }] });
+      assert.equal(typeof r.files[0].refused, "string", f);
+      assert.deepEqual(r.purls, ["pkg:pypi/django@4.2.7"], f);
+    }
+  });
+  it("F1, hosted, as its image starts it: after a Cargo.lock of [__proto__] hasOwnProperty, and one of __proto__.x, tools/list and a package-lock.json are answered as before", { skip: IMAGE_SKIP }, async () => {
+    const api = await stubApi();
+    const srv = await startServer(api.base);
+    try {
+      for (const content of ["[__proto__]\nhasOwnProperty = 1\n", "__proto__.x = 1\n", "[__proto__]\nlink = true\npackage = \"x\"\n"]) {
+        const r = await post(srv.port, toolCall("scan_manifest", { files: [{ filename: "Cargo.lock", content }] }));
+        assert.equal(r.status, 200, JSON.stringify(r).slice(0, 300));
+        const sc = resultOf(r)?.structuredContent;
+        assert.equal(sc?.state, "invalid_input", String(r.text).slice(0, 300));
+        assert.match(sc.error.message, /a key named __proto__/);
+      }
+      const list = await post(srv.port, JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }));
+      assert.equal(list.status, 200, String(list.text).slice(0, 300));
+      assert.equal(resultOf(list)?.tools?.length, 16, String(list.text).slice(0, 300));
+      const lock = JSON.stringify({ lockfileVersion: 3, packages: { "": {}, "node_modules/lodash": { version: "4.17.20" } } });
+      const r = await post(srv.port, toolCall("scan_manifest", { files: [{ filename: "package-lock.json", content: lock }] }));
+      const sc = resultOf(r)?.structuredContent;
+      assert.equal(sc?.state, "measured", String(r.text).slice(0, 300));
+      assert.deepEqual([sc.coverage.sent, sc.data.not_checked], [1, []]);
+      await assertAlive(srv, "after the __proto__ files");
+    } finally {
+      await srv.stop();
+      await api.close();
+    }
+  });
+});
+
 describe("#3434 the hosted endpoint, started as its image starts it, answers each such file and the next request", { skip: IMAGE_SKIP }, () => {
   let api;
   let srv;
@@ -700,6 +1016,19 @@ describe("#3434 the hosted endpoint, started as its image starts it, answers eac
       for (const n of sc.data.not_checked) assert.ok(n.detail.length < 300, n.detail.slice(0, 100));
     }
   });
+  // #3460: the issue's call, a package-lock.json whose one name is 4.9 million '/' (the hosted container ended, exit
+  // 139), and its control of 'a': each answered, that entry not checked, the instance alive.
+  it("#3460: a package-lock.json whose name is 4.9 million '/', and the same of 'a': answered, the entry not checked, the next request answered", async () => {
+    for (const ch of ["/", "a"]) {
+      const lock = `{"lockfileVersion":3,"packages":{"node_modules/x":{"name":"${ch.repeat(N3460)}","version":"1.0.0"},"node_modules/ok":{"version":"1.0.0"}}}`;
+      const t0 = Date.now();
+      const sc = await scan("package-lock.json", lock);
+      assert.ok(Date.now() - t0 < 10_000, `${ch}: answered after ${Date.now() - t0} ms`);
+      assert.equal(sc.state, "measured", `${ch}: ${JSON.stringify(sc).slice(0, 300)}`);
+      assert.equal(sc.coverage.sent, 1, ch);
+      assert.ok(sc.data.not_checked.some((n) => n.reason === "unsupported_line" && LONG.test(n.detail)), `${ch}: ${JSON.stringify(sc.data.not_checked).slice(0, 300)}`);
+    }
+  });
   it("a filename past 1,024 characters on 6,000 unpinned lines is refused, naming the bound; at 1,024, 20,000 such lines, two calls at once, are answered", async () => {
     refusedWith(await scan(`requirements-${"x".repeat(8_000)}.txt`, "a\n".repeat(6_000)), new RegExp(`files\\[0\\]\\.filename must be at most ${MAX_FILENAME_CHARS} characters long`));
     const name = `${"é".repeat(MAX_FILENAME_CHARS - "requirements.txt".length)}requirements.txt`;
@@ -721,8 +1050,11 @@ describe("#3434 the hosted endpoint, started as its image starts it, answers eac
     const kids = (k) => Object.fromEntries(Array.from({ length: k }, (_, n) => [n.toString(36), {}]));
     for (const [p, k] of [[26_000, 3_000], [32_000, 3_600]]) {
       const sc = await scan("package-lock.json", JSON.stringify({ lockfileVersion: 1, dependencies: { ["a".repeat(p)]: { version: "1.0.0", dependencies: kids(k) } } }));
-      // The parent itself is pinned, its purl longer than any the API takes: the call says so, after reading every entry.
-      refusedWith(sc, /^purl 1 is longer than 512 characters/);
+      // #3460: the parent's name is past NAME_MAX, so it is listed not checked, after every entry is read; through 3.1.5
+      // it was pinned, its purl longer than any the API takes, and the whole call was refused for it.
+      assert.equal(sc.state, "not_assessed", JSON.stringify(sc).slice(0, 300));
+      assert.equal(sc.coverage.not_checked, k + 1);
+      assert.equal(sc.data.not_checked.filter((n) => n.reason === "unsupported_line" && LONG.test(n.detail)).length, 1);
     }
   });
   it("Cargo.lock and poetry.lock strings of 4,999,000 characters with an escape every 4, two calls at once", async () => {
@@ -757,7 +1089,10 @@ describe("#3434 the hosted endpoint, started as its image starts it, answers eac
   });
   it("a dotted key, a table header and an inline table's key of 1,666,000 parts: unreadable, the process alive", async () => {
     for (const [open, close] of [["", " = 1\n"], ["[", "]\n"], ["[[", "]]\n"], ["x = {", " = 1}\n"]]) {
-      refusedWith(await scan("Cargo.lock", `${open}${"ab.".repeat(1_666_000)}a${close}`), new RegExp(`a dotted key of more than ${KEY_PARTS_MAX} parts on line 1$`));
+      // #3381: past the parse bound, so refused before it is read, saying what to do; of KEY_PARTS_MAX + 1 parts,
+      // under it, refused at its 65th part.
+      refusedWith(await scan("Cargo.lock", `${open}${"ab.".repeat(1_666_000)}a${close}`), new RegExp(`${TOML_DENSE.source}${HOSTED_HINT.source}`));
+      refusedWith(await scan("Cargo.lock", `${open}${"ab.".repeat(KEY_PARTS_MAX)}a${close}`), new RegExp(`a dotted key of more than ${KEY_PARTS_MAX} parts on line 1$`));
     }
   });
   it(`20 Gemfile.locks of a real one's shape, ${MAX_MANIFEST_LINES} lines in all, two calls at once: answered, every purl checked`, async () => {
@@ -769,18 +1104,78 @@ describe("#3434 the hosted endpoint, started as its image starts it, answers eac
     refusedWith(await scan("Gemfile.lock", `PATH\n  specs:\n${"    a (1)\n".repeat(400_000)}`), PAST_LINES);
     refusedWith(await scan("package-lock.json", `{"lockfileVersion":1,"dependencies":{${Array.from({ length: 540_000 }, (_, k) => `"${k.toString(36)}":0`).join(",")}}}`), PAST_JSON);
     refusedWith(await scan("composer.lock", `{"packages":[${"{},".repeat(1_600_000)}{}]}`), PAST_JSON);
-    refusedWith(await scan("Cargo.lock", "[[package]]\n".repeat(415_000)), PAST_TOML);
-    refusedWith(await scan("poetry.lock", `x = [${"{},".repeat(1_600_000)}]\n`), PAST_TOML);
+    // #3381: a TOML lockfile past MAX_TOML_VALUES under the parse bound is refused naming it; 3.1.3's own shapes past
+    // it are past the parse bound too, which refuses them first (TOML values are counted as they are read).
+    refusedWith(await scan("Cargo.lock", `x = [${"1,".repeat(MAX_TOML_VALUES)}1]\n`), PAST_TOML);
+    refusedWith(await scan("poetry.lock", `x = [${"1,".repeat(MAX_TOML_VALUES)}1]\n`), PAST_TOML);
+    refusedWith(await scan("Cargo.lock", "[[package]]\n".repeat(415_000)), new RegExp(`${TOML_DENSE.source}${HOSTED_HINT.source}`));
+    refusedWith(await scan("poetry.lock", `x = [${"{},".repeat(1_600_000)}]\n`), new RegExp(`${TOML_DENSE.source}${HOSTED_HINT.source}`));
   });
-  it("files at each per-call bound, two calls at once, are answered", async () => {
+  // #3381: the JSON and TOML shapes at the per-call bounds (the files 3.1.5 answered) are past the parse bound, so
+  // unreadable before they are read, saying what to do; each is answered, two calls at once, at the most entries the
+  // endpoint's reservation takes (the body's estimate and the read's, together at most what one request may hold,
+  // the parse within the parse bound), and refused from a twentieth more. What bounds them is the estimate: their parse
+  // is estimated at 1.5 to 8.5 times what it retains (each of 3.1.3's at-bound shapes 10 to 27 MB measured), and each
+  // entry is reserved as a purl kept though these are not checked, of which the answer keeps 2,000; every real
+  // lockfile measured is read (parseBudget.ts WEIGHT_MANIFEST_ENTRY, scan_manifest.ts HOSTED_READS).
+  const dense = [
+    ["package-lock.json", (n) => `{"lockfileVersion":1,"dependencies":{${Array.from({ length: n }, (_, k) => `"${k.toString(36)}":0`).join(",")}}}`, MAX_JSON_VALUES - 4, 51_000],
+    ["package-lock.json", (n) => `{"lockfileVersion":3,"packages":{${Array.from({ length: n }, (_, k) => `"node_modules/${k.toString(36)}":{}`).join(",")}}}`, Math.floor((MAX_JSON_VALUES - 5) / 2), 46_000],
+    ["Cargo.lock", (n) => '[[package]]\nname="a"\n'.repeat(n), MAX_TOML_VALUES / 2 - 1, 28_500],
+    ["poetry.lock", (n) => `x = [${"{},".repeat(n)}]\n`, MAX_TOML_VALUES - 2, 145_000],
+  ];
+  const IMAGE = B.budgetsFor(B.IMAGE_HEAP_LIMIT);
+  const MOST = IMAGE.inflightBytes - Math.floor(IMAGE.inflightBytes / 4);
+  const reserved = (filename, content) => {
+    const args = { files: [{ filename, content }] };
+    const parse = filename.endsWith(".json") ? B.documentCost(content).bytes : B.tomlEstimate(content);
+    return { parse, held: B.scanJson(Buffer.from(toolCall("scan_manifest", args))).estimate + SM.manifestEstimate(args, IMAGE) };
+  };
+  it("files at each per-call bound, two calls at once, are answered: the line formats'; the JSON and TOML ones are past the parse bound, and are answered at the most the endpoint holds", async () => {
     const at = [
       ["requirements.txt", "a\n".repeat(MAX_MANIFEST_LINES)],
       ["go.mod", `module m\n\ngo 1.21\n\nreplace a => example.com/${"d".repeat(400)} v1.0.0\n\nrequire (\n${"\ta v1\n".repeat(MAX_MANIFEST_LINES - 6)})\n`],
-      ["package-lock.json", `{"lockfileVersion":1,"dependencies":{${Array.from({ length: MAX_JSON_VALUES - 4 }, (_, k) => `"${k.toString(36)}":0`).join(",")}}}`],
-      ["package-lock.json", `{"lockfileVersion":3,"packages":{${Array.from({ length: Math.floor((MAX_JSON_VALUES - 5) / 2) }, (_, k) => `"node_modules/${k.toString(36)}":{}`).join(",")}}}`],
-      ["Cargo.lock", '[[package]]\nname="a"\n'.repeat(MAX_TOML_VALUES / 2 - 1)],
-      ["poetry.lock", `x = [${"{},".repeat(MAX_TOML_VALUES - 2)}]\n`],
     ];
     for (const [filename, content] of at) for (const sc of await call([{ filename, content }], { k: 2 })) assert.notEqual(sc.state, "invalid_input", `${filename}: ${sc.error?.message}`);
+    for (const [filename, build, atBound, most] of dense) {
+      assert.ok(reserved(filename, build(atBound)).parse > IMAGE.parseBytes, `${filename} at the bound: under the parse bound`);
+      for (const sc of await call([{ filename, content: build(atBound) }], { k: 2 })) refusedWith(sc, new RegExp(`${(filename.endsWith(".json") ? JSON_DENSE : TOML_DENSE).source}${HOSTED_HINT.source}`));
+      const r = reserved(filename, build(most));
+      assert.ok(r.parse <= IMAGE.parseBytes && r.held <= MOST, `${filename} of ${most}: ${JSON.stringify(r)}, past ${MOST}`);
+      const past = reserved(filename, build(Math.ceil(most * 1.05)));
+      assert.ok(past.parse > IMAGE.parseBytes || past.held > MOST, `${filename} of ${Math.ceil(most * 1.05)}: ${JSON.stringify(past)}, within the bounds`);
+      for (const sc of await call([{ filename, content: build(most) }], { k: 2 })) assert.notEqual(sc.state, "invalid_input", `${filename} of ${most}: ${sc.error?.message}`);
+    }
+  });
+});
+
+// Round 11 (the round-10 verify's d2 F8, N1, N2).
+describe("round 11: blank requirements.txt lines, a Gemfile.lock's long version, a lockfileVersion past a double", () => {
+  it("requirements.txt: blank lines are passed over before any pattern runs, and read as they did", () => {
+    const body = "requests==2.31.0\n\n   \n\t\nflask==3.0.0 \\\n\n  # c\ndjango==5.0\n";
+    const out = M.readFile("requirements.txt", body);
+    // As round 10 read it (the same output with the early return taken out): each entry at its own line, the
+    // continuation's blank line joined to it, the comment line nothing.
+    assert.deepEqual(out.pinned, [{ purl: "pkg:pypi/requests@2.31.0", line: 1 }, { purl: "pkg:pypi/flask@3.0.0", line: 5 }, { purl: "pkg:pypi/django@5.0", line: 8 }]);
+    assert.deepEqual(out.not_checked, []);
+    // Millions of blank lines cost within twenty times what as many characters on one line do, not a hundredfold
+    // (measured: 2,000,000 blank lines about 20 ms, one line of as many characters about 1.5 ms; round 10 about 200 ms).
+    const time = (t) => { let best = Infinity; for (let k = 0; k < 3; k++) { const t0 = process.hrtime.bigint(); M.readFile("requirements.txt", t); best = Math.min(best, Number(process.hrtime.bigint() - t0) / 1e6); } return best; };
+    const blank = time("\n".repeat(2_000_000));
+    const oneLine = time(`a${" ".repeat(1_999_999)}`);
+    assert.ok(blank < 20 * oneLine + 50, `2,000,000 blank lines took ${blank.toFixed(1)} ms, one line of as many characters ${oneLine.toFixed(1)} ms`);
+  });
+  it("Gemfile.lock: a spec whose version is past NAME_MAX is listed by its name, clipped as other readers clip it", () => {
+    const out = M.readFile("Gemfile.lock", `GEM\n  specs:\n    rails (${"1".repeat(600)})\n`);
+    const nc = out.not_checked.find((n) => n.reason === "unsupported_line");
+    assert.equal(nc?.name, "rails", JSON.stringify(nc));
+  });
+  it("package-lock.json: a lockfileVersion of 1e400 is named as a number past what a double holds, not as null", () => {
+    for (const lv of ["1e400", "-1e400"]) {
+      const u = M.readFile("package-lock.json", `{"lockfileVersion":${lv}}`).unreadable;
+      assert.match(u ?? "", /has lockfileVersion a number past what a double holds and no packages object/, lv);
+      assert.doesNotMatch(u ?? "", /lockfileVersion null/, lv);
+    }
+    assert.match(M.readFile("package-lock.json", '{"lockfileVersion":null}').unreadable ?? "", /has lockfileVersion null and no packages object/);
   });
 });

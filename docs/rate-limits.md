@@ -33,14 +33,76 @@ address, counted by each server instance, answered over it with HTTP 429, `Retry
 JSON-RPC error (code `-32029`) that names the limit and the seconds to wait. A request body over
 64 KiB is refused (HTTP 413, code `-32600`), except a `tools/call` of `check_sbom` or
 `scan_manifest`, or a `prompts/get` of `sbom_review`, which may be up to 6 MiB: enough for a
-CycloneDX or SPDX document, or a call's lockfiles, at the tools' 5,000,000-character cap. Each server instance reads at most two such large bodies at
-once; a third waits up to 15 seconds for one to finish (two may wait at once), and is answered
-HTTP 503 with `Retry-After` and a JSON-RPC error (code `-32030`) only when that wait runs out, or at
-once when two are already waiting. Each
+CycloneDX or SPDX document, or a call's lockfiles, at the tools' 5,000,000-character cap. Each server
+instance reads at most two such large bodies at once; a third waits up to 15 seconds for one to
+finish (two may wait at once), and is answered HTTP 503 with `Retry-After` and a JSON-RPC error
+(code `-32030`) only when that wait runs out, or at once when two are already waiting. Each
 instance serves at most 64 requests at once; the next waits up to 10 seconds for one to finish,
 and is then answered the same way. A `subscriptions/listen` stream is not one of the 64: the
 server sends no list-change notification, so since 3.1.1 the stream ends right after its
 acknowledgement, with a `complete` result (through 3.1.0 it stayed open until its client left).
+
+What parsing a request may hold is bounded too (#3381). Every body, at any size, is read once
+before it is parsed, and what parsing it would hold in the instance's memory is estimated from what
+it holds: its objects and arrays, list entries and object members, keys, and string bytes. A body
+estimated past what one request's parse may take is refused (HTTP 413, code `-32600`), unparsed,
+with an error that gives its counts, its estimate and the bound; every real CycloneDX or SPDX
+document measured up to 6 MiB is within it. Each body's estimate is then held in one budget for the
+instance until its request has stopped (past its deadline, until it has unwound). A body that fits
+is let in ahead of one that waits and does not, until that one has waited a second; from then on a
+body above the general 64 KiB cap is let in only if the room the waiter needs is left beside it, so
+the waiter is let in once the large requests before it end. A body within the cap is let in whatever
+waits, and so are its tool's reservations of the document it reads and of the API's answers for up to
+200 purls (one batch), while all of those together hold no more than a quarter of the budget; a call
+of more purls reserves its answers as a large body does, and waits behind such a waiter, up to the
+same 10 seconds. The answers to such a small call's batch can take that quarter past full while the
+call answers; a small body or reservation then waits as a large one does, but for a tiny body (at
+most 64 KiB of estimate: a `tools/list`, `initialize` or `ping`), which has a lane of its own, open
+whatever the quarter holds, of 4 MiB in all; a tool's reservations, however small, do not take it. A JSON-RPC batch is one request: its calls'
+reservations are made one after another, each counting what the request holds as it is then, and
+once one of them finds no room within the wait the batch's later calls wait no more: each is taken
+where it fits at once, and answered "server busy" where it does not. A body that finds no room waits up to 10 seconds, as for a place, and is then answered
+HTTP 503 with `Retry-After` and code `-32030`, so two of the largest real documents sent at once
+may be parsed one after the other. What `check_sbom` parses from an `sbom` passed as text, and
+`scan_manifest` from its lockfiles, is held in the same budget from before it is parsed until it
+has been read, and then what the answer keeps of it; and so is what the API's answers to the purls
+of a `check_sbom` or `scan_manifest` call hold, from before its first batch is sent (1,280 bytes a
+purl, and what the answers hold past that as they come: three bytes a byte of an answer for each
+row's first 512 bytes, ten for the rest, its matches) until the call ends. A tool's reservation
+takes its request's place among those that wait: one that came after the request began never holds
+it up. A call whose reservation finds no room within the wait is answered `failed`, `error.status`
+503, "server busy", which is not a finding: the same call can be answered once the instance has
+room. One whose reservation, with what its request already holds, would pass three quarters of the
+budget (the most a waiter is sure to be let in at, beside the small bodies' quarter: 31,457,280
+bytes, 30 MiB, on the hosted endpoint, what one request may reserve before it reads, its body and
+what its tools read together) is refused `invalid_input` at once, naming the bound: retrying it
+will not help. The API's answers past what was reserved for them are charged as they come, so one
+batch's answer can take a request past that bound, within what the instance has room for; the call
+then sends no further batch (below). Measured on 38 real
+lockfiles of large public repositories (24 `package-lock.json`, 8 `Cargo.lock` and 6 `poetry.lock`,
+67 KB to 1.8 MB), each was read, the costliest at 0.40 of that bound. Of files of their shape copied
+to larger sizes, a `poetry.lock` past about 3 MB is refused, where 3.1.5 answered one of 2,000
+packages or fewer; a `Cargo.lock` or `package-lock.json` that large usually already holds more than the
+2,000 distinct purls a call checks, which 3.1.5 refused too (one whose entries repeat a package at
+many install paths need not). A call of a line format can be refused within its 40,000-line bound as
+well: 40,000 lines near the 5,000,000-character cap pass it where the text holds one character past
+U+00FF (the body is then two bytes a character in memory), and not in ASCII. A lockfile can be
+checked by passing its purls to `check_sbom`, in calls of 2,000 or fewer, a line format by passing
+its lines over more calls, and either by the server run locally (`npx -y echelongraph-mcp`), whose
+bounds are a share of its own machine's memory; the refusal says which. Once the
+instance's parse budget, which holds the API's answers beside its requests' bodies and documents, is
+more than a quarter past its bound, whichever calls took it there, or a call's own request holds more
+than what one request may reserve, the call sends no further batch; and a batch's answer is read only
+to what the call's reservation still covers of it and what the budget has left when it is sent (at
+the weights above), so one larger is read no further and dropped. That bound is each call's own:
+calls reading at once each read up to what the budget had left, so their reads together can pass it
+(#3603). Each way the purls not sent are listed with `not_sent_reason` `server_busy`, not checked
+and not clean; where it is the call's first batch, the call is answered `failed`, "server busy",
+with the batch route as `error.path` and the API's 200 as `error.status`. Both bounds are a share of
+the memory the instance's deployment gives it. A server run locally (stdio) holds only a document it
+parses from text to the same share of its own heap, usually larger, so that bound is proportionally
+larger ([structured-results.md](structured-results.md)); it estimates no message before parsing it,
+has no in-flight budget, and reads the API's answers whole.
 
 A call whose client goes away (its own timeout, a closed tab) is stopped only once the server
 learns of it. Its API calls are then cancelled, `check_sbom` and `scan_manifest` send no further batch, and its

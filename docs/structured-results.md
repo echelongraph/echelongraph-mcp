@@ -60,4 +60,36 @@ members in all, counted at every depth. That is the most any tool accepts, a `ch
 passed as an object at its 5,000,000-character cap, so no call a tool would answer is refused. The
 MCP SDK counts them before any `inputSchema` is read (its `maxToolInputElements`, the fix for
 CVE-2026-111768) and answers `isError` true with one text block of its own, "Invalid arguments for
-tool <name>: arguments contain more than the maximum of 2500000 elements" (#3345).
+tool <name>: arguments contain more than the maximum of 2500000 elements" (#3345). Over the hosted
+endpoint the bound is tighter: every request body is estimated before it is parsed, by what parsing it
+would hold in memory, and one past what a request's parse may take is refused there first, HTTP 413
+with a JSON-RPC error, not a tool result ([rate-limits.md](rate-limits.md)). That can refuse a body of
+far fewer than 2,500,000 elements whose shape costs more memory than a real document's; every real
+CycloneDX or SPDX document measured up to the hosted endpoint's 6 MiB cap is within it.
+
+A document a tool parses from text is bounded the same way, on both transports: `check_sbom`'s `sbom`
+passed as a string, and `scan_manifest`'s `package-lock.json`, `npm-shrinkwrap.json`, `composer.lock`,
+`Cargo.lock` and `poetry.lock`, are estimated before they are read, and one past the bound is not
+read, naming its estimate and the bound ("too dense to read"): `check_sbom`'s call is refused
+`invalid_input`; `scan_manifest` lists that file in `data.manifest.files` with `read` false and
+`refused` saying so, reads the call's other files, and answers `invalid_input` only when no file could
+be read (#3381's review). `scan_manifest` reads at
+most 40,000 lines, 300,000 JSON values and 300,000 TOML values per call across its files, and a call
+past one is refused `invalid_input`, naming the bound and each file's count (#3434, 3.1.3). The bound
+on a document's parse is a share of the memory the server's heap may grow to, and each refusal names
+the one in force. The hosted endpoint's is fixed by its deployment: 29,360,128 bytes (28 MiB) a file's
+parse may take, and 31,457,280 bytes (30 MiB) one request may reserve before it reads, its body and
+what its tools read together (the API's answers to a call's purls are charged past that as they come,
+and one batch's answer can take a request past it, within what the instance has room for). Every real lockfile measured is within them (38 of large public repositories, to 1.8 MB);
+a `poetry.lock` past about 3 MB is refused, where 3.1.5 answered one of 2,000 packages or fewer, and a
+call near the 5,000,000-character cap can be refused within the line and value bounds above
+([rate-limits.md](rate-limits.md)); the refusal says so, and what to do: a lockfile's purls passed to
+`check_sbom`, a line format's lines over more calls, or the server run locally. A local server's heap,
+which Node sizes from the machine's memory, is usually larger, and its bound on a document's parse is
+proportionally larger, far past any real document or lockfile; it holds no per-request or in-flight bound. Over the hosted endpoint a document is also held in the instance's parse
+budget while it is read, and so is what the API's answers to `check_sbom`'s and `scan_manifest`'s
+purls hold ([rate-limits.md](rate-limits.md)): a call that finds no room is answered `failed` with
+`error.status` 503, `error.kind` `internal` and `error.path` null, "server busy": the 503 is this
+server's own, no API call was made, and it is not a finding and can be retried, and one whose reservation,
+with what its request already holds, could never be granted is refused `invalid_input` at once, which a
+retry will not change.

@@ -1,0 +1,1737 @@
+{
+ "about": "#3391: core-backend's own answers for each kind of fixed_in_dispute, dumped from its matcher (core-backend/internal/cve at #3391, by a test run through go test -overlay that serves each fixture of pkgmatch_fixedin_cna_test.go through registryTestApp and decodeJSON(matchPath(...)), re-taken 2026-11-01 during its fifth round, with nothing written to its worktree), so the relay is held to the shapes the API sends, not to synthetic ones. match: GET /api/v1/public/cves/match's answer, whole. remediation: the installed-version fields of GET .../cves/:id/remediation (installedFixFromRows, as remediation.go sets fixed_in, fixed_in_reason, fixed_in_detail and fixed_in_dispute beside installed). The cases: higher cna or advisory; kind fixed or introduced; the advisory's bound as advisory_fixed, advisory_last_affected, advisory_introduced (on either kind) or a version it lists (advisory_listed); the CNA's range ending at less_than or less_than_or_equal, with changes, or a span its defaultStatus implies (cna_range_default); a CNA that states no status past its range (cna_states_no_status: fixed_in is that range's bound, the advisory's fix being lower), and one whose range names no end (cna_affected_no_end: fixed_in null, with fixed_in_reason); a version the CNA lists by itself, which raises the match with no dispute (cna_listed_alone_no_dispute: version_evidence cna_affected_range, fixed_in null), and an advisory interval's match whose fix the CNA lists as affected, no dispute either (advisory_interval_cna_listed_at_fix: fixed_in null); and a version the CVE record's CNA states no end for, beside the advisory's fix below it, answered undetermined (cna_range_open_ended: qs 6.14.1 under CVE-2025-15284, re-taken 2026-11-07 from 95927abe, the commit that ships #3391), with no match. Round 11: a remediation answer carries no fixed_in_dispute where there is none, and installed carries the ecosystem the handler sets, as 95927abe's wire does.",
+ "cases": {
+  "cna_fixed_advisory_interval": {
+   "match": {
+    "advisories_considered": 2,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 2,
+    "cve_ids": [
+     "CVE-2026-4800",
+     "CVE-2026-2950"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2026-4800",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_detail": "fixed_in moved past the overlapping interval [4.0.0, 4.18.1) of the same record: the interval that holds this version, [4.0.0, 4.18.0), ends inside it, so its own bound is still affected",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.18.0",
+       "advisory_id": "GHSA-r5fr-rjxr-66jc",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "lodash",
+       "cna_range": {
+        "less_than": "4.18.1",
+        "status": "affected",
+        "version": "4.0.0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2026-4800 is fixed in lodash 4.18.1; GHSA-r5fr-rjxr-66jc says 4.18.0. 4.18.0 is not named as the fix because a source we hold says it is affected."
+      },
+      "interval": {
+       "fixed": "4.18.0",
+       "introduced": "4.0.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.95,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.95): npm/lodash — version 4.17.15 falls inside the advisory interval [4.0.0, 4.18.0)",
+      "matched_criteria": "pkg:npm/lodash",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "advisory_interval"
+     },
+     {
+      "cve_id": "CVE-2026-2950",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_detail": "fixed_in moved past the overlapping interval [4.17.23, 4.18.1) of the same record: the interval that holds this version, [0, 4.18.0), ends inside it, so its own bound is still affected",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.18.0",
+       "advisory_id": "GHSA-f23m-r3pf-42rh",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "lodash",
+       "cna_range": {
+        "less_than": "4.18.1",
+        "status": "affected",
+        "version": "4.17.23",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2026-2950 is fixed in lodash 4.18.1; GHSA-f23m-r3pf-42rh says 4.18.0. 4.18.0 is not named as the fix because a source we hold says it is affected."
+      },
+      "interval": {
+       "fixed": "4.18.0",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.95,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.95): npm/lodash — version 4.17.15 falls inside the advisory interval [0, 4.18.0)",
+      "matched_criteria": "pkg:npm/lodash",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "advisory_interval"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "lodash",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.17.15"
+   },
+   "package": "lodash",
+   "remediation": {
+    "fixed_in": "4.18.1",
+    "fixed_in_detail": "fixed_in moved past the overlapping interval [4.0.0, 4.18.1) of the same record: the interval that holds this version, [4.0.0, 4.18.0), ends inside it, so its own bound is still affected",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-r5fr-rjxr-66jc",
+     "advisory_fixed": "4.18.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "lodash",
+     "cna_range": {
+      "version": "4.0.0",
+      "status": "affected",
+      "less_than": "4.18.1",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2026-4800 is fixed in lodash 4.18.1; GHSA-r5fr-rjxr-66jc says 4.18.0. 4.18.0 is not named as the fix because a source we hold says it is affected."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.18.0",
+      "introduced": "4.0.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.17.15",
+     "version_evidence": "advisory_interval"
+    }
+   },
+   "version": "4.17.15"
+  },
+  "cna_fixed_cna_affected_range": {
+   "match": {
+    "advisories_considered": 2,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 2,
+    "cve_ids": [
+     "CVE-2026-4800",
+     "CVE-2026-2950"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2026-4800",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.18.0",
+       "advisory_id": "GHSA-r5fr-rjxr-66jc",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "lodash",
+       "cna_range": {
+        "less_than": "4.18.1",
+        "status": "affected",
+        "version": "4.0.0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2026-4800 is fixed in lodash 4.18.1; GHSA-r5fr-rjxr-66jc says 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.18.1",
+       "introduced": "4.0.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/lodash — version 4.18.0 is at or past 4.18.0, the fix GHSA-r5fr-rjxr-66jc records, but inside the range [4.0.0, 4.18.1) that OpenJS Foundation (CNA) states for lodash: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/lodash",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     },
+     {
+      "cve_id": "CVE-2026-2950",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.18.0",
+       "advisory_id": "GHSA-f23m-r3pf-42rh",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "lodash",
+       "cna_range": {
+        "less_than": "4.18.1",
+        "status": "affected",
+        "version": "4.17.23",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2026-2950 is fixed in lodash 4.18.1; GHSA-f23m-r3pf-42rh says 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.18.1",
+       "introduced": "4.17.23"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/lodash — version 4.18.0 is at or past 4.18.0, the fix GHSA-f23m-r3pf-42rh records, but inside the range [4.17.23, 4.18.1) that OpenJS Foundation (CNA) states for lodash: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/lodash",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "lodash",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.18.0"
+   },
+   "package": "lodash",
+   "remediation": {
+    "fixed_in": "4.18.1",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-r5fr-rjxr-66jc",
+     "advisory_fixed": "4.18.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "lodash",
+     "cna_range": {
+      "version": "4.0.0",
+      "status": "affected",
+      "less_than": "4.18.1",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2026-4800 is fixed in lodash 4.18.1; GHSA-r5fr-rjxr-66jc says 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.18.1",
+      "introduced": "4.0.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.18.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.18.0"
+  },
+  "cna_introduced": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2026-2950"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2026-2950",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.0",
+      "fixed_in_dispute": {
+       "advisory_id": "GHSA-f23m-r3pf-42rh",
+       "advisory_introduced": "4.0.0",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "lodash.unset",
+       "cna_range": {
+        "less_than": "4.18.0",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "introduced",
+       "note": "OpenJS Foundation (CNA) says CVE-2026-2950 affects lodash.unset from 0; GHSA-f23m-r3pf-42rh says from 4.0.0. 3.9.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.18.0",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.6,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.60): npm/lodash.unset — version 3.9.0 is below 4.0.0, where GHSA-f23m-r3pf-42rh records the flaw from, but inside the range [0, 4.18.0) that OpenJS Foundation (CNA) states for lodash.unset: the two disagree about where it was introduced (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/lodash.unset",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "lodash.unset",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "3.9.0"
+   },
+   "package": "lodash.unset",
+   "remediation": {
+    "fixed_in": "4.18.0",
+    "fixed_in_dispute": {
+     "kind": "introduced",
+     "advisory_id": "GHSA-f23m-r3pf-42rh",
+     "advisory_introduced": "4.0.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "lodash.unset",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "4.18.0",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2026-2950 affects lodash.unset from 0; GHSA-f23m-r3pf-42rh says from 4.0.0. 3.9.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.18.0",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "3.9.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "3.9.0"
+  },
+  "advisory_fixed": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-33911"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-33911",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "2.0.0",
+      "fixed_in_dispute": {
+       "advisory_fixed": "2.0.0",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "1.5.0",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "advisory",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-33911 is fixed in pkg 1.5.0; GHSA-test-3391 says 2.0.0. 1.6.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "2.0.0",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.95,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.95): npm/pkg — version 1.6.0 falls inside the advisory interval [0, 2.0.0)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "advisory_interval"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "1.6.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "2.0.0",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "2.0.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "1.5.0",
+      "version_type": "semver"
+     },
+     "higher": "advisory",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-33911 is fixed in pkg 1.5.0; GHSA-test-3391 says 2.0.0. 1.6.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "2.0.0",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "1.6.0",
+     "version_evidence": "advisory_interval"
+    }
+   },
+   "version": "1.6.0"
+  },
+  "cna_through_last_affected": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-33912"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-33912",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": null,
+      "fixed_in_dispute": {
+       "advisory_fixed": "2.0.0",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than_or_equal": "2.0.0",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-33912 affects pkg up to and including 2.0.0; GHSA-test-3391 says it is fixed in 2.0.0. 2.0.0 is reported as affected because a source we hold says it is."
+      },
+      "fixed_in_reason": "the interval that holds this version ends at last_affected 2.0.0; no fixed version is recorded",
+      "interval": {
+       "introduced": "0",
+       "last_affected": "2.0.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 2.0.0 is at or past 2.0.0, the fix GHSA-test-3391 records, but inside the range [0, 2.0.0] (2.0.0 is the last affected version, not a fix) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "2.0.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": null,
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "2.0.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than_or_equal": "2.0.0",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-33912 affects pkg up to and including 2.0.0; GHSA-test-3391 says it is fixed in 2.0.0. 2.0.0 is reported as affected because a source we hold says it is."
+    },
+    "fixed_in_reason": "the interval that holds this version ends at last_affected 2.0.0; no fixed version is recorded",
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "introduced": "0",
+      "last_affected": "2.0.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "2.0.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "2.0.0"
+  },
+  "cna_fixed_advisory_last_affected": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-34601"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-34601",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "2.3.1",
+      "fixed_in_dispute": {
+       "advisory_id": "GHSA-test-3391",
+       "advisory_last_affected": "1.2.4",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "2.3.1",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-34601 is fixed in pkg 2.3.1; GHSA-test-3391 says up to and including 1.2.4. 1.9.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "2.3.1",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 1.9.0 is past 1.2.4, the last version GHSA-test-3391 records as affected, but inside the range [0, 2.3.1) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "1.9.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "2.3.1",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_last_affected": "1.2.4",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "2.3.1",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-34601 is fixed in pkg 2.3.1; GHSA-test-3391 says up to and including 1.2.4. 1.9.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "2.3.1",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "1.9.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "1.9.0"
+  },
+  "advisory_open_ended": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-34701"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-34701",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": null,
+      "fixed_in_dispute": {
+       "advisory_id": "GHSA-test-3391",
+       "advisory_introduced": "1.0.0",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "2.0.0",
+        "status": "affected",
+        "version": "1.0.0",
+        "version_type": "semver"
+       },
+       "higher": "advisory",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-34701 is fixed in pkg 2.0.0; GHSA-test-3391 says every version from 1.0.0 is affected. 2.5.0 is reported as affected because a source we hold says it is."
+      },
+      "fixed_in_reason": "the interval that holds this version has no upper bound; no fixed version is recorded",
+      "interval": {
+       "introduced": "1.0.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.95,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.95): npm/pkg — version 2.5.0 falls inside the advisory interval [1.0.0, ∞)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "advisory_interval"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "2.5.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": null,
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_introduced": "1.0.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "1.0.0",
+      "status": "affected",
+      "less_than": "2.0.0",
+      "version_type": "semver"
+     },
+     "higher": "advisory",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-34701 is fixed in pkg 2.0.0; GHSA-test-3391 says every version from 1.0.0 is affected. 2.5.0 is reported as affected because a source we hold says it is."
+    },
+    "fixed_in_reason": "the interval that holds this version has no upper bound; no fixed version is recorded",
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "introduced": "1.0.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "2.5.0",
+     "version_evidence": "advisory_interval"
+    }
+   },
+   "version": "2.5.0"
+  },
+  "cna_fixed_advisory_listed": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-34501"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-34501",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_dispute": {
+       "advisory_last_affected": "4.17.21",
+       "advisory_listed": true,
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "4.18.1",
+        "status": "affected",
+        "version": "3.0.0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-34501 is fixed in pkg 4.18.1; the advisory lists 4.17.21 as affected and not 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.18.1",
+       "introduced": "3.0.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 4.18.0 is not among the versions the advisory lists as affected, but inside the range [3.0.0, 4.18.1) that OpenJS Foundation (CNA) states for pkg: the two disagree about whether it is affected (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.18.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "4.18.1",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_last_affected": "4.17.21",
+     "advisory_listed": true,
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "3.0.0",
+      "status": "affected",
+      "less_than": "4.18.1",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-34501 is fixed in pkg 4.18.1; the advisory lists 4.17.21 as affected and not 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.18.1",
+      "introduced": "3.0.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.18.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.18.0"
+  },
+  "cna_introduced_advisory_listed": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-34501"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-34501",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_dispute": {
+       "advisory_introduced": "4.17.0",
+       "advisory_listed": true,
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "4.18.1",
+        "status": "affected",
+        "version": "3.0.0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "introduced",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-34501 affects pkg from 3.0.0; the advisory lists 4.17.0 as affected and not 3.5.0. 3.5.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.18.1",
+       "introduced": "3.0.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.6,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.60): npm/pkg — version 3.5.0 is not among the versions the advisory lists as affected, but inside the range [3.0.0, 4.18.1) that OpenJS Foundation (CNA) states for pkg: the two disagree about whether it is affected (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "3.5.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "4.18.1",
+    "fixed_in_dispute": {
+     "kind": "introduced",
+     "advisory_introduced": "4.17.0",
+     "advisory_listed": true,
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "3.0.0",
+      "status": "affected",
+      "less_than": "4.18.1",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-34501 affects pkg from 3.0.0; the advisory lists 4.17.0 as affected and not 3.5.0. 3.5.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.18.1",
+      "introduced": "3.0.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "3.5.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "3.5.0"
+  },
+  "cna_changes": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-34203"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-34203",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.18.1",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.18.0",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "changes": [
+         {
+          "at": "4.18.1",
+          "status": "unaffected"
+         }
+        ],
+        "less_than": "*",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-34203 is fixed in pkg 4.18.1; GHSA-test-3391 says 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.18.1",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 4.18.0 is at or past 4.18.0, the fix GHSA-test-3391 records, but inside the range [0, 4.18.1) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.18.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "4.18.1",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "4.18.0",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "*",
+      "version_type": "semver",
+      "changes": [
+       {
+        "at": "4.18.1",
+        "status": "unaffected"
+       }
+      ]
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-34203 is fixed in pkg 4.18.1; GHSA-test-3391 says 4.18.0. 4.18.0 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.18.1",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.18.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.18.0"
+  },
+  "cna_range_default_below_unaffected": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-38002"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-38002",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.17.21",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.17.12",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "4.17.21",
+        "status": "affected",
+        "version": "0"
+       },
+       "cna_range_default": true,
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-38002 is fixed in pkg 4.17.21; GHSA-test-3391 says 4.17.12. 4.17.15 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.17.21",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 4.17.15 is at or past 4.17.12, the fix GHSA-test-3391 records, but inside the range [0, 4.17.21) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.17.15"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "4.17.21",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "4.17.12",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "4.17.21"
+     },
+     "cna_range_default": true,
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-38002 is fixed in pkg 4.17.21; GHSA-test-3391 says 4.17.12. 4.17.15 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.17.21",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.17.15",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.17.15"
+  },
+  "cna_range_default_span": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-38001"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-38001",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "5.0.0",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.17.12",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "5.0.0",
+        "status": "affected",
+        "version": "4.17.21"
+       },
+       "cna_range_default": true,
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-38001 is fixed in pkg 5.0.0; GHSA-test-3391 says 4.17.12. 4.17.21 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "5.0.0",
+       "introduced": "4.17.21"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 4.17.21 is at or past 4.17.12, the fix GHSA-test-3391 records, but inside the range [4.17.21, 5.0.0) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.17.21"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "5.0.0",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "4.17.12",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "4.17.21",
+      "status": "affected",
+      "less_than": "5.0.0"
+     },
+     "cna_range_default": true,
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-38001 is fixed in pkg 5.0.0; GHSA-test-3391 says 4.17.12. 4.17.21 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "5.0.0",
+      "introduced": "4.17.21"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.17.21",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.17.21"
+  },
+  "cna_states_no_status": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-38001"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-38001",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": "4.17.21",
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.17.12",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "4.17.21",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-38001 affects pkg below 4.17.21, and states no status from there; GHSA-test-3391 says it is fixed in 4.17.12. 4.17.15 is reported as affected because a source we hold says it is."
+      },
+      "interval": {
+       "fixed": "4.17.21",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 4.17.15 is at or past 4.17.12, the fix GHSA-test-3391 records, but inside the range [0, 4.17.21) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.17.15"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": "4.17.21",
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "4.17.12",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "4.17.21",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-38001 affects pkg below 4.17.21, and states no status from there; GHSA-test-3391 says it is fixed in 4.17.12. 4.17.15 is reported as affected because a source we hold says it is."
+    },
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.17.21",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.17.15",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.17.15"
+  },
+  "cna_affected_no_end": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-38004"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-38004",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": null,
+      "fixed_in_dispute": {
+       "advisory_fixed": "4.17.12",
+       "advisory_id": "GHSA-test-3391",
+       "cna": {
+        "name": "OpenJS Foundation",
+        "short_name": "openjs"
+       },
+       "cna_product": "pkg",
+       "cna_range": {
+        "less_than": "4.17.21",
+        "status": "affected",
+        "version": "0",
+        "version_type": "semver"
+       },
+       "higher": "cna",
+       "kind": "fixed",
+       "note": "OpenJS Foundation (CNA) says CVE-2099-38004 affects pkg from 0, and names no version where it stops; GHSA-test-3391 says it is fixed in 4.17.12. 4.17.15 is reported as affected because a source we hold says it is."
+      },
+      "fixed_in_reason": "4.17.21 is inside the interval [4.17.21, ∞) of the same record, which records no fixed version; no version above this one is recorded outside every affected interval",
+      "interval": {
+       "fixed": "4.17.21",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 4.17.15 is at or past 4.17.12, the fix GHSA-test-3391 records, but inside the range [0, 4.17.21) that OpenJS Foundation (CNA) states for pkg: the two disagree about where it is fixed (fixed_in_dispute)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "4.17.15"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": null,
+    "fixed_in_dispute": {
+     "kind": "fixed",
+     "advisory_id": "GHSA-test-3391",
+     "advisory_fixed": "4.17.12",
+     "cna": {
+      "short_name": "openjs",
+      "name": "OpenJS Foundation"
+     },
+     "cna_product": "pkg",
+     "cna_range": {
+      "version": "0",
+      "status": "affected",
+      "less_than": "4.17.21",
+      "version_type": "semver"
+     },
+     "higher": "cna",
+     "note": "OpenJS Foundation (CNA) says CVE-2099-38004 affects pkg from 0, and names no version where it stops; GHSA-test-3391 says it is fixed in 4.17.12. 4.17.15 is reported as affected because a source we hold says it is."
+    },
+    "fixed_in_reason": "4.17.21 is inside the interval [4.17.21, ∞) of the same record, which records no fixed version; no version above this one is recorded outside every affected interval",
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "4.17.21",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "4.17.15",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "4.17.15"
+  },
+  "cna_listed_alone_no_dispute": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-39503"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-39503",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": null,
+      "fixed_in_reason": "no fixed version is named above 1.5.0: OpenJS Foundation (CNA) lists it as affected by itself and states no fix, and GHSA-test-3391 records 1.4.0 as its fix, which does not clear this version",
+      "interval": {
+       "introduced": "1.5.0",
+       "last_affected": "1.5.0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.8,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.80): npm/pkg — version 1.5.0 is outside what the advisory records as affected, but OpenJS Foundation (CNA) lists it as affected for pkg",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "cna_affected_range"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "1.5.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": null,
+    "fixed_in_reason": "no fixed version is named above 1.5.0: OpenJS Foundation (CNA) lists it as affected by itself and states no fix, and GHSA-test-3391 records 1.4.0 as its fix, which does not clear this version",
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "introduced": "1.5.0",
+      "last_affected": "1.5.0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "1.5.0",
+     "version_evidence": "cna_affected_range"
+    }
+   },
+   "version": "1.5.0"
+  },
+  "advisory_interval_cna_listed_at_fix": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 1,
+    "cve_ids": [
+     "CVE-2099-39506"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+     {
+      "cve_id": "CVE-2099-39506",
+      "cvss_v2_score": 0,
+      "cvss_v3_score": 6.1,
+      "cvss_v4_score": 0,
+      "description": "fixture for #3137",
+      "echelongraph_score": 6.1,
+      "echelongraph_severity": "MEDIUM",
+      "effective_score": 6.1,
+      "effective_severity": "MEDIUM",
+      "epss_score": 0.001,
+      "fixed_in": null,
+      "fixed_in_reason": "1.4.0 is inside the interval [1.4.0, 1.4.0] (1.4.0 is the last affected version, not a fix) of the same record, which records no fixed version; no version above this one is recorded outside every affected interval",
+      "interval": {
+       "fixed": "1.4.0",
+       "introduced": "0"
+      },
+      "kev_listed": false,
+      "match_confidence": 0.95,
+      "match_method": "registry package",
+      "match_reason": "registry package (confidence 0.95): npm/pkg — version 1.3.0 falls inside the advisory interval [0, 1.4.0)",
+      "matched_criteria": "pkg:npm/pkg",
+      "ransomware": false,
+      "score_assessed": true,
+      "severity": "MEDIUM",
+      "vendor_unknown": false,
+      "version_evidence": "advisory_interval"
+     }
+    ],
+    "not_affected_count": 0,
+    "not_assessed_reason": "",
+    "package": "pkg",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "1.3.0"
+   },
+   "package": "pkg",
+   "remediation": {
+    "fixed_in": null,
+    "fixed_in_reason": "1.4.0 is inside the interval [1.4.0, 1.4.0] (1.4.0 is the last affected version, not a fix) of the same record, which records no fixed version; no version above this one is recorded outside every affected interval",
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "interval": {
+      "fixed": "1.4.0",
+      "introduced": "0"
+     },
+     "package": "",
+     "verdict": "affected",
+     "version": "1.3.0",
+     "version_evidence": "advisory_interval"
+    }
+   },
+   "version": "1.3.0"
+  },
+  "cna_range_open_ended": {
+   "match": {
+    "advisories_considered": 1,
+    "assessed": false,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 0,
+    "cve_ids": [],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [],
+    "not_affected_count": 0,
+    "not_assessed_reason": "no_decidable_advisory",
+    "package": "qs",
+    "undetermined": [
+     {
+      "cve_id": "CVE-2025-15284",
+      "detail": "version 6.14.1 is outside what the advisory records as affected (GHSA-6rw7-vpxm-498p records 6.14.1 as its fix), but inside the span [6.14.1, ∞) that the defaultStatus \"affected\" Harborist (CNA) states covers for qs, and the CNA's statements give no version from which the package stops being affected: the CNA does not say where it is fixed, so its statement cannot be read against the advisory's, and the version is neither answered clean nor raised on it",
+      "ecosystem": "npm",
+      "package": "qs",
+      "reason": "cna_range_open_ended"
+     }
+    ],
+    "undetermined_count": 1,
+    "version": "6.14.1"
+   },
+   "package": "qs",
+   "remediation": {
+    "fixed_in": null,
+    "fixed_in_reason": "the version could not be decided against this CVE's ranges for this package (cna_range_open_ended): version 6.14.1 is outside what the advisory records as affected (GHSA-6rw7-vpxm-498p records 6.14.1 as its fix), but inside the span [6.14.1, ∞) that the defaultStatus \"affected\" Harborist (CNA) states covers for qs, and the CNA's statements give no version from which the package stops being affected: the CNA does not say where it is fixed, so its statement cannot be read against the advisory's, and the version is neither answered clean nor raised on it",
+    "installed": {
+     "ecosystem": "npm",
+     "ecosystem_recognised": true,
+     "package": "qs",
+     "verdict": "undetermined",
+     "version": "6.14.1"
+    }
+   },
+   "version": "6.14.1"
+  }
+ }
+}

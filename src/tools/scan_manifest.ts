@@ -22,8 +22,28 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type TextCut } from "../textBudget.js";
-import { sbomData, sbomText, type CheckSbomDeps } from "./check_sbom.js";
-import { FORMAT_NAMES, FORMATS, NOT_CHECKED_MAX, NOT_CHECKED_REASONS, PastBound, SPEC_MAX, callBounds, detect, jsonEscaped, readFile, type Bounds, type Format, type NotChecked, type NotCheckedReason } from "./manifests/index.js";
+import { BUDGETS, WEIGHT_MANIFEST_ENTRY, WEIGHT_MANIFEST_ITEM, documentCost, lockfileEntries, nonBlankLines, tomlEstimate, tomlPackages, tooLargeToHold, LOCAL_INSTEAD, type Budgets } from "../parseBudget.js";
+import { BUSY_WHY, sbomData, sbomText, type CheckSbomDeps } from "./check_sbom.js";
+import { isHttpEntrypoint, parseBudgeted } from "../runtime.js";
+import {
+  FORMAT_NAMES,
+  FORMATS,
+  MAX_JSON_VALUES,
+  MAX_MANIFEST_LINES,
+  MAX_TOML_VALUES,
+  NOT_CHECKED_MAX,
+  NOT_CHECKED_REASONS,
+  PastBound,
+  SPEC_MAX,
+  callBounds,
+  detect,
+  jsonEscaped,
+  readFile,
+  type Bounds,
+  type Format,
+  type NotChecked,
+  type NotCheckedReason,
+} from "./manifests/index.js";
 import {
   CLEAN_NOTE,
   DISTRO_NOTE,
@@ -36,9 +56,11 @@ import {
   field,
   plural,
   purlsRefusal,
+  reserveAnswers,
   sendBatches,
   sendingCoverage,
   sendingCoverageShape,
+  failureSendingCoverageShape,
   sendingSentences,
   verdictSentences,
   type FailureLike,
@@ -84,7 +106,7 @@ const NOT_CHECKED_NOTE =
 // numbers are literals, as marketing-site's check reads them; test/manifest-lines.test.mjs holds them to the constants.
 export const SCAN_MANIFEST_TITLE = "Check a lockfile against the advisory corpus";
 export const SCAN_MANIFEST_DESCRIPTION =
-  "Check a project's lockfile or pinned manifest against EchelonGraph's advisory corpus, one verdict per dependency. Pass files: 1 to 20 of filename and content, up to 5,000,000 characters in all. Read: requirements.txt (== and === pins only), go.mod (after replace and exclude), package-lock.json and npm-shrinkwrap.json (v1-v3), Cargo.lock, Gemfile.lock, composer.lock, poetry.lock and gradle.lockfile. package.json, pyproject.toml, Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle hold ranges and are refused, naming the lockfile; go.sum is refused: it lists versions the build does not select. The server reads the files into purls; only the purls are sent to the API, in POST bodies of at most 200, never in a URL; filenames and file contents are not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body, up to 6 MiB. data.results holds a row per distinct purl, with verdict (affected, not_affected, undetermined or not_assessed) and cve_ids; each match carries kev_listed, epss_score and fixed_in. not_affected is the only clean verdict. data.not_checked lists the first 2,000 entries not sent (file, line, reason), counting all; not_checked entries are not clean. Refused: over 40,000 lines or 300,000 JSON/TOML values a call, a filename over 1,024 characters. At most 2,000 distinct purls and 50 seconds a call. The API allows 1,200 components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls, not clean." +
+  "Check a project's lockfile or pinned manifest against EchelonGraph's advisory corpus, one verdict per dependency. Pass files: 1 to 20 of filename and content, up to 5,000,000 characters in all. Read: requirements.txt (== and === pins only), go.mod, package-lock.json and npm-shrinkwrap.json (v1-v3), Cargo.lock, Gemfile.lock, composer.lock, poetry.lock and gradle.lockfile. package.json, pyproject.toml, Pipfile, Gemfile, Cargo.toml, composer.json and build.gradle hold ranges: refused, naming the lockfile; go.sum is refused: it lists versions the build does not select. The server reads the files into purls; only the purls are sent to the API, in POST bodies of at most 200, never in a URL; filenames and file contents are not sent on. Run from npm, this server is on your machine; over the hosted endpoint (mcp.echelongraph.io) it is EchelonGraph's, and the files are the request body, up to 6 MiB. data.results holds a row per distinct purl: verdict (affected, not_affected, undetermined or not_assessed) and cve_ids; each match carries kev_listed, epss_score and fixed_in. not_affected is the only clean verdict. data.not_checked lists the first 2,000 entries not sent (file, line, reason), counting all; not_checked entries are not clean. Refused: over 40,000 lines or 300,000 JSON/TOML values a call, a filename over 1,024 characters. Hosted, also over 30 MiB with its body. At most 2,000 distinct purls and 50 seconds a call. The API allows 1,200 components a minute per caller; on a 429 it waits out Retry-After within that; a later batch cut off, refused or failed ends the call, the rest in data.not_sent_purls, not clean." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
   " Cut, each row keeps index, purl, verdict, not_assessed_reason and cve_ids at least; not_checked its first 20.";
@@ -167,7 +189,71 @@ function pastBound(e: PastBound, bounds: Bounds, counted: { filename: string; co
   return `the ${b.formats} files hold more than ${b.max} ${b.what} in all, counted per call${how}: ${each.join(", ")}; at most ${b.max} are read per call, so no file is read: pass these files over more calls, or a lockfile's purls to check_sbom in parts`;
 }
 
-export function readFiles(a: { files?: unknown }): Read | string {
+// #3381's round-5 review (C1): the hosted endpoint's bound in files, for a too_large refusal of a lockfile to say in
+// plain words. Measured 2026-11-01 on 38 real lockfiles of large public repositories (24 package-lock.json, 8
+// Cargo.lock, 6 poetry.lock, 67 KB to 1.8 MB: each one read, the costliest 0.40 of what one request may hold), and on
+// each scaled by copies of its own packages up to the 5,000,000-character cap: a poetry.lock is refused from about 3 MB
+// (3.1 to 3.9 MB, by its shape). A Cargo.lock is refused from 2.4 MB and a package-lock.json from 3.3 to 5 MB, but
+// #3381's round-6 verification (R6V-2.2, 2.3) found each of those already holds more than the 2,000 distinct purls a
+// call checks (3.1.5 refused them too): only the poetry.lock is a call 3.1.5 answered and this endpoint refuses. A
+// package-lock.json whose entries repeat a package at many install paths can stay within 2,000 and pass the bound too
+// (test/http-parse-budget-round4.test.mjs F4), hence "usually".
+export const HOSTED_READS = "on this endpoint that is about a 3 MB poetry.lock; a Cargo.lock or package-lock.json that large usually already holds more than the 2,000 distinct purls a call checks";
+// The formats read a line at a time; the rest (JSON and TOML lockfiles) are parsed whole.
+const LINE_FORMATS: ReadonlySet<Format> = new Set<Format>(["requirements.txt", "go.mod", "Gemfile.lock", "gradle.lockfile"]);
+
+// #3381: what reading a call's files may retain, estimated before any is read, which the hosted endpoint reserves in its
+// parse budget first (runtime.ts reserveParse): the costliest one file's parse (a JSON lockfile's tree, parseBudget.ts
+// scanJson; a TOML lockfile's tables, tomlEstimate; a line format keeps one line at a time), and every entry its readers
+// will take, counted as they take them (#3381's review: through round 3 every line and JSON element was counted, so a
+// real poetry.lock or package-lock.json of a few MB was reserved far more than it takes, and could never fit beside its
+// own body): a package entry of an npm or Composer lockfile (parseBudget.ts lockfileEntries), a [[package]] table of a
+// TOML one (tomlPackages), a line of the others (nonBlankLines), each kind at most #3434's bound for it (MAX_MANIFEST_LINES,
+// MAX_JSON_VALUES, MAX_TOML_VALUES: past one the readers stop and the call is refused), each entriesCost's. A
+// file past PARSE_BUDGET_BYTES is not read (its reader refuses it), so it adds nothing; a call whose files readFiles
+// refuses (precheck) adds nothing. `budgets`: the bounds in force (parseBudget.ts BUDGETS, from this process's heap),
+// unless the caller names others. #3381's round-4 review (F10): each file counted as its reader will read it, its
+// leading byte-order mark dropped (manifests/index.ts readFile): through round 4 one before a lockfile's '{' left the
+// count at 0 entries, where its reader took them all.
+export function manifestEstimate(a: { files?: unknown }, budgets: Budgets = BUDGETS): number {
+  if (precheck(a) !== undefined) return 0;
+  let parse = 0;
+  let lines = 0;
+  let json = 0;
+  let toml = 0;
+  for (const f of a.files as { filename: string; content: string; format?: Format | null }[]) {
+    const d = f.format ? { format: f.format } : detect(f.filename);
+    if ("refused" in d) continue;
+    const content = f.content.replace(/^\uFEFF/, "");
+    let one = 0;
+    let entries: number;
+    if (d.format === "package-lock.json" || d.format === "composer.lock") {
+      one = documentCost(content).bytes;
+      entries = one <= budgets.parseBytes ? lockfileEntries(content, d.format === "composer.lock" ? "composer" : "npm") : 0;
+    } else if (d.format === "Cargo.lock" || d.format === "poetry.lock") {
+      one = tomlEstimate(content);
+      entries = one <= budgets.parseBytes ? tomlPackages(content) : 0;
+    } else entries = nonBlankLines(content);
+    if (one > budgets.parseBytes) continue;
+    parse = Math.max(parse, one);
+    if (d.format === "package-lock.json" || d.format === "composer.lock") json += entries;
+    else if (d.format === "Cargo.lock" || d.format === "poetry.lock") toml += entries;
+    else lines += entries;
+  }
+  // #3434's per-call bounds stop the readers past them (manifests/common.ts), so no more is reserved than they take.
+  return parse + entriesCost(Math.min(lines, MAX_MANIFEST_LINES) + Math.min(json, MAX_JSON_VALUES) + Math.min(toml, MAX_TOML_VALUES));
+}
+
+// #3381's round-5 review (C1): what `entries` entries a call's readers take hold to the call's end, WEIGHT_MANIFEST_ENTRY
+// each, and as many of them as data.not_checked can list (NOT_CHECKED_MAX) WEIGHT_MANIFEST_ITEM more, as the answer
+// carries them (parseBudget.ts). `listed`: how many of them are listed, where that is known (after the read); before it,
+// as many as may be.
+export const entriesCost = (entries: number, listed: number = entries): number =>
+  entries * WEIGHT_MANIFEST_ENTRY + Math.min(listed, NOT_CHECKED_MAX) * WEIGHT_MANIFEST_ITEM;
+
+// Why a call's files are not read, from their shape alone (before anything is counted or reserved, #3381's review), or
+// undefined.
+export function precheck(a: { files?: unknown }): string | undefined {
   if (!Array.isArray(a.files)) return "files must be a list of {filename, content}";
   if (a.files.length === 0) return "files holds no file";
   if (a.files.length > MAX_FILES) return `${a.files.length} files; at most ${MAX_FILES} are read per call`;
@@ -182,6 +268,14 @@ export function readFiles(a: { files?: unknown }): Read | string {
     total += f.content.length;
   }
   if (total > MAX_MANIFEST_CHARS) return `the files are ${total} characters in all; at most ${MAX_MANIFEST_CHARS} are read per call`;
+  return undefined;
+}
+
+// `budgets`: the bounds in force (parseBudget.ts BUDGETS, from this process's heap), unless the caller names others: each
+// file's parse or read is held to its parseBytes (#3381).
+export function readFiles(a: { files?: unknown }, budgets: Budgets = BUDGETS): Read | string {
+  const refused = precheck(a);
+  if (refused) return refused;
 
   const files: FileRead[] = [];
   const all: string[] = [];
@@ -211,7 +305,7 @@ export function readFiles(a: { files?: unknown }): Read | string {
       return { lines: now.lines - before.lines, json: now.json - before.json, toml: now.toml - before.toml };
     };
     try {
-      r = readFile(d.format, f.content, bounds);
+      r = readFile(d.format, f.content, bounds, budgets.parseBytes);
     } catch (e) {
       if (e instanceof PastBound) return pastBound(e, bounds, [...counted, { filename: f.filename, counts: mine() }]);
       throw e;
@@ -219,6 +313,8 @@ export function readFiles(a: { files?: unknown }): Read | string {
     counted.push({ filename: f.filename, counts: mine() });
     if ("unreadable" in r) {
       out.refused = `read as ${d.format}, ${r.unreadable}`;
+      // #3381's round-5 review (C1): past the parse bound on the hosted endpoint, the bound in files and what to do.
+      if (isHttpEntrypoint() && r.unreadable.startsWith("it is too dense to read")) out.refused += `; on this endpoint one file's read may take ${budgets.parseBytes} bytes (${Math.floor(budgets.parseBytes / (1024 * 1024))} MiB) of its memory: ${LOCAL_INSTEAD}, or pass the lockfile's purls to check_sbom, in calls of 2,000 or fewer`;
       continue;
     }
     out.read = true;
@@ -310,7 +406,44 @@ const manifestData = (x: Read) => ({
 export async function scanManifest<F extends FailureLike>(deps: CheckSbomDeps<F>, a: { files?: unknown }): Promise<ToolResult> {
   const tool = SCAN_MANIFEST;
   try {
+    // #3381: on the hosted endpoint, what reading the files may retain is reserved in the instance's parse budget first,
+    // once the files' shape is one readFiles reads (#3381's review: a call it refuses for its shape reserves nothing): a
+    // reservation the request could never hold is refused at once, one that found no room in the wait is busy.
+    const shape = precheck(a);
+    if (shape) return deps.badInput(tool, shape);
+    let keep: ((bytes: number) => void) | undefined;
+    let reserved = 0;
+    // #3381's round-6 verification (R6V-2.4): only a call the hosted endpoint serves has a budget (runtime.ts
+    // parseBudgeted); on stdio the estimate bounded nothing and was thrown away, every call paying for a scan of its
+    // files.
+    if (deps.reserve && deps.busy && parseBudgeted()) {
+      const bytes = manifestEstimate(a);
+      reserved = bytes;
+      const r = await deps.reserve(bytes);
+      if (r.state === "busy") return deps.busy(tool, BUSY_WHY);
+      if (r.state === "too_large") {
+        // #3381's round-5 review (C1): a call of one file cannot pass fewer files. Round-6 verification (R6V-2.1): the
+        // advice by format: a lockfile's purls to check_sbom, the bound in lockfile sizes; a line format's lines over
+        // more calls.
+        const files = a.files as { filename: string; format?: Format | null }[];
+        const lockfile = files.some((f) => {
+          const d = f.format ? { format: f.format } : detect(f.filename);
+          return "format" in d && !LINE_FORMATS.has(d.format);
+        });
+        const one = files.length === 1;
+        const instead = one
+          ? lockfile ? "pass the lockfile's purls to check_sbom, in calls of 2,000 or fewer" : "pass its lines over more calls"
+          : lockfile ? "pass fewer or smaller files per call, or a lockfile's purls to check_sbom in parts" : "pass fewer or smaller files per call, or a file's lines over more calls";
+        return deps.badInput(tool, tooLargeToHold(one ? "the file" : "the files", bytes, r.heldBytes, r.maxBytes, instead, lockfile ? HOSTED_READS : undefined));
+      }
+      keep = r.keep;
+    }
     const x = readFiles(a);
+    // #3381's review: what parsing the files built is dropped once readFiles returns; for the rest of the call (its API
+    // phase) what is held is the entries kept (entriesCost: never more than manifestEstimate reserved for them, so the
+    // hold only shrinks, #3381's round-5 review B1).
+    // #3381's round-10 review (R10-B1): and at most what was reserved, whatever the two counts come to.
+    keep?.(typeof x === "string" ? 0 : Math.min(reserved, entriesCost(x.purls.length + x.not_checked.length, x.not_checked.length)));
     if (typeof x === "string") return deps.badInput(tool, x);
     const refused = purlsRefusal(
       x.purls,
@@ -347,7 +480,10 @@ export async function scanManifest<F extends FailureLike>(deps: CheckSbomDeps<F>
 
     // match_batch.ts: one batch at a time, Retry-After waited out within the budget, stopped on
     // cancellation (#2775), exactly as check_sbom sends its purls.
-    const run = await sendBatches(deps, tool, x.purls);
+    // #3381's round-4 review: what the API's answers will hold, reserved before the first batch (match_batch.ts).
+    const answers = await reserveAnswers(deps, tool, x.purls.length);
+    if ("result" in answers) return answers.result;
+    const run = await sendBatches(deps, tool, x.purls, answers);
     if (!run.ok) return run.result;
     const { data, status, sending: g } = run;
     Object.assign(data, manifestData(x));
@@ -373,6 +509,15 @@ const LISTED = NOT_CHECKED_MAX.toLocaleString("en-US");
 const formatEnum = z.enum(FORMAT_NAMES as [Format, ...Format[]]);
 
 export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["envelopeSchema"]): z.ZodType {
+  const read = {
+    files: z.number().int().describe("Files passed."),
+    files_read: z.number().int().describe("Of those, the ones read."),
+    files_not_read: z.number().int().describe("The ones refused or unreadable: nothing in them is checked, and none is clean."),
+    entries_pinned: z.number().int().describe("Entries pinned to one version across the files, duplicates included."),
+    duplicates_removed: z.number().int().describe("Purls read more than once (the same package and version in two places) and sent once."),
+    not_checked: z.number().int().describe(`Entries not sent, every one counted (data.not_checked lists the first ${LISTED}): not clean.`),
+    not_checked_by_reason: z.strictObject(Object.fromEntries(NOT_CHECKED_REASONS.map((r) => [r, z.number().int()])) as Record<NotCheckedReason, z.ZodNumber>).describe("not_checked, counted by reason."),
+  };
   return envelopeSchema({
     data: z.looseObject({
       ...batchDataShape,
@@ -413,16 +558,9 @@ export function scanManifestOutput(envelopeSchema: CheckSbomDeps<FailureLike>["e
           `Each entry not sent to the API, with its file, line and reason: not checked, and not clean. A call lists its first ${LISTED} read; coverage.not_checked counts them all.`,
         ),
     }),
-    coverage: z.strictObject({
-      files: z.number().int().describe("Files passed."),
-      files_read: z.number().int().describe("Of those, the ones read."),
-      files_not_read: z.number().int().describe("The ones refused or unreadable: nothing in them is checked, and none is clean."),
-      entries_pinned: z.number().int().describe("Entries pinned to one version across the files, duplicates included."),
-      duplicates_removed: z.number().int().describe("Purls read more than once (the same package and version in two places) and sent once."),
-      not_checked: z.number().int().describe(`Entries not sent, every one counted (data.not_checked lists the first ${LISTED}): not clean.`),
-      not_checked_by_reason: z.strictObject(Object.fromEntries(NOT_CHECKED_REASONS.map((r) => [r, z.number().int()])) as Record<NotCheckedReason, z.ZodNumber>).describe("not_checked, counted by reason."),
-      ...sendingCoverageShape,
-    }),
+    coverage: z.strictObject({ ...read, ...sendingCoverageShape }),
+    // #3381's round-10 review (R10-1): the failure branch keeps 3.1.5's not_sent_reason (match_batch.ts).
+    failureCoverage: z.strictObject({ ...read, ...failureSendingCoverageShape }),
     freshness: null,
   });
 }

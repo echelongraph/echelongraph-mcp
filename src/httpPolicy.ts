@@ -14,6 +14,7 @@ export const RATE_LIMITED_CODE = -32029; // implementation-defined server error 
 export const BODY_TOO_LARGE_CODE = -32600; // Invalid Request
 export const BUSY_CODE = -32030; // implementation-defined server error range; "503": no large-body slot free (#2747), or the instance full (#2773)
 export const BODY_STALLED_CODE = -32600; // Invalid Request: "408", its body stopped coming before it ended (#3362)
+export const BODY_DENSE_CODE = -32600; // Invalid Request: "413", its structure past what this instance parses (#3381)
 
 export function rpcError(code: number, message: string, data?: Record<string, unknown>): string {
   return JSON.stringify({ jsonrpc: "2.0", id: null, error: { code, message, ...(data ? { data } : {}) } });
@@ -347,6 +348,17 @@ export function isLargeBodyTarget(facts: BodyFacts): boolean {
   return name !== undefined && targetsOf(facts.rpc_method).includes(name);
 }
 
+// ── What a body's parse may take (#3381) ──
+//
+// The 6 MiB cap bounds a body's bytes, not what parsing them builds: a body is parsed whole (bodyFacts, then the SDK)
+// before the SDK's element limit (index.ts MAX_TOOL_INPUT_ELEMENTS) counts anything, and per byte an empty object or
+// array costs V8 far more than the text it came in. Measured 2026-10-29 on dist/http.js started with Dockerfile.http's
+// CMD flags (heap limit 152 MiB): one tools/call or prompts/get whose one list held N empty objects or one-element arrays
+// ended the process ("JavaScript heap out of memory", exit 134, every request on it failing) at N = 1,170,000 to
+// 1,193,000, a 3.5 to 4.7 MB body, under the 2,500,000 elements the SDK counts. So every body is counted before it is
+// parsed, into an estimate of what its parse retains, and refused unparsed past what one request may take; and what all
+// requests in flight hold is bounded together (http.ts): parseBudget.ts says how, with the measurements.
+
 /** #3362: one slot taken, and when (Slots' now()). Only Slots makes one, and only release(hold) gives it back. */
 export type SlotHold = { readonly since: number };
 
@@ -469,7 +481,8 @@ export class Slots {
 // What this does not bound is a request whose ANSWER is large: a check_sbom call of 2,000 purls
 // fits a 64 KiB body, and with production-shaped rows (~2.2 KB each) one peaks at +77 MB; beside
 // the two documents, 8 at once peaked at 84%, and 16 at once exhausted the 128 MiB heap. Bounding
-// that needs a weight per call (its purls), not a count of requests.
+// that needs a weight per call (its purls), not a count of requests: #3381's round-4 review, that weight is now held
+// in the parse budget (parseBudget.ts WEIGHT_BATCH_ROW, http.ts reserveParse), from before a call's first batch.
 export const DEFAULT_MAX_IN_FLIGHT = 64;
 export const DEFAULT_ADMISSION_WAIT_MS = 10_000;
 export const DEFAULT_MAX_WAITING = 250;

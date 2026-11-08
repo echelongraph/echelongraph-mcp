@@ -17,6 +17,14 @@
 // #3434: what it builds is bounded. Each table, array entry and key it makes is taken from the call's MAX_TOML_VALUES
 // (`values`, common.ts) as it is made; arrays and inline tables nest at most NEST_MAX deep (value() recurses, and a
 // deeper nest would end in the engine's own stack); and a string with many escapes is joined in chunks.
+//
+// #3460's round-10 review (F1): a key from the file never reaches Object.prototype. Every table it makes has no
+// prototype (table()), so a key named constructor or prototype is a key like any other, and each is looked up as the
+// table's own (Object.hasOwn); a key named __proto__, which no Cargo or PyPI name can be, makes the file unreadable on
+// its line. Through round 10 tables were plain objects: a 30-byte Cargo.lock of `[__proto__]` and `hasOwnProperty = 1`
+// wrote that key onto Object.prototype, and every later request to the instance failed (HTTP 500) while /health
+// answered 200; `link = true` there made every later caller's package-lock.json entries local_path, not checked.
+import { PARSE_BUDGET_BYTES, WEIGHT_TOML_DOT, WEIGHT_TOML_KEY, WEIGHT_TOML_OPEN, WEIGHT_TOML_VALUE, tomlEstimate } from "../../parseBudget.js";
 import { Unreadable, callBounds, clip, type Bound } from "./common.js";
 
 export type TomlTable = { [k: string]: TomlValue };
@@ -31,12 +39,38 @@ const KEY_PARTS_MAX = 64;
 // #3434: how many runs and escapes basic() holds before it joins them into one chunk.
 const PARTS_MAX = 4_096;
 
-export function readToml(text: string, values: Bound = callBounds().toml): { root: TomlTable; lines: WeakMap<object, number> } {
+// #3381: what reading it would retain, counted first (parseBudget.ts tomlEstimate); past maxBytes (the bound in force,
+// PARSE_BUDGET_BYTES, unless the caller names another) it is not read. #3381's review (F8): and what the reader builds is
+// counted as it builds it, so the estimate is a bound whether or not the two agree on where a string is. The estimate
+// counts each structure character outside strings and comments ('[' and '{' a table or an array, '=' a key, '.' a
+// dotted key's part, ',' and newline a value) and two bytes a character; the reader charges the same weights for the
+// same characters as it consumes them as structure (charge, below), from the same two bytes a character. Where the two
+// agree on the strings, the reader charges no more than the estimate (it charges a '.' or a '[' only where it makes a
+// key part or a table of it; test/parse-budget.test.mjs holds it to that). Where they did not (a quote the estimate
+// took to open a string the reader did not), the reader built what the estimate never counted: a 5 MB Cargo.lock
+// estimated at 10 MB was read past the heap. Now a reader that charges past its estimate stops there, unread.
+// `estimate`: what was reserved for it, tomlEstimate's unless the caller names another (its tests). `cost` in the
+// answer: what the reader charged. #3434's `values` bound applies beside it (a call's tables, entries and keys).
+export function readToml(
+  text: string,
+  values: Bound = callBounds().toml,
+  maxBytes: number = PARSE_BUDGET_BYTES,
+  estimate: number = tomlEstimate(text),
+): { root: TomlTable; lines: WeakMap<object, number>; cost: number } {
+  if (estimate > maxBytes) {
+    throw new Unreadable(`is too dense to read: its tables, keys and values are estimated at ${estimate} bytes read, past the ${maxBytes} bytes a file's read may take`);
+  }
+  let cost = 2 * text.length;
+  const charge = (w: number): void => {
+    cost += w;
+    if (cost > estimate) throw new Unreadable(`is too dense to read: what reading it built passed the ${estimate} bytes estimated of it before it was read`);
+  };
   const s = text.replace(/\r\n/g, "\n");
   let i = 0;
   let line = 1;
   const lines = new WeakMap<object, number>();
-  const root: TomlTable = {};
+  const table = (): TomlTable => Object.create(null) as TomlTable;
+  const root: TomlTable = table();
   lines.set(root, 1);
   let current: TomlTable = root;
 
@@ -58,8 +92,10 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     for (;;) {
       skipWs();
       skipComment();
-      if (peek() === "\n") advance();
-      else break;
+      if (peek() === "\n") {
+        charge(WEIGHT_TOML_VALUE);
+        advance();
+      } else break;
     }
   };
   const endOfLine = () => {
@@ -72,6 +108,7 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
   // which V8 kept as a string node per character; and every PARTS_MAX of those it joins into one chunk, so a string of
   // many escapes holds no more than its characters and PARTS_MAX entries at once, not two entries per escape.
   const ESC: Record<string, string> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", '"': '"', "\\": "\\", e: "\x1b" };
+  const own = (t: object, k: string): boolean => Object.hasOwn(t, k);
   const basic = (multi: boolean): string => {
     const parts: string[] = [];
     const chunks: string[] = [];
@@ -122,7 +159,7 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
           run = i;
           continue;
         }
-        if (ESC[n] === undefined) fail(`an unknown escape \\${n}`);
+        if (!own(ESC, n)) fail(`an unknown escape \\${n}`);
         add(ESC[n]);
         advance(2);
         run = i;
@@ -146,8 +183,11 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
   const key = (): string => {
     skipWs();
     const c = peek();
-    if (c === '"') return basic(false);
-    if (c === "'") return literal(false);
+    const k = c === '"' ? basic(false) : c === "'" ? literal(false) : bare();
+    if (k === "__proto__") fail("a key named __proto__, which no lockfile writes");
+    return k;
+  };
+  const bare = (): string => {
     const m = /^[A-Za-z0-9_-]+/.exec(s.slice(i, i + 256));
     if (!m) fail("a missing key");
     advance(m![0].length);
@@ -163,6 +203,7 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
       if (peek() !== ".") return parts;
       if (parts.length === KEY_PARTS_MAX) fail(`a dotted key of more than ${KEY_PARTS_MAX} parts`);
       values.take();
+      charge(WEIGHT_TOML_DOT);
       advance();
       parts.push(key());
     }
@@ -178,6 +219,7 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     if (c === "'") return literal(false);
     if ((c === "[" || c === "{") && ++nest > NEST_MAX) fail(`arrays and inline tables nested more than ${NEST_MAX} deep`);
     if (c === "[") {
+      charge(WEIGHT_TOML_OPEN);
       advance();
       const arr: TomlValue[] = [];
       for (;;) {
@@ -190,13 +232,16 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
         values.take();
         arr.push(value());
         skipAll();
-        if (peek() === ",") advance();
-        else if (peek() !== "]") fail("a missing , in an array");
+        if (peek() === ",") {
+          charge(WEIGHT_TOML_VALUE);
+          advance();
+        } else if (peek() !== "]") fail("a missing , in an array");
       }
     }
     if (c === "{") {
+      charge(WEIGHT_TOML_OPEN);
       advance();
-      const t: TomlTable = {};
+      const t = table();
       lines.set(t, line);
       skipWs();
       if (peek() === "}") {
@@ -208,10 +253,12 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
         const k = dottedKey();
         skipWs();
         if (peek() !== "=") fail("a missing = in an inline table");
+        charge(WEIGHT_TOML_KEY);
         advance();
         setPath(t, k, value());
         skipWs();
         if (peek() === ",") {
+          charge(WEIGHT_TOML_VALUE);
           advance();
           continue;
         }
@@ -233,16 +280,18 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     const num = raw.replace(/_/g, "");
     if (/^[+-]?(0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|\d+)$/.test(num)) return Number(num.replace(/^\+/, ""));
     if (/^[+-]?(\d+(\.\d+)?([eE][+-]?\d+)?|inf|nan)$/.test(num)) return Number(num.replace(/^\+/, ""));
-    if (/^\d{4}-\d{2}-\d{2}|^\d{2}:\d{2}/.test(raw)) return raw;
+    // A date, a time or a date-time (kept as its text), whole: #3381's review (F8): a token that only began like one
+    // (2024-01-01' and the rest of the line) was taken as one, where tomlEstimate saw a string open.
+    if (TOML_DATE_TIME.test(raw)) return raw;
     return fail(`an unreadable value "${raw.slice(0, 40)}"`);
   };
   // #3434: each key set, and each table a dotted key makes, is taken from `values`; a key named in a reason is clip()'d.
   const setPath = (t: TomlTable, path: string[], v: TomlValue) => {
     let at = t;
     for (const k of path.slice(0, -1)) {
-      if (at[k] === undefined) {
+      if (!own(at, k)) {
         values.take();
-        at[k] = {};
+        at[k] = table();
         lines.set(at[k] as object, line);
       }
       const next = at[k];
@@ -259,22 +308,22 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     path.forEach((k, n) => {
       const last = n === path.length - 1;
       if (last && array) {
-        if (at[k] === undefined) {
+        if (!own(at, k)) {
           values.take();
           at[k] = [];
         }
         if (!Array.isArray(at[k])) fail(`[[${clip(path.join("."))}]] names a key that is not an array of tables`);
         values.take();
-        const t: TomlTable = {};
+        const t = table();
         lines.set(t, line);
         (at[k] as TomlValue[]).push(t);
         at = t;
         return;
       }
-      let next = at[k];
+      let next = own(at, k) ? at[k] : undefined;
       if (next === undefined) {
         values.take();
-        next = {};
+        next = table();
         lines.set(next, line);
         at[k] = next;
       }
@@ -290,6 +339,7 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     skipWs();
     const c = peek();
     if (c === "\n") {
+      charge(WEIGHT_TOML_VALUE);
       advance();
       continue;
     }
@@ -300,6 +350,7 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     if (i >= s.length) break;
     if (c === "[") {
       const array = peek(1) === "[";
+      charge(array ? 2 * WEIGHT_TOML_OPEN : WEIGHT_TOML_OPEN);
       advance(array ? 2 : 1);
       const path = dottedKey();
       skipWs();
@@ -312,9 +363,14 @@ export function readToml(text: string, values: Bound = callBounds().toml): { roo
     const k = dottedKey();
     skipWs();
     if (peek() !== "=") fail("a missing =");
+    charge(WEIGHT_TOML_KEY);
     advance();
     setPath(current, k, value());
     endOfLine();
   }
-  return { root, lines };
+  return { root, lines, cost };
 }
+
+// A local date, local time, local date-time or offset date-time, the whole token: "T", "t" or a space between date and
+// time (the bare scalar above takes "1979-05-27 07:32:00Z" as one), seconds optional (TOML 1.1).
+const TOML_DATE_TIME = /^(?:\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2})?)?|\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/;

@@ -236,7 +236,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const m = res.structuredContent.data.matches;
       assert.equal(m[0].fixed_in, "2.15.0");
       assert.equal(m[1].fixed_in, null);
-      assert.match(noteOf(res), /fixed_in, the first version above this one that no affected interval of the advisory holds: set on 1 of 2 matches; null on 1, where the CVE's advisory records show no version above this one to be unaffected \(fixed_in_reason says why; it is not a finding that no fix exists\)\./);
+      assert.match(noteOf(res), /fixed_in, the first version above this one that no affected interval of the CVE's record holds: set on 1 of 2 matches; null on 1, where the CVE's records show no version above this one to be unaffected \(fixed_in_reason says why; it is not a finding that no fix exists\)\./);
       const v = validator.getValidator(schema)(res.structuredContent);
       assert.ok(v.valid, v.errorMessage);
       const broken = structuredClone(res.structuredContent);
@@ -294,11 +294,13 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const data = src.slice(src.indexOf("const CHECK_AFFECTED_DATA"), src.indexOf("async function checkAffected"));
       const later = text.match(/keep: \[[^\]]*\]/g).slice(1);
       const thins = data.slice(data.indexOf("thin: [")).match(/\[\s*"cve_id"[^\]]*\]/g);
-      assert.ok(later.length >= 1 && thins.length === 2, `re-aim this check: ${later.length} later text levels, ${thins.length} data levels`);
+      // Round 11: a third data level, check_affected's leanest (fixed_in_dispute without its note), leaves them out too.
+      assert.ok(later.length >= 1 && thins.length === 3, `re-aim this check: ${later.length} later text levels, ${thins.length} data levels`);
       for (const k of ["cpe_version_end_excluding", "cpe_version_end_including"]) {
         for (const l of later) assert.doesNotMatch(l, new RegExp(`"${k}"`), `a later text level keeps ${k}, so the docs' "first level alone" is wrong`);
         assert.match(thins[0], new RegExp(`"${k}"`));
         assert.doesNotMatch(thins[1], new RegExp(`"${k}"`), `the second data level keeps ${k}`);
+        assert.doesNotMatch(thins[2], new RegExp(`"${k}"`), `the third data level keeps ${k}`);
       }
       const docs = readFileSync(new URL("../docs/tools.md", import.meta.url), "utf8").replace(/\s+/g, " ");
       assert.ok(

@@ -6,6 +6,290 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.0 — 2026-11-08
+
+The hosted endpoint bounds what parsing a request may take before it parses it, for each request and for all of
+those in flight together, refuses a request that would reserve more than 31,457,280 bytes (30 MiB) of its memory
+before it reads, its body and what its tools read together, and reads the API's answers to a call's purls only to
+the room it has left, each call (#3381); a document a tool parses from text is estimated before it is parsed, on both transports, beside
+3.1.3's per-call bounds, that bound a share of the server's memory, so a local server's is proportionally larger than
+the hosted endpoint's (#3381); every name and version `scan_manifest`'s readers take from a file is bounded before it
+is split, so what a call's files make the server build is bounded per call, as 3.1.3 said but did not yet hold, and one such file no longer
+ends the hosted endpoint's process, nor does a lockfile key named `__proto__` reach the server's shared objects
+(#3460, Security, below); once EchelonGraph's API serves it, a match relays where the CVE record's CNA disputes the
+advisory's range (#3391); `check_sbom` says where a list of purls goes when one is sent in the wrong shape, and
+`cve_exposure`'s note no longer says Shodan's banner time is not stored (#3467); and corrections to 3.1.2's and 3.1.3's
+entries, below. One optional `outputSchema` field is added (`fixed_in_dispute`), `get_cve`'s
+`affected_ranges`, already relayed, is now named (and so is `search_cves`' rows', which share the record's schema;
+a search answer never carries it), `version_evidence` names its values beside any string and is now
+named on `check_sbom`'s and `scan_manifest`'s matches too, and a success's `coverage.not_sent_reason` can say
+`server_busy`; no `required` changes. A failure carries `coverage` null, and its schema keeps 3.1.5's
+`not_sent_reason` values, so a client holding 3.1.5's tool list need not reconnect. Descriptions change: every tool's `error.status` (503 where this server was too busy to make the
+call), `coverage.not_sent_reason`, and the registry matches' `interval`, `match_reason` and `fixed_in`
+(`check_affected`'s own description with them: a match's interval is the affected one, the advisory's or the CNA's),
+and `scan_manifest`'s description, which says a hosted call over 30 MiB with its body is refused, and to make room no
+longer says go.mod is read after replace and exclude (the README's row does); `exposure_radar`'s description, and
+its outputSchema description of `kev_exposure.window`, say whose clock its times are on and that it spans all
+KEV-listed rows together, and to make room the description drops a few words elsewhere, its meaning unchanged
+(#3467). One title changes: `check_sbom`'s is now "Check purls or an SBOM against the advisory corpus" (#3467).
+
+### Added
+
+- **A match relays `fixed_in_dispute`, where the CVE record's CNA and the advisory disagree on its range** (#3391).
+  EchelonGraph's API serves these fields since 2026-11-07 (#3391, core-backend 95927abe), so against it every "once
+  the API serves (or reads) them" in this entry holds now. Once EchelonGraph's API serves it, a match carries `fixed_in_dispute` beside `fixed_in` where the CVE record's
+  numbering authority (CNA) and the advisory disagree on the range that holds the version: what differs (`kind`:
+  `fixed` or `introduced`), the advisory's bound in dispute (one of `advisory_fixed`, `advisory_last_affected` and
+  `advisory_introduced`, with `advisory_listed` where the advisory lists versions rather than a range) and the
+  advisory (`advisory_id`), the CNA (`cna`: `name`, `short_name`), what its entry names (`cna_product`) and the
+  CNA's range in dispute, as the API reads the record (`cna_range`: `version`, `less_than` or
+  `less_than_or_equal`, `status`, `version_type`, and `changes` with `changes_truncated`; where `higher` is `cna`,
+  the CNA's range that reaches past the advisory's bound, which holds the version on a `cna_affected_range` match
+  and, on an `advisory_interval` or `exact_version_list` match, the advisory's bound past the version (its fix, or
+  the versions just above its last affected or listed version), so it may start above the version, and where it is
+  `advisory`, the CNA's range that ends below it): an entry the
+  record writes or, with `cna_range_default` true, a span no entry writes that the record's `defaultStatus` covers;
+  the source the answer follows (`higher`, the more conservative one: `cna` or `advisory`), and the API's sentence
+  on the dispute (`note`). `fixed_in` follows the source `higher` names, so where it is `cna`, `fixed_in` need not
+  be the advisory's own fix. A match whose version only the CNA's range holds says `version_evidence`
+  `cna_affected_range`, and its `interval` is that range; such a match may carry no `fixed_in_dispute` (once it serves
+  them, the API raises a version the CNA lists by itself with none, its `fixed_in` null and `fixed_in_reason` saying why), and
+  so may an advisory interval's match whose fix the CNA lists as affected. A match without `fixed_in_dispute` is not a finding that
+  the CNA agrees: an API that does not serve the field yet sends none, and one that serves it reads a CNA's ranges
+  only where it applies them and only from an entry it matches to the package. `check_affected`, `check_sbom`, `scan_manifest`
+  (each registry match) and `cve_remediation` (the installed version asked) relay it as sent in `structuredContent`,
+  its fields and values open to what a later API adds, keep it on the match in the first text block at every cut
+  level that keeps `fixed_in_reason`, and quote its `note` verbatim in the note, naming the match (at most five
+  matches; every one in its match). Their notes say `fixed_in` is the first version above the one asked that no
+  affected interval of the CVE's record holds (the advisory's, or, once the API serves them, a CNA range it applies), and on a match with
+  a dispute that it follows the source `higher` names; a dispute sent without a note is a dispute all the same; the `am_i_affected` and
+  `sbom_review` prompts read `fixed_in` the same way and have the agent quote the dispute's note. An API that sends no
+  `fixed_in_dispute` is relayed as before. A `fixed_in_dispute` this server cannot read (not an object, or a field of
+  another type than its schema names) is relayed empty (`{}`), its match still disputed, and the note names the match
+  and says its `fixed_in` may follow the CNA, so one malformed annotation never fails the call or loses its other
+  rows. `cve_remediation`
+  quotes the note clipped at 1,000 characters, as the other tools do, whole in `data`. Where not even
+  `check_affected`'s leanest structured level keeps every match, a level below it keeps every match, each dispute
+  without its `note`, before any match leaves (where that does not keep them all either, matches leave as before, each
+  dispute whole). `check_affected`'s method names the CVE record's CNA statements the API reads beside each advisory,
+  once it reads them, and its `no_decidable_advisory` sentence says no CVE could be decided either way, by its advisory
+  or, once the API reads them, by a CNA statement that could not be read against it. `check_affected`'s and `cve_remediation`'s outputSchema now names the
+  values `version_evidence` takes (`exact_version_list`, `advisory_interval`, `fix_boundary_only`,
+  `no_version_supplied` and, once the API serves it, `cna_affected_range`), beside any other string, as it was: a value a later API adds is
+  relayed, never a failed call; `check_sbom`'s and `scan_manifest`'s now name it on each match too, and say a match's
+  `interval` and `match_reason` range are the advisory's or, on a `cna_affected_range` match, the CNA's. An
+  undetermined CVE the API answers as such (its `reason`, such as `cna_range_open_ended` or `cna_range_other_line`) is relayed undetermined,
+  never clean. `get_cve`'s outputSchema now names and describes the record's `affected_ranges`, which it relayed
+  already: each product's version entries as the API stores them, each as the record writes it, and, once
+  EchelonGraph's API serves them, their `changes` and `changes_truncated`, and each product's `package_name` (the
+  entry's `packageName`), `collection_url`, `package_url`, `versions_truncated`, `dropped_products` (with
+  `dropped_products_truncated`: the cut products a registry package's answer could read), `dropped_other_products`
+  (how many other products were cut, which no registry package's answer reads) and `stored_form`; a product without `stored_form` comes from an API or a writer
+  that sends none of these, and may have had versions or products cut with no flag saying so. `search_cves`' rows
+  share the record's schema, so its outputSchema names `affected_ranges` too, described as never on a search row.
+
+### Changed
+
+- **On the hosted endpoint, one request may reserve at most 31,457,280 bytes (30 MiB) of the instance's memory
+  before it reads, its body, what its tools read and 1,280 bytes a purl for the API's answers together** (#3381):
+  three quarters of the budget for all requests in flight, the most a waiter is sure to be let in at (Fixed, below).
+  The API's answers past what was reserved for them are charged as they come, and a call sends no further batch once
+  they take its request past the bound; one batch's answer can take it past, within what the instance has room for
+  (Fixed, below). A call whose reservation would pass it is refused `invalid_input` at once, naming the bound and
+  what to do: for a lockfile, pass its purls to `check_sbom`, in calls of 2,000 or fewer; for a line format, its
+  lines over more calls; or run the server locally (`npx -y echelongraph-mcp`), whose bounds are a share of its own
+  machine's memory. Measured on 38 real lockfiles of large public repositories (24 `package-lock.json`, 8
+  `Cargo.lock`, 6 `poetry.lock`, 67 KB to 1.8 MB), each is read, the costliest at 0.40 of the bound. What 3.1.5
+  answered and the hosted endpoint now refuses, within every per-call bound 3.1.5 states: a `poetry.lock` of more than
+  about 3 MB that holds 2,000 packages or fewer (copied to larger sizes from its own packages, each real poetry.lock
+  is refused from 3.1 to 3.9 MB, by its shape); a `package-lock.json` past the bound whose entries repeat packages
+  at many install paths, so that it holds 2,000 distinct purls or fewer; and a call of 40,000 lines of a line format
+  near the 5,000,000-character cap whose text holds a character past U+00FF (which makes the body two bytes a
+  character in memory). A `Cargo.lock` or `package-lock.json` copied to the sizes it is refused at (from 2.4 MB, and
+  3.3 to 5 MB) held more than 2,000 distinct purls in every real file measured, which 3.1.5 refused too. The same
+  holds for a `check_sbom` call of 2,000 purls whose answers take its request past the 31,457,280 bytes (measured:
+  three matches a row, 717 KB a batch answer): it is answered for its first 1,000 purls, the rest `server_busy`,
+  where 3.1.5 answered all 2,000. A file estimated past what one file's read may take (28 MiB there) is not read,
+  and on the hosted endpoint its refusal says what to do. `scan_manifest`'s description says a hosted call over it
+  is refused (#3381).
+
+### Fixed
+
+- **`cve_exposure` no longer says Shodan's banner time is not stored, and `exposure_radar` says whose clock and which
+  rows its window is** (#3467). `cve_exposure`'s note on `last_seen` said "Shodan's own banner time is not stored", as
+  docs/tools.md did; that was true until #2438's core-backend change, which stores it, reached production
+  (2026-10-06T15:09Z; it was committed on 2026-10-05). It now says that the banner time is
+  stored, where Shodan gives a usable one, for rows matched since 2026-10-06T15:09Z, that the per-CVE answer does not
+  serve it, and that
+  `exposure_radar` serves its earliest and latest as `kev_exposure`'s window (or `dated_window`), over all KEV-listed
+  rows together, never this CVE's alone, and over no row of a CVE tracked only for its EPSS. `exposure_radar`'s
+  description, note and outputSchema, and docs/exposure-radar.md, now call that window's times Shodan's own
+  timestamps, on Shodan's clock, over all KEV-listed rows together (the note, of a `dated_window`: "over the dated
+  KEV-listed rows together"), not "when Shodan collected the banners", and its
+  note, outputSchema and docs/exposure-radar.md add that some run up to 5 minutes ahead of EchelonGraph's
+  `last_seen` for the same row: on 2026-11-01 3,648 rows held a banner time later than EchelonGraph's own last write
+  of the row, by up to 5 minutes. No count, `state` or `measured_at` changes.
+- **`check_sbom` says where a list of purls goes when one is sent in the wrong shape** (#3467). `purls` takes a list
+  of package URLs, one included; through 3.1.5 none of the refusals of a purl list sent otherwise named it: a purl
+  (or several) as `sbom` was answered "sbom is not JSON: pass a CycloneDX JSON or SPDX JSON document", a JSON array
+  as `sbom` "sbom must be a string or an object, not an array" (or, as text, "sbom must be a JSON object"), and one
+  purl as a string in `purls` "purls must be an array, not a string". Each now adds "a list of purls goes in purls,
+  e.g. purls: ["pkg:npm/lodash@4.17.20"]; one purl still goes in a list", and so does the refusal of an `sbom` of
+  neither format that holds a `purls` member; a purl as `sbom` is told so bare, quoted (`"pkg:npm/a@1"`) or in a
+  bracketed list (`['pkg:npm/a@1']`). A document of another kind, or an argument of another wrong type, is
+  refused as before. A CycloneDX or SPDX JSON text saved with a leading byte-order mark (U+FEFF) is now read, as
+  `scan_manifest`'s readers already read one; through 3.1.5 it was refused "sbom is not JSON". The title "Check an SBOM against the advisory corpus" is now "Check purls or an SBOM against
+  the advisory corpus"; the description is unchanged.
+- **On the hosted endpoint, what parsing a request body would hold in memory is estimated before it is parsed, and a
+  body past what one may take is refused** (#3381). Every request body, at any size, is now read once first, without
+  being parsed: its objects and arrays, list entries and object members, keys and string bytes are counted, and what
+  parsing it would retain is estimated from them, at the most each can cost. A body whose estimate is past what one
+  request's parse may take is answered HTTP 413 with a JSON-RPC error (code `-32600`) that gives the counts, the
+  estimate and the bound, without being parsed, and its access line says `refused` `body_dense` (and `rpc_method`
+  `(unparseable)`: the body was not parsed, so no method is known). Through 3.1.5 a body was parsed whole before
+  anything weighed what it would hold, and what that took of the instance's memory had no bound but the body's size.
+  A real document passes: each one measured up to the 6 MiB cap is estimated within the bound (Juice Shop's
+  CycloneDX components passed as an object, a document shaped as Syft writes one, and #2773's 5,000,000-character
+  document passed as text).
+- **On the hosted endpoint, what all requests in flight hold parsed is bounded together** (#3381). Each body's
+  estimate is held in one budget for the instance from before it is parsed until its request has stopped, however it
+  ends: answered, its client gone while it waits or while it is served, or its deadline, where it is given back once
+  the request has unwound, not while what it parsed is still in memory. A body that fits is let in ahead of one that
+  waits and does not, until that one has waited a second; from then on a body above the general 64 KiB cap is let in
+  only if the room the waiter needs is left beside it, so the waiter is let in once the large requests before it end.
+  A body within the cap is let in whatever waits, and so are its tool's reservations of the document it reads and of
+  the API's answers for up to 200 purls (one batch), while all of those together hold no more than a quarter of the
+  budget; a call of more purls reserves its answers as a large body does, waiting behind such a waiter. The answers
+  to such a small call's batch can take that quarter past full while the call answers; a small body or reservation
+  then waits as a large one does, but for a tiny body (at most 64 KiB of estimate: a `tools/list`, `initialize` or
+  `ping`), which has a lane of its own, open whatever the quarter holds, of 4 MiB in all; a tool's reservations,
+  however small, do not take it, so they cannot fill it and keep a `tools/list` out. A JSON-RPC batch is one
+  request: its calls' reservations are made one after another, each counting what the request holds as it is then
+  (its other calls' answers as they are charged, and what they keep as it shrinks), and once one of them finds no
+  room within the wait the batch's later calls wait no more: each is taken where it fits at once, and answered
+  "server busy" where it does not. A body that finds no room within the admission wait is answered HTTP 503 with
+  `Retry-After` and a JSON-RPC
+  error (code `-32030`), as a busy instance is, never queued without bound, and its access line says `refused`
+  `parse_busy`. An access line's `queued_ms` counts its waits for room in this budget as well as for a place.
+  Through 3.1.5 nothing weighed what the requests served at once held together. Two of the largest real documents
+  sent at once can now be parsed one after the other rather than side by side: the second waits for the first,
+  within the same wait.
+- **A document a tool parses from text is estimated before it is parsed** (#3381), on both transports:
+  `check_sbom`'s `sbom` passed as a string, and `scan_manifest`'s `package-lock.json`, `npm-shrinkwrap.json` and
+  `composer.lock`. One past what a document's parse may take is not read ("too dense to read"), naming its counts,
+  its estimate and the bound in force: `check_sbom` refuses the call `invalid_input`; `scan_manifest` lists that file
+  in `data.manifest.files` with `read` false and `refused` saying so, reads the call's other files, and answers
+  `invalid_input` only when no file could be read. A real SBOM or lockfile is within it, and a local server's bound
+  is proportionally larger than the hosted endpoint's (Changed, above). On the hosted endpoint, what its parse would
+  hold, and each entry `scan_manifest` will take from it, is held in the same budget from before it is parsed until
+  it has been read, and then what the answer keeps of it, until the call ends; a request's tool reservation takes the
+  request's place among those that wait, so a request that began first is not held up by a later one, and one of a
+  request within the 64 KiB cap takes its share. Two answers say why a document was not read: a call that finds no
+  room within the wait is answered `failed`, `error.status` 503 (this server's own: `error.kind` `internal`,
+  `error.path` null, and no API call made), "server busy", which is not a finding, and the same call can be read once
+  the instance has room (its access line says `refused` `doc_busy`); one whose read, with what its request already
+  holds (its body, and in a JSON-RPC batch its other calls), would pass three quarters of the budget (Changed,
+  above) is refused `invalid_input` at once, naming the bound and what to do, and retrying it will not help
+  (`refused` `doc_too_large`). Through 3.1.5 a document a tool parsed from text was not weighed before
+  it was parsed.
+- **On the hosted endpoint, what the API's answers to `check_sbom`'s and `scan_manifest`'s purls hold is in the same
+  budget, and a batch's answer is read only to the room left** (#3381). A call reserves 1,280 bytes a purl before
+  its first batch is sent, and as each batch is answered, what the answers hold past that: three bytes a byte of the
+  API's answer for each row's first 512 bytes, and ten bytes a byte for the rest, its matches (as measured: a match
+  costs that much by the time the call is answered). Once the instance's parse budget, which holds the API's answers
+  beside its requests' bodies and documents, is more than a quarter past its bound, whichever calls took it there, or
+  the call's own request holds more than the 31,457,280 bytes one request may reserve (Changed, above), the call sends
+  no further batch. A batch's answer is read only to what the call's reservation still covers of it and what the
+  budget has left when the batch is sent, at those weights: one larger is read no further, and is dropped. That bound
+  is each call's own: calls reading at once each read up to what the budget had left, so their reads together can
+  pass it (#3603). Each way, the purls not sent are listed with
+  `coverage.not_sent_reason` `server_busy`, not checked and not clean; where it is the call's first batch, the call is
+  answered `failed`, "server busy", its `error.path` the batch route and `error.status` the API's 200, which is not a
+  finding. A call whose reservation finds no room is answered "server busy" (`refused` `doc_busy`), and one that
+  could never be granted is refused `invalid_input`, as a document is. Through 3.1.5 nothing weighed it: 64 calls of
+  2,000 purls each, at once, could end the process, and so could one call of 200 purls whose batch answer came to
+  about 26 MB, read and parsed whole. Measured under the hosted image's heap flags in a 256 MiB memory cgroup: one
+  call of 2,000 purls whose rows hold ten matches each now stops after its second batch, and one of three a row after
+  its fifth, once its request passes the bound; a batch answer of 10.7 MB or 40 MB is not read; and 16 or 24 calls at
+  once of 4.3 MB answers, the API answering each batch in 0.3 to 3 seconds, are all answered with the process alive
+  (3 runs each, peak 224 to 261 MB). Answers that all arrive at the same moment, from 16 or more such calls, can still
+  end the instance (1 of 10 runs at 16 where each answer arrives in one write, none of 3 where it arrives in
+  pieces; every run at 24): that is #3603.
+- **A `Cargo.lock` or `poetry.lock` is estimated before it is read** (#3381), on both transports, beside 3.1.3's
+  per-call bounds (#3434): one estimated past what a file's read may take is not read ("too dense to read"), as
+  above, and its reader counts what it builds as it builds it and stops, unread, past what was estimated of it. On
+  the hosted endpoint each entry `scan_manifest` will take from a call's files is counted before they are read, as
+  its reader will read them (its byte-order mark dropped, a TOML header written with an escape counted), and
+  reserved with what their parse would hold. Each such count and estimate takes time linear in the text it reads.
+  Through 3.1.5 what a TOML lockfile's read held was bounded only by its count of values, #3434's per-call bound.
+  Repository only: `test/parse-budget.test.mjs` times every estimate and reader on single lines of 300,000
+  characters and more, each shaped at a pattern's own quantifiers, in a process started with the hosted image's heap
+  flags (each within 100 ms), and `test/http-parse-budget-round4.test.mjs` probes `/health` while such a Cargo.lock
+  is served by `dist/http.js` started as its image starts it (each probe within 1 s).
+
+### Security
+
+- **Every name and version `scan_manifest` takes from a file is bounded before anything is split from it** (#3460).
+  Each reader's names and versions (package-lock.json and npm-shrinkwrap.json v1 to v3, Cargo.lock, poetry.lock,
+  composer.lock, Gemfile.lock, gradle.lockfile, and those of requirements.txt and go.mod, whose lines 3.1.3 already
+  bounds) hold at most 512 characters, the longest purl a call sends, before anything splits, matches, encodes or
+  replaces in them; an entry past that is listed in `data.not_checked` as `unsupported_line` ("a name or version of
+  more than 512 characters, which no purl the API checks holds: not read"), and the call's other entries are read.
+  So is an entry whose name and version are within that but whose purl, percent-encoded, is longer (a `%` is three
+  characters there, a CJK character nine): it is listed as `unsupported_line` ("its purl, percent-encoded, is longer
+  than the 512 characters the API takes: not read") at its own place, with its name and the file's text for it, its
+  purl's length counted and no purl built for it, and the call's other entries are read; a go.mod `replace` whose
+  replacement's purl is so is listed at the require it applies to, naming the replace, and not as applied. An entry
+  whose name or version holds a lone surrogate (half of a UTF-16 pair, which a JSON lockfile's `\ud800` gives) is
+  listed the same way ("a name or version holding a lone surrogate (half of a UTF-16 pair), which no purl can encode:
+  not read"); through 3.1.5 it failed the whole call, which blamed the API.
+  Through 3.1.5 such a purl was kept and refused the whole call (`invalid_input`, "purl N is longer than 512
+  characters", an index no file or line maps to): a requirements.txt pin of 200 `%` between two others did that,
+  where now the two are checked.
+  Gemfile.lock's version and gradle.lockfile's coordinates are taken by cutting at the first `-` and `=`, not by
+  splitting. Through 3.1.5 a package name was split on each `/` with no bound: one keyless call of 4.9 MB, a
+  package-lock.json whose one name was about 4.9 million `/`, ended the hosted endpoint's container (heap out of
+  memory, exit 139), where the same call of `a` was answered (`invalid_input`: its one purl past 512 characters); a
+  composer.lock name of `/` did the same. A Cargo.lock, poetry.lock or Gemfile.lock name of `/` was split into
+  millions of strings too, and the call then refused whole for its purl past 512 characters, where now only that entry
+  is not read; a Gemfile.lock version of `-` and a gradle.lockfile line of `=` were split the same way. With this, what a call's files make the
+  server build is bounded per call, as 3.1.3 said but did not yet hold (Corrections, below): by its per-call line and value bounds, the 2,000 entries
+  `data.not_checked` lists, the 200 characters of each string an entry carries, the 200 of the go directive a note
+  names and the 40 of a `lockfileVersion` a reason names, and the 512 of each name, version and purl. Through 3.1.5 a
+  `package-lock.json`'s `lockfileVersion` was named whole in the reason its file was not read: one of 3,100,000
+  characters made an answer of 31 MB, and three such calls whose clients did not read their answers ended a 256 MiB
+  instance; now a string is named in at most 40 characters, and an object or an array by its type.
+  A blank requirements.txt line outside a continuation is now passed over before any pattern runs on it: 4,999,000
+  blank lines take about 50 ms of the event loop, where through 3.1.5 they took about 520 ms (measured under the
+  hosted image's heap flags; one line of as many characters takes about 4 ms); a Gemfile.lock spec whose
+  version is past the bound is listed by its name, as the other readers list theirs; and a package-lock.json
+  `lockfileVersion` past what a double holds (`1e400`) is named so in its refusal, not as `null`.
+  Repository only: `test/manifest-lines.test.mjs` reads such a file of each format in a process started with the
+  hosted image's heap flags, and sends the 4.9 MB call and its control to `dist/http.js` started as its image starts it.
+- **A `Cargo.lock` or `poetry.lock` key never reaches the server's shared objects** (#3460). Through 3.1.5 the TOML
+  reader's tables were plain objects: a 30-byte `Cargo.lock` of `[__proto__]` and `hasOwnProperty = 1`, in one keyless
+  call, wrote that key onto every object's prototype, and every later request to the hosted instance failed (HTTP
+  500) while `/health` answered 200; `link = true` there made every later caller's `package-lock.json` entries
+  `local_path`, not checked. Now no table the reader makes has a prototype, each key is looked up as the table's own,
+  and a key named `__proto__`, which no crate or PyPI name can be, makes the file unreadable on its line ("a key
+  named __proto__, which no lockfile writes"); a key named `constructor` or `prototype` (PyPI has packages of both
+  names) is read as any other. A file whose basename is `__proto__` or `constructor`, which failed the whole call
+  for its outputSchema, is refused as a name this tool does not read, and the call's other files are read.
+
+### Corrections
+
+- **Correction to 3.1.2's entry** (#3381). It said the bound on a tool call's arguments (CVE-2026-111768) did not
+  yet hold for the hosted endpoint, because a hosted request body was parsed whole before that bound counted
+  anything and that parse was not bounded, and that a fix was in progress. The fix is above. On the hosted endpoint
+  a body's parse is now bounded before it starts, every body's and all of those in flight together, and so is what a
+  tool parses or reads from text; so that bound now holds for the hosted endpoint too, more tightly than over stdio:
+  a body is refused by what parsing it would hold before the SDK counts its elements, which can refuse a shape the
+  SDK's count would admit (docs/structured-results.md).
+- **Correction to 3.1.3's entry** (#3460). It said that what a call's files make the server build is bounded per call.
+  It was not, through 3.1.5: a name or version a reader took from a file was split with no bound on its length, so one
+  keyless call of about 4.9 MB (a package-lock.json name of `/`) ended the hosted endpoint's container (Security,
+  above). With this release's bound on every name and version, it holds.
+
 ## 3.1.5 — 2026-11-07
 
 The hosted endpoint's image moves to a patched base; the package's code is 3.1.4's, unchanged.

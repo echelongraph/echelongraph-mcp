@@ -11,7 +11,7 @@
 // so. go.sum is not read here: it lists every version the module graph mentions, not the one the
 // build selects (core-backend's go.sum holds ten golang.org/x/sys versions where its go.mod
 // selects one).
-import { addNotChecked, callBounds, clip, eachLine, emptyParsed, purlOf, specOf, usableVersion, type Bounds, type Parsed } from "./common.js";
+import { LONG_NAME_DETAIL, addNotChecked, callBounds, clip, eachLine, emptyParsed, pin, purlOf, specOf, tooLong, usableVersion, type Bounds, type Parsed } from "./common.js";
 
 // `over`: the last token of a line read no further, past TOKENS_MAX or LINE_MAX (#3434).
 type Tok = { text: string; quoted: boolean; over?: true };
@@ -121,8 +121,9 @@ export function readGoMod(text: string, bounds: Bounds = callBounds()): Parsed {
   const requires: Line[] = [];
   const excluded = new Set<string>();
   // replace, keyed by old path, then by old version ("" for every version). #3434: `to` and `purl`, what every require
-  // it applies to is checked as, are built once per replace, not once per require.
-  const replaces = new Map<string, Map<string, { path: string; version: string | null; line: number; to?: string; purl?: string }>>();
+  // it applies to is checked as, are built once per replace, not once per require. #3460's round-10 review (F6): `purl`
+  // is purlOf's answer, why none is built where it is not.
+  const replaces = new Map<string, Map<string, { path: string; version: string | null; line: number; to?: string; purl?: { purl: string } | { why: string } }>>();
   let goVersion: string | null = null;
   for (const l of lines) {
     // #3434: a line past TOKENS_MAX tokens or LINE_MAX characters, not read on (tokens).
@@ -174,6 +175,11 @@ export function readGoMod(text: string, bounds: Bounds = callBounds()): Parsed {
       miss("unsupported_line", "not a require line this reader can read (module path, then version)");
       continue;
     }
+    // #3460: a line is within LINE_MAX already; its module path and version within NAME_MAX too, as every reader's.
+    if (tooLong(path, version)) {
+      miss("unsupported_line", LONG_NAME_DETAIL);
+      continue;
+    }
     const rep = replaces.get(path)?.get(version) ?? replaces.get(path)?.get("");
     if (rep) {
       // #3434: one replace applies to every require of its module, so its path is clip()'d in each detail.
@@ -185,22 +191,34 @@ export function readGoMod(text: string, bounds: Bounds = callBounds()): Parsed {
         miss("unsupported_line", `replaced by ${clip(rep.path)} without a version (replace on line ${rep.line}), which this reader cannot resolve`);
         continue;
       }
-      rep.to ??= `${rep.path}@${rep.version}`;
+      if (tooLong(rep.path, rep.version)) {
+        miss("unsupported_line", `replaced by ${clip(rep.path)} (replace on line ${rep.line}): ${LONG_NAME_DETAIL}`);
+        continue;
+      }
+      // #3460's round-10 review (F6): a replacement whose purl is not built is not checked, so it is not listed as
+      // applied: through round 10 it was, and the note said the module was checked at its replacement.
       rep.purl ??= purlOf("golang", rep.path, rep.version);
+      if ("why" in rep.purl) {
+        miss("unsupported_line", `replaced by ${clip(rep.path)} (replace on line ${rep.line}): ${rep.purl.why}`);
+        continue;
+      }
+      rep.to ??= `${rep.path}@${rep.version}`;
       p.replaced.push({ from: `${path}@${version}`, to: rep.to });
-      p.pinned.push({ purl: rep.purl, line: r.line });
+      p.pinned.push({ purl: rep.purl.purl, line: r.line });
       continue;
     }
     if (excluded.has(`${path}@${version}`)) {
       miss("version_unresolved", "this version is excluded by an exclude directive, so the build uses another version, which go.mod does not name");
       continue;
     }
-    p.pinned.push({ purl: purlOf("golang", path, version), line: r.line });
+    pin(p, r.line, "golang", path, version, (why) => miss("unsupported_line", why));
   }
   // No go directive is read as go 1.16 (go.dev/ref/mod#go-mod-file-go).
   if (goVersion === null || below117(goVersion)) {
     p.notes.push(
-      `${goVersion === null ? "It has no go directive, which the go command reads as go 1.16" : `Its go directive is ${goVersion}`}, below 1.17: such a go.mod lists the main module's own requirements, not every module the build loads, so modules required only by its dependencies are not checked.`,
+      // #3460's round-10 review (F2): the directive clip()'d, as every string of the file a note or entry carries: through
+      // round 10 it was written whole, up to LINE_MAX characters in each go.mod's note.
+      `${goVersion === null ? "It has no go directive, which the go command reads as go 1.16" : `Its go directive is ${clip(goVersion)}`}, below 1.17: such a go.mod lists the main module's own requirements, not every module the build loads, so modules required only by its dependencies are not checked.`,
     );
   }
   return p;

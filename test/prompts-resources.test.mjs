@@ -225,6 +225,22 @@ const headroomProblems = (tools) =>
   tools
     .filter((t) => (t.description ?? "").length > CLIENT_CUT - DESCRIPTION_HEADROOM)
     .map((t) => `${t.name}: ${t.description.length} characters, ${CLIENT_CUT - t.description.length} under the ${CLIENT_CUT}-character cut; the floor is ${DESCRIPTION_HEADROOM}`);
+// #3381's round-4 review (F11): what a prompt that reads fixed_in must say of a match with fixed_in_dispute (#3391),
+// whose fixed_in follows the source the dispute's higher names, which can be the CNA's: the advisory's account of
+// fixed_in only of a match without one, and the dispute's note quoted. As a list of what it lacks.
+const ADVISORY_ACCOUNT = "no affected interval of the CVE's record holds";
+function disputeReadingProblems(text) {
+  const out = [];
+  for (let at = text.indexOf(ADVISORY_ACCOUNT); at >= 0; at = text.indexOf(ADVISORY_ACCOUNT, at + 1)) {
+    // The sentence that says it, from its start.
+    const sentence = text.slice(Math.max(text.lastIndexOf(". ", at), text.lastIndexOf(": ", at), 0), at);
+    if (!sentence.includes("without fixed_in_dispute")) out.push(`"${ADVISORY_ACCOUNT}" said of every match: ${sentence.slice(-120)}`);
+  }
+  if (!/On a match with fixed_in_dispute[^.]*fixed_in follows the source the dispute's higher names/.test(text)) out.push("no reading of fixed_in on a match with fixed_in_dispute");
+  if (!/quote fixed_in_dispute's note verbatim/.test(text)) out.push("the dispute's note is not quoted");
+  if (/stays the advisory's|still the advisory's|as the advisory states it/.test(text)) out.push("calls a disputed fixed_in the advisory's");
+  return out;
+}
 // #3269's fourth review: what sbom_review's steps 1 and 3 must say, as a list of what they lack.
 function sbomRound4Problems(own) {
   const lines = own.split("\n");
@@ -503,7 +519,8 @@ for (const era of ERAS) {
 
     it("#2834: am_i_affected's registry text reads each match's fixed_in, and its product text, whose CPE matches carry none, names none", async () => {
       const reg = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { ecosystem: "Maven", package: "org.apache.logging.log4j:log4j-core", version: "2.14.1" } }));
-      assert.match(reg, /For each match, give its fixed_in where it is a version: the first version above this one that no affected interval of the advisory holds\. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists\./);
+      assert.match(reg, /For each match, give its fixed_in where it is a version\. On a match without fixed_in_dispute, it is the first version above this one that no affected interval of the CVE's record holds\. On a match with fixed_in_dispute, .*\. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists\./);
+      assert.deepEqual(disputeReadingProblems(reg), []);
       const cpe = textOf(await client.getPrompt({ name: "am_i_affected", arguments: { product: "openssl", version: "3.0.0" } }));
       assert.doesNotMatch(cpe, /fixed_in/);
     });
@@ -515,11 +532,17 @@ for (const era of ERAS) {
       const rule = own.split("\n").find((l) => l.startsWith("For each line give the component"));
       const at = (re) => rule.search(re);
       // #3074: fixed_in is the first version above the installed one that no affected interval holds.
-      assert.ok(at(/Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\./) >= 0, rule);
+      assert.ok(at(/Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the fixed version to give\. On a match without fixed_in_dispute, it is the first version above the installed one that no affected interval of the CVE's record holds\. On a match with fixed_in_dispute .*\. null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\./) >= 0, rule);
       assert.ok(at(/Where the text or data keeps no match for that CVE on the component \(a cut can keep a row's cve_ids alone, or fewer matches than cve_ids\), or the match has no fixed_in field, the rest of this rule applies\./) >= 0, rule);
       // fixed_in comes before cve_intel's values, and nothing reads match_reason.
       assert.ok(at(/carries fixed_in/) >= 0 && at(/carries fixed_in/) < at(/fixed_branches/), rule);
       assert.doesNotMatch(own, /match_reason|advisory interval \[A, B/, "sbom_review still reads a fixed version from match_reason's prose");
+      assert.deepEqual(disputeReadingProblems(own), []);
+    });
+    it("#3381's round-4 review (F11) control: the readings of fixed_in as they were through round 4 fail the dispute check", () => {
+      const OLD_AM = "For each match, give its fixed_in where it is a version: the first version above this one that no affected interval of the advisory holds. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists.";
+      const OLD_SBOM = "read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record";
+      for (const t of [OLD_AM, OLD_SBOM]) assert.ok(disputeReadingProblems(t).length >= 2, t);
     });
     it("#2834 control: the rule as it read through 2.7.2, with its match_reason fallback, fails the check above", () => {
       const OLD = "Prefer the match's match_reason where the text keeps it: \"falls inside the advisory interval [A, B)\", closed by a parenthesis, says B is the advisory's fixed version for the range that holds the installed version, so give B as the fixed version, quoting it";

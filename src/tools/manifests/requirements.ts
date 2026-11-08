@@ -10,7 +10,7 @@
 // file, which is not read here (unsupported_line: pass it as its own file); -e, a direct URL
 // (name @ https://…) and a bare path or URL are vcs_source, local_path or unsupported_line. Global
 // options (--index-url and the rest) are not dependencies and are not counted.
-import { addNotChecked, callBounds, clip, eachLine, emptyParsed, pep503, purlOf, specOf, usableVersion, type Bounds, type NotCheckedReason, type Parsed } from "./common.js";
+import { LONG_NAME_DETAIL, addNotChecked, callBounds, clip, eachLine, emptyParsed, pep503, pin, specOf, tooLong, usableVersion, type Bounds, type NotCheckedReason, type Parsed } from "./common.js";
 
 // The logical lines: comments removed (a line starting with #, or whitespace then #), a trailing
 // backslash joining the next line, each with the 1-based number of its first physical line. #3434: one physical line at
@@ -26,6 +26,10 @@ function logicalLines(text: string, bounds: Bounds): { text: string; line: numbe
     out.push({ text: t, line: start });
   };
   eachLine(text, true, (raw, i) => {
+    // Round 11 (the round-10 verify's d2 F8): a blank line, or one of blanks, outside a continuation reads as nothing;
+    // it is passed over before any pattern runs on it: 4,999,000 of them took 518 ms under the image's heap flags, 53 ms
+    // now (one line of as many characters: 4 ms; what is left is eachLine's own walk).
+    if (buf === "" && (raw.length === 0 || raw.trim().length === 0)) return;
     if (buf === "") start = i + 1;
     if (buf === "") over = false;
     let l = raw;
@@ -80,8 +84,10 @@ const NAMED_AT = /^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\]\s*)?@/;
 // A line's comment, whitespace then # to its end, removed, as l.replace(/\s#.*$/, "") removes it: the first such # that
 // no \r, U+2028 or U+2029 follows ('.' matches none of them, and $ is the line's end). Without backtracking (#3434):
 // that regex retried each " #" to the line's end, quadratic in the line; this looks only past the last of those.
+// One pattern for every line (round 11, d2 F8): its lastIndex is set on each use.
+const COMMENT = /\s#/g;
 function withoutComment(l: string): string {
-  const re = /\s#/g;
+  const re = COMMENT;
   re.lastIndex = Math.max(0, l.lastIndexOf("\r"), l.lastIndexOf("\u2028"), l.lastIndexOf("\u2029"));
   const m = re.exec(l);
   return m ? l.slice(0, m.index) : l;
@@ -165,7 +171,12 @@ export function readRequirements(text: string, bounds: Bounds = callBounds()): P
       miss(name, "unsupported_line", "the pinned version cannot be read");
       continue;
     }
-    p.pinned.push({ purl: purlOf("pypi", pep503(name), pinned), line });
+    // #3460: a line is within LINE_MAX already; its name and version within NAME_MAX too, as every reader's.
+    if (tooLong(name, pinned)) {
+      miss(name, "unsupported_line", LONG_NAME_DETAIL);
+      continue;
+    }
+    pin(p, line, "pypi", pep503(name), pinned, (why) => miss(name, "unsupported_line", why));
   }
   return p;
 }

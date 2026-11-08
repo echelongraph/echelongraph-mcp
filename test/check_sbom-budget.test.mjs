@@ -148,7 +148,8 @@ describe("#2756: on a test-owned clock, at the real 50 s budget", () => {
 //
 // The loopback API answers each batch after plan[n].delayMs, and plan[n].onAnswer runs before it
 // answers (the case below moves the tool's clock on there). A request the client aborts is
-// recorded as aborted.
+// recorded as aborted. #3381's round-10 review (R10-M1): plan[n].text is the batch's answer, sent with its
+// Content-Length; plan[n].chunks, its answer in pieces, without one (chunked).
 const plan = {};
 const seen = [];
 const server = http.createServer((req, res) => {
@@ -165,12 +166,19 @@ const server = http.createServer((req, res) => {
     setTimeout(() => {
       if (res.destroyed) return;
       p.onAnswer?.();
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(req.url === BATCH_PATH ? JSON.stringify(answerFor(body)) : "{}");
+      res.writeHead(200, { "content-type": "application/json", ...(p.text === undefined ? {} : { "content-length": String(Buffer.byteLength(p.text)) }) });
+      if (p.chunks) {
+        for (const c of p.chunks) if (!res.destroyed) res.write(c);
+        return res.end();
+      }
+      res.end(req.url === BATCH_PATH ? (p.text ?? JSON.stringify(answerFor(body))) : "{}");
     }, p.delayMs ?? 0);
   });
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
+// The loopback API serves the describe below and #3381's round-10 one after it, whichever of them a name filter runs:
+// it is never closed under them, and holds no process open (unref) once the file's tests are done.
+server.unref();
 // Read by dist/index.js when it loads: the request timeout is 2 s here.
 process.env.ECHELONGRAPH_API_BASE = `http://127.0.0.1:${server.address().port}`;
 process.env.ECHELONGRAPH_API_TIMEOUT_MS = "2000";
@@ -182,10 +190,6 @@ const I = await import(dist("index.js"));
 describe("#2756: on the wall clock, the real api() against a loopback API", () => {
   before(() => {
     seen.length = 0;
-  });
-  after(async () => {
-    server.closeAllConnections();
-    await new Promise((r) => server.close(r));
   });
   const reset = (p) => {
     for (const k of Object.keys(plan)) delete plan[k];
@@ -237,5 +241,178 @@ describe("#2756: on the wall clock, the real api() against a loopback API", () =
     const c = res.structuredContent.coverage;
     assert.deepEqual([c.batches, c.batches_sent, c.sent, c.not_sent, c.not_sent_reason], [3, 1, MAX_COMPONENTS, 2 * MAX_COMPONENTS, "time_budget"]);
     assert.match(res.content[1].text, /the call's 50 s budget ran out while batch 2 of 3 was unanswered, so it was cut off/);
+  });
+});
+
+// #3381's round-4 review (F1): on the hosted endpoint a call reserves what the API's answers to its purls will hold
+// before its first batch (WEIGHT_BATCH_ROW a purl), adds what they hold past that as they come, and sends no further
+// batch once the budget says it is past its overdraft (not_sent_reason server_busy). Through round 4 nothing reserved
+// it. Here the reservation is a stand-in that records what it was asked and answers as told.
+const B = await import(dist("parseBudget.js"));
+describe("#3381's round-4 review: the answers to a call's purls are reserved before its first batch, and their excess charged as they come", () => {
+  const reservation = ({ state = "held", within = () => true } = {}) => {
+    const seen = { reserved: [], charged: [] };
+    const reserve = async (bytes, opts) => {
+      seen.reserved.push({ bytes, opts });
+      if (state === "busy") return { state: "busy" };
+      if (state === "too_large") return { state: "too_large", heldBytes: 30_000_000, maxBytes: 31_457_280 };
+      return { state: "held", keep: () => {}, charge: (b) => (seen.charged.push(b), within(seen.charged.length)) };
+    };
+    return { seen, reserve, busy: (tool, why) => ({ isError: false, content: [{ type: "text", text: why }], structuredContent: { state: "failed", error: { message: why, status: 503 } } }) };
+  };
+  // The API: every row with `matches` real-sized matches, its answer's length in bytes, as api() sends it.
+  const heavyApi = (matches) => async (_p, init) => {
+    const rows = JSON.parse(init.body).components.map((c, i) => ({ ...ROWS.affected(i, c.purl, "budget", "1.0.0", ["CVE-1"]), matches: Array.from({ length: matches }, (_, j) => ({ cve_id: `CVE-2099-${j}`, description: "d".repeat(1200) })) }));
+    const text = JSON.stringify(batchAnswer(rows));
+    return { ok: true, status: 200, data: JSON.parse(text), bytes: text.length };
+  };
+  it("a purl list reserves WEIGHT_BATCH_ROW a purl first, as answers (not small past one batch); busy and too_large answer at once, nothing sent", async () => {
+    let sent = 0;
+    const api = async (p, init) => (sent++, { ok: true, status: 200, data: answerFor(init.body), bytes: 10 });
+    const r = reservation();
+    const res = await checkSbom({ ...kit, api, reserve: r.reserve, busy: r.busy }, { purls: purls(3 * MAX_COMPONENTS) });
+    assert.notEqual(res.isError, true, res.content[0].text);
+    assert.deepEqual(r.seen.reserved, [{ bytes: 3 * MAX_COMPONENTS * B.WEIGHT_BATCH_ROW, opts: { answers: true } }]);
+    assert.equal(sent, 3);
+    for (const [state, says] of [["busy", /^server busy: no room in this instance's parse budget \(what its requests in flight hold, other calls' API answers among them\) came for this call's answers within the wait; retry in a few seconds$/], ["too_large", /^reading the API's answers for its 600 purls would take an estimated 768000 bytes of this server's memory beside the 30000000 bytes its request already holds \(its body, and its JSON-RPC batch's other calls\), more than the 31457280 bytes \(30 MiB\) one request may hold at once on the hosted endpoint, its body and what reading it holds together, so it is not read, and retrying the same call will not change that: pass fewer purls per call; or run this server locally \(npx -y echelongraph-mcp\), whose bounds are a share of its own machine's memory, not this endpoint's$/]]) {
+      sent = 0;
+      const q = reservation({ state });
+      const out = await checkSbom({ ...kit, api, reserve: q.reserve, busy: q.busy }, { purls: purls(3 * MAX_COMPONENTS) });
+      assert.equal(sent, 0, `${state}: a batch was sent`);
+      assert.match(out.content[0].text, says);
+    }
+  });
+  it("answers holding more than was reserved are charged as they come; past the overdraft no further batch is sent, and the purls not sent say server_busy", async () => {
+    let sent = 0;
+    const api = heavyApi(3);
+    const counting = async (p, init) => (sent++, api(p, init));
+    // Control: within the overdraft every batch is sent, and each one's excess is charged.
+    const ok = reservation();
+    const all = await checkSbom({ ...kit, api: counting, reserve: ok.reserve, busy: ok.busy }, { purls: purls(4 * MAX_COMPONENTS) });
+    assert.equal(sent, 4);
+    assert.equal(ok.seen.charged.length, 4);
+    assert.ok(ok.seen.charged.every((b) => b > 0), `the excess of rows of three matches was not charged: ${ok.seen.charged}`);
+    assert.equal(all.structuredContent.coverage.not_sent, 0);
+    // Past the overdraft after the second batch: the third and fourth are not sent.
+    sent = 0;
+    const over = reservation({ within: (n) => n < 2 });
+    const part = await checkSbom({ ...kit, api: counting, reserve: over.reserve, busy: over.busy }, { purls: purls(4 * MAX_COMPONENTS) });
+    assert.equal(sent, 2);
+    const c = part.structuredContent.coverage;
+    assert.deepEqual([c.batches_sent, c.sent, c.not_sent, c.not_sent_reason], [2, 2 * MAX_COMPONENTS, 2 * MAX_COMPONENTS, "server_busy"]);
+    assert.match(part.content[1].text, /NOT sent \(not_sent_reason server_busy: after 2 of 4 batches this instance's parse budget was more than a quarter past its bound, so no further batch was sent\)/);
+    // Rows the reservation covers are not charged at all.
+    const light = reservation();
+    await checkSbom({ ...kit, api: async (p, init) => ({ ok: true, status: 200, data: answerFor(init.body), bytes: init.body.length }), reserve: light.reserve, busy: light.busy }, { purls: purls(2 * MAX_COMPONENTS) });
+    assert.deepEqual(light.seen.charged, [0, 0]);
+  });
+});
+
+// #3381's round-10 review. R10-M1: on the hosted endpoint a batch's answer is read only to the room the call has (what
+// its reservation still covers of it, and what the budget has left before its overdraft, at WEIGHT_ANSWER_BYTE a byte):
+// past it the read stops, the answer is dropped, and that batch's purls and the rest are not sent (server_busy), or, on
+// the first batch, the call is answered "server busy". Through round 10 it was read and parsed whole: one of 26 MB ended
+// the hosted process. R10-B1: the call sends no further batch once its own request holds more than the most one request
+// may reserve, and check_sbom's keep() never grows its document's hold past what was reserved for it.
+describe("#3381's round-10 review: a batch's answer is read to the room left, and a request's hold to its bound", () => {
+  const reset = (p) => {
+    for (const k of Object.keys(plan)) delete plan[k];
+    Object.assign(plan, p);
+    seen.length = 0;
+  };
+  const heavy = (n) => JSON.stringify(batchAnswer(Array.from({ length: 200 }, (_, i) => ({ ...ROWS.affected(i, `pkg:npm/x${i}@1`, "x", "1", ["CVE-1"]), matches: Array.from({ length: n }, (_, j) => ({ cve_id: `CVE-2099-${j}`, description: "d".repeat(1000) })) }))));
+  // The reservation: room() as told, charge() and keep() recorded.
+  const held = (room, { within = () => true } = {}) => {
+    const seen = { reserved: [], charged: [], kept: [] };
+    return {
+      seen,
+      reserve: async (bytes, opts) => (seen.reserved.push({ bytes, opts }), { state: "held", keep: (b) => seen.kept.push(b), charge: (b) => (seen.charged.push(b), within(seen.charged.length)), room }),
+    };
+  };
+  const deps = (r) => ({ api: I.api, failed: I.failed, describeFailure: I.describeFailure, badInput: I.badInput, crashed: I.crashed, busy: I.busy, checked: I.checked, succeeded: I.succeeded, okHead: I.okHead, envelopeSchema: I.envelopeSchema, annotations: {}, reserve: r.reserve });
+  const ROOM = 1_000_000;
+  const roomy = () => ({ budget: ROOM, request: ROOM, requestMax: 31_457_280 });
+
+  it("api(): an answer past init.maxBytes, by its Content-Length or as it comes, is read no further and answered as cut; one within it is read as res.text() reads it", async () => {
+    reset({ 0: { text: "x".repeat(100_000) }, 1: { chunks: Array.from({ length: 5 }, () => "y".repeat(40_000)) }, 2: { text: `\uFEFF${JSON.stringify({ a: "é" })}` } });
+    const declared = await I.api(BATCH_PATH, { method: "POST", body: "{}", maxBytes: 50_000 });
+    assert.deepEqual(declared, { ok: false, cut: true, path: BATCH_PATH, status: 200, bytes: 100_000, maxBytes: 50_000 });
+    const streamed = await I.api(BATCH_PATH, { method: "POST", body: "{}", maxBytes: 100_000 });
+    assert.equal(streamed.cut, true);
+    // Stopped at the chunk that passed the bound, before the answer's end (200,000 bytes).
+    assert.ok(streamed.bytes > 100_000 && streamed.bytes < 200_000, `read ${streamed.bytes} bytes of it`);
+    const whole = await I.api(BATCH_PATH, { method: "POST", body: "{}", maxBytes: 50_000 });
+    assert.deepEqual([whole.ok, whole.data], [true, { a: "é" }]);
+  });
+
+  it("R10-M1: check_sbom of two batches whose second answer is past the room: the first's purls checked, the second's not sent, server_busy", async () => {
+    reset({ 1: { text: heavy(10) } });
+    const r = held(roomy);
+    const res = await checkSbom(deps(r), { purls: purls(2 * MAX_COMPONENTS) });
+    assert.notEqual(res.isError, true, res.content[0].text);
+    const c = res.structuredContent.coverage;
+    assert.deepEqual([c.batches_sent, c.sent, c.not_sent, c.not_sent_reason], [1, MAX_COMPONENTS, MAX_COMPONENTS, "server_busy"]);
+    // What the reservation still covered of the second batch, and the room, read at what its rows' matches would cost.
+    const first = JSON.stringify(answerFor(JSON.stringify({ components: purls(MAX_COMPONENTS).map((purl) => ({ purl })) }))).length;
+    const cap = B.mostAnswerBytes(2 * MAX_COMPONENTS * B.WEIGHT_BATCH_ROW + r.seen.charged[0] - B.answerCost(first, MAX_COMPONENTS) + ROOM, MAX_COMPONENTS);
+    assert.match(res.structuredContent.notes.join(" "), new RegExp(`not_sent_reason server_busy: the API's answer to batch 2 of 2 came to more than the ${cap} bytes this instance's memory had room for, so it was not read, and no further batch was sent`));
+    assert.equal(res.structuredContent.data.not_sent_purls[0], purls(2 * MAX_COMPONENTS)[MAX_COMPONENTS]);
+  });
+
+  it("R10-M1: check_sbom whose first batch's answer is past the room: failed, server busy, naming the request made and that its answer was not read", async () => {
+    reset({ 0: { chunks: [heavy(10)] } });
+    const res = await checkSbom(deps(held(roomy)), { purls: purls(MAX_COMPONENTS) });
+    assert.equal(res.isError, true);
+    const sc = res.structuredContent;
+    assert.deepEqual([sc.state, sc.coverage, sc.error.kind, sc.error.path, sc.error.status], ["failed", null, "internal", BATCH_PATH, 200]);
+    assert.match(sc.error.message, /^server busy: the API's answer to batch 1 of 1 came to more than the \d+ bytes this instance's memory had room for, so it was not read; retry in a few seconds, or pass fewer purls per call$/);
+    assert.match(res.content[0].text, /The API's answer was not read, so this is not a finding/);
+    assert.doesNotMatch(res.content[0].text, /Nothing was read or sent to the API/);
+  });
+
+  it("R10-M1's verification: a batch's answer costs WEIGHT_ANSWER_BYTE a byte for its rows' first ROW_ANSWER_BYTES, WEIGHT_MATCH_BYTE for its matches, and is read to what that leaves room for", () => {
+    const rows = MAX_COMPONENTS;
+    const light = rows * B.ROW_ANSWER_BYTES;
+    assert.deepEqual([B.answerCost(light, rows), B.answerCost(light + 1000, rows)], [B.WEIGHT_ANSWER_BYTE * light, B.WEIGHT_ANSWER_BYTE * (light + 1000) + (B.WEIGHT_MATCH_BYTE - B.WEIGHT_ANSWER_BYTE) * 1000]);
+    for (const room of [0, 1, 1000, B.WEIGHT_ANSWER_BYTE * light - 1, B.WEIGHT_ANSWER_BYTE * light, 5_000_000, 52_428_800]) {
+      const most = B.mostAnswerBytes(room, rows);
+      assert.ok(B.answerCost(most, rows) <= room, `${room}: ${most} costs ${B.answerCost(most, rows)}`);
+      assert.ok(B.answerCost(most + 1, rows) > room, `${room}: ${most + 1} still fits`);
+    }
+    // A batch of rows not affected (about 410 B each) costs three bytes a byte, within what each purl reserves.
+    const a = JSON.stringify(answerFor(JSON.stringify({ components: purls(rows).map((purl) => ({ purl })) }))).length;
+    assert.ok(B.answerCost(a, rows) <= rows * B.WEIGHT_BATCH_ROW, `${a} bytes cost ${B.answerCost(a, rows)}`);
+  });
+
+  it("R10-M1: without a budget (stdio), or within the room, every answer is read as before", async () => {
+    reset({ 1: { text: heavy(10) } });
+    const res = await checkSbom({ ...deps(held(roomy)), reserve: undefined }, { purls: purls(2 * MAX_COMPONENTS) });
+    assert.deepEqual([res.structuredContent.coverage.sent, res.structuredContent.coverage.not_sent], [2 * MAX_COMPONENTS, 0]);
+    reset({ 1: { text: heavy(10) } });
+    const wide = await checkSbom(deps(held(() => ({ budget: 50_000_000, request: 1, requestMax: 31_457_280 }))), { purls: purls(2 * MAX_COMPONENTS) });
+    assert.deepEqual([wide.structuredContent.coverage.sent, wide.structuredContent.coverage.not_sent], [2 * MAX_COMPONENTS, 0]);
+  });
+
+  it("R10-B1: once charge() says no and the call's request is past what one request may reserve, no further batch is sent, and the detail says so", async () => {
+    reset({});
+    const r = held(() => ({ budget: ROOM, request: -1, requestMax: 31_457_280 }), { within: () => false });
+    const res = await checkSbom(deps(r), { purls: purls(3 * MAX_COMPONENTS) });
+    const c = res.structuredContent.coverage;
+    assert.deepEqual([c.batches_sent, c.sent, c.not_sent_reason], [1, MAX_COMPONENTS, "server_busy"]);
+    assert.match(res.structuredContent.notes.join(" "), /after 1 of 3 batches the API's answers took this call's request past the 31457280 bytes one request may reserve, so no further batch was sent/);
+  });
+
+  it("R10-B1: keep() never grows the document's hold past what was reserved, where its \"purl\" keys are written with an escape", async () => {
+    reset({});
+    const n = 2_000;
+    const sbom = `{"bomFormat":"CycloneDX","specVersion":"1.5","components":[${Array.from({ length: n }, (_, i) => `{"\\u0070url":"pkg:npm/a-${String(i).padStart(4, "0")}@1.0.0"}`).join(",")}]}`;
+    const reserved = B.documentCost(sbom).bytes;
+    assert.ok(n * B.WEIGHT_MANIFEST_ENTRY > reserved, `the case's premise: its purls (${n * B.WEIGHT_MANIFEST_ENTRY}) are more than its reservation (${reserved})`);
+    const r = held(roomy);
+    const res = await checkSbom(deps(r), { sbom });
+    assert.notEqual(res.isError, true, res.content[0].text);
+    assert.equal(res.structuredContent.coverage.with_purl, n);
+    assert.equal(r.seen.reserved[0].bytes, reserved);
+    assert.deepEqual(r.seen.kept, [reserved]);
   });
 });

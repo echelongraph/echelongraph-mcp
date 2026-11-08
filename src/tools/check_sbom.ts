@@ -20,6 +20,8 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { answering, FULL_ARG, TEXT_BUDGET_DESCRIPTION, type Again, type DataCut, type LeaveLast, type RowKeep, type TextCut, type ThinLevel } from "../textBudget.js";
 import { boundedRecord } from "../inputBounds.js";
+import { PARSE_BUDGET_BYTES, WEIGHT_MANIFEST_ENTRY, documentCost, tooLargeToHold, type DocumentCost } from "../parseBudget.js";
+import type { Reservation, ReserveFor } from "../runtime.js";
 import {
   CLEAN_NOTE,
   DISTRO_NOTE,
@@ -34,9 +36,11 @@ import {
   isObj,
   plural,
   purlsRefusal,
+  reserveAnswers,
   sendBatches,
   sendingCoverage,
   sendingCoverageShape,
+  failureSendingCoverageShape,
   sendingSentences,
   verdictSentences,
   type FailureLike,
@@ -58,6 +62,10 @@ export type CheckSbomDeps<F extends FailureLike> = MatchBatchDeps<F> & {
   hold?: <T>(p: Promise<T>) => Promise<T>;
   badInput: (tool: string, why: string) => ToolResult;
   crashed: (tool: string, e: unknown) => ToolResult;
+  // #3381: on the hosted endpoint, runtime.ts reserveParse (room in the instance's parse budget before a document is
+  // parsed from a string), and index.ts busy (the answer when none came). Absent, nothing is reserved.
+  reserve?: (bytes: number, opts?: ReserveFor) => Promise<Reservation>;
+  busy?: (tool: string, why: string, unread?: { path: string; status: number }) => ToolResult;
   checked: (tool: string, schema: z.ZodType, r: ToolResult) => ToolResult;
   succeeded: (
     data: object,
@@ -66,11 +74,13 @@ export type CheckSbomDeps<F extends FailureLike> = MatchBatchDeps<F> & {
     cut?: TextCut,
   ) => ToolResult;
   okHead: (tool: string, status?: number) => string;
-  envelopeSchema: (o: { data: z.ZodType; coverage: z.ZodType | null; freshness: z.ZodType | null }) => z.ZodType;
+  envelopeSchema: (o: { data: z.ZodType; coverage: z.ZodType | null; failureCoverage?: z.ZodType | null; freshness: z.ZodType | null }) => z.ZodType;
   annotations: Record<string, boolean>;
 };
 
 export const CHECK_SBOM = "check_sbom";
+// #3381: what a call answers when the hosted endpoint's parse budget had no room for its document (index.ts busy).
+export const BUSY_WHY = "server busy: this instance's memory for reading documents is taken by other calls; retry in a few seconds";
 // The document's size cap, as JSON text. OWASP Juice Shop 11.1.2's full CycloneDX SBOM (840
 // components) is 0.74 MB; this leaves room for a much larger one while bounding what this process
 // parses.
@@ -106,7 +116,16 @@ const MAX_DEPTH = 32;
 const READ_ORDER =
   "counted in the order this tool read them (the order of purls, or of the document's components or packages, each component's nested components right after it and before its next sibling, each purl at its first place)";
 
-export const CHECK_SBOM_TITLE = "Check an SBOM against the advisory corpus";
+// #3467: through 3.1.5 "Check an SBOM against the advisory corpus", which, with refusals that named only sbom, read as
+// though a list of purls were not taken; purls is the tool's first argument.
+export const CHECK_SBOM_TITLE = "Check purls or an SBOM against the advisory corpus";
+// #3467: where a list of purls goes, added to each refusal of one sent in the wrong shape: a purl, or a list of them,
+// as sbom (text or a JSON array), or one bare string as purls (schemaRefusal.ts, purlsHint below). Through 3.1.5 none
+// of the three named purls: "sbom is not JSON: pass a CycloneDX JSON or SPDX JSON document", "sbom must be a string or
+// an object, not an array", "purls must be an array, not a string".
+export const PURLS_HINT = 'a list of purls goes in purls, e.g. purls: ["pkg:npm/lodash@4.17.20"]; one purl still goes in a list';
+// #3467 (round 11): text that starts as a purl does, after blanks, quotes and an opening bracket.
+const PURL_TEXT = /^[\s"'\[]*pkg:/i;
 // #2846: the routing sentence for the pods-and-images question, inside the description's first
 // 2,048 characters (test/prompts-resources.test.mjs holds it there, with a control). The workload
 // itself never reaches this tool: the workload_triage prompt has the agent build each image's SBOM
@@ -147,7 +166,8 @@ export const CHECK_SBOM_DESCRIPTION =
 // any row is cut to the last level, those rows are cut to it and leave the text, as many as must;
 // where even that does not fit, the cut goes on as before.
 export function sbomText(sent: number): TextCut {
-  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed", "fixed_in", "fixed_in_reason"];
+  // #3391: a match's fixed_in_dispute (its note on where the CVE's own record differs) beside its fixed_in.
+  const matches = ["cve_id", "severity", "effective_severity", "effective_score", "kev_listed", "ransomware", "epss_score", "score_assessed", "fixed_in", "fixed_in_reason", "fixed_in_dispute"];
   const row = [
     "index", "purl", "ecosystem", "package", "version", "verdict", "assessed", "not_assessed_reason", "count", "not_affected_count", "undetermined_count", "cve_ids", "matched_package", "matched_via",
   ];
@@ -215,7 +235,7 @@ export const SBOM_ROW_THIN: RowKeep = [
   "matched_via",
   "matched_version_from",
   "purl_name",
-  ["matches", ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason"]],
+  ["matches", ["cve_id", "kev_listed", "ransomware", "epss_score", "effective_score", "score_assessed", "fixed_in", "fixed_in_reason", "fixed_in_dispute"]],
 ];
 // #3132: past SBOM_ROW_THIN, each row is cut on its own terms before any row leaves. Through 3.0.0
 // SBOM_ROW_THIN was the only level, and it keeps every match object, so one row still large once
@@ -544,13 +564,25 @@ function fromSPDX(doc: Record<string, unknown>): Extracted | string {
   return { input: "spdx", components_in_document: total, with_purl: found.length, without_purl: without, duplicates_removed: removed, purls };
 }
 
-// Reads the tool's arguments into the purls to send, or says why it cannot.
-export function extract(a: { purls?: unknown; sbom?: unknown }): Extracted | string {
+// #3381: why a document passed as text is not parsed: what its parse would retain beside the text (parseBudget.ts
+// documentCost) is past maxBytes, the bound in force (PARSE_BUDGET_BYTES) unless the caller names another; undefined
+// when it is not.
+export function denseRefusal(c: DocumentCost, what: string, maxBytes: number = PARSE_BUDGET_BYTES): string | undefined {
+  if (c.bytes <= maxBytes) return undefined;
+  const s = c.structure;
+  return `${what} is too dense to read: its ${s.containers} objects and arrays, ${s.elements} entries and ${s.keys} keys, parsed, are estimated at ${c.bytes} bytes, past the ${maxBytes} bytes a document's parse may take; pass its purls instead`;
+}
+
+// Reads the tool's arguments into the purls to send, or says why it cannot. `counted`: documentCost of an sbom passed as
+// text, when the caller has counted it already (checkSbom); else it is counted here, before it is parsed (#3381), and
+// refused past `maxBytes` (denseRefusal).
+export function extract(a: { purls?: unknown; sbom?: unknown }, counted?: DocumentCost, maxBytes: number = PARSE_BUDGET_BYTES): Extracted | string {
   const hasPurls = a.purls !== undefined;
   const hasSbom = a.sbom !== undefined;
   if (hasPurls === hasSbom) return "pass exactly one of purls (a list of package URLs) or sbom (a CycloneDX JSON or SPDX JSON document)";
   if (hasPurls) {
-    if (!Array.isArray(a.purls) || a.purls.some((p) => typeof p !== "string")) return "purls must be a list of strings";
+    // #3467: one purl as a bare string is told it goes in a list (over MCP the inputSchema refuses it first, purlsHint).
+    if (!Array.isArray(a.purls) || a.purls.some((p) => typeof p !== "string")) return `purls must be a list of strings${typeof a.purls === "string" ? `; ${PURLS_HINT}` : ""}`;
     const trimmed = (a.purls as string[]).map((p) => p.trim()).filter(Boolean);
     const { purls, removed } = dedupe(trimmed);
     return { input: "purls", components_in_document: null, with_purl: trimmed.length, without_purl: (a.purls as string[]).length - trimmed.length, duplicates_removed: removed, purls };
@@ -558,11 +590,21 @@ export function extract(a: { purls?: unknown; sbom?: unknown }): Extracted | str
   let doc: unknown = a.sbom;
   if (typeof doc === "string") {
     if (doc.length > MAX_SBOM_CHARS) return `sbom is ${doc.length} characters; at most ${MAX_SBOM_CHARS} are read`;
+    const dense = denseRefusal(counted ?? documentCost(doc), "sbom", maxBytes);
+    if (dense) return dense;
+    // A leading byte-order mark (U+FEFF), as an editor may save a document with, is not part of the JSON (round 11,
+    // the round-10 verify's d1 F5): scan_manifest's readers drop it too.
+    const text = doc.charCodeAt(0) === 0xfeff ? doc.slice(1) : doc;
     try {
-      doc = JSON.parse(doc);
+      doc = JSON.parse(text);
     } catch {
-      return "sbom is not JSON: pass a CycloneDX JSON or SPDX JSON document (XML and SPDX tag-value are not read)";
+      // #3467: text that begins as a purl does ("pkg:"), one or a list of them, bare, quoted or in brackets, is told
+      // where they go (round 11, d1 F3: '"pkg:npm/a@1", "pkg:npm/b@2"' and "['pkg:npm/a@1']" too).
+      const purl = PURL_TEXT.test(text.slice(0, 64));
+      return `sbom is not JSON: pass a CycloneDX JSON or SPDX JSON document (XML and SPDX tag-value are not read)${purl ? `; ${PURLS_HINT}` : ""}`;
     }
+    // #3467: one purl sent as a JSON string ('"pkg:npm/a@1"') was meant as purls.
+    if (typeof doc === "string" && PURL_TEXT.test(doc.slice(0, 64))) return `sbom must be a JSON object: a CycloneDX JSON or SPDX JSON document; ${PURLS_HINT}`;
   } else {
     let size = 0;
     try {
@@ -572,7 +614,8 @@ export function extract(a: { purls?: unknown; sbom?: unknown }): Extracted | str
     }
     if (size > MAX_SBOM_CHARS) return `sbom is ${size} characters as JSON; at most ${MAX_SBOM_CHARS} are read`;
   }
-  if (!isObj(doc)) return "sbom must be a JSON object: a CycloneDX JSON or SPDX JSON document";
+  // #3467: a JSON array is no SBOM document; a list there is most likely of purls.
+  if (!isObj(doc)) return `sbom must be a JSON object: a CycloneDX JSON or SPDX JSON document${Array.isArray(doc) ? `; ${PURLS_HINT}` : ""}`;
   if (typeof doc.bomFormat === "string" && doc.bomFormat.toLowerCase() === "cyclonedx") {
     const r = fromCycloneDX(doc);
     return typeof r === "string" ? `the CycloneDX document cannot be read: ${r}` : r;
@@ -581,7 +624,15 @@ export function extract(a: { purls?: unknown; sbom?: unknown }): Extracted | str
     const r = fromSPDX(doc);
     return typeof r === "string" ? `the SPDX document cannot be read: ${r}` : r;
   }
-  return 'sbom is neither a CycloneDX JSON document (bomFormat "CycloneDX") nor an SPDX JSON document (spdxVersion "SPDX-…")';
+  // #3467: a document of neither format that holds purls of its own at its top level was meant as the argument.
+  return `sbom is neither a CycloneDX JSON document (bomFormat "CycloneDX") nor an SPDX JSON document (spdxVersion "SPDX-…")${"purls" in doc ? `; ${PURLS_HINT}` : ""}`;
+}
+
+/** #3467: the hint (PURLS_HINT) for check_sbom's arguments the inputSchema refuses (schemaRefusal.ts withSchemaRefusal):
+ *  sbom sent as a JSON array, or purls as one string. Undefined for any other. */
+export function purlsHint(input: unknown): string | undefined {
+  if (!isObj(input)) return undefined;
+  return Array.isArray(input.sbom) || typeof input.purls === "string" ? PURLS_HINT : undefined;
 }
 
 // ── The answer ──
@@ -605,10 +656,48 @@ function noteFor(head: string, x: Extracted, d: object, g: Sending): { note: str
   return { note: out.join(" "), assessed: v.assessed };
 }
 
+// #3381's round-5 review (C1): what a call refused too_large on the hosted endpoint can do instead (parseBudget.ts
+// tooLargeToHold adds the local server).
+const SBOM_TOO_LARGE_INSTEAD = "pass its purls instead, in calls of 2,000 or fewer";
+// How many "purl" keys a document's text holds: no fewer than the purls extract() reads from it (a key written with an
+// escape is not counted; then keep() grows the hold to what is kept, as through round 5).
+function purlKeys(text: string): number {
+  let n = 0;
+  for (let i = text.indexOf('"purl"'); i >= 0; i = text.indexOf('"purl"', i + 6)) n++;
+  return n;
+}
+
 export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a: { purls?: unknown; sbom?: unknown }): Promise<ToolResult> {
   const tool = CHECK_SBOM;
   try {
-    const x = extract(a);
+    // #3381: a document passed as text is counted before it is parsed, and on the hosted endpoint what its parse would
+    // retain is reserved in the instance's parse budget first (the text itself is the request's, already reserved): a
+    // reservation the request could never hold is refused at once, one that found no room in the wait is busy.
+    let counted: DocumentCost | undefined;
+    let keep: ((bytes: number) => void) | undefined;
+    let reserved = 0;
+    if (typeof a.sbom === "string" && a.sbom.length <= MAX_SBOM_CHARS && a.purls === undefined) {
+      counted = documentCost(a.sbom);
+      if (!denseRefusal(counted, "sbom") && deps.reserve && deps.busy) {
+        // #3381's round-5 review (B1): the most the call keeps of it is reserved from the start: its parse, or its purls
+        // (each "purl" key one, WEIGHT_MANIFEST_ENTRY each), whichever is more, so the hold only ever shrinks. Through
+        // round 5 keep() grew it to the purls past what was taken, a small request's past the small share.
+        const bytes = Math.max(counted.bytes, purlKeys(a.sbom) * WEIGHT_MANIFEST_ENTRY);
+        reserved = bytes;
+        const r = await deps.reserve(bytes);
+        if (r.state === "busy") return deps.busy(tool, BUSY_WHY);
+        if (r.state === "too_large") return deps.badInput(tool, tooLargeToHold("the sbom", bytes, r.heldBytes, r.maxBytes, SBOM_TOO_LARGE_INSTEAD));
+        keep = r.keep;
+      }
+    }
+    const x = extract(a, counted);
+    // #3381's review: what the parse built is dropped once extract returns; for the rest of the call (its API phase) the
+    // document is its purls, each held as WEIGHT_MANIFEST_ENTRY. #3381's round-10 review (R10-B1): at most what was
+    // reserved, so the hold never grows past the bound its reservation was held to: through round 10 a document whose
+    // "purl" keys were written with an escape (purlKeys counts none) grew it to its purls', 68 MB for one of 150,032
+    // components, which purlsRefusal then refused. Past MAX_PURLS the call is refused below; within it, what is kept
+    // past what was reserved is at most MAX_PURLS x WEIGHT_MANIFEST_ENTRY (768,000 bytes).
+    keep?.(typeof x === "string" ? 0 : Math.min(reserved, x.purls.length * WEIGHT_MANIFEST_ENTRY));
     if (typeof x === "string") return deps.badInput(tool, x);
     if (x.purls.length === 0) {
       return deps.badInput(tool, x.input === "purls" ? "purls holds no package URL" : `the document holds ${x.components_in_document ?? 0} components and none carries a purl, so there is nothing to check`);
@@ -616,9 +705,12 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
     const refused = purlsRefusal(x.purls, `split the list into calls of ${MAX_PURLS} or fewer`);
     if (refused) return deps.badInput(tool, refused);
 
+    // #3381's round-4 review: what the API's answers will hold, reserved before the first batch (match_batch.ts).
+    const answers = await reserveAnswers(deps, tool, x.purls.length);
+    if ("result" in answers) return answers.result;
     // match_batch.ts: one batch at a time, Retry-After waited out within the budget (#2734,
     // #2756), stopped on cancellation (#2775).
-    const run = await sendBatches(deps, tool, x.purls);
+    const run = await sendBatches(deps, tool, x.purls, answers);
     if (!run.ok) return run.result;
     const { data, status, sending: g } = run;
     const { note, assessed } = noteFor(deps.okHead(tool, status), x, data, g);
@@ -645,17 +737,19 @@ export async function checkSbom<F extends FailureLike>(deps: CheckSbomDeps<F>, a
 // ── Schemas ──
 
 export function checkSbomOutput(envelopeSchema: CheckSbomDeps<FailureLike>["envelopeSchema"]): z.ZodType {
+  const read = {
+    input: z.enum(["purls", "cyclonedx", "spdx"]).describe("What was passed: a purl list, a CycloneDX JSON document or an SPDX JSON document."),
+    components_in_document: z.number().int().nullable().describe("Components (CycloneDX) or packages (SPDX) in the document; null for a purl list."),
+    with_purl: z.number().int().describe("Of those, the ones carrying a purl."),
+    without_purl: z.number().int().describe("The ones without a purl: not checked, and not clean."),
+    duplicates_removed: z.number().int().describe("Purls that appeared more than once and were sent once."),
+  };
   return envelopeSchema({
     // match_batch.ts batchDataShape: the batch route's answer, merged over the batches.
     data: z.looseObject(batchDataShape),
-    coverage: z.strictObject({
-      input: z.enum(["purls", "cyclonedx", "spdx"]).describe("What was passed: a purl list, a CycloneDX JSON document or an SPDX JSON document."),
-      components_in_document: z.number().int().nullable().describe("Components (CycloneDX) or packages (SPDX) in the document; null for a purl list."),
-      with_purl: z.number().int().describe("Of those, the ones carrying a purl."),
-      without_purl: z.number().int().describe("The ones without a purl: not checked, and not clean."),
-      duplicates_removed: z.number().int().describe("Purls that appeared more than once and were sent once."),
-      ...sendingCoverageShape,
-    }),
+    coverage: z.strictObject({ ...read, ...sendingCoverageShape }),
+    // #3381's round-10 review (R10-1): the failure branch keeps 3.1.5's not_sent_reason (match_batch.ts).
+    failureCoverage: z.strictObject({ ...read, ...failureSendingCoverageShape }),
     freshness: null,
   });
 }

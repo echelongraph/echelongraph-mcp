@@ -170,6 +170,13 @@ const LOG4J_FIXED_IN = {
   "CVE-2021-45105": "2.17.0",
   "CVE-2021-44832": "2.17.1",
 };
+// #3391, #3381's round-4 review (F11): a match as core-backend answers one whose range the CVE record's CNA disputes
+// (test/fixtures/fixed-in-dispute-wire.json), so the text that keeps fixed_in_dispute, which the prompts name, is held.
+const DISPUTE = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fixed-in-dispute-wire.json"), "utf8")).cases.cna_fixed_advisory_interval;
+const withDispute = (answers) =>
+  Object.fromEntries(
+    Object.entries(answers).map(([p, body]) => [p, { ...body, results: body.results.map((r) => ({ ...r, matches: (r.matches ?? []).map((m) => ({ ...m, fixed_in_dispute: DISPUTE.match.matches[0].fixed_in_dispute })) })) }]),
+  );
 const withFixedIn = (answers, fixes = LOG4J_FIXED_IN) =>
   Object.fromEntries(
     Object.entries(answers).map(([path, body]) => [
@@ -466,6 +473,12 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
       [{ product: "flash_player", version: "10.0.0" }, shapedAnswers(caseOf("check_affected, flash_player 10.0.0 (200 matches and an excluded sample of 50)"))],
       [{ ecosystem: "PyPI", package: "django", version: "1.11.0" }, { [djangoPath]: { ...djangoBody, matches, cve_ids: matches.map((m) => m.cve_id), count: 200, capped: true, undetermined, undetermined_count: 73 } }],
       [{ ecosystem: "PyPI", package: "django", version: "1.11.0" }, withFixedIn],
+      // #3391: core-backend's own answer for lodash 4.17.15, its matches disputed (fixed_in_dispute). It holds 2
+      // matches, not the cap: it is exempt from the cap's assertion below, and is here so fixed_in_dispute is among
+      // the fields the prompt lists and a call's text carries (#3381's round-5 review, T5). At the cap a disputed
+      // registry list's text, like the withFixedIn case's, keeps only its first matches, and its note says how many
+      // it leaves out (fixed-in-dispute.test.mjs holds fixed_in_dispute on every match a cut list keeps).
+      [{ ecosystem: "npm", package: "lodash", version: "4.17.15" }, { [djangoPath]: DISPUTE.match }],
     ];
     const carried = new Set();
     let named;
@@ -481,7 +494,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
       const shown = JSON.parse(blocksOf(res)[0]);
       t.diagnostic(`${JSON.stringify(args)}: first text block ${blocksOf(res)[0].length} characters, ${shown.matches.length} matches, each with ${Object.keys(shown.matches[0]).join(", ")}`);
       assert.equal(shown.matches.length, res.structuredContent.data.matches.length, `${JSON.stringify(args)}: matches left out of the text`);
-      assert.ok(shown.matches.length === 200 || answers === withFixedIn, `${JSON.stringify(args)}: ${shown.matches.length} matches, not the cap of 200`);
+      assert.ok(shown.matches.length === 200 || answers === withFixedIn || args.package === "lodash", `${JSON.stringify(args)}: ${shown.matches.length} matches, not the cap of 200`);
       for (const f of heldTo(`check_affected ${JSON.stringify(args)}`, res, named)) carried.add(f);
     }
     allCarried(t, "am_i_affected", named, carried, ["check_affected"]);
@@ -567,6 +580,9 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     // row with matched_package and matched_via.
     const small2834 = await call("check_sbom", LOG4J.args, withMatched(withFixedIn(shapedAnswers(LOG4J))));
     for (const f of heldTo(LOG4J_2834.label, small2834, named, derived)) carried.add(f);
+    // #3391: the same, its match disputed (fixed_in_dispute), as core-backend answers one.
+    const small3391 = await call("check_sbom", LOG4J.args, withDispute(withMatched(withFixedIn(shapedAnswers(LOG4J)))));
+    for (const f of heldTo(`${LOG4J_2834.label}, disputed`, small3391, named, derived)) carried.add(f);
     // #2836: an upstream row, whole in the text: step 2's reading of its purl (openssl at 3.3.6-r0,
     // matched_via upstream) is held to the row's own package, version, matched_package and
     // matched_via (heldTo reads every derived field the text keeps on an affected row).
@@ -891,7 +907,7 @@ describe("#2799: what each prompt names is in the text its tools return, at the 
     const sbom = JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.5", components: [{ type: "library", name: "log4j-core", version: "2.14.1", purl }] });
     const own = textOf(await client.getPrompt({ name: "sbom_review", arguments: { sbom } })).split("\nSBOM:\n")[0];
     // #3074: fixed_in is the first version above the installed one that no affected interval holds.
-    assert.match(own, /Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the first version above the installed one that no affected interval of the advisory holds, so give it as the fixed version; null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\./);
+    assert.match(own, /Where the text keeps the component's match for the CVE and the match carries fixed_in, read fixed_in alone: a version there is the fixed version to give\. On a match without fixed_in_dispute, it is the first version above the installed one that no affected interval of the CVE's record holds\. On a match with fixed_in_dispute .*\. null says no fixed version is on record for the installed version's range, so give none for that CVE on that component: where the match carries fixed_in_reason, write "no fix on record" and that fixed_in_reason, which says why, as given \(a version it names is not a fix\); this is not a finding that no fix exists\./);
     assert.match(own, /Where the text or data keeps no match for that CVE on the component \(a cut can keep a row's cve_ids alone, or fewer matches than cve_ids\), or the match has no fixed_in field, the rest of this rule applies\./);
     const shown = async (answers) => JSON.parse(blocksOf(await call("check_sbom", LOG4J.args, answers))[0]).results[0];
     const row = await shown(withFixedIn(shapedAnswers(LOG4J)));

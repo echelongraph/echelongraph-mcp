@@ -236,7 +236,10 @@ describe("#2835 the TOML reader", () => {
         "[t.u]", "v = 1_000", "[[arr]]", "w = 1979-05-27T07:32:00Z", "[[arr]]", "w = -2.5e3", "[arr.sub]", 'x = "in last"',
       ].join("\n"),
     );
-    assert.deepEqual(root, { a: "x\tyé", b: "C:\\path", c: 'onetwo"', d: ["p", "q"], e: { f: 1, g: { h: true } }, t: { u: { v: 1000 } }, arr: [{ w: "1979-05-27T07:32:00Z" }, { w: -2500, sub: { x: "in last" } }] });
+    // #3460's round-10 review (d2-3460 F1): every table it makes has no prototype, so a key of the file never reaches
+    // Object.prototype; what they hold is compared as JSON writes it.
+    assert.deepEqual(JSON.parse(JSON.stringify(root)), { a: "x\tyé", b: "C:\\path", c: 'onetwo"', d: ["p", "q"], e: { f: 1, g: { h: true } }, t: { u: { v: 1000 } }, arr: [{ w: "1979-05-27T07:32:00Z" }, { w: -2500, sub: { x: "in last" } }] });
+    for (const t of [root, root.e, root.e.g, root.t, root.t.u, root.arr[0], root.arr[1], root.arr[1].sub]) assert.equal(Object.getPrototypeOf(t), null);
   });
   it("text it cannot read is refused with its line, never read as holding no package", () => {
     assert.match(M.readFile("Cargo.lock", '[[package]]\nname = "a"\nversion = \n').unreadable, /is not TOML this reader can read: .* on line 3/);
@@ -570,6 +573,17 @@ describe("#2835: a cancelled scan_manifest call sends no further batch", () => {
     const res = await SM.scanManifest({ ...kit, api }, { files: [{ filename: "requirements.txt", content }] });
     assert.notEqual(res.isError, true);
     assert.deepEqual(requests, [200, 200, 200, 200, 200, 200, 200]);
+  });
+  // #3381's round-6 verification (R6V-2.4): on stdio there is no budget, so the files are not estimated for one; the
+  // answers' reservation, answered at once there, is the only one made.
+  it("on stdio no estimate of the files is made or reserved: the one reservation is the answers'", async () => {
+    const reserved = [];
+    const reserve = async (bytes, opts) => (reserved.push({ bytes, opts }), { state: "held", keep: () => {}, charge: () => true });
+    const api = async (_p, init) => ({ ok: true, status: 200, data: answerFor(JSON.parse(init.body).components.map((c) => c.purl)) });
+    const content = Array.from({ length: 1400 }, (_, i) => `pkg${i}==1.0.0`).join("\n");
+    const res = await SM.scanManifest({ ...kit, api, reserve, busy: () => assert.fail("busy") }, { files: [{ filename: "requirements.txt", content }] });
+    assert.notEqual(res.isError, true);
+    assert.deepEqual(reserved, [{ bytes: 1400 * 1280, opts: { answers: true } }]);
   });
 });
 

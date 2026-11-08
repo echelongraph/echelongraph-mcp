@@ -8,19 +8,31 @@
 // What a tool keeps for itself: how it reads its input into purls, its own refusals, and how its
 // note says what it read. Everything after "these are the distinct purls to check" is here.
 import * as z from "zod";
+import { blankUnreadableDisputes, disputedOf, disputesSentence, fixedInDisputeSchema, isDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
+import { WEIGHT_BATCH_ROW, answerCost, mostAnswerBytes, tooLargeToHold } from "../parseBudget.js";
+import type { Reservation, ReserveFor, Room } from "../runtime.js";
 
 // What index.ts hands a tool module, so it uses the server's one api(), envelope and failure
 // contract instead of a copy (and index.ts stays the only place that defines them).
 type Text = { type: "text"; text: string };
 export type ToolResult = { content: Text[]; structuredContent: Record<string, unknown>; isError?: boolean };
-export type ApiOk = { ok: true; status: number; data: object };
+// bytes: the answer's length (#3381's round-4 review), which the call's reservation counts (sendBatches).
+export type ApiOk = { ok: true; status: number; data: object; bytes?: number };
 // The part of index.ts's Failure this module reads: a 429's Retry-After (whole seconds), #2734.
 export type FailureLike = { ok: false; kind: string; status?: number; retryAfter?: number };
+// #3381's round-10 review (R10-M1): what api() answers for a 2xx answer past init.maxBytes: read no further (bytes, what
+// had come, or its Content-Length), the request ended. Neither data nor a failure of the API's.
+export type ApiCut = { ok: false; cut: true; path: string; status: number; bytes: number; maxBytes: number };
+const isCut = (r: object): r is ApiCut => (r as { cut?: unknown }).cut === true;
 export type MatchBatchDeps<F extends FailureLike> = {
   // init.timeoutMs: what is left of the call's budget, the most this request may take (#2756).
   // init.signal: the call's own (below); api() answers a failure at once when it has aborted.
-  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal }) => Promise<ApiOk | F>;
+  // init.maxBytes (R10-M1): the most of the answer read; past it api() answers ApiCut.
+  api: (path: string, init?: { headers?: Record<string, string>; method?: string; body?: string; timeoutMs?: number; signal?: AbortSignal; maxBytes?: number }) => Promise<ApiOk | ApiCut | F>;
   failed: (tool: string, f: F) => ToolResult;
+  // #3381: on the hosted endpoint, index.ts busy: the answer when this instance had no room; with `unread`, for the
+  // API's answer to a call's first batch, not read past what it had room for (R10-M1).
+  busy?: (tool: string, why: string, unread?: { path: string; status: number }) => ToolResult;
   // index.ts's one sentence for a failure: quoted when a batch after the first fails.
   describeFailure: (f: F) => string;
   // For a caller that must not wait in real time; production uses the clock and setTimeout. A
@@ -104,7 +116,7 @@ export function dedupe(all: string[]): { purls: string[]; removed: number } {
 }
 
 // How the batches went: what the note and the coverage say about sending.
-export type NotSentReason = "time_budget" | "rate_limited" | "request_failed";
+export type NotSentReason = "time_budget" | "rate_limited" | "request_failed" | "server_busy";
 export type Sending = {
   batches: number;
   batches_sent: number;
@@ -114,6 +126,9 @@ export type Sending = {
   not_sent_detail: string | null;
   waits: number;
   waited_ms: number;
+  // Round 11 (the round-10 verify's d5 F7): how many fixed_in_dispute values the answers held that this server cannot
+  // read, each relayed empty (fixedInDispute.ts blankUnreadableDisputes), by where. The note's, never coverage's.
+  unread_disputes?: string[];
 };
 
 // Summary fields summed over the batches, and bounds that hold per batch (the largest held for all).
@@ -198,13 +213,42 @@ export function purlsRefusal(purls: string[], split: string): string | null {
   return null;
 }
 
+// #3381's round-4 review: before a call sends its first batch, the hosted endpoint reserves in its parse budget what the
+// API's answers for its purls will hold (parseBudget.ts WEIGHT_BATCH_ROW): one that finds no room in the wait is
+// answered busy, one its request could never hold beside what it holds is refused, at once, as a document is. Answers
+// the reservation's charge (sendBatches), or the call's answer. On stdio nothing is reserved.
+export const ANSWER_BUSY_WHY = "server busy: no room in this instance's parse budget (what its requests in flight hold, other calls' API answers among them) came for this call's answers within the wait; retry in a few seconds";
+export async function reserveAnswers(
+  deps: { reserve?: (bytes: number, opts?: ReserveFor) => Promise<Reservation>; busy?: (tool: string, why: string) => ToolResult; badInput: (tool: string, why: string) => ToolResult },
+  tool: string,
+  purls: number,
+): Promise<AnswersHeld | { result: ToolResult }> {
+  if (!deps.reserve || !deps.busy) return {};
+  const bytes = purls * WEIGHT_BATCH_ROW;
+  const r = await deps.reserve(bytes, { answers: true });
+  if (r.state === "busy") return { result: deps.busy(tool, ANSWER_BUSY_WHY) };
+  if (r.state === "too_large") return { result: deps.badInput(tool, tooLargeToHold(`the API's answers for its ${plural(purls, "purl", "purls")}`, bytes, r.heldBytes, r.maxBytes, "pass fewer purls per call")) };
+  return { charge: r.charge, room: r.room };
+}
+/** The call's reservation for its answers (reserveAnswers): its charge(), and its room() where it has a budget. */
+export type AnswersHeld = { charge?: (bytes: number) => boolean; room?: () => Room };
+
 // What sendBatches answers: the API's answer (one batch: its JSON as it came; more: merged) and
 // how the sending went, or the failure that is the call's answer (nothing was measured).
 export type BatchRun = { ok: true; data: Record<string, unknown>; status: number; sending: Sending } | { ok: false; result: ToolResult };
 
 // The loop (#2734, #2756, #2775): one batch at a time, in order; a 429 with Retry-After is waited
-// out and the same batch sent again, while the wait fits in the call's budget.
-export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>, tool: string, purls: string[]): Promise<BatchRun> {
+// out and the same batch sent again, while the wait fits in the call's budget. #3381's round-4 review: `held.charge`, the
+// call's reservation's (reserveAnswers): what the answers so far hold past what was reserved for the purls they answer
+// is added to it, and once the budget says it is past its overdraft no further batch is sent (not_sent_reason
+// server_busy). #3381's round-10 review: nor once the call's request holds more than the most one request may reserve
+// (R10-B1: charge() answers no then too); and, with `held.room`, each batch's answer is read only to what the call's
+// reservation still covers of it and what the budget has left before its overdraft, at WEIGHT_ANSWER_BYTE a byte
+// (R10-M1): an answer past that is not read (api()'s maxBytes), and that batch's purls and the rest are not sent
+// (server_busy), or, on the first batch, the call is answered "server busy". Through round 10 a batch's answer was read
+// and parsed whole, whatever its size: one of 26 MB ended the hosted process.
+export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>, tool: string, purls: string[], held: AnswersHeld = {}): Promise<BatchRun> {
+  const { charge, room } = held;
   const sleep = deps.sleep ?? realSleep;
   const now = deps.now ?? Date.now;
   const batches: string[][] = [];
@@ -218,6 +262,9 @@ export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>
   let stop: { reason: NotSentReason; detail: string } | null = null;
   // The 429 last waited out, for the one way the budget can be gone before anything answered.
   let waitedFor: F | undefined;
+  // #3381's round-4 review: what the answers so far come to past what was reserved for them, added to the reservation.
+  let charged = 0;
+  let answered = 0;
   while (answers.length < batches.length) {
     const left = TIME_BUDGET_MS - (now() - started);
     if (left <= 0 && answers.length === 0 && waitedFor) {
@@ -229,17 +276,46 @@ export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>
       stop = { reason: "time_budget", detail: `the call's ${budgetS} s budget ran out after ${answers.length} of ${batches.length} batches` };
       break;
     }
+    // R10-M1: the most of this batch's answer read: what its cost (parseBudget.ts answerCost) may come to within what the
+    // reservation still covers of it (WEIGHT_BATCH_ROW for each purl through this batch, and what was charged, less what
+    // the answers so far came to) and what the budget has left before its overdraft. Only where the call has a budget,
+    // and a busy answer.
+    const batch = batches[answers.length];
+    const now_ = room && deps.busy ? room() : undefined;
+    const covered = Math.min(purls.length, (answers.length + 1) * MAX_COMPONENTS) * WEIGHT_BATCH_ROW + charged - answered;
+    const maxBytes = now_ === undefined ? undefined : mostAnswerBytes(covered + Math.max(0, now_.budget), batch.length);
     // At most what is left of the budget (#2756): a slow batch is cut off at its end.
     const r = await deps.api(BATCH_PATH, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ components: batches[answers.length].map((purl) => ({ purl })) }),
+      body: JSON.stringify({ components: batch.map((purl) => ({ purl })) }),
       timeoutMs: Math.max(0, left),
       signal: deps.signal,
+      ...(maxBytes === undefined ? {} : { maxBytes }),
     });
+    if (isCut(r)) {
+      const what = `the API's answer to batch ${answers.length + 1} of ${batches.length} came to more than the ${r.maxBytes} bytes this instance's memory had room for, so it was not read`;
+      if (answers.length === 0 && deps.busy) return { ok: false, result: deps.busy(tool, `server busy: ${what}; retry in a few seconds, or pass fewer purls per call`, { path: r.path, status: r.status }) };
+      stop = { reason: "server_busy", detail: `${what}, and no further batch was sent` };
+      break;
+    }
     if (r.ok) {
       answers.push(r.data);
       status = r.status;
+      // #3381's round-10 verification: a row's matches charged as they cost (parseBudget.ts answerCost).
+      answered += typeof r.bytes === "number" ? answerCost(r.bytes, batch.length) : 0;
+      const past = Math.max(0, answered - (answers.length * MAX_COMPONENTS > purls.length ? purls.length : answers.length * MAX_COMPONENTS) * WEIGHT_BATCH_ROW - charged);
+      charged += past;
+      if (charge && !charge(past) && answers.length < batches.length) {
+        // #3381's round-5 review (C2): the stop is the instance's, whatever this call's own answers held; R10-B1: or the
+        // call's own request's, past the most one request may reserve.
+        const after = room?.();
+        stop =
+          after !== undefined && after.request < 0
+            ? { reason: "server_busy", detail: `after ${answers.length} of ${batches.length} batches the API's answers took this call's request past the ${after.requestMax} bytes one request may reserve, so no further batch was sent` }
+            : { reason: "server_busy", detail: `after ${answers.length} of ${batches.length} batches this instance's parse budget was more than a quarter past its bound, so no further batch was sent` };
+        break;
+      }
       continue;
     }
     // Cancelled (#2775): this batch was cut off, or never sent after a wait the signal ended.
@@ -286,6 +362,7 @@ export async function sendBatches<F extends FailureLike>(deps: MatchBatchDeps<F>
   // One batch: data is the API's JSON as it came. More: the merged answer.
   const data: Record<string, unknown> = batches.length === 1 ? (answers[0] as Record<string, unknown>) : mergeAnswers(answers);
   if (notSentPurls.length) data.not_sent_purls = notSentPurls;
+  sending.unread_disputes = blankUnreadableDisputes(data);
   return { ok: true, data, status, sending };
 }
 
@@ -413,9 +490,27 @@ export function verdictSentences(d: object, g: Sending): { sentences: string[]; 
       out.push(affectedSaid(hits));
       // Said only when the answer carries fixed_in (an API before #2834 sends none).
       if (hits.some((r) => (Array.isArray(field(r, "matches")) ? (field(r, "matches") as unknown[]) : []).some((m) => isObj(m) && "fixed_in" in m))) {
-        out.push("Each match's fixed_in is the first version above the component's that no affected interval of the advisory holds; null, with fixed_in_reason, where no higher version is shown to be unaffected.");
+        // #3381's review: on a disputed match (fixed_in_dispute) fixed_in follows the source its higher names. Round 6:
+        // "the CVE's record", as fixed_in's own description says, where 3.1.5 said "the advisory"; "shown unaffected"
+        // keeps the sentence no longer than 3.1.5's (the 201-purl probe's cut, check_sbom-large-rows.test.mjs, keeps
+        // 43 rows only within that).
+        const disputedHit = hits.some((r) => (Array.isArray(field(r, "matches")) ? (field(r, "matches") as unknown[]) : []).some((m) => isObj(m) && isDispute(m.fixed_in_dispute)));
+        out.push(
+          disputedHit
+            ? "Each match's fixed_in is the first version above the component's that no affected interval of the CVE's record holds, except on a match with fixed_in_dispute, where it follows the source the dispute's higher names; null, with fixed_in_reason, where no higher version is shown unaffected."
+            : "Each match's fixed_in is the first version above the component's that no affected interval of the CVE's record holds; null, with fixed_in_reason, where no higher version is shown unaffected.",
+        );
       }
     }
+    // #3391: the matches whose range the CVE's own record (its CNA) and the advisory disagree on, each with its note.
+    const disputed = rows.flatMap((r) => {
+      const purl = field(r, "purl");
+      return disputedOf(field(r, "matches"), typeof purl === "string" ? purl : undefined);
+    });
+    const said = disputesSentence(disputed).trim();
+    if (said) out.push(said);
+    const unread = unreadDisputesSentence(g.unread_disputes ?? []).trim();
+    if (unread) out.push(unread);
     // #2836: rows matched by the source package their purl's upstream qualifier names.
     const upstream = rows.filter((r) => field(r, "matched_via") === "upstream").length;
     if (upstream > 0) {
@@ -479,19 +574,24 @@ export const Row = z.looseObject({
         cve_id: opt(z.string()),
         kev_listed: opt(z.boolean()).describe("Whether the CVE is in CISA's Known Exploited Vulnerabilities catalog, as EchelonGraph's record holds it."),
         epss_score: opt(z.number()).describe("The CVE's EPSS score (FIRST), as EchelonGraph's record holds it; null when it has none."),
+        // #3381's round-4 review (F12): as check_affected's: where version_evidence is cna_affected_range, the range is
+        // the CNA's, not the advisory's.
         match_reason: opt(z.string()).describe(
-          "Why the advisory applies, with the advisory interval the version falls inside: \"[A, B)\" names that interval's fixed bound B (another interval of the advisory can still hold B; fixed_in is the version past them all), \"[A, B]\" the last affected version B. On an upstream row it ends by naming the source package and the purl name.",
+          "Why the match applies, with the affected interval the version falls inside: \"[A, B)\" names that interval's fixed bound B (another interval can still hold B; fixed_in is the version past them all), \"[A, B]\" the last affected version B. The interval is the advisory's, or, where version_evidence is cna_affected_range, the CVE record's CNA range. On an upstream row it ends by naming the source package and the purl name.",
         ),
+        version_evidence: versionEvidenceSchema(),
         interval: opt(z.looseObject({ introduced: opt(z.string()), fixed: opt(z.string()), last_affected: opt(z.string()) })).describe(
-          "The advisory interval that holds this component's version (fixed is exclusive, last_affected inclusive); absent when no interval holds it.",
+          "The affected interval that holds this component's version (fixed is exclusive, last_affected inclusive): the advisory's, or, where version_evidence is cna_affected_range, the CVE record's CNA range. Absent when no interval holds it.",
         ),
         fixed_in: opt(z.string()).describe(
-          "The lowest version above this component's that no affected interval of the CVE's record for the package holds, always above it: the fixed bound of the interval that holds the component's version, moved past any overlapping interval that still holds that bound (fixed_in_detail then names it). null when no such version is on record (an interval on the way records no fix: it ends at last_affected, or has no end) or no interval holds the version, with fixed_in_reason saying which.",
+          "The lowest version above this component's that no affected interval of the CVE's record for the package holds, always above it: the fixed bound of the interval that holds the component's version, moved past any overlapping interval that still holds that bound (fixed_in_detail then names it). null when no such version is on record (an interval on the way records no fix: it ends at last_affected, or has no end) or no interval holds the version, with fixed_in_reason saying which. Where fixed_in_dispute is set, the CVE record's CNA and the advisory disagree on the range that holds the component's version, and fixed_in follows the source its higher names (its note says how).",
         ),
         fixed_in_reason: opt(z.string()).describe("Why fixed_in is null; absent when fixed_in is a version."),
         fixed_in_detail: opt(z.string()).describe(
           "Set when fixed_in is not the fixed bound of the interval that holds the component's version: the overlapping intervals of the same record it moved past, which still hold that bound.",
         ),
+        // #3391: the CVE's own record and the advisory disagree on this range (fixedInDispute.ts).
+        fixed_in_dispute: fixedInDisputeSchema(),
       }),
     ),
   ),
@@ -553,6 +653,11 @@ export const batchDataShape = {
   not_sent_purls: opt(z.array(z.string())).describe("The distinct purls not sent (coverage.not_sent_reason says why): not checked, and not clean. Present only when some were not sent."),
 };
 
+// #3381's round-10 review (d4-release R10-1): the success branch's not_sent_reason names server_busy; a failure carries
+// coverage null, so the failure branch's (failureSendingCoverageShape) keeps 3.1.5's enum and description: a client
+// holding 3.1.5's tool list validates every answer of this release, and the release's schema-compat gate finds nothing.
+const NOT_SENT_REASON_3_1_3 =
+  "Why not_sent is above 0: time_budget (the call's 50 s budget ran out, before a batch or while one was unanswered, which is then cut off; or waiting out the API's Retry-After would pass it), rate_limited (a 429 without Retry-After, or a 429 after 10 waits), request_failed (a batch after the first failed; the note quotes how). null when every purl was sent.";
 // The coverage fields sendingCoverage fills, as the schema holds them.
 export const sendingCoverageShape = {
   distinct_purls: z.number().int().describe("Distinct purls to check: sent plus not_sent."),
@@ -562,10 +667,10 @@ export const sendingCoverageShape = {
   sent: z.number().int().describe("Distinct purls sent and answered."),
   not_sent: z.number().int().describe("Distinct purls not sent, listed in data.not_sent_purls: not checked, and not clean."),
   not_sent_reason: z
-    .enum(["time_budget", "rate_limited", "request_failed"])
+    .enum(["time_budget", "rate_limited", "request_failed", "server_busy"])
     .nullable()
     .describe(
-      "Why not_sent is above 0: time_budget (the call's 50 s budget ran out, before a batch or while one was unanswered, which is then cut off; or waiting out the API's Retry-After would pass it), rate_limited (a 429 without Retry-After, or a 429 after 10 waits), request_failed (a batch after the first failed; the note quotes how). null when every purl was sent.",
+      "Why not_sent is above 0: time_budget (the call's 50 s budget ran out, before a batch or while one was unanswered, which is then cut off; or waiting out the API's Retry-After would pass it), rate_limited (a 429 without Retry-After, or a 429 after 10 waits), request_failed (a batch after the first failed; the note quotes how), server_busy (hosted endpoint: the API's answers took this instance's parse budget more than a quarter past its bound, or this call's request past the 30 MiB one request may reserve, or a batch's answer was larger than the room left, so it was not read; no further batch was sent). null when every purl was sent.",
     ),
   rate_limit_waits: z.number().int().describe("How many times the API answered 429 and the tool waited its Retry-After before sending the batch again."),
   waited_ms: z.number().int().describe("Milliseconds spent in those waits."),
@@ -574,4 +679,9 @@ export const sendingCoverageShape = {
     .boolean()
     .nullable()
     .describe("true when not every purl was sent (not_sent above 0) or any batch's summary.partial was true (its time budget ran out first); otherwise the answer's summary.partial."),
+};
+/** The failure branch's: as sendingCoverageShape, its not_sent_reason 3.1.5's (R10-1, above). */
+export const failureSendingCoverageShape = {
+  ...sendingCoverageShape,
+  not_sent_reason: z.enum(["time_budget", "rate_limited", "request_failed"]).nullable().describe(NOT_SENT_REASON_3_1_3),
 };

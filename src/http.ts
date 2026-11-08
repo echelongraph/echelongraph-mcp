@@ -37,10 +37,11 @@ import http2 from "node:http2";
 import type net from "node:net";
 import v8 from "node:v8";
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { forwardToken, markHttpEntrypoint, onUpstreamFailure, requestLabels, requestSettled, SYNTHETIC_UA_FAMILY, withClient } from "./runtime.js";
+import { forwardToken, markHttpEntrypoint, onUpstreamFailure, requestLabels, requestSettled, SYNTHETIC_UA_FAMILY, withClient, type Reservation, type ReserveFor } from "./runtime.js";
 import {
   Admission,
   apiRoute,
+  BODY_DENSE_CODE,
   BODY_STALLED_CODE,
   BODY_TOO_LARGE_CODE,
   BUSY_CODE,
@@ -78,6 +79,7 @@ import {
   upstreamSeverity,
 } from "./httpPolicy.js";
 import type { LogFields, LogMessage, NotAny } from "./logLines.js";
+import { INFLIGHT_BUDGET_BYTES, PARSE_BUDGET_BYTES, ParseBudget, SMALL_ANSWERS_BYTES, scanJson, type BudgetGroup, type BudgetHold, type JsonStructure } from "./parseBudget.js";
 import { bodyReader, header, type BodyRead } from "./readBody.js";
 
 // Must run before index.ts is evaluated: it is how index.ts knows not to start stdio.
@@ -182,6 +184,16 @@ const handler = createMcpHandler(createServer, {
 const limiter = new FixedWindowLimiter(RATE_LIMIT_PER_MIN);
 const largeBodies = new Slots(LARGE_BODY_SLOTS, DEFAULT_LARGE_BODY_WAITERS);
 const admission = new Admission(MAX_IN_FLIGHT, DEFAULT_MAX_WAITING);
+// #3381: what the requests in flight may hold parsed, all together (parseBudget.ts INFLIGHT_BUDGET_BYTES): each its
+// body's estimate (scanJson), from before its body is parsed until the request has stopped, and what its tool parses
+// from a string, from before it parses it until it has read it (then only what its answer keeps of it, runtime.ts
+// Reservation keep) or the request has stopped, and (#3381's round-4 review) what the API's answers to a check_sbom or
+// scan_manifest call's purls hold, from before its first batch (match_batch.ts reserveAnswers). A request that does not
+// fit waits as for a place, up to
+// ADMISSION_WAIT_MS, at most DEFAULT_MAX_WAITING at once, and is then answered 503; one that can never fit is refused at
+// once (reserveParse). A body within MAX_BODY_BYTES is small (parseBudget.ts BUDGET_STARVE_MS): it is let in ahead of a
+// large one that waits, while the small ones together hold at most their share.
+const parseBudget = new ParseBudget(INFLIGHT_BUDGET_BYTES, DEFAULT_MAX_WAITING);
 
 // CORS for a browser client on an https Origin (the Origin policy has already admitted it).
 // A wildcard is safe here because nothing is credentialed: no cookies, no auth.
@@ -222,7 +234,8 @@ function send(res: http.ServerResponse, status: number, body: string, headers: R
 // clientClosed (#2775): the client went before its answer was written; logged as status 499 (the
 // "client closed request" of nginx and of the SDK), whatever status line had already been sent.
 // inFlight / queuedMs (#2773): the requests in flight when this one was admitted, itself
-// included, and how long it waited for that. A subscriptions/listen stream is never admitted
+// included, and how long it waited for that: #3381, for room in the parse budget too (its body's, and its tool's
+// while it was served), and for its place. A subscriptions/listen stream is never admitted
 // (httpPolicy.ts isListenStream), so its line says 0 and 0. Since SDK 2.2.0 (3.1.1, #3345) a listen
 // here ends at once, its status 200; through 3.1.0 it stayed open until its client ended it, logged
 // 499 with clientClosed.
@@ -242,15 +255,116 @@ type Outcome = {
 // The body is read by readBody.ts, over this instance's large-body slots and caps.
 const readBody = bodyReader(largeBodies, { maxBodyBytes: MAX_BODY_BYTES, maxSbomBodyBytes: MAX_SBOM_BODY_BYTES, largeBodyWaitMs: LARGE_BODY_WAIT_MS, bodyIdleMs: BODY_IDLE_MS });
 
-// #3362: what a request holds of its instance, each given back once: by the request as it settles, or by its deadline
-// (serveMcp) if it has not settled by then. A second release of its place would free a place that another request
+// #3362: what a request holds of its instance, each given back once: by the request as it settles, or, its place and its
+// slot, by its deadline (serveMcp) if it has not settled by then (its parse holds wait for it to unwind: see parse,
+// below). A second release of its place would free a place that another request
 // holds, letting one more in past the bound (a second release of its slot's hold frees nothing: httpPolicy.ts Slots).
 // body and facts: what its access line says of it, if the deadline writes that line; clientGone: its client went
 // (clientWent in serveMcpTimed; the deadline stopping it is not its client going), which that line says too.
-type Held = { slot?: SlotHold; admitted: boolean; clientGone: boolean; body?: Buffer; facts?: ReturnType<typeof bodyFacts> };
+// #3381: parse, what it holds of the parse budget (its body's estimate, and what its tool reserved), all given back at
+// once, by the request as it settles: never by its deadline (#3381's review). The memory a hold stands for is the
+// request's parsed body and what its tool parsed, which stay reachable until the request has actually unwound (a tool
+// stops only when its aborted signal reaches it); given back at the deadline, waiting requests were let in to parse
+// beside them, and V8 ended the process. parseClosed, once the request is stopped or has given them back, so a tool that
+// reserves after that holds nothing. parseWaitMs: how long it waited for room, which its access line counts in
+// queued_ms. docRefused: its tool's reservation was refused (reserveParse), which its access line says. #3381's round-4
+// review: small, its body is within MAX_BODY_BYTES (none is), so its tool's reservations are small too; since, when the
+// request began, which places its tool's reservations among the waiters (parseBudget.ts BUDGET_STARVE_MS).
+type Held = {
+  small: boolean;
+  since: number;
+  // #3381's round-5 review (B3): the request's tool reservations, one after another (reserveParse).
+  reserving: Promise<void>;
+  // #3381's round-6 verification (R6V-1.1): what the request holds of the budget, kept live by it (parseBudget.ts
+  // BudgetGroup): its body's hold and each of its tools' are taken with it.
+  group: BudgetGroup;
+  slot?: SlotHold;
+  admitted: boolean;
+  clientGone: boolean;
+  body?: Buffer;
+  facts?: ReturnType<typeof bodyFacts>;
+  parse: BudgetHold[];
+  parseClosed: boolean;
+  parseWaitMs: number;
+  docRefused?: "busy" | "too_large";
+};
 function releaseSlot(held: Held): void {
   largeBodies.release(held.slot);
   held.slot = undefined;
+}
+function releaseParse(held: Held): void {
+  held.parseClosed = true;
+  for (const h of held.parse.splice(0)) parseBudget.release(h);
+}
+// #3381: room in the parse budget for `bytes` more (runtime.ts reserveParse, from a tool), held until the tool keeps
+// less of it or the request ends. What the request already holds counts: a reservation that with it would pass the whole
+// budget can never be granted, whatever else ends, so it is refused at once, never waited for (#3381's review). #3381's
+// round-4 review (F4): nor one that with it would pass the most a waiter is sure to be let in at (parseBudget.ts
+// BUDGET_STARVE_MS: the budget less the small bodies' share): through round 4 one between the two waited, and under a
+// steady flow of small requests was answered busy on every retry.
+const BUSY: Reservation = { state: "busy" };
+const MOST_ONE_REQUEST_HOLDS = parseBudget.max - parseBudget.smallShare;
+// #3381's round-5 review (B3): a JSON-RPC batch is one request whose messages the SDK serves at once, so one request
+// can reserve for several tools at once. They are taken one after another: each counts what the ones before it hold
+// (own, and the bound one request may hold, are the request's), and the request is among those waiting at most once
+// (parseBudget.ts queuedOwn). Through round 5 each counted the body alone, and each that waited counted it again.
+// #3381's round-6 verification: what the request holds is its group's bytes, kept live by the budget (R6V-1.1), and a
+// reservation after one that found no room is still taken where it fits at once, without a wait (R6V-1.3).
+// A reservation that had to wait for room, its wait counted in the request's queued_ms. One taken at once is not timed:
+// timing the await of a hold already granted counted 1 ms now and then, and a listen's queued_ms read 1, not 0.
+async function waitedFor(held: Held, wait: () => Promise<BudgetHold | undefined>): Promise<BudgetHold | undefined> {
+  const t = Date.now();
+  try {
+    return await wait();
+  } finally {
+    held.parseWaitMs += Date.now() - t;
+  }
+}
+function reserveParse(held: Held, bytes: number, gone: AbortSignal, opts: ReserveFor = {}): Promise<Reservation> {
+  const before = held.reserving;
+  let done!: () => void;
+  held.reserving = new Promise<void>((r) => (done = r));
+  return before.then(() => reserveOne(held, bytes, gone, opts)).finally(done);
+}
+async function reserveOne(held: Held, bytes: number, gone: AbortSignal, opts: ReserveFor): Promise<Reservation> {
+  if (held.parseClosed) return BUSY;
+  const own = held.group.bytes;
+  if (own + Math.ceil(bytes) > MOST_ONE_REQUEST_HOLDS) {
+    held.docRefused = "too_large";
+    return { state: "too_large", heldBytes: own, maxBytes: MOST_ONE_REQUEST_HOLDS };
+  }
+  const reserve = { small: held.small && (opts.answers !== true || bytes <= SMALL_ANSWERS_BYTES), group: held.group, since: held.since };
+  // Once one of a request's reservations found no room within its wait, its batch's later ones do not wait (one after
+  // another, each would wait as long again), but each is still taken where it fits at once (R6V-1.3: through round 6
+  // a call of 150 purls, room for it, was answered busy because a sibling before it was).
+  const hold = parseBudget.tryReserve(bytes, reserve) ?? (held.docRefused === "busy" ? undefined : await waitedFor(held, () => parseBudget.acquire(bytes, ADMISSION_WAIT_MS, gone, reserve)));
+  if (!hold) {
+    if (!gone.aborted) held.docRefused = "busy";
+    return BUSY;
+  }
+  if (held.parseClosed) {
+    parseBudget.release(hold);
+    return BUSY;
+  }
+  held.parse.push(hold);
+  // #3381's round-10 review (R10-B1): charge() answers no once the request holds more than the most one request may
+  // reserve, as well as once the budget is past its overdraft: through round 10 only the budget was asked, and one
+  // check_sbom of 2,000 purls whose rows held ten matches each held 52.9 MB, its answers charged past the bound that
+  // refused its reservations. room(): what each of the two has left, from which sendBatches bounds a batch's answer as
+  // it is read (R10-M1).
+  return {
+    state: "held",
+    keep: (b: number) => parseBudget.resize(hold, b),
+    charge: (b: number) => parseBudget.grow(hold, b) && held.group.bytes <= MOST_ONE_REQUEST_HOLDS,
+    room: () => ({ budget: parseBudget.max + parseBudget.overdraft - parseBudget.inUse, request: MOST_ONE_REQUEST_HOLDS - held.group.bytes, requestMax: MOST_ONE_REQUEST_HOLDS }),
+  };
+}
+// The access line's refused for a tool's refused reservation: doc_busy (it found no room within the wait, answered
+// failed, "server busy") or doc_too_large (it could never fit, answered invalid_input). Each a literal reason.
+function docRefusal(held: Held): Pick<Outcome, "refused"> {
+  if (held.docRefused === "busy") return { refused: "doc_busy" };
+  if (held.docRefused === "too_large") return { refused: "doc_too_large" };
+  return {};
 }
 function releaseAdmission(held: Held): void {
   if (held.admitted) admission.release();
@@ -271,9 +385,43 @@ function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outco
   return { status: 413, refused: "body_size" };
 }
 
+// #3381: a body whose parse is estimated past what one request may take (parseBudget.ts PARSE_BUDGET_BYTES), refused
+// unparsed. Its access line names no method (rpc_method "(unparseable)": it was not parsed, so none is known) and logs
+// its size; refused "body_dense".
+function tooDenseToParse(res: http.ServerResponse, cors: Record<string, string>, s: JsonStructure): Outcome {
+  send(
+    res,
+    413,
+    rpcError(
+      BODY_DENSE_CODE,
+      `Request body too dense to parse: its ${s.containers} objects and arrays, ${s.elements} elements (list entries and object members) and ${s.keys} keys, counted outside its strings, are estimated at ${s.estimate} bytes of this instance's memory parsed; at most ${PARSE_BUDGET_BYTES} bytes, far more than a CycloneDX or SPDX document of 6 MiB takes. Pass check_sbom a larger document's purls.`,
+      { containers: s.containers, elements: s.elements, keys: s.keys, estimated_bytes: s.estimate, max_bytes: PARSE_BUDGET_BYTES },
+    ),
+    cors,
+  );
+  return { status: 413, refused: "body_dense", facts: { rpc_method: "(unparseable)" } };
+}
+
+// #3381: no room in the parse budget came within ADMISSION_WAIT_MS: the instance's busy answer. Not parsed, so its line
+// names no method either; refused "parse_busy".
+function parseBusy(res: http.ServerResponse, cors: Record<string, string>): Outcome {
+  send(
+    res,
+    503,
+    rpcError(
+      BUSY_CODE,
+      `Server busy: this instance's memory for parsing request bodies is taken by the requests it is serving. Retry after ${BUSY_RETRY_AFTER_SEC} s.`,
+      { retry_after_seconds: BUSY_RETRY_AFTER_SEC },
+    ),
+    { ...cors, "Retry-After": String(BUSY_RETRY_AFTER_SEC), Connection: "close" },
+  );
+  return { status: 503, refused: "parse_busy", facts: { rpc_method: "(unparseable)" } };
+}
+
 // #2775: the access line's slot_wait_ms is how long the request's large body waited for a slot, whatever came of it.
 // #3362: and every request is over by REQUEST_TIMEOUT_MS (httpPolicy.ts DEFAULT_REQUEST_TIMEOUT_MS). Then it is stopped
-// as one whose client went is, what it holds is given back, and this answers for it at once, so its access line is
+// as one whose client went is, its place and its slot are given back (its parse holds once it has unwound, #3381's
+// review), and this answers for it at once, so its access line is
 // written then (refused "timeout") even if what it was doing never settles. What it settles with later is neither
 // logged (settleBy) nor released (Held) again. That line's status is the one the request would have had:
 //   - its client had gone (clientWent): 499 and client_closed, as any request's whose client went, whatever status line
@@ -283,20 +431,23 @@ function tooLarge(res: http.ServerResponse, cors: Record<string, string>): Outco
 //   - else 504, a status for the log only: no HTTP answer is sent, and its stream (h2c) or connection (HTTP/1.1) is reset.
 async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<Outcome> {
   const timing = { slotWaitMs: 0 };
-  const held: Held = { admitted: false, clientGone: false };
+  const held: Held = { small: true, since: Date.now(), reserving: Promise.resolve(), group: parseBudget.newGroup(), admitted: false, clientGone: false, parse: [], parseClosed: false, parseWaitMs: 0 };
   const o = await settleBy(
     REQUEST_TIMEOUT_MS,
     (deadline) => serveMcpTimed(req, res, pathname, timing, held, deadline),
     (): Outcome => {
       releaseAdmission(held);
       releaseSlot(held);
+      // #3381's review: its parse holds stay until serveMcpTimed has unwound (its finally gives them back): what they
+      // stand for is still reachable now. No tool of it reserves more.
+      held.parseClosed = true;
       const answered = res.writableEnded;
       if (!answered) res.destroy();
       const status = held.clientGone ? 499 : answered ? res.statusCode : 504;
       return { status, refused: "timeout", clientClosed: held.clientGone, body: held.body, facts: held.facts };
     },
   );
-  return { ...o, slotWaitMs: timing.slotWaitMs };
+  return { ...o, slotWaitMs: timing.slotWaitMs, queuedMs: (o.queuedMs ?? 0) + held.parseWaitMs };
 }
 
 async function serveMcpTimed(
@@ -420,6 +571,22 @@ async function serveMcpTimed(
       }
       body = read.body;
       held.slot = read.slot;
+      // #3381: every body is counted before anything parses it (bodyFacts below is the first parse, then the SDK's): one
+      // whose parse is estimated past PARSE_BUDGET_BYTES is refused unparsed, and the estimate of any other is held in
+      // the parse budget until the request ends, waiting for room as for a place. Its slot and its hold are given back by
+      // the finally below.
+      const structure = scanJson(body);
+      if (structure.estimate > PARSE_BUDGET_BYTES) return { ...tooDenseToParse(res, cors, structure), body };
+      held.small = body.length <= MAX_BODY_BYTES;
+      // #3381's round-7 verification (R7V-1.1): the body alone may take the tiny lane (parseBudget.ts).
+      const reserve = { small: held.small, lane: true, group: held.group };
+      const hold = parseBudget.tryReserve(structure.estimate, reserve) ?? (await waitedFor(held, () => parseBudget.acquire(structure.estimate, ADMISSION_WAIT_MS, gone.signal, reserve)));
+      if (!hold) {
+        if (gone.signal.aborted) return { status: 499, refused: "client_closed", clientClosed: true, body, facts: { rpc_method: "(unparseable)" } };
+        return { ...parseBusy(res, cors), body };
+      }
+      if (held.parseClosed) parseBudget.release(hold);
+      else held.parse.push(hold);
       facts = bodyFacts(body);
       held.body = body;
       held.facts = facts;
@@ -433,7 +600,7 @@ async function serveMcpTimed(
       // takes no place and holds no work, or 64 idle ones would leave every other request waiting
       // for a 503 (#2773; httpPolicy.ts isListenStream says what bounds it).
       const standard = { protocolVersion: header(req, "mcp-protocol-version"), mcpMethod: header(req, "mcp-method"), mcpName: header(req, "mcp-name") };
-      if (isListenStream(facts, body, standard)) return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal)), facts };
+      if (isListenStream(facts, body, standard)) return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal, held)), facts };
     }
 
     // #2773: at most MAX_IN_FLIGHT requests are served at once; the next waits here.
@@ -461,7 +628,7 @@ async function serveMcpTimed(
     // large-body slot are held until all of it has settled, not only until the answer is written.
     const work = new Set<Promise<unknown>>();
     try {
-      return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal, work)), facts, ...admitted };
+      return { ...(await relay(req, res, pathname, method, cors, client, body, facts, gone.signal, held, work)), facts, ...admitted, ...docRefusal(held) };
     } finally {
       // Every tool call stops on `gone` (#2775), so this wait is long only if one does not: then the deadline gives
       // the place and the slot back (#3362).
@@ -470,6 +637,7 @@ async function serveMcpTimed(
     }
   } finally {
     releaseSlot(held);
+    releaseParse(held);
   }
 }
 
@@ -485,6 +653,7 @@ async function relay(
   body: Buffer | undefined,
   facts: ReturnType<typeof bodyFacts> | undefined,
   gone: AbortSignal,
+  held: Held,
   work?: Set<Promise<unknown>>,
 ): Promise<Outcome> {
   const headers = new Headers();
@@ -511,6 +680,8 @@ async function relay(
     synthetic,
     signal: gone,
     work,
+    // #3381: what a tool parses from a string is reserved in the parse budget first (reserveParse).
+    reserve: (bytes: number, opts?: ReserveFor) => reserveParse(held, bytes, gone, opts),
     rpcMethod: facts?.rpc_method,
     tool: facts?.tool,
     protocolVersion,

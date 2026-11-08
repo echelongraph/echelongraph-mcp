@@ -119,7 +119,25 @@ that only mentions a patch, and a CVE's presence in CISA's KEV catalog, are not 
 `cna_solution_section` (`solution` or `workaround`: a workaround's sentence is the record's
 workaround, never its solution), its date for when the vulnerability was made public as
 `date_public` (with `date_public_source` `cna`), and the CNA as `cna`, each only where the CVE
-record has it. `false` means no fix evidence is on record, which is **not** a
+record has it, and the record's affected ranges as `affected_ranges`: each product as its CNA
+(`source` `cna`) or CISA's ADP (`cisa-adp`) writes it, its `vendor`, `product` (the product or
+package the entry names, as the API stores it), `default_status` and `versions`, the version entries
+the API stores, each as written (`version`, `status`, `less_than` or `less_than_or_equal`,
+`version_type`). Since EchelonGraph's API serves them (#3391, from 2026-11-07), a product also carries `package_name`
+(the entry's `packageName`, where it names one), `collection_url` and `package_url` (the package
+collection the entry names, as written), each version entry's `changes`, each `at` and `status`, with
+`changes_truncated` where more were written than are kept, `versions_truncated` where the product held
+more entries than are kept, `dropped_products` (with `dropped_products_truncated`) on the product kept
+last before each cut, so a source's may be spread over several of its products, naming the cut
+products a registry package's answer could read, `dropped_other_products` on the same products,
+counting the other cut products (one whose purl or `collection_url` names a collection no registry
+package is read from, such as a distro's packages, a container image, conda-forge or CPAN; a product
+whose every version is rpm, deb, dpkg, apk or ebuild; or one with no `packageName` or purl whose
+product name holds a space), which no registry package's answer reads, and `stored_form`.
+A search row (`search_cves`) never carries `affected_ranges`: read them with `get_cve`. A product without
+`stored_form` comes from an API or a writer that sends none of these: its versions, or its source's
+products, may have been cut with no flag saying so. These are the record's own words, not a verdict
+for any version, and fields a later API adds are relayed. `false` means no fix evidence is on record, which is **not** a
 finding that no fix exists. Once `true`, `patch_available` is not set back to `false`, so it can be
 `true` beside an empty `patch_evidence`: evidence of a fix once held has since been withdrawn, and
 `remediation.fix_status` in the CVE's record is the current reading, not `patch_available` (since
@@ -139,7 +157,12 @@ over a sample: not an exploit test, and not an internet-wide census.
 was observed, and not when its vulnerable version was last confirmed. It is set to the time of
 the write when a search matches the banner, and again when a re-check finds the port still
 listed by Shodan InternetDB, without re-reading the banner, so a patched service can stay
-counted while its port stays open. Shodan's own time for the banner is not stored. So
+counted while its port stays open. Shodan's own time for the banner is stored, where Shodan gives a
+usable one, for rows a search has matched since 2026-10-06 15:09Z, but this per-CVE answer does not
+serve it: `exposure_radar`
+serves its earliest and latest as `kev_exposure`'s `window` (or `dated_window`), on Shodan's clock,
+over all KEV-listed rows together, never one CVE's alone, and over no row of a CVE tracked only for
+its EPSS. So
 `last_seen` dates the write, never the sighting, and it is never `measured_at` (see
 [Structured results](../README.md#structured-results)).
 
@@ -195,8 +218,9 @@ loaded. A failed advisory lookup (`advisory_lookup_failed`) comes back as a fail
 keeps `kev_listed`, `ransomware`, `epss_score`, `effective_score`, `effective_severity` and
 `score_assessed` as the API sent them.
 
-A registry match also carries `interval`, the advisory interval that holds the version
-(`introduced`, and `fixed`, exclusive, or `last_affected`, inclusive), and `fixed_in`, the lowest
+A registry match also carries `interval`, the affected interval that holds the version
+(`introduced`, and `fixed`, exclusive, or `last_affected`, inclusive): the advisory's, or, where
+`version_evidence` is `cna_affected_range`, the CVE record's CNA range (below); and `fixed_in`, the lowest
 version above the one asked about that no affected interval of the same record holds: the
 holding interval's fixed bound, moved past any overlapping interval that still holds that bound,
 and `fixed_in_detail` then names the intervals it moved past (#3074). `fixed_in` is always above
@@ -217,6 +241,36 @@ past those levels, as typical ones are, carries them only with `full: true`. Ano
 same CVE, or a vendor backport, can sit past it, so it is never given as a fixed version. `check_sbom` and
 `scan_manifest` relay the same fields (`interval`, `fixed_in`, `fixed_in_reason` and
 `fixed_in_detail`) on each match.
+
+Since EchelonGraph's API serves it (#3391, from 2026-11-07), a registry match carries `fixed_in_dispute` beside
+`fixed_in` where the CVE record's numbering authority (CNA) and the advisory disagree on the range
+that holds the version, as the API sends it: what differs (`kind`: `fixed`, where the package is fixed, or
+`introduced`, the CNA's range starting below the advisory's), the advisory's bound in dispute
+(exactly one of `advisory_fixed`, `advisory_last_affected` and `advisory_introduced`, with
+`advisory_listed` where the advisory lists versions rather than a range) and the advisory
+(`advisory_id`), the CNA (`cna`: `name`, `short_name`), what its entry names (`cna_product`) and the
+CNA's range in dispute, as the API reads the record (`cna_range`: `version`, `less_than`
+or `less_than_or_equal`, `status`, `version_type`, and `changes`, each `at` and `status`, with
+`changes_truncated`; where `higher` is `cna`, the CNA's range that reaches past the advisory's
+bound, which holds the version on a `cna_affected_range` match and, on an `advisory_interval` or
+`exact_version_list` match, the advisory's bound past the version (its fix, or the versions just above
+its last affected or listed version), so it may start above the version (lodash 4.17.15 under CVE-2026-2950:
+the CNA's range is [4.17.23, 4.18.1)), and where it is `advisory`, the CNA's range that ends below
+it, the CNA saying the version is fixed): an entry the
+record writes or, with `cna_range_default` true, a span no entry
+writes that the record's `defaultStatus` covers; the source the answer follows (`higher`, the more
+conservative one: `cna` or `advisory`), and the API's sentence on the dispute and what the
+answer does with it (`note`), which the note quotes verbatim beside the match's name (a dispute sent
+without a note is a dispute all the same, and the note says none was sent). `fixed_in` follows the source `higher` names: where it is `cna`, `fixed_in` need not
+be the advisory's own fix (lodash 4.17.15 under CVE-2026-4800 carries `fixed_in` 4.18.1, the CNA's
+bound, where the advisory says 4.18.0; until #3391 reached the API, on 2026-11-07, it carried 4.18.0
+and no dispute). A match whose version only the CNA's range holds says
+`version_evidence` `cna_affected_range`, and its `interval` is that range. `check_sbom`,
+`scan_manifest` and `cve_remediation` (on the installed version asked) relay it the same way; its
+fields and values are open to what a later API adds. A match without `fixed_in_dispute` is not a
+finding that the CNA agrees: an API that does not serve the field yet, or older than it, sends none,
+and one that serves it reads a CNA's ranges only where it applies them and only from an entry it
+matches to the package.
 
 `product`, `version`, `ecosystem` and `package` travel in the `X-EG-Product`, `X-EG-Version`,
 `X-EG-Ecosystem` and `X-EG-Package` request headers, never in the URL, so request logs and
