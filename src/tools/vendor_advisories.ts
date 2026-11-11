@@ -11,8 +11,8 @@
 // the note names each one. rejected_cve_ids (#2865) is separate from it: the CVE IDs a row names
 // whose CVE record was rejected by its numbering authority, while the vendor's own document may
 // still read as live; the note names those rows and the by-cve answer's cve_rejected. Advisories
-// of a vendor feed EchelonGraph has disabled are left out of all three. None of the answers carries a time at which the pollers last completed a poll,
-// so freshness is null.
+// of a vendor feed EchelonGraph has disabled are left out of all three. freshness is null: no answer has one
+// poll time, and each vendor's last successful poll is its window's last_success_at (#3464, below).
 //
 // The search term never travels in a URL (#1983). search_vendor_advisories sends it in the
 // X-EG-Advisory-Search header, percent-encoded, which the API reads first (handler.go
@@ -61,6 +61,24 @@
 // from 2018, while an unreviewed advisory it published before 2026-05-15 may not be held: a vendor
 // whose history_scope is a part is fully held for a year only when feed_held_since is on or before
 // the year's start too, and the note gives both dates. An API without the two fields reads as before.
+//
+// A window says nothing of whether the vendor is still being collected (#3464). Cisco's polls were
+// refused from 2026-10-12T12:52:55Z, and for 20 days its window read "held to 2026-10-07" here as
+// if it were current. coverage.go now serves, from the rule the feed-state alert pages on
+// (feed_state.go feedState), each vendor's last_success_at and collection_state: ok; partial (its
+// polls succeed, but held_back of the documents it lists could not be used, the oldest since
+// held_back_since: those may not be held, the rest of its feed is); failing (failing_since is its
+// last successful poll, and what it published after that may not be held, whatever the window says);
+// or disabled (this deployment runs no collector for it, so its window ends at last_success_at).
+// The tools relay the five fields in each window, the note names each vendor whose state is not ok
+// with its date (collectionNote), and vendor_advisories_for_cve lists such a vendor in
+// vendors_not_fully_held for any CVE year. A state the API adds later is not read as ok. An API
+// without the fields relays them null and reads as before.
+//
+// Every field the coverage row carries is read here or named in VENDOR_COVERAGE_NOT_RELAYED with why
+// (#3628): test/vendor-coverage-fields.test.mjs holds that to docs/api/openapi.yaml's vendor item, so
+// a field the API adds is a decision here, not a gap found weeks later (history_scope and
+// feed_held_since, #3472; the five above, #3464).
 //
 // The window is context, not the answer: when it cannot be read (an API older than the route, a failure), the answer is relayed as before, with
 // the windows null and a note saying they are unknown, never failed. The coverage request carries
@@ -119,6 +137,18 @@ const BACKFILLING = new Set(["in_progress", "not_started"]);
 // #3472: history_backfill values of a finished history read: complete, and complete_reviewed_only,
 // which read back GitHub's reviewed advisories only (its history_scope says the same).
 const HISTORY_READ = new Set(["complete", "complete_reviewed_only"]);
+// #3464: the collection_state values the API sends (feed_state.go FeedState*); any other is relayed as
+// sent and read as not known to be collected, never as ok.
+export const COLLECTION_STATES = ["ok", "partial", "failing", "disabled"] as const;
+// #3628: the coverage row's fields this file does not relay, each with why. Every other field of the
+// row (docs/api/openapi.yaml's vendor item) is read by windowsOf: test/vendor-coverage-fields.test.mjs
+// fails on a field that is neither.
+export const VENDOR_COVERAGE_NOT_RELAYED: Readonly<Record<string, string>> = {
+  history_units_done:
+    "the history read's bookkeeping, how many units of the vendor's archive it has read so far: history_backfill says whether the read is done, and the count bounds no window",
+  history_completed_at:
+    "when the history read finished: history_backfill complete or complete_reviewed_only says that it has, and held_since where the window it read begins; the finish time bounds no window",
+};
 
 const CVE_ID = /^CVE-\d{4}-\d{4,}$/i;
 // vendors.slug's CHECK constraint (migration 063).
@@ -143,6 +173,9 @@ const VENDOR_ADVISORY_ID_FIELD =
 const METHOD =
   "EchelonGraph's vendor-advisory feed: advisories as each vendor published them in its own feed (for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA), each feed polled on a schedule; advisories of a feed EchelonGraph has disabled are left out.";
 const NO_FRESHNESS = "freshness is null: these answers carry no time at which the vendor-advisory pollers last completed a poll.";
+// #3464: once the windows carry last_success_at, the answer does carry poll times, one per vendor.
+const PER_VENDOR_FRESHNESS =
+  "freshness is null: the answer has no single poll time; each vendor's last successful poll is its window's last_success_at in coverage, and its collection_state says whether it is being collected now, by EchelonGraph's feed-state rule.";
 const DATES =
   "vendor_published_at is the date the vendor gives for the advisory; our_first_seen_at is when EchelonGraph first recorded it, which is not the vendor's date.";
 const LIST_MEASURED_AT = "measured_at is null: a list of advisories has no single observation time; each row carries vendor_published_at and our_first_seen_at.";
@@ -164,6 +197,7 @@ const rowsOf = (o: unknown): unknown[] | undefined => {
   return Array.isArray(v) ? v : undefined;
 };
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+const listed = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 
 // Each withdrawn row named by vendor and id: report it as withdrawn, never as a current advisory.
 function withdrawnNote(rows: unknown[]): string {
@@ -215,6 +249,16 @@ type VendorWindow = {
   // #3472: what the history read covers: "all", or a part such as "reviewed"; null without a
   // history read or from an API older than the field.
   history_scope: string | null;
+  // #3464: the vendor's last successful poll; null when none is on record or from an API older than
+  // the field.
+  last_success_at: string | null;
+  // #3464: ok, partial, failing, disabled, or a later value as sent; null from an older API.
+  collection_state: string | null;
+  // #3464: while failing, the last successful poll; null otherwise.
+  failing_since: string | null;
+  // #3197: how many of the documents the vendor lists are held back, and since when the oldest failed.
+  held_back: number | null;
+  held_back_since: string | null;
 };
 // The windows, or why there are none.
 type Windows = { ok: true; windows: VendorWindow[] } | { ok: false; why: string };
@@ -225,8 +269,9 @@ const instantOrNull = (o: unknown, k: string): string | null => {
 };
 
 // The /coverage answer's rows; undefined when it carries no vendors list. A row without a vendor
-// slug cannot be named, so it is left out.
-function windowsOf(d: unknown): VendorWindow[] | undefined {
+// slug cannot be named, so it is left out. Each field relayed has the row's own name (#3628's check
+// reads a field as read when the window carries it under that name).
+export function windowsOf(d: unknown): VendorWindow[] | undefined {
   const rows = field(d, "vendors");
   if (!Array.isArray(rows)) return undefined;
   return rows.flatMap((r) => {
@@ -243,6 +288,11 @@ function windowsOf(d: unknown): VendorWindow[] | undefined {
         feed_held_since: instantOrNull(r, "feed_held_since"),
         history_backfill: str(r, "history_backfill") ?? null,
         history_scope: str(r, "history_scope") ?? null,
+        last_success_at: instantOrNull(r, "last_success_at"),
+        collection_state: str(r, "collection_state") ?? null,
+        failing_since: instantOrNull(r, "failing_since"),
+        held_back: num(r, "held_back") ?? null,
+        held_back_since: instantOrNull(r, "held_back_since"),
       },
     ];
   });
@@ -305,8 +355,74 @@ const windowItem = (w: VendorWindow, heldOnly: boolean) => {
       ? `${part} advisories ${held}; ${outsidePart(part)} ${w.feed_held_since === null ? "held from a date not known" : `held only from ${day(w.feed_held_since)}`}`
       : held;
   const reading = backfilling(w) ? `; history_backfill ${w.history_backfill}${part !== null ? `, which reads its ${part} advisories only (history_scope ${part})` : ""}` : "";
-  return `${w.vendor} (${scoped}${reading})`;
+  // #3464: why a vendor collected in full is listed; collectionNote says what the state means.
+  const collecting = notCollectedOk(w) ? `; collection_state ${stateShown(w) ?? "of a value this server does not read"}` : "";
+  return `${w.vendor} (${scoped}${reading}${collecting})`;
 };
+
+// ── Whether each vendor is being collected (#3464) ──
+
+// A collection_state as a note writes it: as sent when it has a state's shape, else null (not echoed).
+const stateShown = (w: VendorWindow): string | null => (w.collection_state !== null && /^[a-z][a-z0-9_]{0,31}$/.test(w.collection_state) ? w.collection_state : null);
+// Whether the API says the vendor is not collected in full now: any state but ok, a later one too.
+// From an API without collection_state (null), nothing is said, as before.
+const notCollectedOk = (w: VendorWindow) => w.collection_state !== null && w.collection_state !== "ok";
+// How a note names a vendor: its display name and slug, or the slug alone.
+const vendorNamed = (w: VendorWindow) => (w.vendor_display_name && w.vendor_display_name !== w.vendor ? `${w.vendor_display_name} (${w.vendor})` : w.vendor);
+const vendorShort = (w: VendorWindow) => w.vendor_display_name ?? w.vendor;
+
+// One vendor's sentence, by its collection_state; "" when it is ok or not given.
+export function collectionSentence(w: VendorWindow): string {
+  if (!notCollectedOk(w)) return "";
+  const who = vendorNamed(w);
+  const short = vendorShort(w);
+  switch (w.collection_state) {
+    case "failing": {
+      // failing_since is the last successful poll; an API that sends last_success_at without it is read the same.
+      const since = w.failing_since ?? w.last_success_at;
+      const by = w.failing_since !== null ? "failing_since" : "last_success_at";
+      return since !== null
+        ? ` ${who} collection has failed since ${day(since)} (collection_state failing; ${by} ${since}, its last successful poll); advisories ${short} published after that may not be held, whatever its window says.`
+        : ` ${who} collection is failing, with no successful poll on record (collection_state failing, last_success_at null); advisories ${short} published may not be held, whatever its window says.`;
+    }
+    case "partial": {
+      const n = w.held_back !== null && w.held_back > 0 ? w.held_back : null;
+      const one = n === 1;
+      const count = n === null ? `Some ${who} documents are` : `${n} ${who} ${plural(n, "document is", "documents are")}`;
+      const since = w.held_back_since === null ? "" : one ? ` since ${day(w.held_back_since)}` : `, the oldest since ${day(w.held_back_since)}`;
+      const field = n === null ? "collection_state partial" : `collection_state partial, held_back ${n}`;
+      return one
+        ? ` ${count} held back${since} (${field}: EchelonGraph could not use it); one ${short} advisory may be missing: that advisory, or that revision, may not be held, and the rest of its feed is.`
+        : ` ${count} held back${since} (${field}: EchelonGraph could not use them); some ${short} advisories may be missing: those advisories, or those revisions, may not be held, and the rest of its feed is.`;
+    }
+    case "disabled":
+      return w.last_success_at !== null
+        ? ` ${who} is not collected in this deployment (collection_state disabled): its window ends at its last successful poll, ${day(w.last_success_at)} (last_success_at ${w.last_success_at}); advisories ${short} published after that may not be held.`
+        : ` ${who} is not collected in this deployment (collection_state disabled), with no successful poll on record (last_success_at null); advisories ${short} published may not be held.`;
+    default: {
+      const shown = stateShown(w);
+      return ` ${who} has a collection_state this server does not know${shown !== null ? ` (${shown})` : ""}: whether it is being collected is not known, so advisories ${short} published may not be held.`;
+    }
+  }
+}
+
+// All three tools: each vendor of the windows whose collection_state is not ok, then what that means
+// for an empty answer.
+// #3663 review: vendor_advisories_for_cve's vendors_not_fully_held sentence already ends "is not a
+// finding that it published none" for each vendor it lists (covered), so the closing sentence names
+// only the vendors it has not: none, or the ones the answer holds an advisory from.
+function collectionNote(windows: VendorWindow[], covered: ReadonlySet<string> = new Set()): string {
+  const c = windows.filter(notCollectedOk);
+  if (!c.length) return "";
+  const rest = c.filter((w) => !covered.has(w.vendor));
+  const k = rest.length;
+  const who = k === c.length ? plural(k, "that vendor", "those vendors") : listed(rest.map(vendorShort));
+  const tail = k ? ` So no advisory here from ${who} is not a finding that ${plural(k, "it", "they")} published none.` : "";
+  return `${c.map(collectionSentence).join("")}${tail}`;
+}
+
+// The freshness note: per vendor once any window carries last_success_at, else as before.
+const freshnessNote = (windows: VendorWindow[] | null) => (windows?.some((w) => w.last_success_at !== null) ? PER_VENDOR_FRESHNESS : NO_FRESHNESS);
 
 // The sentence for windows that could not be read: no "none here" is a finding about a vendor.
 const windowsUnknown = (why: string) =>
@@ -317,12 +433,16 @@ const windowsUnknown = (why: string) =>
 // the year in the CVE ID or from a date not known, a history still being read, or (#3472) a history
 // read of only part of the vendor's advisories whose rest is held (feed_held_since) only from after
 // that 1 January or from a date not known. Never the earliest held advisory: for a vendor with no
-// history read it can be years before held_since (#2803).
+// history read it can be years before held_since (#2803). #3464: and, for any year, a vendor whose
+// collection_state is not ok: what it published after its last successful poll, or a document it
+// holds back, may name the CVE.
 function notFullyHeld(windows: VendorWindow[], rows: unknown[], year: number): VendorWindow[] {
   const answered = new Set(rows.map((r) => str(r, "vendor")).filter((v): v is string => v !== undefined));
   const yearStart = Date.UTC(year, 0, 1);
   return windows.filter(
-    (w) => !answered.has(w.vendor) && (w.earliest_vendor_published_at === null || !heldFromYear(w, yearStart) || backfilling(w) || !restHeldFromYear(w, yearStart)),
+    (w) =>
+      !answered.has(w.vendor) &&
+      (w.earliest_vendor_published_at === null || !heldFromYear(w, yearStart) || backfilling(w) || !restHeldFromYear(w, yearStart) || notCollectedOk(w)),
   );
 }
 
@@ -360,6 +480,16 @@ function heldInPartNote(windows: VendorWindow[]): string {
   return ` The history read of ${plural(k, "1 vendor", `${k} vendors`)} covers only part of ${plural(k, "its", "their")} advisories (history_scope): ${p.map((w) => windowItem(w, false)).join("; ")}. An advisory outside that part published before ${plural(k, "its", "their")} feed_held_since may not be held, so none found from ${plural(k, "it", "them")} is not a finding that ${plural(k, "it", "they")} published none.`;
 }
 
+// #3663: what a note adds beside the kinds where a Cisco row lists no_fix_planned. The parser makes it
+// from a vendor_fix only when the advisory's Summary says, in wording it reads, that Cisco will not
+// release a fix and no fix note says one exists (core-backend vendoradv cisco_csaf_doc.go ciscoNoFix),
+// so the note says what such an item may be, never that every such advisory is one.
+export const CISCO_NO_FIX_NOTE = " (no_fix_planned may also be a Cisco vendor_fix whose summary says no fix will be released)";
+export const ciscoListsNoFix = (r: unknown): boolean => {
+  const ks = field(r, "remediation_kinds");
+  return str(r, "vendor") === "cisco" && Array.isArray(ks) && ks.includes("no_fix_planned");
+};
+
 // #2840: what the rows say of their remediation, where the API sends remediation_state.
 function remediationNote(cve: string, rows: unknown[]): string {
   const states = rows.map((r) => field(r, "remediation_state")).filter((x): x is string => typeof x === "string");
@@ -371,8 +501,11 @@ function remediationNote(cve: string, rows: unknown[]): string {
     if (Array.isArray(ks)) for (const k of ks) if (typeof k === "string") kinds.set(k, (kinds.get(k) ?? 0) + 1);
   }
   const listedKinds = [...kinds].map(([k, n]) => `${k} (${n})`).join(", ");
+  // #3663: a Cisco no_fix_planned may be Cisco's vendor_fix, not Cisco's category: said where a Cisco
+  // row lists one, and only there (a Red Hat no_fix_planned is Red Hat's own).
+  const noFix = rows.some(ciscoListsNoFix) ? CISCO_NO_FIX_NOTE : "";
   const parts = [
-    listedKinds ? ` By the vendors' own categories, the advisories list for ${cve}: ${listedKinds}; each is the vendor's text, untested by EchelonGraph, and cve_remediation or get_vendor_advisory returns it.` : "",
+    listedKinds ? ` By the vendors' own categories${noFix}, the advisories list for ${cve}: ${listedKinds}; each is the vendor's text, untested by EchelonGraph, and cve_remediation or get_vendor_advisory returns it.` : "",
     count("none_in_source") ? ` ${count("none_in_source")} ${plural(count("none_in_source"), "lists", "list")} no remediation for ${cve} (none_in_source), which is not a finding that no fix exists.` : "",
     count("not_parsed") ? ` EchelonGraph does not read the remediation of ${count("not_parsed")} (remediation_state not_parsed), which is not a finding that ${plural(count("not_parsed"), "it lists", "they list")} none.` : "",
   ];
@@ -393,18 +526,65 @@ const DATE_FIELDS = {
 const REMEDIATION_STATE_FIELD =
   "parsed; none_in_source (EchelonGraph read the vendor's remediation, and it lists none for this CVE, which is not a finding that no fix exists); not_parsed (EchelonGraph does not read this vendor's remediation, or has not yet read this advisory: not a finding of none); withdrawn (the vendor rescinded the advisory).";
 const REMEDIATION_KINDS_FIELD =
-  "The kinds of remediation the advisory lists (for the CVE asked about, on a by-cve row), each the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other. [] with remediation_state not_parsed is not a finding that it lists none.";
+  "The kinds of remediation the advisory lists (for the CVE asked about, on a by-cve row), each the vendor's own category (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), or may be no_fix_planned where a Cisco advisory's summary says no fix will be released. [] with remediation_state not_parsed is not a finding that it lists none.";
+// #3663: kind is not always the vendor's category. The Cisco parser (core-backend vendoradv
+// cisco_csaf_doc.go ciscoNoFix) stores a vendor_fix as no_fix_planned when both hold: the Summary
+// matches its no-fix wording (ciscoNoFixRe), and none of the five notes it reads (ciscoFixNoteTitles)
+// says a fix exists by its negation-aware markers (ciscoReleased). Other wording leaves vendor_fix
+// (#3719), so this says the rule, not that every no-fix advisory is caught. cve_remediation.ts's items
+// carry the same two texts.
+export const REMEDIATION_ITEM_KIND_FIELD =
+  "The vendor's own category: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other. One exception: a Cisco vendor_fix is no_fix_planned when the advisory's Summary says, in wording EchelonGraph's parser reads, that Cisco will not release a fix, and none of its Summary, Fixed Software, Recommendations, Details or Affected Products notes says, by the parser's markers, that a fix exists; its source_category then stays vendor_fix, its source_subcategory names the note its text is from, and it carries no url. Wording the parser does not read leaves the item vendor_fix, so a Cisco vendor_fix is not a finding that a fix was released.";
+export const REMEDIATION_ITEM_SUBCATEGORY_FIELD =
+  "MSRC's SubType, e.g. Security Update; for a Cisco no_fix_planned item, the title of the note its text is from (Summary); null elsewhere.";
 const REMEDIATION_KINDS = ["vendor_fix", "workaround", "mitigation", "no_fix_planned", "none_available", "other"] as const;
 const REMEDIATION_STATES = ["parsed", "none_in_source", "not_parsed", "withdrawn"] as const;
+// #3642: what vendor_text_withheld says, on every row and on the detail. The API withholds
+// Microsoft's advisory text (core-backend internal/cve/vendor_text.go) and these tools relay its
+// answer as sent, so the rule is the API's and reaches every version of this server at once.
+const VENDOR_TEXT_WITHHELD_FIELD =
+  "true: the vendor's advisory page is not copied (Microsoft's): title is EchelonGraph's (Microsoft security update for its first CVE where it lists a vendor fix, Microsoft advisory otherwise, by its own ID when it names no CVE), and the advisory's description, summary, remediation, withdrawn_reason and each remediation's text are empty (instead, a detail's cve_records lists the first cve_records_cap CVEs it names, each with the CVE record's description or null, as cve_records says when); severity, cvss_v3_score, cvss_v3_vector, cve_ids, affected_products, the dates and the links are the vendor's facts, and, where the advisory names a CVE ID, references lead with the vendor's own advisory page.";
+// #3643: each source's licence, on the field that names the source (the site's /pulse/api says the
+// same, marketing-site/lib/apiDataLicences.ts; Red Hat's read at https://access.redhat.com/security/data,
+// GitHub's in github/advisory-database's LICENSE.md, both 2026-11-08).
+export const VENDOR_LICENCE_FIELD =
+  "The vendor's slug. Each vendor's advisory data stays under its own licence, and EchelonGraph's terms add no restriction to it: redhat, Red Hat's security advisories, © Red Hat, Inc., licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/; source https://access.redhat.com/security/data); github, the GitHub Advisory Database, licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/; source https://github.com/github/advisory-database); microsoft, Microsoft's own terms (its advisory pages are not copied: the facts and EchelonGraph's title are served, with a link to Microsoft's advisory where it names a CVE ID); every other vendor, that vendor's own terms.";
+// #3642 round-3 review: what get_vendor_advisory's description says of a vendor whose text is withheld,
+// the last sentence of it, within the client cut and #2924's 100-character headroom under it
+// (requiredText.ts CLIENT_DESCRIPTION_CUT; test/prompts-resources.test.mjs).
+const WITHHELD_DETAIL_DESCRIPTION =
+  "vendor_text_withheld true (Microsoft): title is EchelonGraph's; description, remediation and item texts are empty; cve_records: its first CVEs, each with its CVE-record description or null.";
+// #3642: EchelonGraph's own facts of each CVE a withheld vendor's advisory names, on the detail.
+const CVE_RECORDS_FIELD =
+  "When vendor_text_withheld is true: EchelonGraph's facts of the first cve_records_cap CVEs the advisory names, in its order: the CVE record's own description, as the CVE Numbering Authority that assigned the CVE (cna) published it in the CVE record at cve_record_url, reused under the CVE Program's Terms of Use (https://www.cve.org/Legal/TermsOfUse; © The MITRE Corporation; for a CVE the vendor assigned, the vendor wrote it; null where the record has none, was rejected or is still the stub a GitHub advisory seeded, where EchelonGraph holds no record (known false), or where description_withheld_reason says it is withheld), EchelonGraph's score as the CVE feed serves it (null unless score_assessed), the CISA KEV listing, and the fix status by the CVE feed's rule. null when the vendor's text is served, or when the facts could not be read.";
+const CVE_RECORD_ROW = z.looseObject({
+  cve_id: opt(z.string()),
+  known: opt(z.boolean()).describe("Whether EchelonGraph holds a CVE record for it; false: EchelonGraph holds no CVE record for it; only cve_id and cve_record_url are set."),
+  vuln_status: opt(z.string()),
+  description: opt(z.string()).describe("The CVE record's description, as its CVE Numbering Authority (cna) published it in the CVE record at cve_record_url; null when there is none to serve, or when description_withheld_reason says why it is withheld."),
+  description_withheld_reason: opt(z.string()).describe("Why a description the CVE record has is null: matches_vendor_title: it repeats the advisory's own title, and a server-side switch for such descriptions, off by default, withheld it; null otherwise."),
+  cve_record_url: opt(z.string()),
+  cna: opt(z.string()).describe("The CVE Numbering Authority that assigned the CVE and wrote its record, by its name in the CVE Program's CNA list, else its short name (e.g. Microsoft Corporation, kernel.org); null when none is on record."),
+  echelongraph_score: opt(z.number()),
+  echelongraph_severity: opt(z.string()),
+  score_assessed: opt(z.boolean()),
+  score_unassessed_reason: opt(z.string()),
+  score_confidence: opt(z.string()),
+  kev_listed: opt(z.boolean()),
+  kev_added_date: opt(z.string()),
+  fix_status: z.unknown().optional().describe("The fix status by the CVE feed's rule (state, basis, unread_inputs and the rule's evidence); null for a rejected record."),
+});
 const AdvisoryRow = z.looseObject({
   advisory_id: opt(z.string()).describe(ROW_ADVISORY_ID_FIELD),
-  vendor: opt(z.string()),
+  vendor: opt(z.string()).describe(VENDOR_LICENCE_FIELD),
   vendor_display_name: opt(z.string()),
   vendor_advisory_id: opt(z.string()).describe(VENDOR_ADVISORY_ID_FIELD),
   cve_ids: opt(z.array(z.string())),
   title: opt(z.string()),
   severity: opt(z.string()),
   cvss_v3_score: opt(z.number()),
+  cvss_v3_vector: opt(z.string()).describe("The CVSS v3 vector of cvss_v3_score where the vendor's source carries one (Microsoft's); null otherwise. On by-cve rows and the detail."),
+  vendor_text_withheld: opt(z.boolean()).describe(VENDOR_TEXT_WITHHELD_FIELD),
   summary: opt(z.string()),
   affected_products: opt(z.array(z.string())),
   ...DATE_FIELDS,
@@ -422,7 +602,8 @@ const REJECTED_CVE_DESCRIPTION =
   "Each advisory also carries rejected_cve_ids: the CVE IDs it names whose CVE record was rejected (withdrawn) by its numbering authority, which are not active vulnerabilities.";
 // #2842: the generic rule for the result's last text block is in the README and the methodology
 // resource, not in each description.
-const ENVELOPE_DESCRIPTION = "Its freshness is null: the answer carries no poll-completion time.";
+// #3464: the window carries the vendor's last successful poll, so the answer is not without one.
+const ENVELOPE_DESCRIPTION = "freshness is null; vendor_window.last_success_at is the last successful poll.";
 // #2729: what a vendor's window is.
 const HISTORY_BACKFILL_DESCRIPTION =
   "history_backfill: complete (the vendor's published history has been read back as far as its source goes), complete_reviewed_only (the vendor's reviewed advisories have been read back as far as its source goes and its unreviewed ones have not: GitHub's, history_scope reviewed), in_progress or not_started (it is still being read, so the vendor's older advisories are not all held yet), or not_supported (EchelonGraph has no history read for that vendor, so what it holds is what the vendor's feed has carried)";
@@ -434,7 +615,10 @@ const FEED_HELD_SINCE_DESCRIPTION =
   "feed_held_since (the start of the window the vendor's own feed has read every one of its advisories from, which is held_since as it would be without any history read; an advisory outside history_scope published before it may not be held; null when none is held or the API does not say)";
 const HISTORY_SCOPE_DESCRIPTION =
   "history_scope (what the vendor's history read covers: all, or reviewed for GitHub, whose read covers its reviewed advisories and not its unreviewed ones, which are held only from feed_held_since; a value the API adds later as it sends it; null for a vendor with no history read, or when the API does not say)";
-const WINDOW_DESCRIPTION = `vendor, advisories (how many EchelonGraph holds from that vendor), earliest_vendor_published_at and latest_vendor_published_at (the earliest and latest vendor_published_at among them, null when none is held), ${HELD_SINCE_DESCRIPTION}, ${FEED_HELD_SINCE_DESCRIPTION}, ${HISTORY_BACKFILL_DESCRIPTION} and ${HISTORY_SCOPE_DESCRIPTION}`;
+// #3464: whether the vendor is being collected now, beside the window.
+const COLLECTION_STATE_DESCRIPTION =
+  "last_success_at (the vendor's last successful poll), collection_state (whether the vendor is being collected now, by EchelonGraph's feed-state rule: ok; partial, its polls succeed but held_back of the documents it lists could not be used, the oldest since held_back_since, and those advisories, or those revisions, may not be held while the rest of its feed is; failing, it is not being collected, and what it published after failing_since, its last successful poll, may not be held, whatever the window says; disabled, this deployment runs no collector for it (its held advisories are still served), so its window ends at last_success_at; a value the API adds later as it sends it, never read as ok), failing_since, held_back and held_back_since (each null when the API does not say)";
+const WINDOW_DESCRIPTION = `vendor, advisories (how many EchelonGraph holds from that vendor), earliest_vendor_published_at and latest_vendor_published_at (the earliest and latest vendor_published_at among them, null when none is held), ${HELD_SINCE_DESCRIPTION}, ${FEED_HELD_SINCE_DESCRIPTION}, ${HISTORY_BACKFILL_DESCRIPTION}, ${HISTORY_SCOPE_DESCRIPTION}, and ${COLLECTION_STATE_DESCRIPTION}`;
 // #2842: what the descriptions say of a window, within the client cut (requiredText.ts);
 // WINDOW_DESCRIPTION in full is the outputSchema's description of a window.
 const WINDOW_HEAD_FIELDS = "vendor, advisories, earliest_vendor_published_at, latest_vendor_published_at, held_since (where that window begins)";
@@ -444,8 +628,12 @@ const WINDOW_HEAD = `${WINDOW_HEAD_FIELDS} and ${BACKFILL_HEAD}`;
 // feed_held_since too; vendor_advisories_for_cve's names them where it says what
 // vendors_not_fully_held lists, within its headroom (test/prompts-resources.test.mjs, #2924).
 const WINDOW_HEAD_SCOPED = `${WINDOW_HEAD_FIELDS}, ${BACKFILL_HEAD}, history_scope and feed_held_since`;
+// #3663, #3642 re-review: get_vendor_advisory's, without vendor and advisories (its outputSchema names
+// them), so its description keeps #2924's headroom with the Cisco kind sentence and a cve_records
+// sentence that is true of every description it serves.
+const WINDOW_HEAD_DETAIL = `earliest_vendor_published_at, latest_vendor_published_at, held_since (where that window begins), ${BACKFILL_HEAD}, history_scope and feed_held_since`;
 const NOT_HELD_DESCRIPTION =
-  "An advisory a vendor published before its held_since may not be held, even when its earliest_vendor_published_at is older, and one outside its history_scope (GitHub's unreviewed advisories) published before its feed_held_since may not be held either, so no advisory from a vendor is not a finding that it published none.";
+  "An advisory a vendor published before its held_since may not be held, even when its earliest_vendor_published_at is older, and one outside its history_scope (GitHub's unreviewed advisories) published before its feed_held_since may not be held either, nor one it published after its last successful poll while its collection_state is failing or disabled, nor one of the documents it holds back (partial), so no advisory from a vendor is not a finding that it published none.";
 // #2842: the same rule within the client cut; NOT_HELD_DESCRIPTION whole is the windows' outputSchema description.
 const NOT_HELD_HEAD =
   "An advisory published before its vendor's held_since may not be held, so no advisory from a vendor is not a finding that it published none.";
@@ -497,6 +685,34 @@ const VendorWindowSchema = z.strictObject({
     .describe(
       "What this vendor's history read covers: all (every advisory its archive publishes) or reviewed (GitHub: its reviewed advisories, not its unreviewed ones, which are held only from feed_held_since); a value the API adds later as it sends it. null for a vendor with no history read, or when the API does not say.",
     ),
+  // #3464: coverage.go LastSuccessAt, CollectionState, FailingSince; #3197: HeldBack, HeldBackSince.
+  last_success_at: z
+    .string()
+    .nullable()
+    .describe("This vendor's last successful poll; null when none is on record or the API does not say. While collection_state is disabled, the window ends here."),
+  // A string, as history_scope: the four values the API sends today (COLLECTION_STATES) are named in
+  // the description, and a later one is relayed as sent, never turned into a failure or read as ok.
+  // (An enum beside any string would add no check, and would be a fifth open enum in the failure
+  // branch, which README Versioning counts.)
+  collection_state: z
+    .string()
+    .nullable()
+    .describe(
+      "Whether this vendor is being collected now, by EchelonGraph's feed-state rule: ok, partial, failing or disabled. ok: it is being collected. partial: its polls succeed, but held_back of the documents it lists could not be used, the oldest since held_back_since; those advisories, or those revisions, may not be held, and the rest of its feed is. failing: it is not being collected, and an advisory it published after failing_since, its last successful poll, may not be held, whatever the window says. disabled: this deployment runs no collector for it (its held advisories are still served), so its window ends at last_success_at, and an advisory it published after that may not be held. A value the API adds later is relayed as sent and is not read as ok. null when the API does not say.",
+    ),
+  failing_since: z
+    .string()
+    .nullable()
+    .describe(
+      "While collection_state is failing, this vendor's last successful poll: an advisory it published after it may not be held, whatever the window says. null when it is not failing, when no successful poll is on record, or when the API does not say.",
+    ),
+  held_back: z
+    .number()
+    .nullable()
+    .describe(
+      "How many of the documents this vendor lists EchelonGraph could not use (collection_state partial): those advisories, or those revisions, may not be held. 0 when none is held back; null when the API does not say.",
+    ),
+  held_back_since: z.string().nullable().describe("When the oldest held-back document first failed; null when none is held back or the API does not say."),
 }).describe(`A vendor's window in what EchelonGraph holds: ${WINDOW_DESCRIPTION}.`);
 const WINDOWS = z.array(VendorWindowSchema).nullable().describe(`Each vendor's window in what EchelonGraph holds; null when the windows could not be read. ${NOT_HELD_DESCRIPTION}`);
 
@@ -570,7 +786,7 @@ function outputsOf(envelopeSchema: VendorAdvisoryKit["envelopeSchema"]) {
         .array(z.string())
         .nullable()
         .describe(
-          "The vendors with no advisory in this answer that may have published one EchelonGraph does not hold: none held, held_since after 1 January of cve_year or not known, history_backfill in_progress or not_started, or a history_scope that is a part of the vendor's advisories (reviewed) with feed_held_since after 1 January of cve_year or not known: GitHub, whose unreviewed advisories are held only from feed_held_since, however early its held_since. No advisory from them is not a finding that they published none. null when the windows could not be read.",
+          "The vendors with no advisory in this answer that may have published one EchelonGraph does not hold: none held, held_since after 1 January of cve_year or not known, history_backfill in_progress or not_started, a history_scope that is a part of the vendor's advisories (reviewed) with feed_held_since after 1 January of cve_year or not known: GitHub, whose unreviewed advisories are held only from feed_held_since, however early its held_since, or, for any cve_year, a collection_state that is not ok (failing, partial, disabled, or a value the API adds later). No advisory from them is not a finding that they published none. null when the windows could not be read.",
         ),
     }),
     freshness: null,
@@ -583,10 +799,11 @@ function outputsOf(envelopeSchema: VendorAdvisoryKit["envelopeSchema"]) {
       remediations: opt(
         z.array(
           z.looseObject({
-            kind: opt(z.union([z.enum(REMEDIATION_KINDS), z.string()])),
+            // #3663: as cve_remediation's items say them.
+            kind: opt(z.union([z.enum(REMEDIATION_KINDS), z.string()])).describe(REMEDIATION_ITEM_KIND_FIELD),
             source_category: opt(z.string()).describe("The vendor's own name for the category."),
-            source_subcategory: opt(z.string()),
-            text: opt(z.string()).describe("The vendor's text, verbatim but for HTML markup removed, untested by EchelonGraph; at most 2,000 characters (text_truncated, text_chars)."),
+            source_subcategory: opt(z.string()).describe(REMEDIATION_ITEM_SUBCATEGORY_FIELD),
+            text: opt(z.string()).describe("The vendor's text, verbatim but for HTML markup removed, untested by EchelonGraph; at most 2,000 characters (text_truncated, text_chars). Empty, with text_chars 0, when vendor_text_withheld is true."),
             text_truncated: opt(z.boolean()),
             text_chars: opt(z.number()),
             url: opt(z.string()),
@@ -594,14 +811,19 @@ function outputsOf(envelopeSchema: VendorAdvisoryKit["envelopeSchema"]) {
             cve_ids: opt(z.array(z.string())).describe("The CVEs the item covers; [] for the whole advisory."),
             product_ids: opt(z.array(z.string())),
             product_count: opt(z.number()),
+            kb_article: opt(z.string()).describe("The KB article the item's url names, e.g. KB5055519, when vendor_text_withheld is true; absent otherwise."),
           }),
         ),
-      ).describe("Each remediation the vendor lists, with its kind, the vendor's own category."),
+      ).describe("Each remediation the vendor lists, with its kind: the vendor's own category, or it may be no_fix_planned where a Cisco advisory's summary says no fix will be released."),
       remediation_items_not_stored: opt(z.number()).describe("Items past the 64 stored per advisory."),
       references: z.unknown().optional(),
       vendor_modified_at: opt(z.string()),
       withdrawn_at: opt(z.string()),
       withdrawn_reason: opt(z.string()),
+      cve_records: opt(z.array(CVE_RECORD_ROW)).describe(CVE_RECORDS_FIELD),
+      cve_records_total: opt(z.number()).describe("How many CVE IDs the advisory names; cve_records holds the first cve_records_cap of them."),
+      cve_records_cap: opt(z.number()),
+      content_changed_at: opt(z.string()).describe("When what EchelonGraph's page of this advisory shows changed with no change to the advisory: when the vendor-text rule began serving; empty when none is recorded."),
     }),
     coverage: z.strictObject({
       vendor_window: VendorWindowSchema.nullable().describe("This advisory's vendor's window in what EchelonGraph holds; null when the windows could not be read or carry none for this vendor."),
@@ -676,10 +898,12 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
           vendors_not_fully_held: missing ? missing.map((m) => m.vendor) : null,
         },
         freshness: null,
-        notes: [LIST_MEASURED_AT, NO_FRESHNESS, DATES],
+        notes: [LIST_MEASURED_AT, freshnessNote(w.ok ? w.windows : null), DATES],
       };
       const head = kit.okHead(tool, r.status);
-      const held = w.ok ? notFullyHeldNote(cve, year, missing ?? []) : windowsUnknown(w.why);
+      // #3464: every vendor not collected in full, answered or not: what it published after its last
+      // successful poll may name this CVE too.
+      const held = w.ok ? `${notFullyHeldNote(cve, year, missing ?? [])}${collectionNote(w.windows, new Set((missing ?? []).map((m) => m.vendor)))}` : windowsUnknown(w.why);
       // #2865: the queried CVE's own state, first, so no advisory below reads as a live CVE's.
       const cveState = field(r.data, "cve_rejected");
       const rejectedHead =
@@ -754,7 +978,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
           realInstant(firstSeen)
             ? "measured_at is our_first_seen_at: when EchelonGraph first recorded this advisory."
             : "measured_at is null: the answer carries no real our_first_seen_at.",
-          NO_FRESHNESS,
+          freshnessNote(window ? [window] : null),
           DATES,
         ],
       };
@@ -767,7 +991,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
         Array.isArray(cveIDs) && Array.isArray(known) && cveIDs.length > known.length
           ? ` Of the ${cveIDs.length} CVE IDs it lists (cve_ids), ${known.length} ${plural(known.length, "has", "have")} a record in EchelonGraph's CVE feed (known_cve_ids); the others have no record there yet, which does not mean they are not CVEs.`
           : "";
-      const held = !w.ok ? windowsUnknown(w.why) : window ? `${backfillingNote([window])}${heldInPartNote([window])}` : "";
+      const held = !w.ok ? windowsUnknown(w.why) : window ? `${backfillingNote([window])}${heldInPartNote([window])}${collectionNote([window])}` : "";
       // #2865: the CVE IDs it names that were rejected, said whether or not the vendor withdrew it.
       const rej = rejectedIDs(r.data);
       const rejectedCVEs = rej.length
@@ -837,7 +1061,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
         freshness: null,
         notes: [
           LIST_MEASURED_AT,
-          NO_FRESHNESS,
+          freshnessNote(windows),
           DATES,
           "Advisories their vendor withdrew are left out of this list (withdrawn advisories stay reachable through get_vendor_advisory and vendor_advisories_for_cve).",
         ],
@@ -849,7 +1073,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
         query && match === "word"
           ? " The query is 1 or 2 characters, so it matched whole words only (search_match word): an advisory matches when the query equals, ignoring case, a whole word (a run of letters and digits) of its title, description, vendor_advisory_id, an affected product, a CVE ID or its vendor's name, never part of a longer word."
           : "";
-      const held = !w.ok ? windowsUnknown(w.why) : `${backfillingNote(windows ?? [])}${heldInPartNote(windows ?? [])}`;
+      const held = !w.ok ? windowsUnknown(w.why) : `${backfillingNote(windows ?? [])}${heldInPartNote(windows ?? [])}${collectionNote(windows ?? [])}`;
       if (total === 0) {
         return kit.succeeded(
           r.data,
@@ -875,7 +1099,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "vendor_advisories_for_cve",
     {
       title: "Vendor advisories for one CVE",
-      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_display_name, vendor_advisory_id, title, severity and cvss_v3_score where given. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means none of the advisories EchelonGraph holds names the CVE, not that no vendor published one. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} The answer's cve_rejected is true when the CVE record of the CVE asked for was rejected. Each row has remediation_kinds and remediation_state (not_parsed is not none). coverage gives returned, cap, at_cap (true: may be more) and cve_year; vendor_windows, each vendor's held window: ${WINDOW_HEAD}; and vendors_not_fully_held, the vendors absent from the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since), or whose history is still being read. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
+      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_advisory_id, title, severity and cvss_v3_score where given. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means none of the advisories EchelonGraph holds names the CVE, not that no vendor published one. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} The answer's cve_rejected is true when the CVE record of the CVE asked for was rejected. Each row has remediation_kinds and remediation_state (not_parsed is not none). coverage gives returned, cap, at_cap (true: may be more) and cve_year; vendor_windows, each vendor's window: ${WINDOW_HEAD}; and vendors_not_fully_held, the vendors absent from the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since), or whose history is still being read or collection_state is not ok. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
       inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2024-21412"), full: FULL_ARG }),
       outputSchema: FOR_CVE_OUTPUT,
       annotations: kit.annotations,
@@ -887,7 +1111,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "get_vendor_advisory",
     {
       title: "Vendor advisory detail",
-      description: `One vendor advisory in full, by vendor and the vendor's advisory ID (the vendor and vendor_advisory_id of a vendor advisory row, never its advisory_id, EchelonGraph's internal UUID): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (those with a record in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations lists each remediation the vendor lists, with kind (the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), source_category, text, url and the cve_ids and product_ids it covers; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state is parsed, none_in_source, not_parsed or withdrawn: none_in_source and not_parsed are not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is that vendor's window in what EchelonGraph holds: ${WINDOW_HEAD_SCOPED}; null when the windows could not be read or carry none for that vendor. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION}`,
+      description: `One vendor advisory in full, by vendor and advisory ID (the vendor and vendor_advisory_id of a vendor advisory row, never its advisory_id): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations: each the vendor lists, with kind (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other: the vendor's category, or may be no_fix_planned if Cisco's summary says none will be released), source_category, text, url, cve_ids and product_ids; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state none_in_source or not_parsed is not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is what EchelonGraph holds of that vendor: ${WINDOW_HEAD_DETAIL}; null if unreadable or empty. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION} ${WITHHELD_DETAIL_DESCRIPTION}`,
       inputSchema: z.object({
         vendor: z.string().describe("the vendor slug, e.g. microsoft, redhat, github"),
         advisory_id: z

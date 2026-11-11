@@ -16,49 +16,55 @@ declares exactly the server's tools and prompts.
 Every directory's rules were re-read on 2026-10-04 (UTC); each section quotes the rules it relies
 on and names the source. Directory requirements change: re-read the source before you submit.
 
-## Status on 2026-10-18
+## Status on 2026-11-08
 
 A dated record: it says what was read on the dates it gives, and a release does not change it. Release
 step 8 below re-runs the check after each release, and the next commit to this directory replaces
 this table with that run's (this file is in the public repo's tree, so it changes with a release,
-never between a tag and the next). Earlier tables (2026-10-04, 2026-10-11) are in this file's history.
+never between a tag and the next). Earlier tables (2026-10-04, 2026-10-11, 2026-10-18) are in this
+file's history.
 
 Measured with `scripts/check-mcp-listings.mjs` (in the EchelonGraph repo; see "Listing check"
-below) at 2026-10-17 19:21 UTC, after the 3.0.2 release (npm `latest` 3.0.2, published 2026-10-17
-17:14Z); its one finding was Glama's lag. npm, the official registry and the hosted endpoint were
-read again on 2026-10-18 (3.0.2 each). A row the check does not read, or a fact it does not
-measure, says when it was read.
+below) at 2026-11-08 15:00:56 UTC, after the 3.2.1 release (npm `latest` 3.2.1, published 2026-11-08
+14:29Z). Its two findings were Glama's lag and the `docker-pin` row's: `docker/server.yaml` here
+pinned v3.2.0's commit `5ef4cfe4dda6`, and the fork v3.2.1's `c327498138e7`. The commit that recorded
+this table moved `docker/server.yaml` to the fork's pin (release step 6), and the `docker-pin` row,
+read again at 15:14 UTC with that file, found both pins at v3.2.1 (`c327498138e7`) and no finding
+(the machine it ran on could not read api.github.com, so the public repo's tags came from `git
+ls-remote` and the fork's file from raw.githubusercontent.com). npm, the official registry and the hosted
+endpoint were read again at 15:10 UTC (3.2.1 each). A row the check does not read, or a fact it does
+not measure, says when it was read.
 
 | Directory | Listed | Version shown | What it takes | Who |
 |---|---|---|---|---|
-| Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, active | 3.0.2, `isLatest` (published to it 2026-10-17 17:20Z; read 2026-10-18) | nothing: each release publishes it (release step 2) | release script |
-| Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 3.0.2 (`/health`, 2026-10-18) | nothing | deploy |
-| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on) | 2.7.0 on 2026-10-17, **behind** npm's 3.0.2: it has shown 2.7.0 since a manual Admin → Sync Server on 2026-10-06, and Auto-Release has picked up none of 2.7.1, 2.7.2, 3.0.0 and 3.0.2 (nor 2.6.7, 2.6.8 or 2.7.0 before them) | Admin → Repository → Sync Server after each release; the one-line description in "Paste text", if Glama's own differs (recorded on #2723 on 2026-10-05 as still to be set, and not recorded as set since) | founder (GitHub sign-in) |
-| Smithery | yes, **published 2026-10-05** as `echelongraph/echelongraph-mcp` (hosted URL); display name and description set (recorded 2026-10-10) | proxies the hosted endpoint: its scan after the 3.0.2 release read 16 tools from it (2026-10-17) | re-publish after each release (release step 5); Settings → Verification, not recorded as done | release step 5; founder (Smithery sign-in) for Verification |
-| mcp.so | **submitted, not listed:** chatmcp/mcpso#4699, the free route the founder chose (the $39 form was declined), opened 2026-10-04 12:14Z; no reply on record (0 comments when read on 2026-10-10), and the check found no listing on 2026-10-17 | shows none | mcp.so's review of #4699. Do not open a second issue or pay the form | mcp.so |
-| PulseMCP | no | shows none | nothing: submissions paused (since 2026-09-03); it reads the official registry when it reopens | nobody |
-| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork; branch `add-echelongraph`), pinned to v3.0.2 (commit `3193362066d3`, the commit `v3.0.2^{}` names, not the tag object `47bd1ffb`; moved 2026-10-17 with the 3.0.2 release, validate and build passing). `docker/server.yaml` here still carries v2.7.2's commit `1a0965ea`: release step 6 mirrors the pin, in the next commit to this directory. No review on record; Docker's own CI has never run: both workflows sit at `action_required` (first-time contributor) until a Docker maintainer approves them | n/a until merged | Docker's review; move the pin on each release while open | Docker |
-| Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passed in our local runs (Docker's CI held at `action_required` for maintainer approval); tools are dynamic, so no pin to move; no review on record | serves the hosted endpoint | Docker's review | Docker |
-| awesome-mcp-servers (punkpeye) | **yes**: punkpeye/awesome-mcp-servers#15955 merged by punkpeye 2026-10-08T07:01:56Z (merge commit `89b9a3f946`); one line in 🔒 Security (README line 3769 at merge), with the Glama score badge | no version shown (links the repo; the Glama badge tracks Glama's score) | nothing; the line points at the public repo, so it stays current | maintainer |
-| Public repo About (github.com/echelongraph/echelongraph-mcp) | description, homepage and topics equal to `github-repo-settings.json` (the check's `github-repo` row, read 2026-10-18 07:03Z; #3289) | no version shown | apply the file after each release that changes it (release step 7) | someone with admin on the repo |
-| Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth; when submitted, the endpoint served 2.6.7, with its 14 read-only tools). Not edited while in review: an edit resubmits it (founder, 2026-10-10) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
+| Official MCP Registry | yes, `io.echelongraph/echelongraph-mcp`, active | 3.2.1, `isLatest` (published to it 2026-11-08 14:35Z; read 2026-11-08) | nothing: each release publishes it (release step 2) | release script |
+| Hosted endpoint `https://mcp.echelongraph.io/mcp` | in service | 3.2.1 (`/health`, 2026-11-08) | nothing | deploy |
+| Glama | yes, **claimed 2026-10-05** (Admin as AkshayDubey29, Auto-Release on: as recorded on 2026-10-18, not re-read since) | 3.1.5 on 2026-11-08, **behind** npm's 3.2.1: the page's latest release is v3.1.5, recorded by Glama 2026-11-07 21:51Z, and neither 3.2.0 (on npm 2026-11-08 03:21Z) nor 3.2.1 is on it (page read 2026-11-08 15:12Z) | Admin → Repository → Sync Server after each release; the one-line description in "Paste text", if Glama's own differs (recorded on #2723 on 2026-10-05 as still to be set, and not recorded as set since) | founder (GitHub sign-in) |
+| Smithery | **not listed** on 2026-11-08 (the check's NOT LISTED): https://smithery.ai/servers/echelongraph/echelongraph-mcp answered HTTP 404, as HTML and as the agent view, while Smithery's API still answered a record for us (its `deploymentUrl` the `run.tools` proxy), which the page outranks. It was published 2026-10-05 as `echelongraph/echelongraph-mcp` (hosted URL), with display name and description set (recorded 2026-10-10) | shows none | nothing we can do: by Smithery's notice (https://smithery.ai/future, read 2026-10-25), its API, accounts and API keys stop on 2026-10-31 and a public, non-proxied registry stays, so no publish, sign-in or verification is left that could list us again; release step 5's re-publish after each release ended that day. The check prints this row as a dated note, not a finding (decided 2026-11-08). If Smithery moved the page, see "Smithery" below | nobody |
+| mcp.so | **submitted, not listed:** chatmcp/mcpso#4699, the free route the founder chose (the paid form was declined), opened 2026-10-04 12:14Z; no reply on record (0 comments when read on 2026-10-10, not re-read since), and the check found no listing on 2026-11-08 (its search: 0 results) | shows none | mcp.so's review of #4699. Do not open a second issue or pay for the form | mcp.so |
+| PulseMCP | no (the check's search, 2026-11-08: none of ours) | shows none | nothing: submissions paused since 2026-09-03 (its submit page, read 2026-10-04, not re-read since); it reads the official registry when it reopens | nobody |
+| Docker MCP Catalog, local | **PR open:** docker/mcp-registry#5429 (from the `echelongraph` fork; branch `add-echelongraph`): no review on record, and Docker's own CI never run, both workflows at `action_required` (first-time contributor) until a Docker maintainer approves them (as recorded on 2026-10-18, not re-read since). The branch pins v3.2.1 (commit `c327498138e7`, the commit `v3.2.1^{}` names, not the tag object `69d1542c`), moved there 2026-11-08 15:00Z by its commit `ce706a5bb23e`; `docker/server.yaml` here carries the same pin from the commit that recorded this table (release step 6; the check's `docker-pin` row). Docker's catalog had no `echelongraph` entry on 2026-11-08 (the check) | n/a until merged | Docker's review; move the pin on each release while open | Docker |
+| Docker MCP Catalog, remote | **PR open:** docker/mcp-registry#5428; validate passed in our local runs (Docker's CI held at `action_required` for maintainer approval); tools are dynamic, so no pin to move; no review on record (as recorded on 2026-10-18, not re-read since). Docker's catalog had no `echelongraph-remote` entry on 2026-11-08 (the check) | n/a until merged; the entry serves the hosted endpoint | Docker's review | Docker |
+| awesome-mcp-servers (punkpeye) | **yes**: punkpeye/awesome-mcp-servers#15955 merged by punkpeye 2026-10-08T07:01:56Z (merge commit `89b9a3f946`; as recorded, the PR not re-read since); one line in 🔒 Security (README line 3769 at merge), with the Glama score badge, and still there on 2026-11-08 (line 4226 of the list's README on `main`, read from raw.githubusercontent.com) | no version shown (links the repo; the Glama badge tracks Glama's score) | nothing; the line points at the public repo, so it stays current | maintainer |
+| Public repo About (github.com/echelongraph/echelongraph-mcp) | description, homepage and topics equal to `github-repo-settings.json` (the check's `github-repo` row, 2026-11-08 15:00:56Z; #3289) | no version shown | apply the file after each release that changes it (release step 7) | someone with admin on the repo |
+| Anthropic connector directory | **submitted 2026-10-05, in review** (developer portal; hosted URL, no auth; when submitted, the endpoint served 2.6.7, with its 14 read-only tools; in review as recorded on 2026-10-18, not re-read since). Not edited while in review: an edit resubmits it (founder, 2026-10-10). Its public page answered HTTP 404 on 2026-11-08 (the check) | shows none | Anthropic's review; reply at the founder's contact email | Anthropic |
 
 Docker's remote entry and Anthropic's directory connect to the hosted endpoint, and Smithery's
-entry names it (until 2026-10-31 Smithery's gateway proxied it), so the version they serve is the
-hosted endpoint's.
+entry named it (until 2026-10-31 Smithery's gateway proxied it; on 2026-11-08 its page answered
+404), so the version they serve is the hosted endpoint's.
 
 **Smithery from 2026-10-31 (#3356), read 2026-10-25.** Smithery's notice
-(https://smithery.ai/future, read 2026-10-25): on 2026-10-31 it shuts "Server URLs on run.tools and
+(https://smithery.ai/future, read 2026-10-25): on 2026-10-31 it would shut "Server URLs on run.tools and
 server.smithery.ai", the "Smithery API, Connect, and Toolbox", "Smithery accounts and API keys" and
 "The Smithery CLI and SDKs", and "Smithery will remain as a public (non-proxied) MCP registry". From
-that day our listing is a registry entry for `https://mcp.echelongraph.io/mcp`, and nothing can be
-published there: the Smithery row's "re-publish after each release" above ends on 2026-10-31, and
-release step 5 becomes a read-only check of the page. On 2026-10-25 the page's HTML named
+that day our listing was to be a registry entry for `https://mcp.echelongraph.io/mcp`, and nothing can be
+published there: the Smithery row's "re-publish after each release" above ended on 2026-10-31, and
+release step 5 became a read-only check of the page. On 2026-10-25 the page's HTML named
 `https://mcp.echelongraph.io/mcp` (our record's `upstreamUrl`) beside the proxy
 `https://echelongraph-mcp--echelongraph.run.tools` (`mcpUrl`), and the Markdown view Smithery serves
 agents (and curl) gave only the proxy, under "Direct MCP Connection": the listing check reports that
 as a `wrong-url` finding until Smithery's page gives agents our URL. "Smithery" below says what the
-founder can still do before 2026-10-31.
+founder could still do before 2026-10-31.
 
 ## Who does what
 
@@ -751,9 +757,11 @@ A release is done when all of these hold, in this order (2026-10-05). Each step 
    reports no finding. `test/listings.test.mjs` holds the file's counts to `tools/list`, so a
    release that changes the tool count changes the file; only this step changes the live About,
    which directories (Glama among them) read (#3289).
-8. `node scripts/check-mcp-listings.mjs`: no finding. Glama can lag behind step 4 (its
-   Auto-Release did not pick up 2.6.5, 2.6.7, 2.6.8, 2.7.0 or any release since: the founder's
-   Admin → Sync Server). Then replace "Status on <date>" at the top of this file with that run's
+8. `node scripts/check-mcp-listings.mjs`: no finding. Glama can lag behind step 4: its page
+   records some releases and skips others (on 2026-11-08 it listed 2.6.5, 2.7.0, 3.0.2, 3.1.2,
+   3.1.3 and 3.1.5, and neither 3.2.0 nor 3.2.1), and does not say whether each came from
+   Auto-Release or a manual sync, so after a release the fix is the founder's Admin → Sync Server.
+   Then replace "Status on <date>" at the top of this file with that run's
    table, in the next commit to this directory: this file ships in the release's tree, so it
    cannot change between a tag and the next.
 9. **Deprecate older versions**, by the founder's rule of 2026-11-08: "deprecation should be 3-4

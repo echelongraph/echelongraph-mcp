@@ -1,0 +1,22 @@
+{
+  "about": "docs/api/openapi.yaml, GET /api/v1/public/vendor-advisories/coverage: the vendors item, as test/vendor-coverage-fields.test.mjs coverageItemOf reads it (copied 2026-11-08 from the spec as 27808e91c left it: #3464's and #3197's five collection fields). The npm tarball and the public repository carry mcp-server alone; in EchelonGraph's repository the test holds this copy equal to the spec.",
+  "properties": {
+    "vendor": { "type": "string" },
+    "vendor_display_name": { "type": "string" },
+    "advisories": { "type": "integer" },
+    "earliest_vendor_published_at": { "type": "string" },
+    "latest_vendor_published_at": { "type": "string" },
+    "held_since": { "type": "string" },
+    "feed_held_since": { "type": "string" },
+    "history_backfill": { "type": "string", "enum": ["complete", "complete_reviewed_only", "in_progress", "not_started", "not_supported"] },
+    "history_scope": { "type": "string", "enum": ["all", "reviewed", ""] },
+    "history_units_done": { "type": "integer" },
+    "history_completed_at": { "type": "string" },
+    "last_success_at": { "type": "string" },
+    "collection_state": { "type": "string", "enum": ["ok", "partial", "failing", "disabled"] },
+    "failing_since": { "type": "string" },
+    "held_back": { "type": "integer" },
+    "held_back_since": { "type": "string" }
+  },
+  "required": ["vendor", "vendor_display_name", "advisories", "earliest_vendor_published_at", "latest_vendor_published_at", "held_since", "feed_held_since", "history_backfill", "history_scope", "history_units_done", "history_completed_at", "last_success_at", "collection_state", "failing_since", "held_back", "held_back_since"]
+}

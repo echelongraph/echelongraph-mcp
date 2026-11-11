@@ -6,6 +6,216 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.2 — 2026-11-11
+
+The vendor-advisory tools say when a vendor is not being collected (#3464), and declare the fields
+EchelonGraph's API now serves for a Microsoft advisory, whose own text it no longer copies (#3642,
+#3643). The remediation texts say where a Cisco remediation's `kind` may not be Cisco's own category
+(#3663), and `patch_evidence` names Cisco's signed CSAF (#3647). Descriptions, notes and output
+schemas change. Five fields are added to each vendor window, and others are declared where the API
+serves them. No field already declared changes type or becomes `required`; the five new fields are
+`required` (null when the API omits them), and no enum is added. No client needs to reconnect for its
+answers to validate (below). A client that listed the tools from 3.2.1 or earlier still holds their
+old descriptions, though, which said a remediation's `kind` is the vendor's own category, "never read
+from the text": production's answer for CVE-2026-20185 has contradicted that since it began serving
+that CVE's Cisco item as `no_fix_planned` (read on 2026-11-11). List the tools again (reconnect) to
+read the corrected text.
+
+- **Whether each vendor is being collected** (#3464). A vendor's window (`held_since` to
+  `latest_vendor_published_at`) says nothing of whether the vendor is still being collected. Cisco's
+  polls were refused from 2026-10-12, and for 20 days its window read as held to 2026-10-07, so
+  `vendors_not_fully_held` and the notes read it as current. EchelonGraph's coverage API now serves
+  each vendor's `last_success_at` and `collection_state`, by the rule its feed-state alert uses: `ok`;
+  `partial`, the vendor's polls succeed but `held_back` of the documents it lists could not be used,
+  the oldest since `held_back_since` (those advisories, or those revisions, may not be held, and the
+  rest of its feed is); `failing`, it is not being collected, and what it published after
+  `failing_since`, its last successful poll, may not be held, whatever its window says; or
+  `disabled`, this deployment runs no collector for it (its held advisories are still served), so its
+  window ends at `last_success_at`. All three tools relay the five fields in each window, and the
+  note names each vendor whose `collection_state` is not `ok`, with its date. For production's Cisco
+  from 2026-10-12, docs/api/openapi.yaml's example row, `search_vendor_advisories` says: "Cisco PSIRT
+  (cisco) collection has failed since 2026-10-12 (collection_state failing; failing_since
+  2026-10-12T12:22:49Z, its last successful poll); advisories Cisco PSIRT published after that may
+  not be held, whatever its window says. So no advisory here from that vendor is not a finding that
+  it published none." A `partial` vendor reads "<n> Cisco PSIRT (cisco) documents are held back, the
+  oldest since <date> (collection_state partial, held_back <n>: EchelonGraph could not use them); some
+  Cisco PSIRT advisories may be missing: those advisories, or those revisions, may not be held, and
+  the rest of its feed is.", and a `disabled` one "… is not collected in this deployment
+  (collection_state disabled): its window ends at its last successful poll, <date> (last_success_at
+  <instant>); advisories … published after that may not be held." A vendor with no successful poll on
+  record, and a state this server does not know, are said as such, and a state the API adds later is
+  relayed as sent and never read as `ok`. Nothing is said of an `ok` vendor.
+- `vendor_advisories_for_cve` lists a vendor whose `collection_state` is not `ok` in
+  `vendors_not_fully_held` for any CVE year, when the answer holds none of its advisories (in the
+  suite, a Palo Alto whose history is read back to 2012 is listed for CVE-2024-3400 while failing,
+  and not while `ok`), and names the vendor's failure in its note whether or not the answer holds one
+  of its advisories: what it published after its last successful poll may name the CVE too. Its item
+  in the list says why: "paloalto (held from 2012-04-27 to 2026-10-02; collection_state failing)".
+  The note says once that no advisory from such a vendor is not a finding that it published none: in
+  the `vendors_not_fully_held` sentence for a vendor listed there, and after its collection sentence
+  only for a vendor the answer holds an advisory from ("So no advisory here from Microsoft is not a
+  finding that it published none.").
+- Freshness: `freshness` is still null, and its note said the answers "carry no time at which the
+  vendor-advisory pollers last completed a poll", which is no longer so once the windows carry
+  `last_success_at`. Where a window carries one, the note says "freshness is null: the answer has no
+  single poll time; each vendor's last successful poll is its window's last_success_at in coverage,
+  and its collection_state says whether it is being collected now, by EchelonGraph's feed-state
+  rule."; against an API without the field it reads as before. `get_vendor_advisory`'s description
+  said "Its freshness is null: the answer carries no poll-completion time."; it says "freshness is
+  null; vendor_window.last_success_at is the last successful poll."
+- `outputSchema`: each vendor window (`coverage.vendor_windows[]` of `vendor_advisories_for_cve` and
+  `search_vendor_advisories`, `coverage.vendor_window` of `get_vendor_advisory`) adds
+  `last_success_at`, `collection_state`, `failing_since` and `held_back_since` (each a string or
+  null) and `held_back` (a number or null), each `required` and null from an API without them.
+  `collection_state` is a string, as `history_scope` is, its four values named in its description,
+  so it adds no enum. The descriptions of the window, `vendor_windows` and `vendors_not_fully_held`
+  say what the fields mean. A success's schema is open, so a client holding an older tool list takes
+  the added fields. The failure branch's window objects, which stay closed, add them too
+  (`test/schema-compat-allow.json`, against 3.2.1), but no failure carries a window: a failure's
+  `coverage` is null.
+- **Every field of the coverage row is read, or named as not relayed** (#3628).
+  `test/vendor-coverage-fields.test.mjs` reads the coverage route's vendor item from
+  docs/api/openapi.yaml (which core-backend's coverage_openapi_test.go holds to the API's wire row)
+  and fails on a field that the server's `windowsOf` neither relays nor names in
+  `VENDOR_COVERAGE_NOT_RELAYED` with a reason (today `history_units_done` and
+  `history_completed_at`, the history read's bookkeeping, which bound no window), and on a
+  `collection_state` value it has no sentence for. Through 3.2.1 nothing did: `history_scope` and
+  `feed_held_since` reached the API on 2026-11-01 and this server on 2026-11-07 (#3472, 3.1.4), and
+  the five fields above on 2026-11-08. A field is read when a row with every field set comes back
+  with it in the window, not by a list. The public repository carries a copy of the vendor item
+  (`test/fixtures/vendor-coverage-item.json`), which the release's test run of the packed tarball
+  reads too; in EchelonGraph's repository the copy is held to the spec. Controls: a field added to a
+  copy of the spec fails, and removed again passes.
+- **Microsoft's advisory pages are not copied, and the schemas say so** (#3642). The API now answers
+  every Microsoft advisory with `vendor_text_withheld: true`, a title of EchelonGraph's ("Microsoft
+  security update for CVE-2025-29824"), and an empty `description`, `remediation`,
+  `withdrawn_reason` and remediation `text` (`text_chars` 0), and with no `summary`; the severity,
+  CVSS score, CVE IDs, affected products, dates, references (led by Microsoft's Security Update Guide
+  page where the advisory names a CVE ID; an ADV advisory has none) and each remediation's kind,
+  category, URL and fixed build are unchanged. Every other vendor's answers say
+  `vendor_text_withheld: false` and are unchanged. `vendor_advisories_for_cve`,
+  `get_vendor_advisory`, `search_vendor_advisories` and `cve_remediation` relay the API's answer as
+  sent, so this reached every version of this server, the installed ones included, when the API
+  shipped; this release changes no relayed value. It declares the fields the answers now carry, with
+  what they mean: `vendor_text_withheld` on each vendor-advisory row, on the detail and on each
+  `cve_remediation` vendor advisory, and `cvss_v3_vector` (the CVSS v3 vector of `cvss_v3_score`
+  where the vendor's source carries one, Microsoft's; null otherwise) on `vendor_advisories_for_cve`
+  rows and `get_vendor_advisory`.
+- **A Microsoft advisory's detail carries EchelonGraph's own facts of its CVEs** (#3642).
+  `get_vendor_advisory` relays the API's new `cve_records`: for each of the first `cve_records_cap`
+  (5) CVEs a Microsoft advisory names, the CVE record's own description, as the CVE Numbering
+  Authority that assigned the CVE (`cna`: its name in the CVE Program's CNA list, else its short
+  name, e.g. "Microsoft Corporation", "kernel.org") published it in the CVE record at
+  `cve_record_url`, reused under the CVE Program's Terms of Use; for a CVE Microsoft assigned,
+  Microsoft wrote that record. The description is null where the record has none, was rejected or is
+  still the stub a GitHub advisory seeded, where EchelonGraph holds no record for the CVE (`known`
+  false), or where `description_withheld_reason` says it is withheld (below). Beside it,
+  EchelonGraph's score as the CVE feed serves it (null unless `score_assessed`), the CISA KEV
+  listing, and the fix status by the CVE feed's rule; with `cve_records_total`. Each Microsoft
+  remediation item whose URL names a KB article carries it as `kb_article`, and the detail carries
+  `content_changed_at`, when the page's content changed with no change to the advisory. The output
+  schema declares all of them; the relayed values are the API's, as sent.
+- **What a Microsoft advisory's title says, and which IDs count as CVEs** (#3642 review). The API
+  titles a Microsoft advisory "Microsoft security update for CVE-…" only when it lists a vendor fix
+  and was not withdrawn, and "Microsoft advisory for CVE-…" otherwise; an advisory naming no CVE ID
+  (an ADV advisory, or a malformed ID) is "Microsoft advisory ADV160001", gets no `cve_records` entry
+  and no CVE-record link, and `cve_records_total` counts CVE IDs only. Relayed as sent; the output
+  schema's description of `vendor_text_withheld` says so.
+- **Each source's licence, on the field that names the source** (#3643). The `vendor` field of every
+  vendor-advisory row, and of each `cve_remediation` vendor advisory, names the licence of that
+  vendor's data: Red Hat's security advisories and the GitHub Advisory Database are licensed CC BY
+  4.0 (licence and source linked), Microsoft's and every other vendor's stay under that vendor's own
+  terms; `cve_records` names the CVE Program's Terms of Use (https://www.cve.org/Legal/TermsOfUse).
+  EchelonGraph's terms add no restriction to any of them.
+- **A CVE-record description that repeats the advisory's title can be withheld** (#3642). The
+  descriptions stay shown, credited to their CNA. A server-side switch, off by default, can withhold
+  a `cve_records` description that repeats the advisory's own title: a withheld one is `null`, and
+  the new `description_withheld_reason` says `matches_vendor_title`; it is `null` otherwise. It
+  changes `get_vendor_advisory` only: `get_cve` keeps the CVE record's description. The output
+  schema declares it. Relayed as sent.
+- **`get_vendor_advisory`'s description says what a Microsoft advisory's detail carries** (#3642
+  reviews). It ends "vendor_text_withheld true (Microsoft): title is EchelonGraph's; description,
+  remediation and item texts are empty; cve_records: its first CVEs, each with its CVE-record
+  description or null.", and `vendor_text_withheld`'s description says a detail's `cve_records`
+  "lists the first cve_records_cap CVEs it names, each with the CVE record's description or null".
+  Neither says every CVE's description is there, which is not so where one is null (above) or for a
+  CVE past `cve_records_cap`; `cve_records`' own description names each case in which the
+  description is null. `cve_records[].known` false reads "EchelonGraph holds no CVE record for it;
+  only cve_id and cve_record_url are set", with no guessed cause.
+- **A Cisco remediation may be `no_fix_planned` where Cisco's summary says no fix will be
+  released** (#3663). Cisco's CSAF for cisco-sa-sg350-snmp-dos-GEFZr2Tj (CVE-2026-20185, the SG350
+  switches, past End of Software Maintenance) tags its one remediation `vendor_fix`, with Cisco's
+  boilerplate "Cisco has released software updates that address this vulnerability", while its
+  Summary says Cisco "has not released and will not release software updates". EchelonGraph's API
+  now stores a Cisco `vendor_fix` as `kind` `no_fix_planned` when both hold: the advisory's Summary
+  says, in wording its parser reads, that Cisco will not release a fix, and none of its Summary,
+  Fixed Software, Recommendations, Details or Affected Products notes says, by the parser's markers,
+  that a fix exists. The item's `source_category` stays `vendor_fix` (what Cisco's field holds), its
+  `source_subcategory` is the title of the note its text is from (`Summary`), its text is Cisco's
+  own Summary sentence, and it carries no URL. Wording the parser does not read leaves `vendor_fix`:
+  a Cisco `vendor_fix` is not a finding that a fix was released, and a Cisco advisory whose summary
+  says there is no fix is not always `no_fix_planned`. Of the 211 Cisco CSAF advisories EchelonGraph
+  held on 2026-11-08, one was stored so, CVE-2026-20185's, which production serves as
+  `no_fix_planned` (read on 2026-11-11). The tools relay it as sent, so this reached every version of
+  this server when the API shipped. What changes here is the text that said `kind` was the vendor's
+  own category, "never read from the text":
+  - `cve_remediation`'s and `get_vendor_advisory`'s descriptions, and the README, say `kind` is the
+    vendor's own category, or may be `no_fix_planned` if Cisco's summary says none will be released;
+  - `get_cve`'s `remediation` field and the `remediation_kinds` fields, the triage prompt's step 3
+    and the methodology resource say it may be `no_fix_planned` where Cisco's summary says no fix
+    will be released;
+  - the `kind` field of each remediation item, in `cve_remediation` and `get_vendor_advisory`, states
+    the rule above in full, and `source_subcategory` names the note;
+  - where they say the kinds are the vendors' own categories, the notes of `cve_remediation` and
+    `vendor_advisories_for_cve` add "(no_fix_planned may also be a Cisco vendor_fix whose summary
+    says no fix will be released)" when a Cisco advisory in the answer lists `no_fix_planned` (a Red
+    Hat `no_fix_planned`, Red Hat's own category, adds nothing), and `get_cve`'s note when its
+    remediation summary counts one, since that summary counts kinds, not vendors;
+  - the method of `cve_remediation` names Cisco's CSAF beside Red Hat's among the vendors whose
+    remediation is categorised, and says a Cisco `vendor_fix` may be `no_fix_planned` where Cisco's
+    summary says no fix will be released.
+- **`patch_evidence`'s `vendor_advisory_fix` names Cisco** (#3647). Since EchelonGraph's patch
+  evidence rule 9 (2026-11-08), `vendor_advisory_fix` also counts a Cisco signed CSAF `vendor_fix`;
+  the `patch_evidence` description of `get_cve` and `search_cves` named Red Hat's CSAF `vendor_fix`
+  and Microsoft's Vendor Fix only. It now reads "Red Hat's CSAF vendor_fix, Cisco's signed CSAF
+  vendor_fix, Microsoft's Vendor Fix; not a Cisco vendor_fix EchelonGraph stores as
+  no_fix_planned", and docs/tools.md, "What `patch_available` says", says the same, with the
+  parser's rule.
+- Descriptions, against 3.2.1's, measured on each server's tools/list, each within #2924's 100
+  characters under the 2,048-character client cut. Three change, and no other:
+  - `cve_remediation`, 1,946 characters (1,948 in 3.2.1): the `kind` sentence (above) is 47
+    characters longer, so `fix_status` no longer says "as CVE Pulse shows it", which its output
+    schema says, and `vendor_remediations` no longer gives its order and cap, which `coverage`
+    carries.
+  - `get_vendor_advisory`, 1,947 (1,926): it gains the `vendor_text_withheld` sentence and the
+    freshness sentence (above), and its `kind` list reads "vendor_fix, workaround, mitigation,
+    no_fix_planned, none_available or other: the vendor's category, or may be no_fix_planned if
+    Cisco's summary says none will be released". To fit, `remediation_state` names only the two values
+    that are not a finding that no fix exists (its output schema names all four); its window names
+    `earliest_vendor_published_at` to `feed_held_since` without `vendor` and `advisories`, and is
+    null "if unreadable or empty"; `advisory_id` is no longer called EchelonGraph's internal UUID
+    there (its output schema says so); and `known_cve_ids` are those "in EchelonGraph's CVE feed".
+  - `vendor_advisories_for_cve`, 1,948 (1,944): `vendors_not_fully_held` also lists a vendor "whose
+    history is still being read or collection_state is not ok"; to fit, its list of each row's fields
+    no longer names `vendor_display_name` (still in every row and in the `outputSchema`), and "each
+    vendor's held window" reads "each vendor's window".
+- Sizes: each window of the suite's production-shaped coverage answer (an API older than the fields)
+  carries the five fields null: `vendor_advisories_for_cve` CVE-2021-44228 is 1,580 characters of
+  text and 1,080 of structured result longer (20,906 and 16,503), `get_vendor_advisory` 148 and 108.
+  No text cut changes level; the forced by-CVE case keeps 11 of its 20 rows in data where it kept 12,
+  and `search_vendor_advisories`' largest page 40 of 50 where it kept 41, each DATA CUT note saying
+  how many it left out. Against production's record of 2026-10-25 (3.1.1's server, which relayed 7
+  fields per window), the by-CVE case is past the 10% drift bound, pinned in `TEXT_DRIFT_KNOWN` and
+  `STRUCTURED_DRIFT_KNOWN` until `text-bound:live --record` re-records it. `cve_remediation`'s
+  method is 115 characters longer (548 to 663), in the text's last block (1,377 to 1,492) and in the
+  structured result: CVE-2021-44228's answer in the suite is 22,194 characters of text and 26,367 of
+  structured result, where it was 22,079 and 26,252.
+- README: one sentence on `last_success_at` and `collection_state` (while a vendor's is not `ok`, the
+  note names it and says which of its advisories may not be held), and the `cve_remediation` and
+  `get_vendor_advisory` rows say `kind` may be `no_fix_planned` if Cisco's summary says none will be
+  released; the detail is in docs/tools.md, "How the vendor-advisory tools read each vendor's
+  window".
+
 ## 3.2.1 — 2026-11-08
 
 What the server says resolves to a CVE now holds to what EchelonGraph has measured, namespace by namespace

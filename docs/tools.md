@@ -116,8 +116,12 @@ affected package, or the fixed bound of an affected version range), `release_ref
 reference that EchelonGraph confirmed through the GitHub API is a published release containing
 the fix, or a pull request or commit that a published release contains), `vendor_advisory_fix` (a
 vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's
-CSAF `vendor_fix`, Microsoft's Vendor Fix), `nvd_patch_reference` (an NVD reference tagged Patch),
-`cna_patch_reference` (a reference the CVE's CNA tagged `patch` in its CVE record), `cna_solution`
+CSAF `vendor_fix`, Cisco's signed CSAF `vendor_fix`, Microsoft's Vendor Fix; not a Cisco
+`vendor_fix` that EchelonGraph stores as `no_fix_planned`, which its parser does only when the
+advisory's Summary says, in wording the parser reads, that Cisco will not release a fix, and none of
+its fix notes says one exists),
+`nvd_patch_reference` (an NVD reference tagged Patch), `cna_patch_reference` (a reference the
+CVE's CNA tagged `patch` in its CVE record), `cna_solution`
 (a sentence of the CVE record's solutions, written by its CNA, that names a fixed version) and
 `description_fix` (a sentence of the CVE description that names a fixed version). A reference page
 that only mentions a patch, and a CVE's presence in CISA's KEV catalog, are not evidence.
@@ -395,7 +399,8 @@ kinds, and that `structuredContent.data` holds them.
 `vendor_advisories_for_cve`, `get_vendor_advisory` and `search_vendor_advisories` relay every
 vendor's window in `coverage` (`vendor_windows`, or `vendor_window` for the detail): the advisories
 held, the earliest and latest `vendor_published_at` among them, `held_since`, `feed_held_since`,
-`history_backfill` and `history_scope`.
+`history_backfill` and `history_scope`, and whether the vendor is being collected now:
+`last_success_at`, `collection_state`, `failing_since`, `held_back` and `held_back_since`.
 
 - `held_since` is the start of the window EchelonGraph has read the vendor's advisories from: one
   published before it may not be held. For a vendor with no history read (`history_backfill`
@@ -421,3 +426,16 @@ held, the earliest and latest `vendor_published_at` among them, `held_since`, `f
 - `search_vendor_advisories` and `get_vendor_advisory` name, in the note, each vendor whose history
   is still being read, and each whose history read covers only part of its advisories, with the
   same dates: none found from such a vendor is not a finding that it published none.
+- A window says nothing of whether the vendor is still being collected: Cisco's polls were refused
+  from 2026-10-12, and for 20 days its window read as held to 2026-10-07. `collection_state` says it,
+  by the rule EchelonGraph's feed-state alert uses: `ok`; `partial`, the vendor's polls succeed but
+  `held_back` of the documents it lists could not be used, the oldest since `held_back_since` (those
+  advisories, or those revisions, may not be held, and the rest of its feed is); `failing`, it is not
+  being collected, and an advisory it published after `failing_since`, its last successful poll, may
+  not be held, whatever its window says; `disabled`, this deployment runs no collector for it (its
+  held advisories are still served), so its window ends at `last_success_at`. All three tools name,
+  in the note, each vendor whose `collection_state` is not `ok`, with its date ("Cisco PSIRT (cisco) collection has failed since
+  2026-10-12 (…); advisories Cisco PSIRT published after that may not be held, whatever its window
+  says."), and `vendor_advisories_for_cve` lists such a vendor in `vendors_not_fully_held` for any CVE
+  year when the answer holds none of its advisories. A state the API adds later is relayed as sent
+  and never read as `ok`. From an API older than the five fields, they are null, and nothing is said.

@@ -107,6 +107,12 @@ const relayed = (w) => ({
   feed_held_since: w.feed_held_since || null,
   history_backfill: w.history_backfill,
   history_scope: w.history_scope || null,
+  // #3464: null where the API's row does not carry them (an API older than the fields).
+  last_success_at: w.last_success_at || null,
+  collection_state: w.collection_state || null,
+  failing_since: w.failing_since || null,
+  held_back: w.held_back ?? null,
+  held_back_since: w.held_back_since || null,
 });
 // #2803: production's Cisco and Red Hat on 2026-10-04, as the API served them before held_since:
 // Cisco's continuous run starts 2026-02-25, its three earlier advisories revised later (the
@@ -158,6 +164,66 @@ const DETAIL_GHSA = {
 const GITHUB_ITEM = "github (reviewed advisories held from 2017-10-24 to 2026-11-06; unreviewed advisories held only from 2026-05-15)";
 const PART_RULE =
   "An advisory a vendor published before the date EchelonGraph holds that vendor from (held_since) may not be held, even when an older one is, an advisory outside the part of a vendor's advisories its history read covers (history_scope reviewed) may not be held when published before that vendor's feed_held_since, and while history_backfill is in_progress or not_started the vendor's older advisories are still being read, so no advisory here from that vendor is not a finding that it published none.";
+
+// #3464: each vendor's collection state, as core-backend's CoverageHandler serves it (feed_state.go
+// feedState). CISCO_FAILING is docs/api/openapi.yaml's example row: production's Cisco from
+// 2026-10-12, every poll refused, while its window read "held to 2026-10-07". The others are Palo
+// Alto's complete history (held from 2012) in each state, so it is listed for CVE-2024-3400 only for
+// its collection_state.
+const collected = (w, collection_state, o = {}) => ({ ...w, last_success_at: "2026-11-08T14:29:54Z", collection_state, failing_since: "", held_back: 0, held_back_since: "", ...o });
+const CISCO_FAILING = {
+  vendor: "cisco",
+  vendor_display_name: "Cisco PSIRT",
+  advisories: 189,
+  earliest_vendor_published_at: "2024-10-23T16:00:00Z",
+  latest_vendor_published_at: "2026-10-07T16:00:00Z",
+  held_since: "2026-02-21T21:15:03Z",
+  feed_held_since: "2026-02-21T21:15:03Z",
+  history_backfill: "not_supported",
+  history_scope: "",
+  history_units_done: 0,
+  history_completed_at: "",
+  last_success_at: "2026-10-12T12:22:49Z",
+  collection_state: "failing",
+  failing_since: "2026-10-12T12:22:49Z",
+  held_back: 0,
+  held_back_since: "",
+};
+const PALOALTO_OK = collected(PALOALTO_DONE, "ok");
+const PALOALTO_FAILING = collected(PALOALTO_DONE, "failing", { last_success_at: "2026-10-12T12:22:49Z", failing_since: "2026-10-12T12:22:49Z" });
+// An API that sends last_success_at and not failing_since for a failing vendor is read the same.
+const PALOALTO_FAILING_NO_SINCE = collected(PALOALTO_DONE, "failing", { last_success_at: "2026-10-12T12:22:49Z" });
+const PALOALTO_NEVER = collected(PALOALTO_DONE, "failing", { last_success_at: "" });
+const PALOALTO_PARTIAL = collected(PALOALTO_DONE, "partial", { held_back: 3, held_back_since: "2026-11-07T01:00:00Z" });
+const PALOALTO_PARTIAL_ONE = collected(PALOALTO_DONE, "partial", { held_back: 1, held_back_since: "2026-11-07T01:00:00Z" });
+const PALOALTO_DISABLED = collected(PALOALTO_DONE, "disabled", { last_success_at: "2026-10-20T06:00:00Z" });
+const PALOALTO_DISABLED_NEVER = collected(PALOALTO_DONE, "disabled", { last_success_at: "" });
+const PALOALTO_LATER = collected(PALOALTO_DONE, "paused");
+const PALOALTO_UNREAD = collected(PALOALTO_DONE, "Paused: see\nlog");
+// The sentences, exactly.
+const CISCO_FAILING_SENTENCE =
+  "Cisco PSIRT (cisco) collection has failed since 2026-10-12 (collection_state failing; failing_since 2026-10-12T12:22:49Z, its last successful poll); advisories Cisco PSIRT published after that may not be held, whatever its window says.";
+const PA = "Palo Alto Networks (paloalto)";
+const COLLECTION_SENTENCES = [
+  [PALOALTO_FAILING, `${PA} collection has failed since 2026-10-12 (collection_state failing; failing_since 2026-10-12T12:22:49Z, its last successful poll); advisories Palo Alto Networks published after that may not be held, whatever its window says.`],
+  [PALOALTO_FAILING_NO_SINCE, `${PA} collection has failed since 2026-10-12 (collection_state failing; last_success_at 2026-10-12T12:22:49Z, its last successful poll); advisories Palo Alto Networks published after that may not be held, whatever its window says.`],
+  [PALOALTO_NEVER, `${PA} collection is failing, with no successful poll on record (collection_state failing, last_success_at null); advisories Palo Alto Networks published may not be held, whatever its window says.`],
+  [PALOALTO_PARTIAL, `3 ${PA} documents are held back, the oldest since 2026-11-07 (collection_state partial, held_back 3: EchelonGraph could not use them); some Palo Alto Networks advisories may be missing: those advisories, or those revisions, may not be held, and the rest of its feed is.`],
+  [PALOALTO_PARTIAL_ONE, `1 ${PA} document is held back since 2026-11-07 (collection_state partial, held_back 1: EchelonGraph could not use it); one Palo Alto Networks advisory may be missing: that advisory, or that revision, may not be held, and the rest of its feed is.`],
+  [PALOALTO_DISABLED, `${PA} is not collected in this deployment (collection_state disabled): its window ends at its last successful poll, 2026-10-20 (last_success_at 2026-10-20T06:00:00Z); advisories Palo Alto Networks published after that may not be held.`],
+  [PALOALTO_DISABLED_NEVER, `${PA} is not collected in this deployment (collection_state disabled), with no successful poll on record (last_success_at null); advisories Palo Alto Networks published may not be held.`],
+  [PALOALTO_LATER, `${PA} has a collection_state this server does not know (paused): whether it is being collected is not known, so advisories Palo Alto Networks published may not be held.`],
+  [PALOALTO_UNREAD, `${PA} has a collection_state this server does not know: whether it is being collected is not known, so advisories Palo Alto Networks published may not be held.`],
+];
+const NOT_A_FINDING_ONE = "So no advisory here from that vendor is not a finding that it published none.";
+const NOT_A_FINDING_MANY = "So no advisory here from those vendors is not a finding that they published none.";
+// The by-CVE note's last sentence when no vendor is listed (vendor_advisories.ts ONLY_POLLED).
+const ONLY_POLLED_TAIL = "Only the vendor feeds EchelonGraph polls are covered, so an advisory a vendor published elsewhere is not in this answer.";
+const OLD_FRESHNESS = "freshness is null: these answers carry no time at which the vendor-advisory pollers last completed a poll.";
+const PER_VENDOR_FRESHNESS =
+  "freshness is null: the answer has no single poll time; each vendor's last successful poll is its window's last_success_at in coverage, and its collection_state says whether it is being collected now, by EchelonGraph's feed-state rule.";
+// #3663 review (NIT 10): how often a note says that no advisory from a vendor is not a finding.
+const notAFindingCount = (note) => (note.match(/is not a finding that (it|they) published none\./g) ?? []).length;
 
 // A stub that records every request's URL and search header, and answers per path.
 async function startStub() {
@@ -669,8 +735,14 @@ for (const era of [MODERN, "2025-06-18"]) {
         assert.ok(s.includes("the advisories EchelonGraph holds") && s.includes("not that no vendor published one"), `an empty answer is read as the vendors publishing none: "${s}"`);
       }
       // Every reason a vendor is listed in vendors_not_fully_held, as notFullyHeld() lists it.
-      // #3472: the fourth, a history read of a part, whose rest is held from feed_held_since.
-      for (const why of ["of which EchelonGraph holds none", "whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since)", "whose history is still being read"]) {
+      // #3472: the fourth, a history read of a part, whose rest is held from feed_held_since. #3464: the
+      // fifth, a vendor not collected in full now.
+      for (const why of [
+        "of which EchelonGraph holds none",
+        "whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since)",
+        "whose history is still being read",
+        "or collection_state is not ok",
+      ]) {
         assert.ok(d.includes(why), `vendors_not_fully_held: ${why}`);
       }
     });
@@ -903,6 +975,168 @@ for (const era of [MODERN, "2025-06-18"]) {
         listed?.description ?? nonNull(listed ?? {}).description ?? "",
         /a history_scope that is a part of the vendor's advisories \(reviewed\) with feed_held_since after 1 January of cve_year or not known/,
       );
+    });
+
+    // ── #3464: whether each vendor is being collected ──
+    it("#3464: CVE-2024-3400 with Palo Alto held from 2012 but failing lists paloalto, and the note says since when, plainly; ok does not", async () => {
+      stub.state.coverage = { vendors: [PALOALTO_FAILING] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
+        assert.notEqual(res.isError, true, textOf(res));
+        const sc = res.structuredContent;
+        assert.deepEqual(sc.coverage.vendor_windows, [relayed(PALOALTO_FAILING)]);
+        assert.deepEqual(
+          sc.coverage.vendor_windows.map((w) => [w.last_success_at, w.collection_state, w.failing_since, w.held_back, w.held_back_since]),
+          [["2026-10-12T12:22:49Z", "failing", "2026-10-12T12:22:49Z", 0, null]],
+        );
+        assert.deepEqual(sc.coverage.vendors_not_fully_held, ["paloalto"]);
+        const note = noteOf(res);
+        assert.ok(note.includes("(vendors_not_fully_held): paloalto (held from 2012-04-27 to 2026-10-02; collection_state failing)."), note);
+        // NIT 10: vendors_not_fully_held's sentence already says it of paloalto, so the collection
+        // sentence closes the note with no second "not a finding".
+        assert.ok(note.endsWith(` ${COLLECTION_SENTENCES[0][1]}`), note);
+        assert.equal(notAFindingCount(note), 1, note);
+        assert.ok(sc.notes.includes(PER_VENDOR_FRESHNESS), sc.notes.join(" | "));
+        assert.ok(!sc.notes.includes(OLD_FRESHNESS));
+        // Control: the same window, collected (ok): fully held for 2024, and nothing said of collection.
+        stub.state.coverage = { vendors: [PALOALTO_OK] };
+        const ok = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
+        assert.deepEqual(ok.structuredContent.coverage.vendors_not_fully_held, []);
+        assert.deepEqual(ok.structuredContent.coverage.vendor_windows, [relayed(PALOALTO_OK)]);
+        assert.doesNotMatch(noteOf(ok), /collection|held back|not collected/i);
+        assert.ok(noteOf(ok).endsWith(ONLY_POLLED_TAIL), noteOf(ok));
+        assert.ok(ok.structuredContent.notes.includes(PER_VENDOR_FRESHNESS));
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3464: each collection_state's sentence, exactly, in search_vendor_advisories' note for that vendor; partial, disabled and a later state are listed for any CVE year", async () => {
+      for (const [w, sentence] of COLLECTION_SENTENCES) {
+        stub.state.coverage = { vendors: [w, CISCO_FAILING] };
+        try {
+          const s = await call("search_vendor_advisories", { vendor: "paloalto" });
+          assert.notEqual(s.isError, true, textOf(s));
+          assert.deepEqual(s.structuredContent.coverage.vendor_windows, [relayed(w)], w.collection_state);
+          assert.equal(noteOf(s), `search_vendor_advisories OK: EchelonGraph answered HTTP 200 from ${stub.base}. The list holds 7 vendor advisories; 1 returned in this page (offset 0). ${sentence} ${NOT_A_FINDING_ONE}`);
+          // The by-CVE answer lists it whatever the year: its window alone holds it from 2012.
+          const c = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
+          assert.deepEqual(c.structuredContent.coverage.vendors_not_fully_held, ["paloalto", "cisco"], w.collection_state);
+          assert.ok(noteOf(c).endsWith(` ${sentence} ${CISCO_FAILING_SENTENCE}`), noteOf(c));
+          assert.equal(notAFindingCount(noteOf(c)), 1, noteOf(c));
+        } finally {
+          stub.state.coverage = COVERAGE;
+        }
+      }
+      // A state this server does not read is relayed as sent, and not echoed into the note.
+      const unread = COLLECTION_SENTENCES.at(-1)[0];
+      stub.state.coverage = { vendors: [unread] };
+      try {
+        const c = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
+        assert.equal(c.structuredContent.coverage.vendor_windows[0].collection_state, "Paused: see\nlog");
+        assert.ok(noteOf(c).includes("paloalto (held from 2012-04-27 to 2026-10-02; collection_state of a value this server does not read)."), noteOf(c));
+        assert.doesNotMatch(noteOf(c), /Paused|see\s+log/);
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3464: docs/api/openapi.yaml's Cisco example: the by-CVE answer names Cisco's failure for a CVE it answered too, and the search names every vendor not collected in full", async () => {
+      // CVE-2024-21412's answer holds Microsoft's and GitHub's rows; Microsoft is failing too.
+      const MSFT_FAILING = collected(MSFT_ALL, "failing", { last_success_at: "2026-11-01T00:00:00Z", failing_since: "2026-11-01T00:00:00Z" });
+      stub.state.coverage = { vendors: [CISCO_FAILING, MSFT_FAILING, collected(GITHUB_REVIEWED, "ok"), PALOALTO_PARTIAL] };
+      try {
+        const res = await call("vendor_advisories_for_cve", { cve_id: CVE });
+        assert.notEqual(res.isError, true, textOf(res));
+        // Microsoft answered, so it is not in vendors_not_fully_held; its failure is still said.
+        assert.deepEqual(res.structuredContent.coverage.vendors_not_fully_held, ["cisco", "paloalto"]);
+        const msft =
+          "Microsoft (microsoft) collection has failed since 2026-11-01 (collection_state failing; failing_since 2026-11-01T00:00:00Z, its last successful poll); advisories Microsoft published after that may not be held, whatever its window says.";
+        // NIT 10: cisco and paloalto are in vendors_not_fully_held's sentence; Microsoft, which answered,
+        // is not, so the closing sentence names it alone.
+        assert.ok(noteOf(res).endsWith(` ${CISCO_FAILING_SENTENCE} ${msft} ${COLLECTION_SENTENCES[3][1]} So no advisory here from Microsoft is not a finding that it published none.`), noteOf(res));
+        assert.equal(notAFindingCount(noteOf(res)), 2, noteOf(res));
+        const s = await call("search_vendor_advisories", {});
+        assert.ok(noteOf(s).endsWith(` ${CISCO_FAILING_SENTENCE} ${msft} ${COLLECTION_SENTENCES[3][1]} ${NOT_A_FINDING_MANY}`), noteOf(s));
+        const only = await call("search_vendor_advisories", { vendor: "cisco" });
+        assert.equal(noteOf(only), `search_vendor_advisories OK: EchelonGraph answered HTTP 200 from ${stub.base}. The list holds 7 vendor advisories; 1 returned in this page (offset 0). ${CISCO_FAILING_SENTENCE} ${NOT_A_FINDING_ONE}`);
+        assert.deepEqual(only.structuredContent.coverage.vendor_windows, [relayed(CISCO_FAILING)]);
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3464: get_vendor_advisory says its vendor's collection is failing, and its freshness note names last_success_at", async () => {
+      const REDHAT_FAILING = collected(REDHAT_REVISED, "failing", { last_success_at: "2026-10-30T04:00:00Z", failing_since: "2026-10-30T04:00:00Z" });
+      stub.state.coverage = { vendors: [REDHAT_FAILING, CISCO_FAILING] };
+      try {
+        const d = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2024:1234" });
+        assert.notEqual(d.isError, true, textOf(d));
+        assert.deepEqual(d.structuredContent.coverage, { vendor_window: relayed(REDHAT_FAILING) });
+        assert.equal(
+          noteOf(d),
+          `get_vendor_advisory OK: EchelonGraph answered HTTP 200 from ${stub.base}. Returned the advisory redhat/RHSA-2024:1234. Of the 2 CVE IDs it lists (cve_ids), 1 has a record in EchelonGraph's CVE feed (known_cve_ids); the others have no record there yet, which does not mean they are not CVEs. Red Hat Product Security (redhat) collection has failed since 2026-10-30 (collection_state failing; failing_since 2026-10-30T04:00:00Z, its last successful poll); advisories Red Hat Product Security published after that may not be held, whatever its window says. ${NOT_A_FINDING_ONE}`,
+        );
+        assert.doesNotMatch(noteOf(d), /cisco/i, "only the advisory's vendor is named");
+        assert.ok(d.structuredContent.notes.includes(PER_VENDOR_FRESHNESS));
+        // Its vendor collected: nothing said.
+        stub.state.coverage = { vendors: [collected(REDHAT_REVISED, "ok"), CISCO_FAILING] };
+        const ok = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2024:1234" });
+        assert.doesNotMatch(noteOf(ok), /collection|held back|not collected/i);
+      } finally {
+        stub.state.coverage = COVERAGE;
+      }
+    });
+
+    it("#3464 backwards compatible: from an API without the five fields, nothing is said of collection, they are relayed null, and the freshness note is as before", async () => {
+      // COVERAGE is 2.6.4-era: no last_success_at, collection_state, failing_since, held_back or held_back_since.
+      assert.ok(COVERAGE.vendors.every((w) => !("collection_state" in w) && !("last_success_at" in w) && !("held_back" in w)));
+      const c = await call("vendor_advisories_for_cve", { cve_id: CVE_3400 });
+      const s = await call("search_vendor_advisories", {});
+      const d = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2024:1234" });
+      for (const res of [c, s, d]) {
+        assert.notEqual(res.isError, true, textOf(res));
+        assert.equal(res.structuredContent.state, "measured");
+        assert.doesNotMatch(noteOf(res), /collection|held back|not collected/i);
+        assert.ok(res.structuredContent.notes.includes(OLD_FRESHNESS), res.structuredContent.notes.join(" | "));
+        const windows = res.structuredContent.coverage.vendor_windows ?? [res.structuredContent.coverage.vendor_window];
+        for (const w of windows) for (const f of ["last_success_at", "collection_state", "failing_since", "held_back", "held_back_since"]) assert.equal(w[f], null, `${w.vendor}.${f}`);
+      }
+      // As before #3464 (the #2729 case above): every vendor of the fixture, each for its window.
+      assert.deepEqual(c.structuredContent.coverage.vendors_not_fully_held, ["cisco", "github", "microsoft", "paloalto", "redhat"]);
+    });
+
+    it("#3464: every outputSchema that carries a vendor window documents the five fields, and the descriptions do not say the answer has no poll time", async () => {
+      const success = (s) => s.oneOf.find((b) => b.properties.state.enum.includes("measured"));
+      const nonNull = (n) => n.anyOf?.find((b) => b.type !== "null") ?? n;
+      const at = {
+        vendor_advisories_for_cve: (s) => nonNull(nonNull(success(s).properties.coverage).properties.vendor_windows).items,
+        search_vendor_advisories: (s) => nonNull(nonNull(success(s).properties.coverage).properties.vendor_windows).items,
+        get_vendor_advisory: (s) => nonNull(nonNull(success(s).properties.coverage).properties.vendor_window),
+      };
+      for (const [name, of] of Object.entries(at)) {
+        const w = of(schemas[name]);
+        assert.ok(w?.properties, `${name}: no vendor window schema found: re-aim this check`);
+        assert.match(w.properties.last_success_at?.description ?? "", /This vendor's last successful poll/, name);
+        const state = w.properties.collection_state ?? {};
+        assert.match(state.description ?? "", /Whether this vendor is being collected now, by EchelonGraph's feed-state rule: ok, partial, failing or disabled\./, name);
+        // NIT 6: a disabled vendor's held advisories are still served (core-backend feed_state.go: served, not collected).
+        assert.match(state.description ?? "", /disabled: this deployment runs no collector for it \(its held advisories are still served\)/, name);
+        assert.match(state.description ?? "", /failing: it is not being collected, and an advisory it published after failing_since, its last successful poll, may not be held, whatever the window says/, name);
+        assert.match(state.description ?? "", /partial: its polls succeed, but held_back of the documents it lists could not be used/, name);
+        assert.match(state.description ?? "", /A value the API adds later is relayed as sent and is not read as ok/, name);
+        assert.match(w.properties.failing_since?.description ?? "", /an advisory it published after it may not be held/, name);
+        assert.match(w.properties.held_back?.description ?? "", /those advisories, or those revisions, may not be held/, name);
+        assert.match(w.properties.held_back_since?.description ?? "", /When the oldest held-back document first failed/, name);
+        assert.match(w.description ?? "", /collection_state \(whether the vendor is being collected now, by EchelonGraph's feed-state rule:/, name);
+        assert.match(w.description ?? "", /disabled, this deployment runs no collector for it \(its held advisories are still served\)/, name);
+      }
+      const listed = nonNull(success(schemas.vendor_advisories_for_cve).properties.coverage).properties.vendors_not_fully_held;
+      assert.match(listed?.description ?? nonNull(listed ?? {}).description ?? "", /for any cve_year, a collection_state that is not ok \(failing, partial, disabled, or a value the API adds later\)/);
+      const { tools } = await client.listTools();
+      const d = tools.find((t) => t.name === "get_vendor_advisory").description;
+      assert.ok(d.includes("vendor_window.last_success_at is the last successful poll"), d);
+      for (const t of tools.filter((x) => /vendor_advis/.test(x.name))) assert.doesNotMatch(t.description, /carries no poll-completion time/, t.name);
     });
 
     // #2865: an advisory that names a rejected CVE, while its vendor has not withdrawn it.

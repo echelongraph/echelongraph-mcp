@@ -1335,7 +1335,11 @@ function remediationSummaryNote(cve: string, rec: object): string {
   const counted = kinds && typeof kinds === "object" ? Object.entries(kinds as Record<string, unknown>).filter(([, n]) => typeof n === "number" && n > 0) : [];
   const failed = field(s, "failed_sections");
   const notRead = Array.isArray(failed) && failed.length ? ` The summary could not read ${failed.join(", ")} (failed_sections), so a missing count there is not a finding of none.` : "";
-  const byKind = counted.length ? ` Vendor advisories list ${counted.map(([k, n]) => `${k} (${n})`).join(", ")}, by the vendor's own category.` : "";
+  // #3663: a no_fix_planned may be a Cisco vendor_fix whose advisory's summary says no fix will be
+  // released, not Cisco's category. The summary counts kinds, not vendors, so it is said wherever it
+  // counts one (cve_remediation and vendor_advisories_for_cve, which see the vendor, say it for Cisco only).
+  const noFix = counted.some(([k]) => k === "no_fix_planned") ? " (no_fix_planned may also be a Cisco vendor_fix whose summary says no fix will be released)" : "";
+  const byKind = counted.length ? ` Vendor advisories list ${counted.map(([k, n]) => `${k} (${n})`).join(", ")}, by the vendor's own category${noFix}.` : "";
   // #2841: fix_status is the API's, relayed; a state is named only as the API sent it.
   const fs = field(s, "fix_status");
   const state = strAt(fs, "state");
@@ -3101,14 +3105,15 @@ const CPE_CONFIGURATIONS_DESCRIPTION =
 // among them, are not evidence) and cna_patch_reference (the CNA's own CVE record tags a reference
 // "patch"; NVD's capitalised "Patch" stays nvd_patch_reference).
 // #3076 / #2518 (rule 3): vendor_advisory_fix (a vendor's own structured "vendor fix" for the CVE:
-// Red Hat CSAF, Microsoft CVRF), cna_solution and description_fix (a sentence of the CVE record's
-// solutions, or of its description, that states a released fix in core-backend's fix-statement
-// templates, internal/cve/fix_statement.go). The last two are the record's own words: get_cve
+// Red Hat CSAF, Microsoft CVRF, and since rule 9 (#3647) Cisco's signed CSAF; a Cisco vendor_fix
+// the parser stores as no_fix_planned (#3663) is not one), cna_solution and description_fix (a
+// sentence of the CVE record's solutions, or of its description, that states a released fix in
+// core-backend's fix-statement templates, internal/cve/fix_statement.go). The last two are the record's own words: get_cve
 // relays the solution's sentence as cna_solution, and the description is in the record.
 // One constant string each (the site's tool-claims check folds only constant strings).
 const PATCH_EVIDENCE_LABELS = ["vendor_patch", "fixed_version", "release_reference", "vendor_advisory_fix", "nvd_patch_reference", "cna_patch_reference", "cna_solution", "description_fix", "vendor_fix_released"] as const;
 const PATCH_EVIDENCE_SOURCES =
-  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range), release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Microsoft's Vendor Fix), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions or workarounds, written by its CNA, that names a fixed version; relayed as cna_solution), description_fix (a sentence of the CVE description that names a fixed version) and vendor_fix_released (the vendor states, in the CVE record, that a fix is released and the record names no fixed version; check the vendor's advisory)";
+  "vendor_patch (a vendor patch on record, from Ubuntu or Red Hat), fixed_version (a fixed version recorded for an affected package, or the fixed bound of an affected version range), release_reference (a reference that EchelonGraph confirmed through the GitHub API is a published release containing the fix, or a pull request or commit that a published release contains), vendor_advisory_fix (a vendor advisory that lists a fix for the CVE under the vendor's own structured category: Red Hat's CSAF vendor_fix, Cisco's signed CSAF vendor_fix, Microsoft's Vendor Fix; not a Cisco vendor_fix EchelonGraph stores as no_fix_planned), nvd_patch_reference (an NVD reference tagged Patch), cna_patch_reference (a reference the CVE's CNA tagged patch in its CVE record), cna_solution (a sentence of the CVE record's solutions or workarounds, written by its CNA, that names a fixed version; relayed as cna_solution), description_fix (a sentence of the CVE description that names a fixed version) and vendor_fix_released (the vendor states, in the CVE record, that a fix is released and the record names no fixed version; check the vendor's advisory)";
 // #3070, #3076: what the CVE record's CNA wrote, as GET /cves/:id serves it (core-backend
 // cna_record.go). One constant string each.
 const CVE_CNA_ABSENT =
@@ -3168,7 +3173,7 @@ const KEV_NOTES_URLS_FIELD =
 // #2841: what get_cve's remediation is. One constant string (the site's tool-claims check folds
 // only constant strings).
 const REMEDIATION_SUMMARY_FIELD =
-  "A capped summary (at most 1,500 characters of JSON) of how the CVE is fixed, as its sources state it: fix_status first (the API's fix-status rule: state, basis, described_by, solution_by, stated_in_record, listed_in_patch_table and unread_inputs), vendor_remediation_kinds (per kind, the vendor advisories listing one for this CVE, by the vendor's own category), vendor_advisories, vendors_not_parsed, kev_required_action (CISA's, verbatim), fixed_branches_count, fixed_versions (per package, fixed versions on record), fix_references (URLs tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA), failed_sections, truncated, and see, the name of the tool that returns the whole, with each text. A kind missing from vendor_remediation_kinds is not a finding that no such remediation exists. Absent for a REJECTED CVE and from an API older than the field.";
+  "A capped summary (at most 1,500 characters of JSON) of how the CVE is fixed, as its sources state it: fix_status first (the API's fix-status rule: state, basis, described_by, solution_by, stated_in_record, listed_in_patch_table and unread_inputs), vendor_remediation_kinds (per kind, the vendor advisories listing one for this CVE, by the vendor's own category, or it may be no_fix_planned where Cisco's summary says no fix will be released), vendor_advisories, vendors_not_parsed, kev_required_action (CISA's, verbatim), fixed_branches_count, fixed_versions (per package, fixed versions on record), fix_references (URLs tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA), failed_sections, truncated, and see, the name of the tool that returns the whole, with each text. A kind missing from vendor_remediation_kinds is not a finding that no such remediation exists. Absent for a REJECTED CVE and from an API older than the field.";
 // #2879: the scorer's three components (core-backend scoring v4.0, components.go), which GET
 // /cves/:id serves at the top level. One constant string each (the site's tool-claims check folds
 // only constant strings). eg_likelihood is FIRST's EPSS until EchelonGraph's calibrated model

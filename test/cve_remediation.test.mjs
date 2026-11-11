@@ -241,8 +241,74 @@ const VENDOR_RELEASED = {
   },
 };
 
+// #3663: Cisco's CSAF for cisco-sa-sg350-snmp-dos-GEFZr2Tj (CVE-2026-20185, SG350 past End of
+// Software Maintenance) tags its one remediation vendor_fix while its Summary says Cisco will not
+// release a fix. The API stores the item as kind no_fix_planned, source_category vendor_fix,
+// source_subcategory the note's title (Summary), Cisco's own sentence as its text and no URL
+// (core-backend vendoradv cisco_csaf_doc.go ciscoNoFix); rule 9 then holds no vendor_advisory_fix.
+// This is production's answer of 2026-11-11 (scripts/probe-prod.sh), relayed as sent.
+const SG350 = "CVE-2026-20185";
+const SG350_ADV = "cisco-sa-sg350-snmp-dos-GEFZr2Tj";
+const SG350_SENTENCE =
+  "Cisco has not released and will not release software updates that address this vulnerability because the affected products are past the date for End of Software Maintenance Releases.";
+const SG350_REMEDIATION = {
+  ...NOTHING,
+  cve_id: SG350,
+  fix_status: { state: "none_confirmed", basis: "no_fix_evidence", unread_inputs: [] },
+  vendor_remediations: [adv("cisco", SG350_ADV, "parsed", [item("no_fix_planned", "vendor_fix", SG350_SENTENCE, null, { source_subcategory: "Summary" })])],
+  coverage: { ...COVERAGE([]), parsed_vendors: ["redhat", "microsoft", "paloalto", "cisco"], vendor_advisories_listed: 1 },
+};
+const SG350_RECORD = {
+  cve_id: SG350,
+  description: "SG350 SNMP denial of service",
+  severity: "HIGH",
+  kev_listed: false,
+  score_assessed: true,
+  echelongraph_score: 7.7,
+  updated_at: "2026-11-09T00:00:00Z",
+  remediation: {
+    ...SUMMARY,
+    fix_status: SG350_REMEDIATION.fix_status,
+    vendor_remediation_kinds: { no_fix_planned: 1 },
+    vendor_advisories: 1,
+    vendors_not_parsed: [],
+    kev_required_action: null,
+    fixed_branches_count: 0,
+    fixed_versions: [],
+    fix_references: [],
+  },
+};
+const SG350_BY_CVE = {
+  cve_id: SG350,
+  total: 1,
+  cve_rejected: false,
+  advisories: [
+    { advisory_id: "a3", vendor: "cisco", vendor_display_name: "Cisco", vendor_advisory_id: SG350_ADV, title: "Cisco Small Business Switches SNMP Denial of Service Vulnerability", severity: "High", vendor_published_at: "2026-11-05T16:00:00Z", our_first_seen_at: "2026-11-08T15:52:31Z", withdrawn: false, rejected_cve_ids: [], remediation_kinds: ["no_fix_planned"], remediation_state: "parsed" },
+  ],
+};
+// The #3663 review's polarity case: a Red Hat advisory whose own category is no_fix_planned. Its kind
+// is Red Hat's, so no note may say it may be a Cisco vendor_fix.
+const RH_NOFIX_CVE = "CVE-2099-36631";
+const RH_NOFIX_ADV = adv("redhat", "RHSA-2099:3663", "parsed", [item("no_fix_planned", "no_fix_planned", "Red Hat does not plan to fix this flaw.", null)]);
+const RH_NOFIX_REMEDIATION = { ...NOTHING, cve_id: RH_NOFIX_CVE, vendor_remediations: [RH_NOFIX_ADV], coverage: { ...COVERAGE([]), vendor_advisories_listed: 1 } };
+const RH_NOFIX_BY_CVE = {
+  cve_id: RH_NOFIX_CVE,
+  total: 1,
+  cve_rejected: false,
+  advisories: [{ ...SG350_BY_CVE.advisories[0], advisory_id: "a4", vendor: "redhat", vendor_display_name: "Red Hat", vendor_advisory_id: "RHSA-2099:3663", title: "Will not fix" }],
+};
+// What a note adds beside the kinds where a Cisco row lists no_fix_planned, and only there: the
+// direction the parser guarantees (a Cisco no_fix_planned may be Cisco's vendor_fix), never that
+// every advisory whose summary says no fix is one (#3663 review, #3719).
+const CISCO_NO_FIX = "(no_fix_planned may also be a Cisco vendor_fix whose summary says no fix will be released)";
+
 const ANSWERS = {
   [REM(LOG4SHELL)]: LOG4SHELL_REMEDIATION,
+  [REM(SG350)]: SG350_REMEDIATION,
+  [`/api/v1/public/cves/${SG350}`]: SG350_RECORD,
+  [`/api/v1/public/vendor-advisories/by-cve/${SG350}`]: SG350_BY_CVE,
+  [REM(RH_NOFIX_CVE)]: RH_NOFIX_REMEDIATION,
+  [`/api/v1/public/vendor-advisories/by-cve/${RH_NOFIX_CVE}`]: RH_NOFIX_BY_CVE,
   [REM("CVE-2026-69486")]: CNA_PATCH,
   [REM("CVE-2025-20362")]: VENDOR_RELEASED,
   [REM("CVE-2099-30001")]: REJECTED,
@@ -328,6 +394,12 @@ for (const era of ERAS) {
     });
     after(() => client?.close());
     const schemaOf = (name) => tools.find((t) => t.name === name).outputSchema;
+    // get_vendor_advisory's remediations[] item properties, in its success branch.
+    const detailItemProps = (s) => {
+      const nn = (n) => n.anyOf?.find((b) => b.type !== "null") ?? n;
+      const ok = s.oneOf.find((b) => b.properties.state.enum.includes("measured"));
+      return nn(nn(ok.properties.data).properties.remediations).items.properties;
+    };
 
     it("tools/list: registered after cve_intel, with a title, annotations and an outputSchema; the description names only fields it holds", () => {
       const names = tools.map((t) => t.name);
@@ -865,6 +937,84 @@ for (const era of ERAS) {
       const one = await call("get_vendor_advisory", { vendor: "redhat", advisory_id: "RHSA-2021:5129" });
       assert.ok(!one.isError, noteOf(one));
       assert.deepEqual(one.structuredContent.data.remediations, DETAIL.remediations);
+    });
+
+    // #3663: kind is the vendor's own category, except that a Cisco vendor_fix may be no_fix_planned
+    // where Cisco's summary says no fix will be released. Every text that says what kind is says so,
+    // in that direction only (the review: the parser reads a fixed set of phrasings, so the other
+    // direction is false for #3719's); each answer in which a Cisco row lists a no_fix_planned says
+    // it beside the kinds, and one that lists none, or only another vendor's, reads as before.
+    it("#3663: a Cisco vendor_fix stored as no_fix_planned is relayed as sent, and every text says kind may be no_fix_planned where Cisco's summary says no fix will be released", async () => {
+      const rem = await call("cve_remediation", { cve_id: SG350 });
+      assert.ok(!rem.isError, noteOf(rem));
+      assert.deepEqual(rem.structuredContent.data.vendor_remediations, SG350_REMEDIATION.vendor_remediations, "the Cisco item is relayed as the API sent it");
+      assert.ok(
+        noteOf(rem).includes(`Vendor remediation for ${SG350}, by the vendor's own category ${CISCO_NO_FIX}: no_fix_planned from cisco ${SG350_ADV}.`),
+        noteOf(rem),
+      );
+      const cve = await call("get_cve", { cve_id: SG350 });
+      assert.ok(!cve.isError, noteOf(cve));
+      assert.ok(noteOf(cve).includes(`Vendor advisories list no_fix_planned (1), by the vendor's own category ${CISCO_NO_FIX}.`), noteOf(cve));
+      const rows = await call("vendor_advisories_for_cve", { cve_id: SG350 });
+      assert.ok(!rows.isError, noteOf(rows));
+      assert.ok(noteOf(rows).includes(`By the vendors' own categories ${CISCO_NO_FIX}, the advisories list for ${SG350}: no_fix_planned (1);`), noteOf(rows));
+      // Controls: Log4Shell's answers list no no_fix_planned, and say nothing of Cisco's summaries.
+      for (const [name, args] of [["cve_remediation", { cve_id: LOG4SHELL }], ["get_cve", { cve_id: LOG4SHELL }], ["vendor_advisories_for_cve", { cve_id: LOG4SHELL }]]) {
+        const res = await call(name, args);
+        assert.ok(!res.isError, noteOf(res));
+        assert.ok(!noteOf(res).includes(CISCO_NO_FIX), `${name} ${LOG4SHELL}: ${noteOf(res)}`);
+      }
+      // The other polarity: a Red Hat-only no_fix_planned is Red Hat's own category, and the two
+      // answers that see the vendor say nothing of Cisco.
+      const rh = await call("cve_remediation", { cve_id: RH_NOFIX_CVE });
+      assert.ok(!rh.isError, noteOf(rh));
+      assert.ok(noteOf(rh).includes(`Vendor remediation for ${RH_NOFIX_CVE}, by the vendor's own category: no_fix_planned from redhat RHSA-2099:3663.`), noteOf(rh));
+      assert.ok(!noteOf(rh).includes("Cisco"), noteOf(rh));
+      const rhRows = await call("vendor_advisories_for_cve", { cve_id: RH_NOFIX_CVE });
+      assert.ok(!rhRows.isError, noteOf(rhRows));
+      assert.ok(noteOf(rhRows).includes(`By the vendors' own categories, the advisories list for ${RH_NOFIX_CVE}: no_fix_planned (1);`), noteOf(rhRows));
+      assert.ok(!noteOf(rhRows).includes(CISCO_NO_FIX), noteOf(rhRows));
+      // The descriptions, the outputSchemas, the triage prompt and the methodology resource.
+      const tight = "or may be no_fix_planned if Cisco's summary says none will be released";
+      const say = "may be no_fix_planned where Cisco's summary says no fix will be released";
+      const d = (n) => tools.find((t) => t.name === n).description;
+      assert.ok(d("cve_remediation").includes(`kind is the vendor's own category (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), ${tight}.`), d("cve_remediation"));
+      assert.ok(d("get_vendor_advisory").includes(`kind (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other: the vendor's category, ${tight})`), d("get_vendor_advisory"));
+      const vr = schemaOf("cve_remediation").oneOf.find((b) => b.properties.state.enum.includes("measured")).properties.data.properties.vendor_remediations;
+      const items = (vr.anyOf?.find((b) => b.type === "array") ?? vr).items.properties.items;
+      const itemProps = (items.anyOf?.find((b) => b.type === "array") ?? items).items.properties;
+      // The item schema states the parser's rule exactly: both conditions, the five notes, and that
+      // wording it does not read leaves vendor_fix.
+      for (const props of [itemProps, detailItemProps(schemaOf("get_vendor_advisory"))]) {
+        assert.ok(
+          props.kind.description.includes(
+            "One exception: a Cisco vendor_fix is no_fix_planned when the advisory's Summary says, in wording EchelonGraph's parser reads, that Cisco will not release a fix, and none of its Summary, Fixed Software, Recommendations, Details or Affected Products notes says, by the parser's markers, that a fix exists",
+          ),
+          props.kind.description,
+        );
+        assert.ok(props.kind.description.includes("Wording the parser does not read leaves the item vendor_fix, so a Cisco vendor_fix is not a finding that a fix was released."), props.kind.description);
+        assert.match(props.source_subcategory.description, /for a Cisco no_fix_planned item, the title of the note its text is from \(Summary\)/);
+      }
+      const prompt = await client.getPrompt({ name: "triage_cve", arguments: { cve_id: SG350 } });
+      const { resources } = await client.listResources();
+      const methodology = resources.find((r) => /methodology/.test(r.uri));
+      assert.ok(methodology, "no methodology resource listed: re-aim this check");
+      const body = await client.readResource({ uri: methodology.uri });
+      for (const n of ["cve_remediation", "get_vendor_advisory", "vendor_advisories_for_cve", "search_vendor_advisories", "get_cve"]) {
+        const t = tools.find((x) => x.name === n);
+        const served = JSON.stringify([t.description, t.outputSchema]);
+        // "never read from the text" was true until #3663; no text the server serves may say it.
+        assert.doesNotMatch(served, /never read from the text/, n);
+        // Nor that every Cisco summary saying no fix makes a no_fix_planned (the review's SF1).
+        assert.doesNotMatch(served, /or no_fix_planned (where|if) (a Cisco advisory's|Cisco's) summary/, n);
+      }
+      assert.doesNotMatch(JSON.stringify([prompt, body]), /or no_fix_planned (where|if) (a Cisco advisory's|Cisco's) summary/);
+      assert.ok(JSON.stringify(schemaOf("vendor_advisories_for_cve")).includes("or may be no_fix_planned where a Cisco advisory's summary says no fix will be released. [] with remediation_state not_parsed"));
+      assert.ok(JSON.stringify(schemaOf("get_cve")).includes(`by the vendor's own category, or it ${say}), vendor_advisories`));
+      // #3647 review: patch_evidence says a Cisco no_fix_planned is no vendor_advisory_fix.
+      assert.ok(JSON.stringify(schemaOf("get_cve")).includes("Cisco's signed CSAF vendor_fix, Microsoft's Vendor Fix; not a Cisco vendor_fix EchelonGraph stores as no_fix_planned)"));
+      assert.ok(JSON.stringify(prompt).includes(`each kind the vendor's own category, or it ${say})`));
+      assert.ok(JSON.stringify(body).includes(`each vendor item's kind is the vendor's own category, or it may be no_fix_planned where a Cisco advisory's summary says no fix will be released.`));
     });
 
     it("every result validates against its tool's outputSchema (ajv)", () => {

@@ -787,7 +787,12 @@ export const SHAPED = [
     // #3074: 20,941 since the fixed_branches sentence says how the fix moves past an overlapping range.
     // #3013's review: 21,730 and 25,901 before the DATA CUT said where each item's text is
     // (get_vendor_advisory), the level this answer is thinned to keeping no item text.
-    size: 22_031, structured: 26_204,
+    // #3663: the method names Cisco's CSAF among the vendors whose remediation is categorised, and
+    // that a Cisco vendor_fix may be no_fix_planned where Cisco's summary says no fix will be released:
+    // 548 characters to 663 (+115), in the text's envelope block (1,377 to 1,492) and in the
+    // structured result. The pins before, 22,031 and 26,204, were 48 under what this case measured
+    // (22,079 and 26,252, inside the bound of 50), so they move by 163.
+    size: 22_194, structured: 26_367,
   },
   { label: "get_cwe, CWE-79", tool: "get_cwe", page: "default", args: { cwe_id: "CWE-79" }, fixture: "get_cwe", answers: ["CWE-79"], repeat: { cves: 50 }, size: 28_743, structured: 24_299 },
   // #2800 review: no answer the API serves reaches get_cwe's cut. It cuts each row's description to
@@ -807,7 +812,7 @@ export const SHAPED = [
     live: "a forced cut: no page the API serves reaches it (each row's description is cut to 240 characters at the source)",
     size: 20_557, structured: 29_519,
   },
-  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 19_326, structured: 15_423 },
+  { label: "vendor_advisories_for_cve, CVE-2021-44228", tool: "vendor_advisories_for_cve", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "vendor_advisories_for_cve", answers: ["CVE-2021-44228"], extra: ["coverage"], size: 20_906, structured: 16_503 },
   // #2800 review: nor does any answer reach vendor_advisories_for_cve's cut: the API sends at most 20
   // advisories for a CVE (core-backend vendoradv/store.go ListAdvisoriesByCVE, LIMIT 20), each
   // without summary, affected_products or cve_ids: CVE-2021-44228's 20 are 9,753 characters of
@@ -822,6 +827,12 @@ export const SHAPED = [
   // of structured result, +60 and +44 for the detail. No text cut changes level; search's largest
   // page, already at the structured budget, keeps 41 rows of 50 in data where it kept 42, and its
   // note gives the offset of the rest.
+  // #3464: re-measured for last_success_at, collection_state, failing_since, held_back and
+  // held_back_since, which each of the fixture's 10 windows (one for get_vendor_advisory) now relays,
+  // null from that API: +1,580 characters of text and +1,080 of structured result, +148 and +108 for
+  // the detail. No text cut changes level. Two cases at the structured budget keep a row fewer in
+  // data: the forced by-CVE case 11 of 20 where it kept 12, search's largest page 40 of 50 where it
+  // kept 41; each DATA CUT note says how many it left out, and search's gives the offset of the rest.
   // Forced: CVE-2021-44228's rows, each title twenty times over.
   {
     label: "vendor_advisories_for_cve, CVE-2021-44228, each title twenty times over (a forced cut)",
@@ -833,11 +844,11 @@ export const SHAPED = [
     stretch: { advisories: { title: 20 } },
     extra: ["coverage"],
     live: "a forced cut: no answer the API serves reaches it (at most 20 advisories, each a few hundred characters)",
-    size: 18_554, structured: 29_610,
+    size: 20_134, structured: 28_563,
   },
-  { label: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", page: "default", args: { vendor: "aws", advisory_id: "2026-098-AWS" }, fixture: "get_vendor_advisory", answers: ["aws 2026-098-AWS"], extra: ["coverage"], size: 3_151, structured: 2_899 },
-  { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 35_112, structured: 24_291 },
-  { label: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", page: "max", args: { query: "log4j", limit: 50 }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 50 }, set: { limit: 50 }, extra: ["coverage"], size: 24_123, structured: 29_044 },
+  { label: "get_vendor_advisory, aws 2026-098-AWS", tool: "get_vendor_advisory", page: "default", args: { vendor: "aws", advisory_id: "2026-098-AWS" }, fixture: "get_vendor_advisory", answers: ["aws 2026-098-AWS"], extra: ["coverage"], size: 3_299, structured: 3_007 },
+  { label: "search_vendor_advisories, default page (query log4j)", tool: "search_vendor_advisories", page: "default", args: { query: "log4j" }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 20 }, set: { limit: 20 }, extra: ["coverage"], size: 36_692, structured: 25_371 },
+  { label: "search_vendor_advisories, largest page (query log4j, limit 50)", tool: "search_vendor_advisories", page: "max", args: { query: "log4j", limit: 50 }, fixture: "search_vendor_advisories", answers: ["log4j"], repeat: { advisories: 50 }, set: { limit: 50 }, extra: ["coverage"], size: 25_704, structured: 28_726 },
 ];
 
 // How far a case's size may be from production's text for the same call, as text-bound-live.mjs
@@ -874,8 +885,22 @@ const CVE_SUMMARY_KEPT = {
   why: "fixtures/prod-answers/cves_summary.json is production's answer of 2026-10-05 (probe-prod); production's (hosted 3.1.1, 2026-10-25) carries nvd_poll and a poller block of one API instance's counters, which this server's notes speak of, so text-bound:live --hosted is red on it",
   clears: "npm run text-bound:live -- --record on the dev box (scripts/probe-prod.sh, which re-reads exposure_radar's kept answers too), set the SHAPED sizes it names, run npm test, then drop this entry",
 };
+//
+// vendor_advisories_for_cve, CVE-2021-44228 (#3464): its record (2026-10-25) is 3.1.1+unreleased's
+// server on the hosted endpoint's data, beside the fixture's /coverage (extraAnswers), and that
+// server relayed each of the answer's 10 vendor windows with 7 fields. This checkout relays 14, the
+// 7 since null from that /coverage: #3472's feed_held_since and history_scope (+640 characters of
+// text, +440 of structured result) and #3464's last_success_at, collection_state, failing_since,
+// held_back and held_back_since (+1,580, +1,080). 18,686 + 2,220 is the 20,906 here, and 14,983 +
+// 1,520 the 16,503: the drift is those fields, nothing in the rows. The other vendor cases carry one
+// window (the detail) or a larger answer, and stay within SHAPED_DRIFT.
+const VENDOR_WINDOW_FIELDS_SINCE_RECORD = {
+  why: "the record is 3.1.1+unreleased's server (2026-10-25), which relayed each of the 10 vendor windows with 7 fields; this checkout relays 14 (#3472's 2, #3464's 5), null from the fixture's /coverage: +2,220 characters of text and +1,520 of structured result, nothing in the rows",
+  clears: "npm run text-bound:live -- --record on the dev box (scripts/probe-prod.sh) with this checkout's server, which records its text on the same answers; run npm test, then drop this entry",
+};
 export const TEXT_DRIFT_KNOWN = {
   cve_summary: { shaped: 2_725, recorded: 3_209, ...CVE_SUMMARY_KEPT },
+  "vendor_advisories_for_cve, CVE-2021-44228": { shaped: 20_906, recorded: 18_686, ...VENDOR_WINDOW_FIELDS_SINCE_RECORD },
 };
 
 /** #3273's review: each case whose text is more than SHAPED_DRIFT from the record's for the same label (the hosted endpoint's own text left out), with the drift; `known` (TEXT_DRIFT_KNOWN) marks the ones named there. */
@@ -909,6 +934,8 @@ export const textDriftMessage = (o) =>
 // production's answer again (3,737 against 3,477, +7.5%; against 3.0.1's 3,382 it was +10.5%).
 export const STRUCTURED_DRIFT_KNOWN = {
   cve_summary: { shaped: 2_565, recorded: 2_986, ...CVE_SUMMARY_KEPT },
+  // #3464: TEXT_DRIFT_KNOWN's entry for the same case says why.
+  "vendor_advisories_for_cve, CVE-2021-44228": { shaped: 16_503, recorded: 14_983, ...VENDOR_WINDOW_FIELDS_SINCE_RECORD },
 };
 
 /** #3273: each case whose structured size is more than SHAPED_DRIFT from the record's for the same label (the hosted endpoint's own text left out), with the drift; `known` (STRUCTURED_DRIFT_KNOWN) marks the ones named there. */

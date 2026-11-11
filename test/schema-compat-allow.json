@@ -120,6 +120,21 @@
       "against": "3.1.3",
       "finding": "search_vendor_advisories: coverage.vendor_windows[]: adds feed_held_since, history_scope under an object the old release closed",
       "reason": "#3472: as vendor_advisories_for_cve's vendor_windows[]."
+    },
+    {
+      "against": "3.2.1",
+      "finding": "vendor_advisories_for_cve: coverage.vendor_windows[]: adds last_success_at, collection_state, failing_since, held_back, held_back_since under an object the old release closed",
+      "reason": "#3464: a vendor window relays the coverage API's last_success_at, collection_state, failing_since, held_back and held_back_since, so a vendor whose collection is failing (Cisco from 2026-10-12), partial or disabled is not read as held through its window. The object is closed only in the failure branch, and every failure of the three vendor-advisory tools answers coverage null (index.ts failure's default; none of them passes one), so no answer a client holding 3.2.1's list receives carries the added fields there; the success branch is open since 3.1.0."
+    },
+    {
+      "against": "3.2.1",
+      "finding": "get_vendor_advisory: coverage.vendor_window: adds last_success_at, collection_state, failing_since, held_back, held_back_since under an object the old release closed",
+      "reason": "#3464: as vendor_advisories_for_cve's vendor_windows[]."
+    },
+    {
+      "against": "3.2.1",
+      "finding": "search_vendor_advisories: coverage.vendor_windows[]: adds last_success_at, collection_state, failing_since, held_back, held_back_since under an object the old release closed",
+      "reason": "#3464: as vendor_advisories_for_cve's vendor_windows[]."
     }
   ]
 }

@@ -78,7 +78,10 @@ const PLAIN = {
 // which heldTo still holds to the text wherever the answer has it. github_checker is a value of an
 // exploit's kind (#3221), named by triage_cve's step 2 beside nuclei_template; production's
 // CVE-2021-44228 answer (prod-shaped/cve_intel.json) holds no such row, so no call here carries it.
-const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source", "purl_name", "github_checker"]);
+// no_fix_planned is a value of a remediation's kind, named by triage_cve's step 3 for a Cisco advisory
+// whose summary says no fix will be released (#3663); production's CVE-2021-44228 answer
+// (prod-shaped/cve_remediation.json) lists none, so no call here carries it either.
+const VALUES = new Set(["change_only", "not_assessed", "distro_release_unknown", "invalid_input", "not_parsed", "none_in_source", "purl_name", "github_checker", "no_fix_planned"]);
 
 // sbom_review's step 2: a component's ecosystem, package and version read from its purl, as the
 // prompt says (and as core-backend's matcher maps a purl: cve/matchbatch.go purlNameVersion,

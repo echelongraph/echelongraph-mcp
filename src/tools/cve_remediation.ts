@@ -13,7 +13,11 @@
 //   vendor_remediations  each vendor advisory naming the CVE (at most 20, newest first), with its
 //                        remediation_state and the items it lists for the CVE, each with the
 //                        vendor's own category (kind): vendor_fix, workaround, mitigation,
-//                        no_fix_planned, none_available or other.
+//                        no_fix_planned, none_available or other; a Cisco vendor_fix may be
+//                        no_fix_planned where its advisory's summary says no fix will be released
+//                        (#3663: only in wording the parser reads, and only when no fix note says a
+//                        fix exists; source_category stays vendor_fix, source_subcategory is the
+//                        title of the note its text is from, and it carries no URL).
 //   fix_references       the record's references tagged Patch or Mitigation, by NVD, or patch or
 //                        mitigation, by the CNA (#2841: the API matches the tag in either case).
 //   patches              cve_patches rows.
@@ -43,6 +47,7 @@ import { fixStatusSchema } from "../fixStatus.js";
 import { blankUnreadableDisputes, clipDisputeNote, disputeNote, fixedInDisputeSchema, isDispute, isUnreadDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
 import { MATCH_HEADERS } from "./check_affected.js";
 import { ONE_PACKAGE_RULE, packagesListedTwice } from "./packageRecords.js";
+import { CISCO_NO_FIX_NOTE, ciscoListsNoFix, REMEDIATION_ITEM_KIND_FIELD, REMEDIATION_ITEM_SUBCATEGORY_FIELD, VENDOR_LICENCE_FIELD } from "./vendor_advisories.js";
 
 const TOOL = "cve_remediation";
 const SECTIONS = ["cisa", "fixed_branches", "vendor_remediations", "fix_references", "patches"] as const;
@@ -60,12 +65,17 @@ export const REMEDIATION_NOT_A_ZERO =
 export const REMEDIATION_CISA = "CISA's required_action is directed at US federal civilian agencies (under BOD 26-04, which replaced BOD 22-01 on 10 June 2026) and is not EchelonGraph's advice.";
 
 const METHOD =
-  "EchelonGraph's stored sources for one CVE (GET /api/v1/public/cves/:id/remediation): CISA's Known Exploited Vulnerabilities catalog text; the affected ranges and fixes of OSV advisories; the remediation each vendor advisory lists, categorised by the vendor's own category (Red Hat CSAF remediations, MSRC CVRF Workaround, Mitigation and Vendor Fix rows, Palo Alto's solution and work_around sections); the CVE record's references tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA; and cve_patches. Nothing is generated or tested.";
+  "EchelonGraph's stored sources for one CVE (GET /api/v1/public/cves/:id/remediation): CISA's Known Exploited Vulnerabilities catalog text; the affected ranges and fixes of OSV advisories; the remediation each vendor advisory lists, categorised by the vendor's own category (Red Hat and Cisco CSAF remediations, MSRC CVRF Workaround, Mitigation and Vendor Fix rows, Palo Alto's solution and work_around sections), except that a Cisco vendor_fix may be no_fix_planned where Cisco's summary says no fix will be released; the CVE record's references tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA; and cve_patches. Nothing is generated or tested.";
 
 // #3084 (merged from 24dad5eb): REMEDIATION_CISA names BOD 26-04, which replaced BOD 22-01, 48 characters
 // longer, which left this description 71 under the 2048-character cut (#2924's floor is 100); the
 // remediation_state parentheses and the failed_sections sentence are said shorter, every claim kept.
-export const CVE_REMEDIATION_DESCRIPTION = `How one CVE is fixed, as its sources state it, in one answer. ${REMEDIATION_UNTESTED} ${REMEDIATION_NOT_A_ZERO} Returns fix_status (the API's fix-status rule, as CVE Pulse shows it: state and basis), cisa (for a KEV-listed CVE CISA's required_action, due_date, short_description and notes_urls, verbatim; ${REMEDIATION_CISA}), fixed_branches (each affected package with fixed_branches: every affected range, introduced and fixed or last_affected, and fixed_version, one range's fix), vendor_remediations (each vendor advisory naming the CVE, newest first, at most 20, with remediation_state, remediation_kinds and items, each with kind, source_category, text and url), fix_references (references NVD or the CNA tagged Patch or Mitigation), patches, coverage and failed_sections. kind is the vendor's own category, never read from the text: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other. remediation_state is parsed, none_in_source (none listed for this CVE), not_parsed (that vendor's remediation is not read) or withdrawn. ecosystem, package and version (all three or none, sent in request headers, never in the URL) add installed, the verdict at that version, and fixed_in, the lowest unaffected version above it, or null with fixed_in_reason. A section the API could not read is named in failed_sections, not relayed as empty. A REJECTED CVE answers not_assessed. ${TEXT_BUDGET_DESCRIPTION} Cut, vendor texts are shortened first; kinds, states and URLs are kept.`;
+// #3663: kind is no longer the vendor's category alone (a Cisco vendor_fix may be no_fix_planned
+// where Cisco's summary says none will be released: the parser's rule, REMEDIATION_ITEM_KIND_FIELD,
+// is the item schema's); the sentence that says so is 47 characters longer, so fix_status no longer
+// says "as CVE Pulse shows it" and vendor_remediations no longer gives its order and cap (coverage
+// carries the cap), to stay within #2924's headroom.
+export const CVE_REMEDIATION_DESCRIPTION = `How one CVE is fixed, as its sources state it, in one answer. ${REMEDIATION_UNTESTED} ${REMEDIATION_NOT_A_ZERO} Returns fix_status (the API's fix-status rule: state and basis), cisa (for a KEV-listed CVE CISA's required_action, due_date, short_description and notes_urls, verbatim; ${REMEDIATION_CISA}), fixed_branches (each affected package with fixed_branches: every affected range, introduced and fixed or last_affected, and fixed_version, one range's fix), vendor_remediations (each vendor advisory naming the CVE, with remediation_state, remediation_kinds and items, each with kind, source_category, text and url), fix_references (references NVD or the CNA tagged Patch or Mitigation), patches, coverage and failed_sections. kind is the vendor's own category (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), or may be no_fix_planned if Cisco's summary says none will be released. remediation_state is parsed, none_in_source (none listed for this CVE), not_parsed (that vendor's remediation is not read) or withdrawn. ecosystem, package and version (all three or none, sent in request headers, never in the URL) add installed, the verdict at that version, and fixed_in, the lowest unaffected version above it, or null with fixed_in_reason. A section the API could not read is named in failed_sections, not relayed as empty. A REJECTED CVE answers not_assessed. ${TEXT_BUDGET_DESCRIPTION} Cut, vendor texts are shortened first; kinds, states and URLs are kept.`;
 
 // ── outputSchema ──
 // Built on first use: index.ts imports this file, so its exports are not initialised while this
@@ -74,10 +84,10 @@ function schemas() {
   const Kind = z.union([z.enum(KINDS), z.string()]);
   const State = z.union([z.enum(STATES), z.string()]);
   const Item = z.looseObject({
-    kind: opt(Kind).describe("The vendor's own category: vendor_fix, workaround, mitigation, no_fix_planned, none_available or other."),
+    kind: opt(Kind).describe(REMEDIATION_ITEM_KIND_FIELD),
     source_category: opt(z.string()).describe("The vendor's own name for the category (CSAF vendor_fix, MSRC Vendor Fix, Palo Alto work_around)."),
-    source_subcategory: opt(z.string()).describe("MSRC's SubType, e.g. Security Update; null elsewhere."),
-    text: opt(z.string()).describe("The vendor's text, verbatim but for HTML markup removed, cut at coverage.item_text_cap characters (text_truncated)."),
+    source_subcategory: opt(z.string()).describe(REMEDIATION_ITEM_SUBCATEGORY_FIELD),
+    text: opt(z.string()).describe("The vendor's text, verbatim but for HTML markup removed, cut at coverage.item_text_cap characters (text_truncated). Empty, with text_chars 0, when its advisory's vendor_text_withheld is true."),
     text_truncated: opt(z.boolean()),
     text_chars: opt(z.number()).describe("The length of the vendor's text in characters."),
     url: opt(z.string()),
@@ -86,7 +96,7 @@ function schemas() {
     product_count: opt(z.number()),
   });
   const VendorAdvisory = z.looseObject({
-    vendor: opt(z.string()),
+    vendor: opt(z.string()).describe(VENDOR_LICENCE_FIELD),
     vendor_display_name: opt(z.string()),
     vendor_advisory_id: opt(z.string()),
     vendor_published_at: opt(z.string()),
@@ -97,6 +107,9 @@ function schemas() {
     remediation_kinds: opt(z.array(Kind)),
     items: opt(z.array(Item)),
     items_total: opt(z.number()),
+    vendor_text_withheld: opt(z.boolean()).describe(
+      "true: the vendor's remediation text is not served (Microsoft's): each item's text is empty; its kind, source_category, url, fixed_build and product_ids are served.",
+    ),
   });
   const data = z.looseObject({
     cve_id: opt(z.string()),
@@ -388,7 +401,10 @@ function vendorSentences(cve: string, rows: unknown[]): string[] {
   const few = (xs: string[]) => (xs.length <= 4 ? listed(xs) : `${xs.slice(0, 4).join(", ")} and ${xs.length - 4} more`);
   const kinds = [...KINDS.filter((k) => byKind.has(k)), ...[...byKind.keys()].filter((k) => !(KINDS as readonly string[]).includes(k))];
   if (kinds.length) {
-    out.push(`Vendor remediation for ${cve}, by the vendor's own category: ${kinds.map((k) => `${k} from ${few(byKind.get(k)!)}`).join("; ")}. Each is the vendor's text as stated; EchelonGraph has not tested it.`);
+    // #3663: a Cisco no_fix_planned may be Cisco's vendor_fix, not Cisco's category: said where a
+    // Cisco advisory lists one, and only there (vendor_advisories.ts CISCO_NO_FIX_NOTE).
+    const noFix = rows.some(ciscoListsNoFix) ? CISCO_NO_FIX_NOTE : "";
+    out.push(`Vendor remediation for ${cve}, by the vendor's own category${noFix}: ${kinds.map((k) => `${k} from ${few(byKind.get(k)!)}`).join("; ")}. Each is the vendor's text as stated; EchelonGraph has not tested it.`);
   }
   if (states.none_in_source) out.push(`${few(states.none_in_source)} ${states.none_in_source.length === 1 ? "lists" : "list"} no remediation for ${cve} (none_in_source), which is not a finding that no fix exists.`);
   if (states.not_parsed) out.push(`EchelonGraph does not read the remediation of ${few(states.not_parsed)} (not_parsed): read ${states.not_parsed.length === 1 ? "it" : "each"} with get_vendor_advisory; not_parsed is not "no remediation".`);
