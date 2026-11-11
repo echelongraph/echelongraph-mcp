@@ -147,7 +147,7 @@ export function amIAffectedText(a: AffectedArgs): string {
       : [
           "  For each match, give its fixed_in where it is a version. On a match without fixed_in_dispute, it is the first version above this one that no affected interval of the CVE's record holds. On a match with fixed_in_dispute, the CVE record's CNA and the advisory disagree on the range that holds this version, and fixed_in follows the source the dispute's higher names: say that the two disagree, never call fixed_in the advisory's fix, and quote fixed_in_dispute's note verbatim where it has one. Where fixed_in is null or absent, write that the result gives no fixed version for this version's range, which is not a finding that no fix exists.",
         ]),
-    "- assessed true and count 0: no matching CVE in EchelonGraph's data at this version. Give undetermined_count too: an advisory that could not be decided at this version is not safe.",
+    "- assessed true and count 0: no matching CVE in EchelonGraph's data at this version. Give undetermined_count too: a CVE that could not be decided at this version is not safe.",
     "- assessed false: NOT ASSESSED. Write that the lookup did not evaluate this version, give not_assessed_reason, and never report it as not affected or clean.",
     "- failed or invalid_input: the check did not run. Say why, from the result.",
     "Where capped, candidates_capped or degraded is true, say the list may be incomplete and why.",

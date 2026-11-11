@@ -208,21 +208,26 @@ affected, by one of two lookup paths:
   token across vendors, so each match carries `cpe_vendor` and `vendor_unknown`: a match with
   `vendor_unknown` true is real, but its vendor is not verified to be yours.
 - **Registry path** — `ecosystem` (`npm`, `PyPI`, `Maven`, …), `package` and `version`. Each CVE
-  named by the OSV advisory records EchelonGraph holds for the package is decided against the
-  version once, as affected (one match), not affected (`not_affected_count`) or undetermined
-  (`undetermined_count`). When OSV publishes one CVE for the package in several records (a GHSA
+  named by the OSV advisory records EchelonGraph holds for the package, and each CVE no advisory
+  record holds whose CVE record's CNA names the package by package URL (`match_method`
+  `cna package url`, decided on that statement alone; below), is decided against the version
+  once, as affected (one match), not affected (`not_affected_count`) or undetermined
+  (`undetermined_count`). A package only CNA records name is never answered clean: it stays
+  `assessed` false (`package_not_in_advisory_corpus`) unless one of them calls the version
+  affected. When OSV publishes one CVE for the package in several records (a GHSA
   and a package repository's own advisory, say), EchelonGraph stores a row for each and decides
   them together, so the two counts count CVEs, while `advisories_considered` counts the stored
-  rows: a CVE stored as two rows and cleared counts 2 in `advisories_considered` and 1 in
-  `not_affected_count`.
+  rows, and each CVE only its CNA names the package for once, decided or not: a CVE stored as two
+  rows and cleared counts 2 in `advisories_considered` and 1 in `not_affected_count`.
 
 Read `assessed` before `count`. `assessed` false means the lookup did not evaluate the
 component, and `not_assessed_reason` says why: `product_not_in_cpe_corpus`,
 `package_not_cpe_nameable`, `candidate_load_pending` (with `degraded` true),
 `candidate_window_truncated`, `package_not_in_advisory_corpus` or `no_decidable_advisory`. The
-result's `state` is then `not_assessed`, and its `count` of 0 never means "not affected". An
-advisory whose version range cannot be decided at this version is counted in
-`undetermined_count` (up to 50 listed in `undetermined`) and is never reported as safe. `capped`
+result's `state` is then `not_assessed`, and its `count` of 0 never means "not affected". A CVE
+whose advisory range, or CNA statement, cannot be decided at this version is counted in
+`undetermined_count` (up to 50 listed in `undetermined`, each with its `reason`) and is never
+reported as safe. `capped`
 says the match list stopped at its cap, and `candidates_capped` that not every candidate CVE was
 loaded. A failed advisory lookup (`advisory_lookup_failed`) comes back as a failure. Each match
 keeps `kev_listed`, `ransomware`, `epss_score`, `effective_score`, `effective_severity` and
@@ -281,6 +286,42 @@ fields and values are open to what a later API adds. A match without `fixed_in_d
 finding that the CNA agrees: an API that does not serve the field yet, or older than it, sends none,
 and one that serves it reads a CNA's ranges only where it applies them and only from an entry it
 matches to the package.
+
+Since EchelonGraph's API serves it (#3757, from 2026-11-11), the registry path also decides a CVE
+that no OSV advisory record names the package for, where the CVE record's CNA names the package by
+its package URL (purl), for a language registry's package (npm, PyPI, Maven, Go, crates.io,
+RubyGems, NuGet, Packagist, Hex, Pub, SwiftURL and GitHub Actions; never a Linux distribution's,
+whose packages are fixed by backports a CNA's versions do not show, nor CRAN, Hackage, CocoaPods,
+conda or Conan). The API reads these CNA records only while its CNA purl index is valid; while it
+is not (rebuilding, or a failed build), its answers are the advisory records' alone, as before
+2026-11-11, and nothing in an answer says which. The CNA's statement is then the only source: the
+match says `match_method` `cna package url`, its `matched_criteria` is the CNA's purl as written,
+its `version_evidence` is `cna_affected_range`, its `interval` the CNA's range, and its
+`match_confidence` 0.8, below an advisory interval's 0.95; `fixed_in` names a version only where
+the CNA calls that version unaffected. `npm` `suneditor` 3.3.0 is the example: on 2026-11-11 the
+registry path answered CVE-2026-124494 and CVE-2026-124422 so, from VulnCheck's records, where it
+had answered "assessed, 0 matches" before. Where the CNA's statements cannot decide the version,
+the CVE is undetermined, with a `reason` the output schema's `undetermined` entry names: the CNA
+states no status for the version, or states the package's versions in a version scheme the matcher
+cannot order (`custom`, `git`), besides the reasons a CNA statement read beside an advisory gives.
+A CNA statement alone never clears a package no advisory record names: where every record the
+lookup read is such a CNA record and none calls the version affected, the answer stays `assessed`
+false (`package_not_in_advisory_corpus`), with `not_affected_count` and `undetermined` saying what
+the CNA records were read to; `check_sbom` and `scan_manifest` answer that component `not_assessed`,
+and `cve_remediation`'s installed verdict for such a CVE is `affected` or `not_assessed`, never
+`not_affected`. `check_affected`'s note names the matches made so, and the notes of `check_sbom` and
+`scan_manifest` count them; where the answer stays `assessed` false with `advisories_considered`
+above 0, `check_affected`'s note says how many CVE records' CNAs name the package, that none calls
+the version affected, and so that the package name is not in doubt.
+
+Known gap (#3825): beside advisory records, `check_affected`, `check_sbom` and `scan_manifest`
+count such a CVE in `not_affected_count` where its CNA calls the version unaffected (production,
+npm `suneditor` 3.4.0: `not_affected_count` 4, two on VulnCheck's records alone), while
+`cve_remediation` answers it `not_assessed`; and a package whose advisory CVEs are all undetermined
+answers `assessed` true, not `no_decidable_advisory`, when such a CVE is decided not affected (its
+undetermined CVEs are still listed, and the note still says never to report them as safe).
+`check_affected`'s note on a registry answer of 0 matches says such a CVE may be among those
+`not_affected_count` counts, and that `cve_remediation` answers it `not_assessed`.
 
 `product`, `version`, `ecosystem` and `package` travel in the `X-EG-Product`, `X-EG-Version`,
 `X-EG-Ecosystem` and `X-EG-Package` request headers, never in the URL, so request logs and

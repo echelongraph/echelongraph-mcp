@@ -574,7 +574,8 @@ for (const era of ERAS) {
       const res = await call("cve_remediation", { cve_id: "CVE-2099-30002" });
       const note = noteOf(res);
       assert.equal(res.structuredContent.state, "measured");
-      assert.match(note, /fixed_branches is empty: no affected package range is on record, which is not a finding that no fix exists\./);
+      // #3767: fixed_branches holds the advisory records' ranges, never the CVE record's own CNA ranges (#3757).
+      assert.match(note, /fixed_branches is empty: no advisory record's affected package range is on record \(the CVE record's own CNA ranges are not listed in it\), which is not a finding that no fix exists\./);
       assert.match(note, /No vendor advisory on record names CVE-2099-30002, which is not a finding that no vendor published a fix\./);
       assert.match(note, /No reference of the CVE record is tagged as a patch or mitigation, in NVD's spelling \(Patch, Mitigation\) or the CNA's \(patch, mitigation\)\./);
       // Every sentence that speaks of "no fix" says it is not a finding.

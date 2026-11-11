@@ -6,6 +6,141 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.3 — 2026-11-11
+
+The registry tools say where an answer can now come from (#3767). Since 2026-11-11 EchelonGraph's
+registry matcher also decides, for a language registry's package (npm, PyPI, Maven, Go, crates.io,
+RubyGems, NuGet, Packagist, Hex, Pub, SwiftURL and GitHub Actions; never a Linux distribution's, nor
+CRAN, Hackage, CocoaPods, conda or Conan), a CVE that no OSV advisory record names the package for,
+where the CVE record's CNA names the package by its package URL (purl) (#3757). Such a match says
+`match_method` `cna package url`, its `matched_criteria` is the CNA's purl, its `version_evidence`
+is `cna_affected_range` and its `match_confidence` 0.8, below an advisory interval's 0.95. A CNA
+statement alone never clears a package no advisory record names: it stays `assessed` false
+(`package_not_in_advisory_corpus`) unless a CNA statement calls the version affected, and
+`cve_remediation`'s installed verdict for such a CVE is `affected` or `not_assessed`, never
+`not_affected`. Known gap (#3825): beside advisory records, `check_affected`, `check_sbom` and
+`scan_manifest` count such a CVE in `not_affected_count` where its CNA calls the version unaffected
+(production, npm `suneditor` 3.4.0: `not_affected_count` 4, two on VulnCheck's records alone), while
+`cve_remediation` answers it `not_assessed`; and a package whose advisory CVEs are all undetermined
+answers `assessed` true, not `no_decidable_advisory`, when such a CVE is decided not affected (its
+undetermined CVEs are still listed, and the note still says never to report them as safe). The API
+reads these CNA records only while its CNA purl index is valid; while it is not (rebuilding, or a
+failed build), its answers are the advisory records' alone, as before 2026-11-11, and nothing in an
+answer says which. On 2026-11-11 production answered npm `suneditor` 3.3.0 with CVE-2026-124494 and
+CVE-2026-124422 so, where it had answered "assessed, 0 matches". The tools relay the API's answers
+as sent, so those matches reached every version of this server when the API shipped; 3.2.2's text
+still said the registry path decides "each OSV advisory EchelonGraph holds for that package", named
+no CNA record as a source, and called such a match's installed `fixed_in` "as the advisory states
+it". Only text changes: descriptions, notes, the method strings, one prompt line, and the
+descriptions of existing output-schema fields. No field is added, removed, retyped or made
+`required`, no enum changes, and no input changes (schema-compat against 3.2.2: no finding). A
+client holding 3.2.2's tool list validates every answer; list the tools again (reconnect) to read the
+corrected descriptions.
+
+- **`check_affected`** (#3767).
+  - Its description's registry sentence reads "decides each OSV advisory EchelonGraph holds for that
+    package, and each CVE only its CNA names by purl, as affected, not affected or undetermined" (3.2.2:
+    "decides each OSV advisory EchelonGraph holds for that package as affected, not affected or
+    undetermined"), and "An advisory undecidable at this version" reads "A CVE undecidable at this
+    version".
+  - The method of a registry answer names, beside the OSV advisory records, the CVE record's CNA
+    statements read beside each for a language registry's package, and each CVE no advisory record
+    holds for such a package whose CVE record's CNA names it by package URL, decided on that statement
+    alone (`match_method` `cna package url`), for npm, PyPI, Maven "and nine other registries; not a
+    Linux distribution's, CRAN's or Hackage's"; it ends "A package only CNA records name is never
+    answered clean." 3.2.2's said the CNA statements were read "once its API reads them".
+  - `package_not_in_advisory_corpus` no longer says the package "was not located": a CVE record's CNA
+    may name it by package URL, but a CNA statement alone never clears a package, and such CVEs are
+    counted in `not_affected_count` or listed in `undetermined`, never as a clean answer. Where the
+    answer's `advisories_considered` is above 0, every record read is such a CNA statement, and the
+    note says so instead of calling the name worth checking: "7 CVE records' CNAs name this package
+    by package URL (advisories_considered 7); none calls this version affected, so the name is not in
+    doubt, and a CNA statement alone never clears it." (production's Maven
+    `org.apache.tomee:openejb-http` 11.0.0; "1 CVE record's CNA names … it does not call …" for one).
+  - The note on a registry answer of 0 matches says `not_affected_count` is "one per CVE however many
+    of its records are stored" (3.2.2: "of its advisory records"), and adds "a CVE no advisory record
+    names the package for counts here where its CNA's purl statement calls this version unaffected, on
+    that statement alone, and cve_remediation answers that CVE not_assessed" (#3825, above).
+    `no_decidable_advisory` names a CVE no advisory holds whose CNA statement for the package could not
+    be decided among what `undetermined` may hold.
+  - The note's UNDETERMINED sentence names, on the registry path, the CVEs "whose advisory records
+    name this package, or whose CVE record's CNA names it by package URL" (3.2.2: "with advisories
+    naming this package"), and on the CPE path the CVEs "whose NVD CPE match criteria name this
+    product", where 3.2.2 spoke of advisories on both.
+  - A new note sentence names the matches only the CNA makes: "Every match is on the CVE record's CNA
+    statement alone (match_method cna package url: CVE-2026-124494, CVE-2026-124422): no OSV advisory
+    record names this package for those CVEs, so the CNA is the only source." (or "<n> matches are …",
+    with the first 10 named). "OSV": EchelonGraph holds GitHub's GHSA-cm78-x5pp-rjx2 for
+    CVE-2026-124494, with no affected package, and `cve_remediation` lists it. Nothing is said where no
+    match has that method.
+  - The output schema describes `match_method` (`registry package`, `cna package url` and what each
+    means; the CPE path's own methods), `undetermined[].reason` (the reasons an advisory record gives,
+    the `cna_range_` reasons, and the two only a CVE no advisory record names gives:
+    `cna_range_status_unknown`, no CNA statement calls the version affected or unaffected, and
+    `cna_range_undecidable_scheme`, the CNA states the versions in a scheme the matcher cannot order,
+    such as `custom` or `git`; and, on the CPE path, `version_not_comparable` is a CPE range the
+    version has no order against, not an advisory record's), and `not_affected_count` (each CVE only
+    its CNA names the package for counts once in `advisories_considered`, decided or not; beside
+    `assessed` false the count is CNA records only, and not a clean answer).
+- **`check_sbom` and `scan_manifest`** (#3767). The method names the CNA's purl statement for a
+  language package's CVE that no advisory record names, "never clean alone"; to keep its length near
+  3.2.2's (374 characters to 384: the method is in every answer's text and structured result, and the
+  suite's 201-purl call still keeps 43 rows), "registry advisory matcher" reads "registry matcher", "the
+  same matcher GET /api/v1/public/cves/match uses when given an ecosystem" reads "as GET .../match
+  given an ecosystem", and "No CPE matching, no score, no ranking." reads "No CPE match, score or
+  ranking." The note counts the matches only the CNA makes ("2 matches, on 1 component, are on the
+  CVE record's CNA statement alone (match_method cna package url): no OSV advisory record names the
+  package for those CVEs, …"). The always-present note says a `not_affected` verdict is clean "only
+  for the CVEs decided at that version" (3.2.2: "the advisories decided"), and the `verdict` and
+  `summary.undetermined` descriptions speak of CVEs, not advisories, that could not be decided.
+- **`cve_remediation`** (#3767). The installed `verdict`'s `not_assessed` reads "no advisory record,
+  and no CNA package URL, names the package for this CVE; or only the CVE record's CNA names it, by
+  package URL, and does not call this version affected, which alone never clears it; or the lookup
+  did not run" (3.2.2: "the record names no such package for this CVE, or the lookup did not run"). Where
+  `installed.version_evidence` is `cna_affected_range` and the answer carries no `fixed_in_dispute`,
+  the note says the installed `fixed_in` is "as the CVE record's CNA states it, not an advisory", where
+  3.2.2 said "as the advisory states it" (production's CVE-2026-124494 at npm `suneditor` 3.3.0, whose
+  only range is VulnCheck's), and `fixed_in`'s description says so too. An empty `fixed_branches`
+  reads "no advisory record's affected package range is on record (the CVE record's own CNA ranges
+  are not listed in it)", not "no affected package range is on record". The method adds: "An
+  installed version's verdict and fixed_in are decided on the records check_affected's registry path
+  reads: the OSV advisory records, with the CVE record's CNA statements read beside them, and, where
+  none names the package for the CVE, the CNA's purl statement alone, which gives affected or
+  not_assessed here, never not_affected, though check_affected counts such a CVE in
+  not_affected_count where the CNA calls the version unaffected." (#3825, above).
+- `version_evidence`'s description, in all four tools, says that on a match whose `match_method` is
+  `cna package url` no advisory record names the package for the CVE at all.
+- Descriptions, against 3.2.2's, measured on each server's tools/list, each within #2924's 100
+  characters under the 2,048-character client cut: only `check_affected`'s changes, 1,948 characters
+  (1,939 in 3.2.2). To fit its registry sentence (above), "include that product at that version"
+  reads "include it at that version", "and whether it was verified (vendor_unknown)" reads ", verified
+  or not (vendor_unknown)", and "(false: not yet scored, so echelongraph_score is withheld)" reads
+  "(false: not yet scored; echelongraph_score withheld)". Every claim is kept.
+- The `am_i_affected` prompt says "a CVE that could not be decided at this version is not safe"
+  (3.2.2: "an advisory that could not be decided"), as `check_affected`'s description now does.
+- Sizes: `check_affected`'s registry method is 342 characters longer (339 to 681), so PyPI `django`
+  1.11.0's answer in the suite is 25,297 characters of text and 14,842 of structured result (24,955
+  and 14,500); `cve_remediation`'s method is 438 longer (663 to 1,101), so CVE-2021-44228's is
+  22,632 and 26,805 (22,194 and 26,367), each within the suite's text and structured budgets, as are
+  the batch tools' cases, whose method grows 10 characters and whose clean note shrinks 6.
+- docs/tools.md, "How `check_affected` decides", says which CVEs the registry path decides on a CNA
+  statement alone, for which registries, what such a match carries, that a CNA statement alone
+  never clears a package no advisory record names, that the API reads the CNA records only while its
+  CNA purl index is valid, and the known gap (#3825, above);
+  the README's `check_sbom` row names the advisory corpus as "OSV.dev records and CVE records' CNA
+  purls", and its `check_affected` row counts the CVEs it cannot decide as `undetermined_count`; to
+  stay under the README's 62,000-character ceiling (61,996), the docs link's `fixed_in` sentence
+  drops a "that".
+- Tests: `test/cna-purl-text.test.mjs` holds the description, the methods, the schema descriptions and
+  the notes to the sentences above, each with 3.2.2's wording as its control: the notes on
+  production's answers of 2026-11-11 (`test/fixtures/cna-purl-wire.json`) for npm `suneditor` 3.3.0
+  and 3.4.0, Maven `org.apache.tomee:openejb-http` 11.0.0 and CVE-2026-124494, and, where production
+  served no such answer to read, on answers written in core-backend's shape and not read from
+  production: the UNDETERMINED sentence and the two CNA-only reasons (`cna_only_not_assessed`, named
+  synthetic in the fixture and the test), `no_decidable_advisory`, and the CPE path's UNDETERMINED
+  sentence. One test is a relay check with no 3.2.2 control, named so: `cve_remediation` relays
+  production's `not_assessed` for `suneditor` 3.4.0 as 3.2.2 does.
+
 ## 3.2.2 — 2026-11-11
 
 The vendor-advisory tools say when a vendor is not being collected (#3464), and declare the fields

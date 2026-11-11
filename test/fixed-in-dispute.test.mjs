@@ -448,14 +448,25 @@ describe(`#3391: fixed_in_dispute and cna_affected_range relayed [${MODERN}]`, (
       assert.ok(note.includes("as the API answers it, following the source fixed_in_dispute's higher names") && note.includes("fixed_in_dispute: the CVE record's CNA and the advisory disagree on the range that holds it; the API sent no note on it"), note);
       assert.doesNotMatch(note, FALSE_CLAIMS);
     }
-    // Control.
-    const c = WIRE.cna_fixed_cna_affected_range;
-    stubState.remediation = remediationOf(c, "CVE-2026-4800", false);
-    const plain = await client.callTool({ name: "cve_remediation", arguments: { cve_id: "CVE-2026-4800", ecosystem: "npm", package: "lodash", version: "4.18.0" } });
+    // Control: without the dispute, an advisory interval's fixed_in is the advisory's.
+    const a = WIRE.cna_fixed_advisory_interval;
+    const aCve = a.match.matches[0].cve_id;
+    stubState.remediation = remediationOf(a, aCve, false);
+    const plain = await client.callTool({ name: "cve_remediation", arguments: { cve_id: aCve, ecosystem: "npm", package: a.package, version: a.version } });
     assert.ok(!plain.isError, noteOf(plain));
+    assert.equal(plain.structuredContent.data.installed.version_evidence, "advisory_interval");
     assert.ok(!Object.hasOwn(plain.structuredContent.data, "fixed_in_dispute"));
     assert.doesNotMatch(noteOf(plain), /fixed_in_dispute/);
     assert.match(noteOf(plain), /as the advisory states it/);
+    // #3767: and where the range holding the version is the CVE record's CNA range (cna_affected_range), with no dispute,
+    // fixed_in is the CNA's, never called the advisory's (through 3.2.2 it was).
+    const c = WIRE.cna_fixed_cna_affected_range;
+    stubState.remediation = remediationOf(c, "CVE-2026-4800", false);
+    const cnaRange = await client.callTool({ name: "cve_remediation", arguments: { cve_id: "CVE-2026-4800", ecosystem: "npm", package: "lodash", version: "4.18.0" } });
+    assert.ok(!cnaRange.isError, noteOf(cnaRange));
+    assert.doesNotMatch(noteOf(cnaRange), /fixed_in_dispute/);
+    assert.doesNotMatch(noteOf(cnaRange), FALSE_CLAIMS);
+    assert.match(noteOf(cnaRange), /fixed_in is 4\.18\.1: the fixed bound of the affected range \[4\.0\.0, 4\.18\.1\) that holds it, as the CVE record's CNA states it, not an advisory \(installed\.version_evidence cna_affected_range\);/);
   });
 
   // Round 11 (the round-10 verify's d5 F5, F6, F7). Controls in round 10: cve_remediation's note quoted a 200,000-character

@@ -1,0 +1,270 @@
+{
+  "about": "#3767: production answers for a CVE that only the CVE record's CNA names a package for (#3757, served by production from 2026-11-11), read on 2026-11-11 between 14:32Z and 14:48Z through scripts/probe-prod.sh: match, GET /api/v1/public/cves/match for npm suneditor 3.3.0 (each description cut to its first sentence); remediation_affected and remediation_not_assessed, GET /api/v1/public/cves/CVE-2026-124494/remediation with the installed version 3.3.0 and 3.4.0, whole. Read on 2026-11-11 at 15:21Z through scripts/probe-prod.sh (#3767's review), whole: match_not_in_corpus, GET /api/v1/public/cves/match for Maven org.apache.tomee:openejb-http 11.0.0 (assessed false, package_not_in_advisory_corpus, its 7 CVEs named only by CNA purls, none calling 11.0.0 affected); match_cleared, the same for npm suneditor 3.4.0 (assessed true, not_affected_count 4, two of the four on VulnCheck's CNA records alone, which cve_remediation answers not_assessed: #3825). cna_only_not_assessed is not read from production (synthetic): it is core-backend's MatchByPackage answer (internal/cve/pkgmatch.go) for a package no advisory record names and none of whose CNA-only records calls the version affected, written here in that shape: assessed false, package_not_in_advisory_corpus, the CNA records counted in advisories_considered, not_affected_count and undetermined (reasons cna_range_status_unknown and cna_range_undecidable_scheme, with the sentences of pkgmatch_cnapurl.go).",
+  "match": {
+    "advisories_considered": 4,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 2,
+    "cve_ids": [
+      "CVE-2026-124494",
+      "CVE-2026-124422"
+    ],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [
+      {
+        "cve_id": "CVE-2026-124494",
+        "severity": "CRITICAL",
+        "cvss_v3_score": 9.3,
+        "description": "SunEditor before 3.4.0 contains a stored cross-site scripting vulnerability because the html.clean() sanitizer's _normalizeURL() function decodes named entities like &colon; to an empty string.",
+        "kev_listed": false,
+        "ransomware": false,
+        "epss_score": 0.00344,
+        "cvss_v2_score": 0,
+        "cvss_v4_score": 9.3,
+        "echelongraph_score": 9.3,
+        "echelongraph_severity": "CRITICAL",
+        "effective_score": 9.3,
+        "effective_severity": "CRITICAL",
+        "score_assessed": true,
+        "matched_criteria": "pkg:npm/suneditor",
+        "match_method": "cna package url",
+        "match_confidence": 0.8,
+        "vendor_unknown": false,
+        "match_reason": "cna package url (confidence 0.80): npm/suneditor — version 3.3.0 is inside the range [0, 3.4.0) that VulnCheck (CNA) states for suneditor; no advisory record EchelonGraph holds names this package for this CVE, so the CVE record's CNA is the only source",
+        "version_evidence": "cna_affected_range",
+        "interval": {
+          "introduced": "0",
+          "fixed": "3.4.0"
+        },
+        "fixed_in": "3.4.0"
+      },
+      {
+        "cve_id": "CVE-2026-124422",
+        "severity": "MEDIUM",
+        "cvss_v3_score": 6.1,
+        "description": "SunEditor from 3.0.0 before 3.4.0 contains a stored cross-site scripting vulnerability in html.clean() that rebuilds iframes from data-se-iframe-holder-attrs JSON without filtering srcdoc or uppercase SRC keys.",
+        "kev_listed": false,
+        "ransomware": false,
+        "epss_score": 0.00238,
+        "cvss_v2_score": 0,
+        "cvss_v4_score": 5.3,
+        "echelongraph_score": 6.1,
+        "echelongraph_severity": "MEDIUM",
+        "effective_score": 6.1,
+        "effective_severity": "MEDIUM",
+        "score_assessed": true,
+        "matched_criteria": "pkg:npm/suneditor",
+        "match_method": "cna package url",
+        "match_confidence": 0.8,
+        "vendor_unknown": false,
+        "match_reason": "cna package url (confidence 0.80): npm/suneditor — version 3.3.0 is inside the range [3.0.0, 3.4.0) that VulnCheck (CNA) states for suneditor; no advisory record EchelonGraph holds names this package for this CVE, so the CVE record's CNA is the only source",
+        "version_evidence": "cna_affected_range",
+        "interval": {
+          "introduced": "3.0.0",
+          "fixed": "3.4.0"
+        },
+        "fixed_in": "3.4.0"
+      }
+    ],
+    "not_affected_count": 2,
+    "not_assessed_reason": "",
+    "package": "suneditor",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "3.3.0"
+  },
+  "remediation_affected": {
+    "cve_id": "CVE-2026-124494",
+    "state": "assessed",
+    "not_assessed_reason": null,
+    "fix_status": {
+      "state": "none_confirmed",
+      "basis": "no_fix_evidence",
+      "unread_inputs": []
+    },
+    "installed": {
+      "ecosystem": "npm",
+      "ecosystem_recognised": true,
+      "package": "suneditor",
+      "version": "3.3.0",
+      "verdict": "affected",
+      "version_evidence": "cna_affected_range",
+      "interval": {
+        "introduced": "0",
+        "fixed": "3.4.0"
+      }
+    },
+    "fixed_in": "3.4.0",
+    "cisa": {
+      "kev_listed": false,
+      "required_action": null,
+      "due_date": null,
+      "short_description": null,
+      "notes_urls": []
+    },
+    "fixed_branches": [],
+    "vendor_remediations": [
+      {
+        "vendor": "github",
+        "vendor_display_name": "GitHub Security Advisories",
+        "vendor_advisory_id": "GHSA-cm78-x5pp-rjx2",
+        "vendor_published_at": "2026-11-08T15:31:30Z",
+        "withdrawn": false,
+        "remediation_state": "not_parsed",
+        "remediation_kinds": [],
+        "items": [],
+        "items_total": 0,
+        "vendor_text_withheld": false
+      }
+    ],
+    "fix_references": [],
+    "patches": [],
+    "coverage": {
+      "parsed_vendors": [
+        "redhat",
+        "microsoft",
+        "paloalto",
+        "cisco"
+      ],
+      "vendors_not_parsed": [
+        "github"
+      ],
+      "vendor_advisories_listed": 1,
+      "vendor_advisory_limit": 20,
+      "item_text_cap": 2000,
+      "items_per_advisory_cap": 16
+    },
+    "failed_sections": []
+  },
+  "remediation_not_assessed": {
+    "cve_id": "CVE-2026-124494",
+    "state": "assessed",
+    "not_assessed_reason": null,
+    "fix_status": {
+      "state": "none_confirmed",
+      "basis": "no_fix_evidence",
+      "unread_inputs": []
+    },
+    "installed": {
+      "ecosystem": "npm",
+      "ecosystem_recognised": true,
+      "package": "suneditor",
+      "version": "3.4.0",
+      "verdict": "not_assessed"
+    },
+    "fixed_in": null,
+    "fixed_in_reason": "no advisory record names this package for this CVE; the CVE record's CNA names it by package URL and does not call this version affected, and a CNA statement alone does not clear a version, so it was not assessed against this CVE",
+    "cisa": {
+      "kev_listed": false,
+      "required_action": null,
+      "due_date": null,
+      "short_description": null,
+      "notes_urls": []
+    },
+    "fixed_branches": [],
+    "vendor_remediations": [
+      {
+        "vendor": "github",
+        "vendor_display_name": "GitHub Security Advisories",
+        "vendor_advisory_id": "GHSA-cm78-x5pp-rjx2",
+        "vendor_published_at": "2026-11-08T15:31:30Z",
+        "withdrawn": false,
+        "remediation_state": "not_parsed",
+        "remediation_kinds": [],
+        "items": [],
+        "items_total": 0,
+        "vendor_text_withheld": false
+      }
+    ],
+    "fix_references": [],
+    "patches": [],
+    "coverage": {
+      "parsed_vendors": [
+        "redhat",
+        "microsoft",
+        "paloalto",
+        "cisco"
+      ],
+      "vendors_not_parsed": [
+        "github"
+      ],
+      "vendor_advisories_listed": 1,
+      "vendor_advisory_limit": 20,
+      "item_text_cap": 2000,
+      "items_per_advisory_cap": 16
+    },
+    "failed_sections": []
+  },
+  "cna_only_not_assessed": {
+    "advisories_considered": 3,
+    "assessed": false,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 0,
+    "cve_ids": [],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [],
+    "not_affected_count": 1,
+    "not_assessed_reason": "package_not_in_advisory_corpus",
+    "package": "cna-only-pkg",
+    "undetermined": [
+      {
+        "cve_id": "CVE-2099-37570",
+        "package": "cna-only-pkg",
+        "ecosystem": "npm",
+        "reason": "cna_range_status_unknown",
+        "detail": "version 1.0.0 is outside every range Example CNA (CNA) states as affected for cna-only-pkg, and it states no status for this version (its defaultStatus is unknown or unstated); no advisory record EchelonGraph holds names this package for this CVE, so the CVE record's CNA is the only source"
+      },
+      {
+        "cve_id": "CVE-2099-37571",
+        "package": "cna-only-pkg",
+        "ecosystem": "npm",
+        "reason": "cna_range_undecidable_scheme",
+        "detail": "Example CNA (CNA) states the versions of cna-only-pkg in a version scheme this matcher cannot order (custom), so no version is decided on it; no advisory record EchelonGraph holds names this package for this CVE, so the CVE record's CNA is the only source"
+      }
+    ],
+    "undetermined_count": 2,
+    "version": "1.0.0"
+  },
+  "match_not_in_corpus": {
+    "advisories_considered": 7,
+    "assessed": false,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 0,
+    "cve_ids": [],
+    "ecosystem": "Maven",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [],
+    "not_affected_count": 7,
+    "not_assessed_reason": "package_not_in_advisory_corpus",
+    "package": "org.apache.tomee:openejb-http",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "11.0.0"
+  },
+  "match_cleared": {
+    "advisories_considered": 4,
+    "assessed": true,
+    "candidates_capped": false,
+    "capped": false,
+    "count": 0,
+    "cve_ids": [],
+    "ecosystem": "npm",
+    "ecosystem_recognised": true,
+    "match_layer": "registry",
+    "matches": [],
+    "not_affected_count": 4,
+    "not_assessed_reason": "",
+    "package": "suneditor",
+    "undetermined": [],
+    "undetermined_count": 0,
+    "version": "3.4.0"
+  }
+}

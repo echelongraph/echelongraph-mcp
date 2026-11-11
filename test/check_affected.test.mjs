@@ -326,7 +326,10 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       assert.equal(sc.coverage.not_affected_count, 10);
       const n = noteOf(res);
       assert.match(n, /0 CVEs match this version, a measured result \(we looked and found nothing that matches\), not a lookup failure\./);
-      assert.match(n, /10 CVEs were decided not to affect this version \(not_affected_count, one per CVE however many of its advisory records are stored\), and only those are cleared\./);
+      // #3767 (the review's S2): one per CVE however many of its records are stored, a CVE no advisory record names the
+      // package for among them where its CNA's purl statement calls the version unaffected, which cve_remediation answers
+      // not_assessed (#3825).
+      assert.match(n, /10 CVEs were decided not to affect this version \(not_affected_count, one per CVE however many of its records are stored\), and only those are cleared; a CVE no advisory record names the package for counts here where its CNA's purl statement calls this version unaffected, on that statement alone, and cve_remediation answers that CVE not_assessed\./);
       assert.doesNotMatch(n, /NOT ASSESSED|AFFECTED:/);
     });
     it("assessed with 0 matches on the CPE path is measured too", async () => {
@@ -362,7 +365,8 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
       const res = await call({ ecosystem: "npm", package: "lodash", version: "4.17.15" }, REASONS.no_decidable_advisory);
       assert.equal(res.structuredContent.coverage.undetermined_count, 2);
       assert.equal(res.structuredContent.data.undetermined.length, 2);
-      assert.match(noteOf(res), /UNDETERMINED: 2 CVEs with advisories naming this package could not be decided at this version \(undetermined_count, one per CVE, listed in undetermined\): report them as undetermined, never as safe\./);
+      // #3767: an undetermined CVE's record may be the CVE record's CNA statement naming the package by package URL (#3757).
+      assert.match(noteOf(res), /UNDETERMINED: 2 CVEs whose advisory records name this package, or whose CVE record's CNA names it by package URL, could not be decided at this version \(undetermined_count, one per CVE, listed in undetermined\): report them as undetermined, never as safe\./);
     });
     it("a reason this version does not know is still not_assessed, and named", async () => {
       const res = await call({ product: "openssl", version: "3.0.0" }, cpe({ assessed: false, not_assessed_reason: "some_future_reason" }));
@@ -408,7 +412,7 @@ describe(`check_affected against a stub of ${PATH} [${ERA}]`, () => {
         withMatches(registry, [LODASH_MATCH], { undetermined_count: 1, undetermined: [{ cve_id: "CVE-2099-30012", package: "lodash", ecosystem: "npm", reason: "collapsed_fix_boundary" }] }),
       );
       assert.equal(res.structuredContent.state, "measured");
-      assert.match(noteOf(res), /UNDETERMINED: 1 CVE with advisories naming this package could not be decided at this version \(undetermined_count, one per CVE, listed in undetermined\): report it as undetermined, never as safe\./);
+      assert.match(noteOf(res), /UNDETERMINED: 1 CVE whose advisory records name this package, or whose CVE record's CNA names it by package URL, could not be decided at this version \(undetermined_count, one per CVE, listed in undetermined\): report it as undetermined, never as safe\./);
     });
     it("excluded_count above 0 is named", async () => {
       const res = await call({ product: "openssl", version: "3.0.0" }, withMatches(cpe, [OPENSSL_MATCH], { excluded_count: 3 }));

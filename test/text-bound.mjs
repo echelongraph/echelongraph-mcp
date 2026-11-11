@@ -627,7 +627,10 @@ export const SHAPED = [
   // cpe_version_end_including, and the DATA CUT note, which the text carries too, names that
   // level's fields, so it names them here as well: 24,807 / 14,352 before (54 characters each).
   // Round 11 (3.2.0): +94 in each, REGISTRY_METHOD's clause on the CNA statements the API reads beside each advisory.
-  { label: "check_affected, PyPI django 1.11.0 (the registry path)", tool: "check_affected", page: "default", args: { ecosystem: "PyPI", package: "django", version: "1.11.0" }, fixture: "check_affected", answers: ["django"], repeat: { matches: 29 }, size: 24_955, structured: 14_500 },
+  // #3767 (3.2.3): +342 in each (24,955 and 14,500 before), REGISTRY_METHOD (339 to 681 characters) naming the CVEs only
+  // the CVE record's CNA names by purl (#3757), for a language registry's package (npm, PyPI, Maven and nine others), and
+  // that a package only CNA records name is never answered clean.
+  { label: "check_affected, PyPI django 1.11.0 (the registry path)", tool: "check_affected", page: "default", args: { ecosystem: "PyPI", package: "django", version: "1.11.0" }, fixture: "check_affected", answers: ["django"], repeat: { matches: 29 }, size: 25_297, structured: 14_842 },
   // #3013's review: each thinned match keeps ransomware, effective_score and score_assessed too,
   // which workload_triage reads (structured 17,122 before, text 31,303: the DATA CUT sentence names
   // the fields); all 50 rows still stay.
@@ -792,7 +795,11 @@ export const SHAPED = [
     // 548 characters to 663 (+115), in the text's envelope block (1,377 to 1,492) and in the
     // structured result. The pins before, 22,031 and 26,204, were 48 under what this case measured
     // (22,079 and 26,252, inside the bound of 50), so they move by 163.
-    size: 22_194, structured: 26_367,
+    // #3767 (3.2.3): +438 in each (22,194 and 26,367 before), the method (663 to 1,101 characters) saying which records
+    // an installed version's verdict is decided on: the OSV advisory records, the CNA statements read beside them, and a
+    // CVE record's CNA purl statement alone where none names the package (#3757), which check_affected counts in
+    // not_affected_count where cve_remediation answers not_assessed (#3825).
+    size: 22_632, structured: 26_805,
   },
   { label: "get_cwe, CWE-79", tool: "get_cwe", page: "default", args: { cwe_id: "CWE-79" }, fixture: "get_cwe", answers: ["CWE-79"], repeat: { cves: 50 }, size: 28_743, structured: 24_299 },
   // #2800 review: no answer the API serves reaches get_cwe's cut. It cuts each row's description to

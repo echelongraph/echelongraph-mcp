@@ -65,8 +65,13 @@ export const REMEDIATION_NOT_A_ZERO =
 export const REMEDIATION_CISA = "CISA's required_action is directed at US federal civilian agencies (under BOD 26-04, which replaced BOD 22-01 on 10 June 2026) and is not EchelonGraph's advice.";
 
 const METHOD =
-  "EchelonGraph's stored sources for one CVE (GET /api/v1/public/cves/:id/remediation): CISA's Known Exploited Vulnerabilities catalog text; the affected ranges and fixes of OSV advisories; the remediation each vendor advisory lists, categorised by the vendor's own category (Red Hat and Cisco CSAF remediations, MSRC CVRF Workaround, Mitigation and Vendor Fix rows, Palo Alto's solution and work_around sections), except that a Cisco vendor_fix may be no_fix_planned where Cisco's summary says no fix will be released; the CVE record's references tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA; and cve_patches. Nothing is generated or tested.";
+  "EchelonGraph's stored sources for one CVE (GET /api/v1/public/cves/:id/remediation): CISA's Known Exploited Vulnerabilities catalog text; the affected ranges and fixes of OSV advisories; the remediation each vendor advisory lists, categorised by the vendor's own category (Red Hat and Cisco CSAF remediations, MSRC CVRF Workaround, Mitigation and Vendor Fix rows, Palo Alto's solution and work_around sections), except that a Cisco vendor_fix may be no_fix_planned where Cisco's summary says no fix will be released; the CVE record's references tagged Patch or Mitigation by NVD, or patch or mitigation by the CNA; and cve_patches. An installed version's verdict and fixed_in are decided on the records check_affected's registry path reads: the OSV advisory records, with the CVE record's CNA statements read beside them, and, where none names the package for the CVE, the CNA's purl statement alone, which gives affected or not_assessed here, never not_affected, though check_affected counts such a CVE in not_affected_count where the CNA calls the version unaffected. Nothing is generated or tested.";
 
+// #3767: the method also says where an installed version's verdict comes from: the records check_affected's registry path
+// reads (#3391's CNA statements beside each advisory among them), and since #3757 a CVE record's CNA purl statement where
+// no advisory record names the package for the CVE (core-backend cve/pkgmatch_fixedin.go installedFixFromRows: affected,
+// or not_assessed, never not_affected, on it alone), which check_affected's match path counts in not_affected_count where
+// the CNA calls the version unaffected (#3825: the two disagree, and the method says so).
 // #3084 (merged from 24dad5eb): REMEDIATION_CISA names BOD 26-04, which replaced BOD 22-01, 48 characters
 // longer, which left this description 71 under the 2048-character cut (#2924's floor is 100); the
 // remediation_state parentheses and the failed_sections sentence are said shorter, every claim kept.
@@ -123,7 +128,7 @@ function schemas() {
         package: opt(z.string()),
         version: opt(z.string()),
         verdict: opt(z.union([z.enum(VERDICTS), z.string()])).describe(
-          "affected (a range on record holds the version), not_affected (no range on record holds it), undetermined (a range could not be decided at it) or not_assessed (the record names no such package for this CVE, or the lookup did not run).",
+          "affected (a range on record holds the version), not_affected (no range on record holds it), undetermined (a range could not be decided at it) or not_assessed (no advisory record, and no CNA package URL, names the package for this CVE; or only the CVE record's CNA names it, by package URL, and does not call this version affected, which alone never clears it; or the lookup did not run).",
         ),
         version_evidence: versionEvidenceSchema(),
         interval: opt(z.looseObject({ introduced: opt(z.string()), fixed: opt(z.string()), last_affected: opt(z.string()) })).describe(
@@ -134,7 +139,7 @@ function schemas() {
       }),
     ).describe("The installed version asked for, as the API read it from the request headers, and its verdict against this CVE; absent when none was asked."),
     fixed_in: opt(z.string()).describe(
-      "With an installed version: the first version above it that no affected range on record holds, always above it, as the advisory states it: the fixed bound of the range holding it, moved past any overlapping range that still holds that bound (fixed_in_detail then names it). null when no range on record holds it, no fix is on record past the ranges holding it, or the version was not assessed, with fixed_in_reason saying which. Absent when no installed version was asked. Where fixed_in_dispute is set, the CVE record's CNA and the advisory disagree on the range that holds the version, and fixed_in follows the source its higher names (its note says how), not the advisory alone.",
+      "With an installed version: the first version above it that no affected range on record holds, always above it, as the advisory states it, or, where installed.version_evidence is cna_affected_range, the CVE record's CNA range: the fixed bound of the range holding it, moved past any overlapping range that still holds that bound (fixed_in_detail then names it). null when no range on record holds it, no fix is on record past the ranges holding it, or the version was not assessed, with fixed_in_reason saying which. Absent when no installed version was asked. Where fixed_in_dispute is set, the CVE record's CNA and the advisory disagree on the range that holds the version, and fixed_in follows the source its higher names (its note says how), not the advisory alone.",
     ),
     fixed_in_reason: opt(z.string()).describe("Why fixed_in is null; absent when fixed_in is a version."),
     fixed_in_detail: opt(z.string()).describe(
@@ -429,7 +434,8 @@ function onePackageListedTwice(rows: unknown[]): { named: string[]; folded: numb
 }
 
 function branchSentence(rows: unknown[]): string {
-  if (rows.length === 0) return "fixed_branches is empty: no affected package range is on record, which is not a finding that no fix exists.";
+  // #3767: fixed_branches is the advisory records' ranges; a CVE only its CNA names a package for (#3757) has none there.
+  if (rows.length === 0) return "fixed_branches is empty: no advisory record's affected package range is on record (the CVE record's own CNA ranges are not listed in it), which is not a finding that no fix exists.";
   let ranges = 0;
   let fixed = 0;
   for (const r of rows) {
@@ -484,13 +490,21 @@ function installedSentence(asked: { ecosystem: string; package: string; version:
       : "the API sent no note on it.";
   return `${s} fixed_in_dispute: the CVE record's CNA and the advisory disagree on the range that holds it; ${said}`;
 }
+// #3767: where the range holding the version is the CVE record's CNA range (installed.version_evidence
+// cna_affected_range: since #3757 also a CVE no advisory record names the package for, decided on the CNA's statement
+// alone), fixed_in is not said to be as the advisory states it.
 function installedVerdictSentence(asked: { ecosystem: string; package: string; version: string }, d: object, disputed = false): string {
-  const source = disputed ? "as the API answers it, following the source fixed_in_dispute's higher names" : "as the advisory states it";
+  const inst = field(d, "installed");
+  const cnaRange = strAt(inst, "version_evidence") === "cna_affected_range";
+  const source = disputed
+    ? "as the API answers it, following the source fixed_in_dispute's higher names"
+    : cnaRange
+      ? "as the CVE record's CNA states it, not an advisory (installed.version_evidence cna_affected_range)"
+      : "as the advisory states it";
   const who = `${asked.ecosystem} ${asked.package} ${asked.version}`;
   if (!("fixed_in" in d)) {
     return `The answer carries no fixed_in for the installed version asked (${who}): the API did not assess it, which is not a finding either way.`;
   }
-  const inst = field(d, "installed");
   const verdict = strAt(inst, "verdict");
   const fixedIn = strAt(d, "fixed_in");
   if (fixedIn) {

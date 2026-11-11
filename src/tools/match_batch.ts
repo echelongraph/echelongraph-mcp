@@ -8,7 +8,7 @@
 // What a tool keeps for itself: how it reads its input into purls, its own refusals, and how its
 // note says what it read. Everything after "these are the distinct purls to check" is here.
 import * as z from "zod";
-import { blankUnreadableDisputes, disputedOf, disputesSentence, fixedInDisputeSchema, isDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
+import { CNA_PACKAGE_URL, blankUnreadableDisputes, disputedOf, disputesSentence, fixedInDisputeSchema, isDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
 import { WEIGHT_BATCH_ROW, answerCost, mostAnswerBytes, tooLargeToHold } from "../parseBudget.js";
 import type { Reservation, ReserveFor, Room } from "../runtime.js";
 
@@ -79,14 +79,23 @@ const MAX_WAITS = 10;
 // The backend's per-purl cap (cveBatchMaxPurlLen).
 export const MAX_PURL_LEN = 512;
 
+// #3767: since #3757 the matcher also decides, for a language registry's package, a CVE no advisory record holds for the
+// package from the CVE record's CNA statement naming it by package URL (core-backend cve/pkgmatch_cnapurl.go), and such a
+// statement alone never makes a component not_affected: a package only CNA records name is not_assessed
+// (package_not_in_advisory_corpus) unless one calls the version affected. The method is in every batch answer's text and
+// structured result, and the 201-purl probe's cut keeps its 43 rows only within a few characters of it
+// (check_sbom-large-rows.test.mjs; measured 2026-11-11 beside CLEAN_NOTE's 210 characters: 3.2.2's 374 plus 8 kept 43,
+// plus 12 kept 42), so the sentence says it in 384, about 3.2.2's length: "registry matcher" for "registry advisory
+// matcher", "as GET .../match" for "the same matcher GET /api/v1/public/cves/match uses", and "No CPE match, score or
+// ranking."; the detail is in docs/tools.md and the note's sentence on each match the CNA alone makes.
 export const METHOD =
-  "EchelonGraph's registry advisory matcher (POST /api/v1/public/cves/match/batch): each component's purl is mapped to its OSV ecosystem, package name and version, and matched against the affected version ranges EchelonGraph holds from OSV.dev advisory records, the same matcher GET /api/v1/public/cves/match uses when given an ecosystem. No CPE matching, no score, no ranking.";
+  "EchelonGraph's registry matcher (POST /api/v1/public/cves/match/batch, as GET .../match given an ecosystem): each purl is mapped to its OSV ecosystem, package and version, and matched against EchelonGraph's OSV.dev advisory ranges and, for a language package's CVE none names, its CNA's purl statement (match_method cna package url), never clean alone. No CPE match, score or ranking.";
 
 // Always in the envelope's notes, whatever the answer: the refusals a model must not read as clean.
 export const DISTRO_NOTE =
   "A deb, apk or rpm purl without a distro qualifier naming its release (for example ?distro=debian-12 or ?distro=alpine-3.20) is not assessed (distro_release_unknown): the advisory corpus is keyed per distro release, and EchelonGraph does not guess one.";
 export const CLEAN_NOTE =
-  "Only not_affected is a clean verdict, and only for the advisories decided at that version: an undetermined or not_assessed component is not a finding of no vulnerability, and is reported as unchecked, never as clean.";
+  "Only not_affected is a clean verdict, and only for the CVEs decided at that version: an undetermined or not_assessed component is not a finding of no vulnerability, and is reported as unchecked, never as clean.";
 export const MEASURED_AT_NOTE =
   "measured_at is null: the corpus rows are read through a cache whose maximum age the answer states (summary.corpus_cache_max_age_ms), so the answer gives no single time at which they were read.";
 export const FRESHNESS_NOTE = "freshness is null: the answer carries no time at which the advisory corpus was last refreshed.";
@@ -502,6 +511,20 @@ export function verdictSentences(d: object, g: Sending): { sentences: string[]; 
         );
       }
     }
+    // #3767: the matches only the CVE record's CNA makes (match_method "cna package url", #3757), counted with the
+    // components holding them: their provenance is the CNA's alone, and the text's cut levels keep no match_method.
+    let cnaOnly = 0;
+    let cnaRows = 0;
+    for (const r of hits) {
+      const n = (Array.isArray(field(r, "matches")) ? (field(r, "matches") as unknown[]) : []).filter((m) => field(m, "match_method") === CNA_PACKAGE_URL).length;
+      cnaOnly += n;
+      if (n > 0) cnaRows++;
+    }
+    if (cnaOnly > 0) {
+      out.push(
+        `${plural(cnaOnly, "match", "matches")}, on ${plural(cnaRows, "component", "components")}, ${cnaOnly === 1 ? "is" : "are"} on the CVE record's CNA statement alone (match_method cna package url): no OSV advisory record names the package for ${cnaOnly === 1 ? "that CVE" : "those CVEs"}, so the CNA is the only source.`,
+      );
+    }
     // #3391: the matches whose range the CVE's own record (its CNA) and the advisory disagree on, each with its note.
     const disputed = rows.flatMap((r) => {
       const purl = field(r, "purl");
@@ -550,7 +573,7 @@ export const Row = z.looseObject({
   input_kind: opt(z.string()),
   purl: opt(z.string()),
   verdict: opt(z.string()).describe(
-    "affected (count > 0); not_affected (assessed, no match, nothing undetermined: the only clean verdict); undetermined (advisories name the package, at least one could not be decided, none matched: not clean); not_assessed (no verdict: not clean).",
+    "affected (count > 0); not_affected (assessed, no match, nothing undetermined: the only clean verdict); undetermined (advisories name the package, at least one of its CVEs could not be decided, none matched: not clean); not_assessed (no verdict: not clean).",
   ),
   ecosystem: opt(z.string()),
   package: opt(z.string()),
@@ -626,7 +649,7 @@ export const batchDataShape = {
       components: opt(z.number()),
       affected: opt(z.number()),
       not_affected: opt(z.number()).describe("Components with a decided, clean verdict."),
-      undetermined: opt(z.number()).describe("Components whose advisories could not all be decided and none matched: not clean."),
+      undetermined: opt(z.number()).describe("Components whose CVEs could not all be decided, with an advisory naming the package, and none matched: not clean."),
       not_assessed: opt(z.number()).describe("Components with no verdict: not clean."),
       not_assessed_by_reason: opt(
         z.looseObject({

@@ -8,7 +8,12 @@
 //             (cpe_vendor) and whether that vendor was verified (vendor_unknown).
 //   registry  {ecosystem, package, version}: the registry matcher (matchByPackage). The OSV
 //             advisory records EchelonGraph holds for this package, each decided against this
-//             version as affected, not affected, or undetermined.
+//             version as affected, not affected, or undetermined, with the CVE record's CNA
+//             statements read beside each for a language registry's package; and, since #3757, each
+//             CVE no advisory record holds for such a package whose CVE record's CNA names it by
+//             package URL, decided on that statement alone (match_method "cna package url",
+//             core-backend cve/pkgmatch_cnapurl.go). A CNA statement alone never clears a package no
+//             advisory record names.
 //
 // #1983: every typed value travels in a request header (X-EG-Product, X-EG-Version,
 // X-EG-Ecosystem, X-EG-Package; handler.go MatchProductHeader..MatchPackageHeader), percent-
@@ -27,7 +32,7 @@
 // The JSON is relayed verbatim as data (#1874): every match keeps kev_listed, ransomware,
 // epss_score, effective_score, effective_severity and score_assessed as the API sent them.
 import * as z from "zod";
-import { DISPUTE_THIN, blankUnreadableDisputes, disputedOf, disputesSentence, fixedInDisputeSchema, isDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
+import { CNA_PACKAGE_URL, DISPUTE_THIN, MATCH_METHOD_FIELD, UNDETERMINED_REASON_FIELD, blankUnreadableDisputes, disputedOf, disputesSentence, fixedInDisputeSchema, isDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { answering, FULL_ARG, GET_CVE_WHOLE, TEXT_BUDGET_DESCRIPTION, type DataCut, type TextCut } from "../textBudget.js";
 
@@ -65,15 +70,23 @@ export const MATCH_HEADERS = { product: "X-EG-Product", version: "X-EG-Version",
 const CPE_METHOD =
   "EchelonGraph's CPE matcher over its CVE corpus, the matcher behind echelongraph.io/am-i-affected and EchelonGraph's scanner: CVEs whose NVD CPE match criteria name this product token and whose version range includes this version.";
 // Round 11 (the round-10 verify's d5 F8): the method every registry answer carries names the CNA statements the API
-// reads beside each advisory, once it reads them. The description keeps its sentence, true as it stands (it does not say
-// "only"), since adding the clause there takes check_affected past the 100-character headroom under the 2048 cut (#2924).
-const REGISTRY_METHOD =
-  "EchelonGraph's registry matcher, the matcher behind echelongraph.io/am-i-affected for a registry package: the OSV advisory records EchelonGraph holds for this package in this ecosystem, each decided against this version as affected, not affected, or undetermined (and, once its API reads them, the CVE record's CNA statements beside each).";
+// reads beside each advisory. #3767: since #3757 (core-backend cve/pkgmatch_cnapurl.go) it also decides, for a language
+// registry's package, a CVE no advisory record holds for the package whose CVE record's CNA names it by package URL, on
+// that statement alone, and a package only CNA records name is never assessed clean on them (MatchByPackage keeps
+// package_not_in_advisory_corpus unless one calls the version affected). The registries are core-backend's
+// registryEcosystems (cve/pkgmatch.go): npm, PyPI, Maven, Go, Packagist, NuGet, crates.io, RubyGems, Hex, Pub, SwiftURL
+// and GitHub Actions; a CNA purl of a distro, CRAN, Hackage, CocoaPods, conda or Conan type names "another collection"
+// (cve/pkgmatch_fixedin.go cnaPurlTypes). test/cna-purl-text.test.mjs holds the sentences.
+export const REGISTRY_METHOD =
+  "EchelonGraph's registry matcher, the matcher behind echelongraph.io/am-i-affected for a registry package: the OSV advisory records EchelonGraph holds for this package in this ecosystem, each decided against this version as affected, not affected, or undetermined, for a language registry's package (npm, PyPI, Maven and nine other registries; not a Linux distribution's, CRAN's or Hackage's) with the CVE record's CNA statements read beside each; and, for such a package, each CVE no advisory record holds for it whose CVE record's CNA names it by package URL, decided on that statement alone (match_method cna package url). A package only CNA records name is never answered clean.";
 const NO_TIME = "measured_at is null: a match answer carries no observation time, and each matched CVE is a record of the CVE feed, polled from its sources on a schedule.";
 const NO_FRESHNESS = "freshness is null: the match answer carries no time at which the feed's pollers last completed.";
 
 // Why an answer says assessed false (core-backend cve/cpematch.go, cve/pkgmatch.go). One sentence
 // each, worded so that none reads as a clean result.
+// package_not_in_advisory_corpus's last clause, said only where no record of the package was read (advisories_considered
+// 0 or absent): where CNA records were read, cnaNamedSentence says the name is not in doubt instead.
+const NAME_WORTH_CHECKING = "; the ecosystem and package name are worth checking.";
 const REASONS: Record<string, string> = {
   product_not_in_cpe_corpus:
     "no CVE in the CPE corpus has this token as its CPE product, so the component was not located, not cleared; the CPE product token can differ from a package name (spring_boot, not spring-boot), and a registry package can be looked up by ecosystem and package instead.",
@@ -83,10 +96,12 @@ const REASONS: Record<string, string> = {
     "the product's candidate CVEs were still loading when this request's time ran out (degraded), so nothing was compared; the same lookup can be retried shortly.",
   candidate_window_truncated:
     "the product has more candidate CVEs than one lookup loads (candidates_capped), so the CVEs below the cut were never examined.",
+  // #3767: since #3757 a CVE record's CNA may name the package by package URL where no advisory record does; the lookup
+  // reads it, and still answers this reason unless a CNA statement calls the version affected.
   package_not_in_advisory_corpus:
-    "EchelonGraph holds no advisory record for this package in this ecosystem, so the package was not located, not cleared; the ecosystem and package name are worth checking.",
+    `EchelonGraph holds no advisory record for this package in this ecosystem, so the package was not cleared: a CVE record's CNA may name it by package URL, but a CNA statement alone never clears a package (such CVEs are counted in not_affected_count or listed in undetermined, never as a clean answer)${NAME_WORTH_CHECKING}`,
   no_decidable_advisory:
-    "EchelonGraph holds advisories for this package, but none of its CVEs could be decided either way at this version (see undetermined: an advisory that could not be decided, or, once EchelonGraph's API reads them, the CVE record's own CNA statements that could not be read against it).",
+    "EchelonGraph holds advisories for this package, but none of its CVEs could be decided either way at this version (see undetermined: an advisory that could not be decided, the CVE record's own CNA statements that could not be read against it, or a CVE no advisory holds whose CNA statement for the package could not be decided).",
   advisory_lookup_failed: "the advisory lookup failed.",
 };
 
@@ -111,7 +126,7 @@ const Match = z.looseObject({
   score_unassessed_reason: opt(z.string()),
   vendor_severity: opt(z.string()),
   matched_criteria: opt(z.string()),
-  match_method: opt(z.string()),
+  match_method: opt(z.string()).describe(MATCH_METHOD_FIELD),
   match_confidence: opt(z.number()),
   cpe_vendor: opt(z.string()).describe("The vendor NVD's CPE asserts for this match."),
   vendor_unknown: opt(z.boolean()).describe("true: the vendor was not verified, so the match is real but its attribution to your vendor is not."),
@@ -145,7 +160,7 @@ const Undetermined = z.looseObject({
   cve_id: opt(z.string()),
   package: opt(z.string()),
   ecosystem: opt(z.string()),
-  reason: opt(z.string()),
+  reason: opt(z.string()).describe(UNDETERMINED_REASON_FIELD),
   detail: opt(z.string()),
 });
 const DATA = z.looseObject({
@@ -169,7 +184,7 @@ const DATA = z.looseObject({
   excluded: z.unknown().optional(),
   undetermined_count: opt(z.number()),
   undetermined: opt(z.array(Undetermined)),
-  not_affected_count: opt(z.number()).describe("CVEs decided as not affecting this version: on the registry path one per CVE, however many of its advisory records are stored (advisories_considered counts those)."),
+  not_affected_count: opt(z.number()).describe("CVEs decided as not affecting this version: on the registry path one per CVE, however many of its advisory records are stored (advisories_considered counts those, and each CVE only its CNA names the package for once, decided or not); beside assessed false (package_not_in_advisory_corpus) the count is CNA records only, and is not a clean answer."),
   degraded: opt(z.boolean()).describe("true: the lookup ran out of time."),
   undecidable_excluded_count: opt(z.number()),
   undecided_candidate_count: opt(z.number()),
@@ -191,10 +206,13 @@ const COVERAGE = z.strictObject({
 });
 
 // Constant strings, so marketing-site lib/mcpToolClaims.test.ts can fold them should it read
-// this file.
+// this file. #3767: the registry path names the CVEs only the CVE record's CNA names by purl (#3757); to stay within
+// #2924's 100 characters under the 2,048 cut (1,948 with it), "include that product at that version" reads "include it
+// at that version", the vendor clause "verified or not", the score_assessed clause "echelongraph_score withheld", and
+// an undecidable advisory "A CVE undecidable" (a CNA-only CVE is reported so too). Every claim is kept.
 export const CHECK_AFFECTED_TITLE = "Am I affected? (product or package at a version)";
 export const CHECK_AFFECTED_DESCRIPTION =
-  "Whether a product or package at a given version is affected by known CVEs, from the same matcher as echelongraph.io/am-i-affected. The CPE path takes product (an NVD CPE product token, such as nginx) and version, and returns the CVEs whose NVD CPE match criteria include that product at that version; each match names the vendor NVD asserts (cpe_vendor) and whether it was verified (vendor_unknown). The registry path takes ecosystem (npm, PyPI, Maven and other OSV ecosystem names), package and version, and decides each OSV advisory EchelonGraph holds for that package as affected, not affected or undetermined. count depends on assessed: assessed false means the lookup did not evaluate this component, not_assessed_reason says why, and a count of 0 there is not a finding of not affected. An advisory undecidable at this version is reported as undetermined (undetermined_count, and up to 50 of them in undetermined), never as safe. Each match carries cve_id, kev_listed, ransomware, epss_score, effective_score, effective_severity and score_assessed (false: not yet scored, so echelongraph_score is withheld). A registry match also carries interval, the affected interval holding it, and fixed_in, the lowest unaffected version above it, or null with fixed_in_reason; a CPE match carries no fixed_in. All four inputs travel in request headers, never in the URL." +
+  "Whether a product or package at a given version is affected by known CVEs, from the same matcher as echelongraph.io/am-i-affected. The CPE path takes product (an NVD CPE product token, such as nginx) and version, and returns the CVEs whose NVD CPE match criteria include it at that version; each match names the vendor NVD asserts (cpe_vendor), verified or not (vendor_unknown). The registry path takes ecosystem (npm, PyPI, Maven and other OSV ecosystem names), package and version, and decides each OSV advisory EchelonGraph holds for that package, and each CVE only its CNA names by purl, as affected, not affected or undetermined. count depends on assessed: assessed false means the lookup did not evaluate this component, not_assessed_reason says why, and a count of 0 there is not a finding of not affected. A CVE undecidable at this version is reported as undetermined (undetermined_count, and up to 50 of them in undetermined), never as safe. Each match carries cve_id, kev_listed, ransomware, epss_score, effective_score, effective_severity and score_assessed (false: not yet scored; echelongraph_score withheld). A registry match also carries interval, the affected interval holding it, and fixed_in, the lowest unaffected version above it, or null with fixed_in_reason; a CPE match carries no fixed_in. All four inputs travel in request headers, never in the URL." +
   " " +
   TEXT_BUDGET_DESCRIPTION +
   " Cut, the excluded and undetermined samples keep their first 10 entries, each its cve_id and reason, cve_ids keeps its first 10, and each match keeps cve_id, kev_listed, ransomware, epss_score, effective_score, score_assessed and fixed_in at least. Every CPE match stays in the text; near the cap, a registry list's last matches can leave it, and the note says how many.";
@@ -239,6 +257,28 @@ function matchesNote(matches: unknown[]): string {
     out += ` NOT YET SCORED (score_assessed: false): ${shown}${unscored.length > 10 ? ` and ${unscored.length - 10} more` : ""}; EchelonGraph has not scored ${unscored.length === 1 ? "it" : "them"}, so an effective_score of zero or an empty effective_severity there means unrated, not harmless.`;
   }
   return out;
+}
+
+// #3767 (the review's S4): package_not_in_advisory_corpus beside advisories_considered above 0. No advisory record names
+// the package, so every row read is a CVE record's CNA statement naming it by package URL, one per CVE (#3757), and none
+// called the version affected (MatchByPackage answers it assessed then): the name is right, and the package is still not
+// cleared. Production's Maven org.apache.tomee:openejb-http 11.0.0 (2026-11-11): advisories_considered 7, not_affected_count 7.
+export function cnaNamedSentence(n: number): string {
+  return n === 1
+    ? ` 1 CVE record's CNA names this package by package URL (advisories_considered 1); it does not call this version affected, so the name is not in doubt, and a CNA statement alone never clears it.`
+    : ` ${n} CVE records' CNAs name this package by package URL (advisories_considered ${n}); none calls this version affected, so the name is not in doubt, and a CNA statement alone never clears it.`;
+}
+
+// #3767: the matches only the CVE record's CNA makes (match_method "cna package url", core-backend
+// cve/pkgmatch_cnapurl.go, #3757): no OSV advisory record names the package for those CVEs, so the CNA is their only
+// source, and the note says which they are. "OSV", not "EchelonGraph holds": a GitHub advisory with no affected package
+// can be held for the same CVE (GHSA-cm78-x5pp-rjx2 for CVE-2026-124494), and cve_remediation lists it.
+export function cnaOnlyNote(matches: unknown[]): string {
+  const ids = matches.flatMap((m, i) => (field(m, "match_method") === CNA_PACKAGE_URL ? [str(m, "cve_id") ?? `matches[${i}]`] : []));
+  if (ids.length === 0) return "";
+  const shown = `${ids.slice(0, 10).join(", ")}${ids.length > 10 ? ` and ${ids.length - 10} more` : ""}`;
+  const which = ids.length === matches.length ? (ids.length === 1 ? "The match is" : "Every match is") : plural(ids.length, "match is", "matches are");
+  return ` ${which} on the CVE record's CNA statement alone (match_method cna package url: ${shown}): no OSV advisory record names this package for ${ids.length === 1 ? "that CVE" : "those CVEs"}, so the CNA is the only source.`;
 }
 
 // #2834: what the registry matches say about a fix. fixed_in is the first version above this one
@@ -406,6 +446,7 @@ async function checkAffected(kit: CheckAffectedKit, a: Args): Promise<ToolResult
     const candidatesCapped = bool(d, "candidates_capped");
     const undetermined = num(d, "undetermined_count");
     const notAffected = num(d, "not_affected_count");
+    const considered = num(d, "advisories_considered");
     const excluded = num(d, "excluded_count");
     const degraded = bool(d, "degraded");
     const layer = str(d, "match_layer");
@@ -416,19 +457,35 @@ async function checkAffected(kit: CheckAffectedKit, a: Args): Promise<ToolResult
     if (assessed === true) {
       note += ` (state: measured) assessed: true, so the lookup evaluated ${what}.`;
     } else if (assessed === false) {
-      const why = reason === null ? "the answer gives no not_assessed_reason." : (REASONS[reason] ?? `the answer gives not_assessed_reason ${reason}, which this version of the server does not describe.`);
+      const cnaNamed = reason === "package_not_in_advisory_corpus" && considered !== null && considered > 0;
+      const known = reason === null ? undefined : REASONS[reason];
+      const why =
+        reason === null
+          ? "the answer gives no not_assessed_reason."
+          : known === undefined
+            ? `the answer gives not_assessed_reason ${reason}, which this version of the server does not describe.`
+            : cnaNamed
+              ? `${known.slice(0, -NAME_WORTH_CHECKING.length)}.${cnaNamedSentence(considered)}`
+              : known;
       note += ` (state: not_assessed) NOT ASSESSED: assessed is false for ${what}${reason === null ? "" : ` (not_assessed_reason ${reason})`}: ${why} A count of 0 here does not mean this version is not affected: do not report it as unaffected or clean.`;
     } else {
       note += ` (state: not_assessed) The answer carries no assessed field (an API older than it sends none), so it does not say whether ${what} was evaluated, and a count of 0 here does not mean this version is not affected.`;
     }
     if (count !== null && count > 0) {
-      note += ` AFFECTED: ${plural(count, "CVE matches", "CVEs match")} this version${capped === true ? " (capped: true, so the list stopped at its cap and more may match)" : ""}.${matchesNote(matches)}${fixedInNote(matches)}${disputesSentence(disputedOf(matches))}${unreadDisputesSentence(unreadDisputes)}`;
+      note += ` AFFECTED: ${plural(count, "CVE matches", "CVEs match")} this version${capped === true ? " (capped: true, so the list stopped at its cap and more may match)" : ""}.${matchesNote(matches)}${cnaOnlyNote(matches)}${fixedInNote(matches)}${disputesSentence(disputedOf(matches))}${unreadDisputesSentence(unreadDisputes)}`;
     } else if (count === 0 && assessed === true) {
       note += ` 0 CVEs match this version, a measured result (we looked and found nothing that matches), not a lookup failure.`;
-      if (lookup === "registry" && notAffected !== null) note += ` ${plural(notAffected, "CVE was", "CVEs were")} decided not to affect this version (not_affected_count, one per CVE however many of its advisory records are stored), and only those are cleared.`;
+      if (lookup === "registry" && notAffected !== null) note += ` ${plural(notAffected, "CVE was", "CVEs were")} decided not to affect this version (not_affected_count, one per CVE however many of its records are stored), and only those are cleared; a CVE no advisory record names the package for counts here where its CNA's purl statement calls this version unaffected, on that statement alone, and cve_remediation answers that CVE not_assessed.`;
     }
+    // #3767: on the registry path a CVE is undetermined from an advisory record or, since #3757, from the CVE record's
+    // CNA statement naming the package by package URL; on the CPE path (#3151) from a CPE range the version has no
+    // order against.
     if (undetermined !== null && undetermined > 0) {
-      note += ` UNDETERMINED: ${plural(undetermined, "CVE", "CVEs")} with advisories naming this package could not be decided at this version (undetermined_count, one per CVE, listed in undetermined): report ${undetermined === 1 ? "it" : "them"} as undetermined, never as safe.`;
+      const whose =
+        lookup === "registry"
+          ? "whose advisory records name this package, or whose CVE record's CNA names it by package URL,"
+          : "whose NVD CPE match criteria name this product";
+      note += ` UNDETERMINED: ${plural(undetermined, "CVE", "CVEs")} ${whose} could not be decided at this version (undetermined_count, one per CVE, listed in undetermined): report ${undetermined === 1 ? "it" : "them"} as undetermined, never as safe.`;
     }
     if (candidatesCapped === true && reason !== "candidate_window_truncated") note += " candidates_capped is true: not every candidate CVE was loaded, so more CVEs may match than the answer lists.";
     if (excluded !== null && excluded > 0) note += ` ${plural(excluded, "candidate CVE was", "candidate CVEs were")} suppressed by the vendor or platform gate (excluded_count, listed in excluded).`;
