@@ -6,6 +6,33 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.4 — 2026-11-12
+
+Text only. The KEV-exposure and exposed-databases radars' countries are hosting countries (#3510): where
+the radar's index geolocates each service's IP address, not necessarily where the operator is.
+
+- **The KEV-exposure radar's countries are hosting countries (#3510).** `cve_exposure`'s description,
+  its note and its `countries` and `top_countries` field text, and `exposure_radar`'s `kev_exposure`
+  note and field text, call them hosting countries: Shodan's IP geolocation, not necessarily the
+  operator's location. The radar stores Shodan's `location.country_name` for each service's IP
+  address: where Shodan geolocates it (for example, a cloud provider's data centre), which is not a record
+  of where the operator is, and the two can differ. `exposure_radar`'s `exposed_databases` note and
+  field text say the same of that radar's countries (the IP geolocation of the index a service was
+  found through: Shodan, or LeakIX when Shodan query credits run low). `docs/exposure-radar.md` says
+  so too, and the README's `cve_exposure` row says "hosting-country/product breakdown".
+- **Wording trimmed to keep `cve_exposure`'s description inside the client cut (#3510).** To make room
+  for the hosting-country phrase within #2924's 100 characters of headroom, the description now says
+  "running a version that maps to this CVE" (was "a version its CVE matcher maps to this CVE"), "as
+  exposed_hosts" (was "returned as exposed_hosts"), "Aggregate, host-redacted, free, keyless." (was
+  "Aggregate and host-redacted; free and keyless."), "keeps a service whose banner version matches"
+  (was "when its banner version matches"), "a row not written or refreshed for 21 days is dropped" (was
+  "a service whose row has not been written or refreshed for 21 days is dropped") and "A count is a
+  banner-version inference" (was "A count is therefore a banner-version inference"). The description no
+  longer names the CVE matcher as what maps a version to the CVE; it still says the count is a
+  banner-version inference over a sample.
+  The README's `cve_exposure` row now reads "(distinct ip:port, `exposed_hosts`)" (was "(distinct
+  ip:port, the `exposed_hosts` field)"), to stay under its 62,000-character ceiling.
+
 ## 3.2.3 — 2026-11-11
 
 The registry tools say where an answer can now come from (#3767). Since 2026-11-11 EchelonGraph's

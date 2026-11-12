@@ -11,16 +11,16 @@
         "leaked-credentials_stats.json": 146371,
         "shadow-ai-radar_stats.json": 46226
       },
-      "code_measured_at": "2026-10-11T11:41:36.680Z",
-      "code_version": "2.7.2+unreleased",
-      "package_version": "2.7.2",
-      "total": 43702,
+      "code_measured_at": "2026-11-12T08:25:58.828Z",
+      "code_version": "3.2.3+unreleased",
+      "package_version": "3.2.3",
+      "total": 44056,
       "blocks": [
         21334,
-        18662,
+        19016,
         3706
       ],
-      "structured": 29962,
+      "structured": 29973,
       "answers_kept": true
     },
     "cve_summary": {
@@ -33,16 +33,16 @@
         "leaked-credentials_stats.json": 146371,
         "shadow-ai-radar_stats.json": 46226
       },
-      "code_measured_at": "2026-10-11T11:41:36.680Z",
-      "code_version": "2.7.2+unreleased",
-      "package_version": "2.7.2",
-      "total": 2725,
+      "code_measured_at": "2026-11-12T08:25:58.828Z",
+      "code_version": "3.2.3+unreleased",
+      "package_version": "3.2.3",
+      "total": 2723,
       "blocks": [
         584,
         1552,
-        589
+        587
       ],
-      "structured": 2565,
+      "structured": 2563,
       "answers_kept": true
     }
   },

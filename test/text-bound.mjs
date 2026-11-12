@@ -597,8 +597,8 @@ export const SHAPED = [
   // longer, +277 to each (the text holds it once, in the envelope block; structuredContent once, in notes).
   // #3467's round-10 review (d1-3467 F4): 4,669 / 5,080 through round 10. The banner time is stored "where Shodan gives a
   // usable one" (the poller stores none for a time absent, unreadable or more than 5 minutes ahead), +34 to each.
-  { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_703, structured: 5_114 },
-  { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 43_702, structured: 29_962 }, // #3010: three radars past their threshold on these 2026-10-05 answers, and the last sentence
+  { label: "cve_exposure, CVE-2023-44487", tool: "cve_exposure", page: "default", args: { cve_id: "CVE-2023-44487" }, fixture: "cve_exposure", answers: ["CVE-2023-44487"], size: 4_778, structured: 5_189 },
+  { label: "exposure_radar", tool: "exposure_radar", page: "default", args: {}, kept: "exposure_radar", size: 44_056, structured: 29_962 }, // #3010: three radars past their threshold on these 2026-10-05 answers, and the last sentence
   { label: "kev_recent, default page (limit 50)", tool: "kev_recent", page: "default", args: {}, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 50 }, set: { limit: 50, count: 50 }, size: 29_187, structured: 23_257 },
   { label: "kev_recent, largest page (limit 200)", tool: "kev_recent", page: "max", args: { limit: 200 }, fixture: "kev_recent", answers: ["recent"], repeat: { kev: 200 }, set: { limit: 200, count: 200 }, size: 32_672, structured: 29_778 },
   // #2867: 2,379 through 2.6.8. The fixture is production's answer from before core-backend served

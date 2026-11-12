@@ -1643,6 +1643,147 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.equal(owned, 1, "the README's License section names what EchelonGraph owns, once");
       assert.match(readme, /EchelonGraph claims no ownership of it or copyright in it\./);
     });
+    // #3510: kev_exposure_observations.country is Shodan's geolocation of each service's IP address (core-backend
+    // kevexposure/poller.go shodanSearch): the HOSTING country, for example a cloud provider's data centre, so a Korean
+    // company's service in us-east-1 counts as United States. It is not a record of where the operator is, and the
+    // two can differ; they can also agree, so the texts say "not necessarily" (#3510 review, F1). ownershipClaims
+    // reads each clause that names a country, in any text the package ships (descriptions and their outputSchema
+    // field text, notes, envelope blocks, README, docs), for the claim: a clause that ties a country to the
+    // organisation, company, operator, owner or vendor without saying it is an IP geolocation (TIES_COUNTRY_TO_ORG),
+    // and the ways the claim gets written without that shape (OWNERSHIP_CLAIMS). A clause that negates it ("not
+    // necessarily", "not a record of") is the honest wording, not a claim. The same rules as
+    // marketing-site/lib/hostingCountryClaims.test.ts. And the KEV-exposure radar's countries, and the exposed data
+    // stores' (F6), are called hosting countries wherever they are counted or ranked (requiredText.ts HOSTING_COUNTRY,
+    // HOSTING_COUNTRY_DB).
+    const ORG = String.raw`(?:company|companies|organi[sz]ations?|owners?|operators?|vendors?|insureds?|business(?:es)?|firms?|customers?|policyholders?|enterprises?)`;
+    // A word that places an organisation: where it is, is based, has its head office or seat, is incorporated or resides.
+    const PLACE = String.raw`(?:located|based(?!\s+on\b)|head[- ]?offices?|headquarter(?:s|ed)?|HQ|seat|registered offices?|incorporated|reside[sd]?|domicil(?:e|ed|es)|nationalit(?:y|ies)|home (?:country|countries|nation|base))`;
+    const PLACES_ORG = new RegExp(String.raw`\b${ORG}\b[\s\S]*\b${PLACE}\b|\b${PLACE}\b[\s\S]*\b${ORG}\b`, "i");
+    const NAMES_PLACE = new RegExp(String.raw`\b${PLACE}\b`, "i");
+    const TIES_COUNTRY_TO_ORG = new RegExp(String.raw`\bcountr(?:y|ies)\b(?:\W+[\w'’-]+){0,12}?\W+${ORG}\b|\b${ORG}\b(?:\W+[\w'’-]+){0,12}?\W+countr(?:y|ies)\b`, "i");
+    const SAYS_GEOLOCATION = /geolocat|\bIP\b/;
+    // The honest wording, in four forms ("not necessarily", "not a record of", "can differ from", "does not record"):
+    // each negates only the words after it, to the next comma or the end of its clause, and those are taken out
+    // before the clause is read (#3510 round-3 review, F1). Any other honest phrasing fails: the check fails safe.
+    const NEGATION = /\b(?:not (?:a record of|necessarily|a reading of|a measure of)|can differ from|does not record)\b[^,]*/gi;
+    const OWNERSHIP_CLAIMS = [
+      ["located", /\blocated\b/i],
+      ["location of the company", new RegExp(String.raw`\blocation of (?:the |its |each |their )?${ORG}\b|\b${ORG}(?:'s|s'|’s)\s+location\b`, "i")],
+      ["nationality", /\bnationalit(?:y|ies)\b/i],
+      ["where the company is", new RegExp(String.raw`\bwhere (?:the |its |each |their )?${ORG}\b[^.;:]*?\b(?:is|are|has|have)\b`, "i")],
+      ["home country", /\b(?:call|calls|called) (?:it )?home\b|\bhome (?:country|countries|nation|base)\b/i],
+      ["based in", /\bbased (?:in|out of)\b/i],
+      ["operating from", /\boperat(?:e|es|ed|ing|ions?) (?:from|out of)\b/i],
+      ["headquartered", /\bhead-?quarter(?:s|ed)?\b/i],
+      ["head office", /\bhead[- ]?offices?\b/i],
+      ["registered office", /\bregistered offices?\b/i],
+      ["resides", /\breside[sd]?\b/i],
+      ["incorporated", /\bincorporated\b(?!\s+into\b)/i],
+      ["jurisdiction", /\bjurisdictions?\b|\bjurisdictional\b/i],
+      ["domicile", /\bdomicil(?:e|ed|es|iary)\b/i],
+      ["the company's country", new RegExp(String.raw`\b${ORG}(?:'s|s')?\s+(?:own\s+|home\s+|legal\s+)?countr(?:y|ies)\b`, "i")],
+      ["legal country", /\b(?:legal|home|registered)\s+countr(?:y|ies)\b/i],
+      ["country of the company", new RegExp(String.raw`\bcountr(?:y|ies) (?:of|where) (?:incorporation|registration|domicile|origin|(?:the |its |each |their )?${ORG})\b`, "i")],
+      ["registered in", /\b(?:registered|incorporated|established) in\b/i],
+    ];
+    // Clause by clause, each negation's span taken out first. A clause that names a country is read for the listed
+    // wordings and for a country tied to the organisation (exempt only where it says IP geolocation and places no
+    // organisation); EVERY clause is read for an organisation and a word that places it, with or without "country"
+    // ("where the businesses behind these services have their head offices").
+    const ownershipClaims = (t) =>
+      t
+        .split(/(?<=[.!?])\s+|[;:—]/)
+        .map((x) => x.replace(NEGATION, " "))
+        .flatMap((x) => [
+          ...(PLACES_ORG.test(x) ? [`places the organisation: ${x.trim()}`] : []),
+          ...(/countr(?:y|ies)/i.test(x)
+            ? [
+                ...OWNERSHIP_CLAIMS.filter(([, re]) => re.test(x)).map(([label]) => `${label}: ${x.trim()}`),
+                ...(TIES_COUNTRY_TO_ORG.test(x) && (!SAYS_GEOLOCATION.test(x) || NAMES_PLACE.test(x)) ? [`ties a country to the organisation: ${x.trim()}`] : []),
+              ]
+            : []),
+        ]);
+    // 3.2.3's unqualified wording for the radar's countries, in each text #3510 corrected.
+    const UNQUALIFIED_KEV_COUNTRIES = /\bacross \d+ countries\b|kev_exposure\.top_countries ranks up to 10 countries\b|exposed_databases\.top_countries ranks up to 10 countries\b|\b10 countries and 12 CVEs\b|\b15 engines and 10 countries\b|(?<!hosting-)\bcountry\/product breakdown\b/;
+    it("#3510: no shipped text presents a country as the operator's, and the KEV-exposure radar's countries are hosting countries wherever they are counted", () => {
+      let read = 0;
+      const texts = [...tools.map((t) => [`${t.name} description and outputSchema`, toolText(t)]), ...shipped()];
+      for (const [where, t] of texts) {
+        if (/countr(?:y|ies)/i.test(t)) read++;
+        assert.deepEqual(ownershipClaims(t), [], `${where} presents a country as the operator's`);
+        assert.doesNotMatch(t, UNQUALIFIED_KEV_COUNTRIES, `${where} counts the KEV-exposure radar's countries without "hosting"`);
+      }
+      assert.ok(read >= 6, `only ${read} shipped texts name a country — the scan read nothing`);
+      // Where the radar's countries are counted or ranked, each says hosting and what that is.
+      const H = REQUIRED.HOSTING_COUNTRY;
+      assert.match(H, /\bnot necessarily\b/, "HOSTING_COUNTRY says the country is not the operator's: it can be (#3510 review, F1)");
+      const cve = tools.find((t) => t.name === "cve_exposure");
+      const data = branchOf(strictOutputSchema(cve.outputSchema), "measured").properties.data.properties;
+      for (const f of ["countries", "top_countries"]) assert.ok(data[f].description?.includes(H), `cve_exposure data.${f}: ${data[f].description}`);
+      const radar = tools.find((t) => t.name === "exposure_radar");
+      const radarData = branchOf(strictOutputSchema(radar.outputSchema), "not_assessed").properties.data.properties;
+      assert.ok(radarData.kev_exposure.description.includes(`10 hosting countries (${H}) and 12 CVEs`), radarData.kev_exposure.description);
+      assert.ok(radarData.exposed_databases.description.includes("15 engines and 10 hosting countries (IP geolocation, not necessarily the operator's location)"), radarData.exposed_databases.description);
+      const exposed = notes.filter(([where, n]) => where.startsWith("cve_exposure/") && n.includes("(exposure_state: exposed)"));
+      assert.ok(exposed.length >= 1, "no exposed cve_exposure note was collected — re-aim this check");
+      for (const [where, n] of exposed) assert.match(n, new RegExp(String.raw`across \d+ hosting countries \(${H.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\)`), where);
+      const radarNote = notes.find(([where]) => where === "exposure_radar/ok")?.[1] ?? "";
+      assert.ok(radarNote.includes(`An exposed_databases.top_countries country is a hosting country too: ${REQUIRED.HOSTING_COUNTRY_DB}.`), `exposure_radar's note: ${radarNote.slice(0, 300)}`);
+      // The README sits at its ceiling (readme.test.mjs, 62,000 characters), so its row names the hosting country and
+      // docs/exposure-radar.md, which the package ships beside it, carries what that is.
+      const readme = flat(readPkgFile("README.md"));
+      assert.ok(readme.includes("+ hosting-country/product breakdown, from the KEV-exposure radar."), "README.md's cve_exposure row");
+      const docs = flat(readPkgFile("docs/exposure-radar.md"));
+      assert.ok(docs.includes(`Up to 12 products, 10 hosting countries (${H}) and 12 CVEs`), "docs/exposure-radar.md's kev_exposure rankings row");
+      assert.ok(docs.includes("Up to 15 engines and 10 hosting countries (IP geolocation, not necessarily the operator's location)"), "docs/exposure-radar.md's exposed_databases rankings row");
+
+      // Controls, over the same served note: the ownership wording in place of the hosting country fails both
+      // checks; so does each wording beside the honest one, in a clause of its own; and so do the #3510 review's
+      // sentence and two more of its shape, which the first version of this list passed.
+      const [, note] = exposed[0];
+      const honest = new RegExp(String.raw`hosting countries \(${H.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\)`);
+      const replaced = note.replace(honest, "countries its operators are based in");
+      assert.notEqual(replaced, note, "re-aim this control: the honest wording was not found in the note");
+      assert.ok(ownershipClaims(replaced).some((c) => c.startsWith("based in:")), "a note saying the countries are where the operators are based passes");
+      assert.match(replaced, UNQUALIFIED_KEV_COUNTRIES);
+      for (const [label, words] of [
+        // Each clause names a country: the scan reads the clauses that do.
+        ["headquartered", "each country is where an operator is headquartered"],
+        ["jurisdiction", "the countries are the operators' jurisdictions"],
+        ["the company's country", "each is the company's country"],
+        ["domicile", "each country is an operator's domicile"],
+        ["operating from", "the countries its operators are operating from"],
+        ["located", "each hosting country is where the company running the service is located"],
+        ["ties a country to the organisation", "these are the countries the vendors behind the services come from"],
+        ["nationality", "each country is the operators' nationality"],
+      ]) {
+        const beside = note.replace(honest, (m) => `${m}; ${words}`);
+        assert.ok(ownershipClaims(beside).some((c) => c.startsWith(`${label}:`)), `"${words}" beside the honest wording is not caught as "${label}": ${JSON.stringify(ownershipClaims(beside))}`);
+      }
+      // #3510 round-3 review (F1): the claim hedged with a negation of something else, or beside the geolocation, and
+      // said without the word "country", each in the served note and in the shipped docs page. Each fails.
+      const docs3510 = flat(readPkgFile("docs/exposure-radar.md"));
+      for (const [label, words] of [
+        ["located", "each hosting country is where the company running the service is located, not necessarily where its server is"],
+        ["head office", "the IP geolocation gives each operator's head-office country"],
+        ["places the organisation", "the list shows where the businesses behind these services have their head offices"],
+      ]) {
+        for (const [where, text] of [["note", note.replace(honest, (m) => `${m}; ${words}`)], ["docs/exposure-radar.md", `${docs3510} ${words[0].toUpperCase()}${words.slice(1)}.`]]) {
+          assert.ok(ownershipClaims(text).some((c) => c.startsWith(`${label}:`)), `${where}: "${words}" is not caught as "${label}": ${JSON.stringify(ownershipClaims(text))}`);
+        }
+      }
+      // ...and the honest wording, in each of the four forms read as a negation, still passes.
+      for (const words of [
+        "the hosting country is not necessarily where the company that runs the service is located",
+        "hosting countries are not a record of where the operators are based",
+        "a hosting country can differ from the country where the organisation running the service is located",
+        "it does not record where the company is headquartered",
+      ]) {
+        assert.deepEqual(ownershipClaims(note.replace(honest, (m) => `${m}; ${words}`)), [], `the honest "${words}" is read as a claim`);
+      }
+      // The honest wording passes because it negates the claim; without the negation it does not.
+      assert.ok(ownershipClaims(note.replace("not necessarily the operator's location", "the operator's location")).some((c) => c.startsWith("location of the company:")), "HOSTING_COUNTRY with its negation taken out is not caught");
+    });
     it("the MIT licence still covers the code", () => {
       assert.equal(PKG.license, "MIT");
       assert.match(flat(readPkgFile("README.md")), /## License The code is MIT-licensed\./);
@@ -1738,7 +1879,8 @@ describe(`against a stub API [${ERA}]`, () => {
     it("a populated footprint names its count, the method the API reports, and Shodan", async () => {
       const n = noteOf(await call(CVE));
       assert.match(n, /\(exposure_state: exposed\)/);
-      assert.match(n, new RegExp(`6213 internet-facing services \\(distinct ip:port, the exposed_hosts field\\) on record whose banner version maps to ${CVE} across 107 countries`));
+      // #3510: the countries are hosting countries, and the note says what that is (requiredText.ts HOSTING_COUNTRY).
+      assert.match(n, new RegExp(`6213 internet-facing services \\(distinct ip:port, the exposed_hosts field\\) on record whose banner version maps to ${CVE} across 107 hosting countries \\(Shodan's IP geolocation, not necessarily the operator's location\\)\\.`));
       assert.ok(n.includes(`Method: ${BACKEND_METHOD} Exposure counts`), `the API's method, which ends in a full stop, is quoted once: ${n}`);
       // last_seen is EchelonGraph's write time, refreshed on port presence alone (#2439), so it
       // is neither a sighting of the service nor of the vulnerable version, and must not read as
@@ -2112,9 +2254,11 @@ describe(`against a stub API [${ERA}]`, () => {
     it("kev_exposure.ransomware_hosts and every ranking count ip:port services, and say so", () => {
       assert.match(note, /kev_exposure\.distinct_hosts \(25113\) counts distinct ip:port services, not machines/);
       assert.match(note, /kev_exposure\.ransomware_hosts \(6655\) counts the services among them with at least one ransomware-linked KEV CVE/);
-      assert.match(note, /kev_exposure\.top_products ranks up to 12 products \(first: http_server, 9120 services\), kev_exposure\.top_countries ranks up to 10 countries \(first: United States, 7021 services\) and kev_exposure\.top_cves ranks up to 12 CVEs \(first: CVE-2023-44487, 6213 services\), each by distinct ip:port services/);
-      assert.match(note, /exposed_databases\.top_engines ranks up to 15 engines \(first: redis, 2410 services\) and exposed_databases\.top_countries ranks up to 10 countries \(first: United States, 2204 services\), each by those services/);
+      assert.match(note, /kev_exposure\.top_products ranks up to 12 products \(first: http_server, 9120 services\), kev_exposure\.top_countries ranks up to 10 hosting countries \(first: United States, 7021 services\) and kev_exposure\.top_cves ranks up to 12 CVEs \(first: CVE-2023-44487, 6213 services\), each by distinct ip:port services/);
+      assert.match(note, /exposed_databases\.top_engines ranks up to 15 engines \(first: redis, 2410 services\) and exposed_databases\.top_countries ranks up to 10 hosting countries \(first: United States, 2204 services\), each by those services/);
       assert.match(description, /kev_exposure\.ransomware_hosts those with a ransomware-linked one/);
+      // #3510: which country kev_exposure.top_countries ranks.
+      assert.ok(note.includes(`A kev_exposure.top_countries country is a hosting country: ${REQUIRED.HOSTING_COUNTRY}.`), note);
     });
     it("the CVSS and EPSS numbers are labelled scores, not counts", () => {
       assert.match(note, /kev_exposure\.top_cves\[\]\.cvss_v3_score and kev_exposure\.top_cves\[\]\.epss_score are the highest CVSS v3 base score and EPSS probability \(0 to 1\) recorded on that CVE's observations: scores, not counts\./);
@@ -3232,6 +3376,25 @@ describe(`against a stub API [${ERA}]`, () => {
       assert.ok(has(p, /^\(b\) cve_exposure: its description's first 2048 characters lack: Shodan data is owned by Shodan/), p.join("\n"));
       assert.ok(has(p, /^\(d\) cve_exposure's description head names Shodan/), p.join("\n"));
     });
+    // #3510: cve_exposure's countries are hosting countries (where Shodan geolocates each IP), and its
+    // head says so. Through 3.2.3 the description said "with a country/product breakdown" and nothing
+    // else about which country, and a reader took it for the operator's.
+    it("#3510: cve_exposure's head names its countries hosting countries, and a description without that sentence fails (b)", () => {
+      const required = REQUIRED.REQUIRED_IN_HEAD.cve_exposure.filter((s) => /\bhosting country\b/.test(s));
+      assert.equal(required.length, 1, "REQUIRED_IN_HEAD.cve_exposure carries no hosting-country sentence (#3510)");
+      const [sentence] = required;
+      assert.match(sentence, /Shodan's IP geolocation/, "the hosting-country sentence no longer says what the country is");
+      assert.match(sentence, /not necessarily the operator's location/, "the hosting-country sentence no longer says what the country is not necessarily");
+      const d = served.tools.find((t) => t.name === "cve_exposure").description;
+      assert.ok(d.slice(0, REQUIRED.CLIENT_DESCRIPTION_CUT).includes(sentence), "cve_exposure's description head lacks the hosting-country sentence");
+      // Control: 3.2.3's wording, an unqualified "country/product breakdown", fails (b) on that sentence.
+      const was = "with a breakdown by product and by hosting country (Shodan's IP geolocation, not necessarily the operator's location) and a ransomware flag.";
+      assert.ok(d.includes(was), "re-aim this control: the breakdown clause changed");
+      const old = cutProblems(withDescription("cve_exposure", (x) => x.replace(was, "with a country/product breakdown and a ransomware flag.")));
+      assert.ok(has(old, /^\(b\) cve_exposure: its description's first 2048 characters lack: by hosting country/), old.join("\n"));
+      // ...and so does the sentence moved past the cut.
+      assert.ok(has(cutProblems(withDescription("cve_exposure", (x) => pastCut(x, sentence))), /^\(b\) cve_exposure: its description's first 2048 characters lack: by hosting country/));
+    });
     // 2.6.8's exposure_radar description was 11,807 characters, its ownership sentence last.
     it("control B2: an exposure_radar description shaped like 2.6.8's, ownership last, fails (b) and (d)", () => {
       const old = `${"Aggregate totals from EchelonGraph's internet-exposure radars: kev_exposure, derived from Shodan data (no Shodan data) its 0 is not one. "}${"z".repeat(11_640)} ${REQUIRED.SHODAN_OWNERSHIP}`;
@@ -3294,7 +3457,8 @@ describe(`against a stub API [${ERA}]`, () => {
       // false also means "no record": it is worded as what EchelonGraph's data says, as the note is.
       assert.match(data.kev_catalog_listed.description, /false also where EchelonGraph holds no record of the CVE/);
       assert.doesNotMatch(data.kev_catalog_listed.description, /is (?:not )?listed in the CISA-KEV catalog/);
-      assert.deepEqual(Object.keys(REQUIRED.REQUIRED_IN_OUTPUT_SCHEMA.cve_exposure).sort(), ["data.kev_catalog_listed", "data.kev_listed", "data.kev_seen_in_observations"]);
+      // #3510 added countries and top_countries (requiredText.ts HOSTING_COUNTRY).
+      assert.deepEqual(Object.keys(REQUIRED.REQUIRED_IN_OUTPUT_SCHEMA.cve_exposure).sort(), ["data.countries", "data.kev_catalog_listed", "data.kev_listed", "data.kev_seen_in_observations", "data.top_countries"]);
       assert.deepEqual(cutProblems(served).filter((p) => p.startsWith("(e) cve_exposure")), []);
     });
     it("#3016 control: 3.0.2's undescribed KEV flags, or a kev_listed text without the deprecation, fail (e)", () => {
@@ -3616,7 +3780,7 @@ describe(`against a stub API [${ERA}]`, () => {
           assert.equal(sc.data.exposed_hosts, 229);
           assert.equal(sc.data.last_seen, last_seen);
           const n = noteOf(res);
-          assert.match(n, /\(exposure_state: exposed\) The radar has 229 internet-facing services \(distinct ip:port, the exposed_hosts field\) on record whose banner version maps to CVE-2026-87902 across 32 countries\./, n);
+          assert.match(n, /\(exposure_state: exposed\) The radar has 229 internet-facing services \(distinct ip:port, the exposed_hosts field\) on record whose banner version maps to CVE-2026-87902 across 32 hosting countries \(Shodan's IP geolocation, not necessarily the operator's location\)\./, n);
           assert.ok(n.includes(`Their latest last_seen is ${last_seen}: when EchelonGraph last wrote or refreshed one of their rows, not when any of them was observed`), n);
           assert.ok(sc.notes.some((s) => s.startsWith(`last_seen (${last_seen}) is not measured_at: it is when EchelonGraph last wrote or refreshed one of these rows`)), sc.notes.join(" | "));
           // The text says the same (#2440).
@@ -5039,8 +5203,8 @@ describe(`against a stub API [${ERA}]`, () => {
     // said "ENISA EUVD identifiers resolve to their CVE."; data and the note are unchanged. cve_summary's method is the
     // feed's first sentence alone, 45 characters shorter (2,734 measured); its bound is unchanged.
     const CASES = [
-      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 31_698], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out; #3010: the thresholds sentence
-      ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 4_243],
+      ["exposure_radar", "exposure_radar", {}, "ok", {}, { state: "not_assessed" }, 32_084], // #2438: the state note names the windows; #2822: mcp_servers.withheld_opted_out; #3010: the thresholds sentence
+      ["cve_exposure, exposed (production's recorded answer)", "cve_exposure", { cve_id: CVE_PROD_WRITE_STAMPED }, "ok", { [PROD_CVE_PATH]: PROD_WRITE_STAMPED }, { state: "not_assessed", exposure_state: "exposed" }, 4_318],
       ["cve_summary", "cve_summary", {}, "ok", {}, { state: "measured" }, 2_781],
       ["search_cves", "search_cves", CALLS.search_cves, "ok", {}, { state: "measured" }, 1_386],
       ["get_cve", "get_cve", CALLS.get_cve, "ok", {}, { state: "measured" }, 1_334],

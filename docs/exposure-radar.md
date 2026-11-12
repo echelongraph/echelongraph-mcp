@@ -35,7 +35,7 @@ maps to a CISA-KEV-listed CVE (see [How `cve_exposure` counts](tools.md#how-cve_
 | `kev_exposure.kev_cves_exposed` | Distinct CISA-KEV-listed CVEs with at least one service on record. |
 | `kev_exposure.ransomware_cves` | The ransomware-linked CVEs among them. |
 | `kev_exposure.correlations` | Service×CVE pairs, not services: a service with three KEV CVEs counts three times. |
-| `kev_exposure.top_products`, `kev_exposure.top_countries`, `kev_exposure.top_cves` | Up to 12 products, 10 countries and 12 CVEs, ranked by distinct ip:port services. |
+| `kev_exposure.top_products`, `kev_exposure.top_countries`, `kev_exposure.top_cves` | Up to 12 products, 10 hosting countries (Shodan's IP geolocation, not necessarily the operator's location) and 12 CVEs, ranked by distinct ip:port services. |
 | `kev_exposure.top_cves[].cvss_v3_score`, `kev_exposure.top_cves[].epss_score` | Scores, not counts: the highest CVSS v3 base score and EPSS probability (0 to 1) recorded on that CVE's observations. |
 | `kev_exposure.trend` | Service×CVE pairs, not services, by the week (starting Monday) in which each pair was first recorded, over the last 12 weeks. Only pairs still on record are counted, so earlier weeks read low. |
 | `kev_exposure.newest_kev` | The 15 CVEs that EchelonGraph's CVE records most recently mark as CISA-KEV-listed (by `added_date`), each with an `exposure_state` (below). |
@@ -59,7 +59,7 @@ A `newest_kev` row's `exposure_state` says whether its count is a measurement:
 |---|---|
 | `exposed_databases.distinct_hosts` | Distinct ip:port services, not machines, that EchelonGraph's check confirmed answering without authentication: data stores and observability UIs alike. |
 | `exposed_databases.engines` | Distinct engine types among them (for example `redis` or `grafana`). |
-| `exposed_databases.top_engines`, `exposed_databases.top_countries` | Up to 15 engines and 10 countries, ranked by those services. |
+| `exposed_databases.top_engines`, `exposed_databases.top_countries` | Up to 15 engines and 10 hosting countries (IP geolocation, not necessarily the operator's location), ranked by those services. |
 | `exposed_databases.pii_likely`, `exposed_databases.pci_likely` | Services whose schema names pass a high-confidence gate for personal data, or for payment-card data. The names are index, database, table or field names in the Shodan or LeakIX banner or in the check's response, never record values; the gate passes one unambiguous term (such as `ssn` or `cardholder`) or two distinct indicators. It is a precision-first schema gate, not a census: a service whose names do not pass it is not counted, whatever it holds, so the other services are not shown to hold no such data. |
 | `exposed_databases.window.from`, `exposed_databases.window.to` | Timestamps, not counts: when EchelonGraph's check last confirmed the oldest and the newest of the services counted answering without authentication, a span of checks made at different times. Relayed only when every counted service has such a time; otherwise the note says how many do not. |
 | `exposed_databases.dated_window.from`, `exposed_databases.dated_window.to`, `exposed_databases.dated_window.undated` | Relayed instead of the window when some counted services have no such time on record: from and to span the dated services only, and undated counts those with none. |

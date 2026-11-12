@@ -36,6 +36,24 @@ export const SHODAN_ATTRIBUTION = "Exposure counts are derived from Shodan data.
 // first; this sentence, placed beside it wherever Shodan data is named, does the second.
 export const SHODAN_OWNERSHIP = "Shodan data is owned by Shodan, which holds its copyright (© Shodan).";
 
+// #3510: what the KEV-exposure radar's country is. kev_exposure_observations.country is Shodan's
+// location.country_name for the service's IP address (core-backend kevexposure/poller.go
+// shodanSearch): where Shodan geolocates the IP address, for example a cloud provider's data centre, so a
+// Korean company's service in us-east-1 counts as United States. It is not a record of where the
+// operator is, and the two can differ; they can also agree, so no text says the country is NOT the
+// operator's (#3510 review, F1). Read as the operator's country it can be a wrong answer, and an
+// insurer's book is keyed on legal jurisdiction. Every text that counts or ranks the radar's countries
+// calls them hosting countries and carries this: cve_exposure's description, its note, its
+// countries/top_countries field text, exposure_radar's kev_exposure note and field text, the README
+// and docs/exposure-radar.md (test/tools.test.mjs "#3510").
+export const HOSTING_COUNTRY = "Shodan's IP geolocation, not necessarily the operator's location";
+// #3510 review (F6): exposed_databases' country is the same kind of value, the IP geolocation of the
+// index a service was found through (core-backend exposeddb/poller.go: Shodan's location.country_name;
+// leakix/client.go: LeakIX's geoip.country_name when Shodan query credits run low), so exposure_radar
+// says so beside it rather than leave a client to infer the two radars' countries differ.
+export const HOSTING_COUNTRY_DB =
+  "the IP geolocation of the index it was found through (Shodan, or LeakIX when Shodan query credits run low), not necessarily the operator's location";
+
 // Sentences the instructions must carry inside the cut: the licence condition, and the rules that
 // keep a zero or a failure from reading as a finding.
 export const REQUIRED_IN_INSTRUCTIONS: readonly string[] = [
@@ -71,6 +89,9 @@ export const REQUIRED_IN_HEAD: Readonly<Record<string, readonly string[]>> = {
     "exposure counts are derived from Shodan data.",
     SHODAN_OWNERSHIP,
     "for a CVE outside that set the note says NOT ASSESSED (exposure_state not_assessed), and its 0 is not a measurement.",
+    // #3510: countries / top_countries are where Shodan geolocates each IP (kevexposure/store.go
+    // CountryCount), which a reader would otherwise take for the operator's country.
+    `by hosting country (${HOSTING_COUNTRY})`,
   ],
   exposure_radar: [
     "derived from Shodan data",
@@ -154,5 +175,8 @@ export const REQUIRED_IN_OUTPUT_SCHEMA: Readonly<Record<string, Readonly<Record<
     "data.kev_listed": [KEV_LISTED_DEPRECATED, KEV_OBSERVATION_FLAG],
     "data.kev_seen_in_observations": [KEV_OBSERVATION_FLAG],
     "data.kev_catalog_listed": [KEV_CATALOG_FLAG],
+    // #3510: the field text says which country, for a client that reads data alone.
+    "data.countries": [HOSTING_COUNTRY],
+    "data.top_countries": [HOSTING_COUNTRY],
   },
 };
