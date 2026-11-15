@@ -6,6 +6,28 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.5 — 2026-11-15
+
+National-authority advisories keep their credit (#3694). Since 2026-11-14 EchelonGraph serves the CSAF
+advisories of NCSC-NL, the Dutch National Cyber Security Centre, as excerpts with its permission, beside
+the vendors' advisories.
+
+- **An NCSC-NL row keeps its credit in every answer (#3694).** `vendor_advisories_for_cve`,
+  `search_vendor_advisories`, `get_vendor_advisory` and `cve_remediation` declare `source_attribution`
+  (the credit "Source: NCSC-NL", the link to NCSC-NL's own page for the advisory, the language it was
+  published in, `translated` false and `excerpt` true) and keep it whole at every text and structured
+  cut, so an answer cut to fit never drops the credit. The advisory rows also declare `ratings`,
+  NCSC-NL's own ratings as it published them (Kans and Schade, and its NCSC Score per CVE). Both fields
+  are absent on a vendor's row.
+- **NCSC-NL is not described as a vendor.** The `vendor` field's text says `ncsc-nl` is a national
+  authority whose advisories are served as excerpts in the language it published them in, never
+  translated, and that a reuse keeps the credit and the link. `vendor_advisories_for_cve`'s description
+  now begins "The advisories that name one CVE" (was "The vendor-published advisories that name one
+  CVE"), and `cve_remediation`'s `vendor_remediations` is "each advisory naming the CVE" (was "each
+  vendor advisory naming the CVE").
+- **Community files.** The public repository gains `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor
+  Covenant 2.1), `ISSUE_TEMPLATE.md` and `PULL_REQUEST_TEMPLATE.md`.
+
 ## 3.2.4 — 2026-11-12
 
 Text only. The KEV-exposure and exposed-databases radars' countries are hosting countries (#3510): where

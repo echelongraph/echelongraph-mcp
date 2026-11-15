@@ -548,7 +548,7 @@ const VENDOR_TEXT_WITHHELD_FIELD =
 // same, marketing-site/lib/apiDataLicences.ts; Red Hat's read at https://access.redhat.com/security/data,
 // GitHub's in github/advisory-database's LICENSE.md, both 2026-11-08).
 export const VENDOR_LICENCE_FIELD =
-  "The vendor's slug. Each vendor's advisory data stays under its own licence, and EchelonGraph's terms add no restriction to it: redhat, Red Hat's security advisories, © Red Hat, Inc., licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/; source https://access.redhat.com/security/data); github, the GitHub Advisory Database, licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/; source https://github.com/github/advisory-database); microsoft, Microsoft's own terms (its advisory pages are not copied: the facts and EchelonGraph's title are served, with a link to Microsoft's advisory where it names a CVE ID); every other vendor, that vendor's own terms.";
+  "The vendor's slug. Each vendor's advisory data stays under its own licence, and EchelonGraph's terms add no restriction to it: redhat, Red Hat's security advisories, © Red Hat, Inc., licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/; source https://access.redhat.com/security/data); github, the GitHub Advisory Database, licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/; source https://github.com/github/advisory-database); microsoft, Microsoft's own terms (its advisory pages are not copied: the facts and EchelonGraph's title are served, with a link to Microsoft's advisory where it names a CVE ID); every other vendor, that vendor's own terms. ncsc-nl is not a vendor: it is the Dutch National Cyber Security Centre (NCSC-NL), a national authority, whose CSAF advisories are served as excerpts with its permission, in the language it published them in, never translated, each row carrying source_attribution, its credit (Source: NCSC-NL) and link, which a reuse keeps.";
 // #3642 round-3 review: what get_vendor_advisory's description says of a vendor whose text is withheld,
 // the last sentence of it, within the client cut and #2924's 100-character headroom under it
 // (requiredText.ts CLIENT_DESCRIPTION_CUT; test/prompts-resources.test.mjs).
@@ -574,6 +574,22 @@ const CVE_RECORD_ROW = z.looseObject({
   kev_added_date: opt(z.string()),
   fix_status: z.unknown().optional().describe("The fix status by the CVE feed's rule (state, basis, unread_inputs and the rule's evidence); null for a rejected record."),
 });
+// #3694 (review fix 9): a national authority's row (NCSC-NL) carries its credit. Our letter to NCSC-NL
+// promised the credit "in our API and MCP responses", so it is declared here, and every text and
+// structured cut keeps it whole (ROW_CUT_LEVELS, ADVISORY_ROW_THIN; cve_remediation.ts the same): six
+// short fields, its url NCSC-NL's own page (about 50 characters), within the leanest level's clip.
+export const SOURCE_ATTRIBUTION_FIELD =
+  "Present on a national authority's row (NCSC-NL), never on a vendor's: the row is the authority's advisory, not a vendor's and not EchelonGraph's assessment. text is the credit (Source: NCSC-NL), url the authority's own page for it, language the language the text is in as published (nl), translated false (it is never translated), excerpt true (its permission covers excerpts). A quote or reuse of the row keeps the credit and the link. Every cut of the answer keeps it whole.";
+export const SourceAttributionSchema = z
+  .looseObject({
+    text: z.string(),
+    url: opt(z.string()),
+    language: opt(z.string()),
+    language_name: opt(z.string()),
+    translated: opt(z.boolean()),
+    excerpt: opt(z.boolean()),
+  })
+  .describe(SOURCE_ATTRIBUTION_FIELD);
 const AdvisoryRow = z.looseObject({
   advisory_id: opt(z.string()).describe(ROW_ADVISORY_ID_FIELD),
   vendor: opt(z.string()).describe(VENDOR_LICENCE_FIELD),
@@ -590,6 +606,9 @@ const AdvisoryRow = z.looseObject({
   ...DATE_FIELDS,
   remediation_kinds: opt(z.array(z.union([z.enum(REMEDIATION_KINDS), z.string()]))).describe(REMEDIATION_KINDS_FIELD),
   remediation_state: opt(z.union([z.enum(REMEDIATION_STATES), z.string()])).describe(REMEDIATION_STATE_FIELD),
+  source_attribution: opt(SourceAttributionSchema),
+  ratings: opt(z.array(z.looseObject({ name: z.string(), value: z.string(), cve: opt(z.string()) })))
+    .describe("A national authority's own ratings of the advisory, as it published them (NCSC-NL's Kans and Schade, its NCSC Score per CVE when cve is set); absent on a vendor's row. They are the authority's, not EchelonGraph's."),
 });
 
 // Shared by the three descriptions. Top-level consts, so the site's tool-claims check
@@ -722,8 +741,8 @@ const WINDOWS = z.array(VendorWindowSchema).nullable().describe(`Each vendor's w
 // text block keeps what identifies and rates the advisory, every string cut to 200 characters and
 // every list to 20 entries; then fewer fields, strings to 100 and lists to 10.
 const ROW_CUT_LEVELS: TextCut["levels"] = [
-  { keep: ["vendor", "vendor_display_name", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "affected_products", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"], clip: 200, cap: 20 },
-  { keep: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"], clip: 100, cap: 10 },
+  { keep: ["vendor", "vendor_display_name", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "affected_products", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state", "source_attribution"], clip: 200, cap: 20 },
+  { keep: ["vendor", "vendor_advisory_id", "title", "severity", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state", "source_attribution"], clip: 100, cap: 10 },
 ];
 // get_vendor_advisory's own first text block is cut too past the budget (#2802): only its
 // structuredContent.data is one advisory whole, with full: true (#3013).
@@ -746,9 +765,9 @@ const searchText = (a: { offset?: number }): TextCut => ({
 const ADVISORY_ROW_THIN: readonly RowKeep[] = [
   [
     "vendor", "vendor_display_name", "vendor_advisory_id", "advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "summary", "vendor_published_at", "our_first_seen_at", "withdrawn",
-    "rejected_cve_ids", "remediation_kinds", "remediation_state",
+    "rejected_cve_ids", "remediation_kinds", "remediation_state", "source_attribution",
   ],
-  ["vendor", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state"],
+  ["vendor", "vendor_advisory_id", "title", "severity", "cvss_v3_score", "cve_ids", "vendor_published_at", "withdrawn", "rejected_cve_ids", "remediation_kinds", "remediation_state", "source_attribution"],
 ];
 const FOR_CVE_DATA: DataCut = { steps: [{ lists: ["advisories"], thin: ADVISORY_ROW_THIN }] };
 // The page size the note says fits data whole is counted on the rows whole (#3013's review: it was
@@ -1099,7 +1118,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "vendor_advisories_for_cve",
     {
       title: "Vendor advisories for one CVE",
-      description: `The vendor-published advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_advisory_id, title, severity and cvss_v3_score where given. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means none of the advisories EchelonGraph holds names the CVE, not that no vendor published one. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} The answer's cve_rejected is true when the CVE record of the CVE asked for was rejected. Each row has remediation_kinds and remediation_state (not_parsed is not none). coverage gives returned, cap, at_cap (true: may be more) and cve_year; vendor_windows, each vendor's window: ${WINDOW_HEAD}; and vendors_not_fully_held, the vendors absent from the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since), or whose history is still being read or collection_state is not ok. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
+      description: `The advisories that name one CVE, newest first, at most 20: for each, vendor, vendor_advisory_id, title, severity and cvss_v3_score where given. Covers the vendor feeds EchelonGraph polls, for example Microsoft MSRC, Red Hat, Cisco, Palo Alto Networks and GitHub GHSA; an empty answer means none of the advisories EchelonGraph holds names the CVE, not that no vendor published one. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} The answer's cve_rejected is true when the CVE record of the CVE asked for was rejected. Each row has remediation_kinds and remediation_state (not_parsed is not none). coverage gives returned, cap, at_cap (true: may be more) and cve_year; vendor_windows, each vendor's window: ${WINDOW_HEAD}; and vendors_not_fully_held, the vendors absent from the answer of which EchelonGraph holds none, whose held_since is after 1 January of cve_year or not known (outside history_scope, feed_held_since), or whose history is still being read or collection_state is not ok. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}.`,
       inputSchema: z.object({ cve_id: z.string().describe("a CVE ID, e.g. CVE-2024-21412"), full: FULL_ARG }),
       outputSchema: FOR_CVE_OUTPUT,
       annotations: kit.annotations,
@@ -1111,7 +1130,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "get_vendor_advisory",
     {
       title: "Vendor advisory detail",
-      description: `One vendor advisory in full, by vendor and advisory ID (the vendor and vendor_advisory_id of a vendor advisory row, never its advisory_id): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations: each the vendor lists, with kind (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other: the vendor's category, or may be no_fix_planned if Cisco's summary says none will be released), source_category, text, url, cve_ids and product_ids; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state none_in_source or not_parsed is not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is what EchelonGraph holds of that vendor: ${WINDOW_HEAD_DETAIL}; null if unreadable or empty. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION} ${WITHHELD_DETAIL_DESCRIPTION}`,
+      description: `One advisory in full, by vendor and advisory ID (the vendor and vendor_advisory_id of a vendor advisory row, never its advisory_id): title, description, severity, cvss_v3_score, cve_ids and known_cve_ids (in EchelonGraph's CVE feed), affected_products, remediation, references, vendor_modified_at, and withdrawn_at and withdrawn_reason when the vendor withdrew it. remediations: each the vendor lists, with kind (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other: the vendor's category, or may be no_fix_planned if Cisco's summary says none will be released), source_category, text, url, cve_ids and product_ids; each text is the vendor's, verbatim, untested by EchelonGraph. remediation_state none_in_source or not_parsed is not a finding that no fix exists. ${DATES_DESCRIPTION} ${REJECTED_CVE_DESCRIPTION} coverage.vendor_window is what EchelonGraph holds of that vendor: ${WINDOW_HEAD_DETAIL}; null if unreadable or empty. measured_at is our_first_seen_at. ${ENVELOPE_DESCRIPTION} ${TEXT_BUDGET_DESCRIPTION} ${WITHHELD_DETAIL_DESCRIPTION}`,
       inputSchema: z.object({
         vendor: z.string().describe("the vendor slug, e.g. microsoft, redhat, github"),
         advisory_id: z
@@ -1129,7 +1148,7 @@ export function registerVendorAdvisoryTools(server: McpServer, kit: VendorAdviso
     "search_vendor_advisories",
     {
       title: "Search vendor advisories",
-      description: `Search or list vendor-published advisories, newest first. ${SEARCH_MATCH_HEAD} Filter by vendor (slug), severity band and whether the advisory names any CVE ID. Advisories their vendor withdrew are left out. Returns advisories, each with vendor, vendor_advisory_id, title, severity, cvss_v3_score, cve_ids, summary and affected_products where present, and total, total_capped, limit, offset, search_applied and search_match. ${TOTAL_CAPPED_HEAD} ${REJECTED_CVE_DESCRIPTION} The query is sent in a request header, never in the URL. coverage repeats those beside returned, and gives vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_HEAD_SCOPED}. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}, or rows are left out and the note gives the offset to call next.`,
+      description: `Search or list advisories, newest first. ${SEARCH_MATCH_HEAD} Filter by vendor (slug), severity band and whether the advisory names any CVE ID. Advisories their vendor withdrew are left out. Returns advisories, each with vendor, vendor_advisory_id, title, severity, cvss_v3_score, cve_ids, summary and affected_products where present, and total, total_capped, limit, offset, search_applied and search_match. ${TOTAL_CAPPED_HEAD} ${REJECTED_CVE_DESCRIPTION} The query is sent in a request header, never in the URL. coverage repeats those beside returned, and gives vendor_windows, each vendor's window in what EchelonGraph holds: ${WINDOW_HEAD_SCOPED}. ${NOT_HELD_HEAD} ${TEXT_BUDGET_DESCRIPTION}${ROW_CUT_DESCRIPTION}, or rows are left out and the note gives the offset to call next.`,
       inputSchema: z.object({
         query: z.string().optional().describe("free text, at most 100 bytes: a product, an advisory ID, a CVE ID or a keyword, e.g. 'exchange server'; 1 or 2 characters match whole words only"),
         vendor: z.string().optional().describe("a vendor slug, e.g. microsoft, redhat, github"),

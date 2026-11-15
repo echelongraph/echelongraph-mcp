@@ -47,7 +47,7 @@ import { fixStatusSchema } from "../fixStatus.js";
 import { blankUnreadableDisputes, clipDisputeNote, disputeNote, fixedInDisputeSchema, isDispute, isUnreadDispute, unreadDisputesSentence, versionEvidenceSchema } from "../fixedInDispute.js";
 import { MATCH_HEADERS } from "./check_affected.js";
 import { ONE_PACKAGE_RULE, packagesListedTwice } from "./packageRecords.js";
-import { CISCO_NO_FIX_NOTE, ciscoListsNoFix, REMEDIATION_ITEM_KIND_FIELD, REMEDIATION_ITEM_SUBCATEGORY_FIELD, VENDOR_LICENCE_FIELD } from "./vendor_advisories.js";
+import { CISCO_NO_FIX_NOTE, ciscoListsNoFix, REMEDIATION_ITEM_KIND_FIELD, REMEDIATION_ITEM_SUBCATEGORY_FIELD, SourceAttributionSchema, VENDOR_LICENCE_FIELD } from "./vendor_advisories.js";
 
 const TOOL = "cve_remediation";
 const SECTIONS = ["cisa", "fixed_branches", "vendor_remediations", "fix_references", "patches"] as const;
@@ -80,7 +80,7 @@ const METHOD =
 // is the item schema's); the sentence that says so is 47 characters longer, so fix_status no longer
 // says "as CVE Pulse shows it" and vendor_remediations no longer gives its order and cap (coverage
 // carries the cap), to stay within #2924's headroom.
-export const CVE_REMEDIATION_DESCRIPTION = `How one CVE is fixed, as its sources state it, in one answer. ${REMEDIATION_UNTESTED} ${REMEDIATION_NOT_A_ZERO} Returns fix_status (the API's fix-status rule: state and basis), cisa (for a KEV-listed CVE CISA's required_action, due_date, short_description and notes_urls, verbatim; ${REMEDIATION_CISA}), fixed_branches (each affected package with fixed_branches: every affected range, introduced and fixed or last_affected, and fixed_version, one range's fix), vendor_remediations (each vendor advisory naming the CVE, with remediation_state, remediation_kinds and items, each with kind, source_category, text and url), fix_references (references NVD or the CNA tagged Patch or Mitigation), patches, coverage and failed_sections. kind is the vendor's own category (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), or may be no_fix_planned if Cisco's summary says none will be released. remediation_state is parsed, none_in_source (none listed for this CVE), not_parsed (that vendor's remediation is not read) or withdrawn. ecosystem, package and version (all three or none, sent in request headers, never in the URL) add installed, the verdict at that version, and fixed_in, the lowest unaffected version above it, or null with fixed_in_reason. A section the API could not read is named in failed_sections, not relayed as empty. A REJECTED CVE answers not_assessed. ${TEXT_BUDGET_DESCRIPTION} Cut, vendor texts are shortened first; kinds, states and URLs are kept.`;
+export const CVE_REMEDIATION_DESCRIPTION = `How one CVE is fixed, as its sources state it, in one answer. ${REMEDIATION_UNTESTED} ${REMEDIATION_NOT_A_ZERO} Returns fix_status (the API's fix-status rule: state and basis), cisa (for a KEV-listed CVE CISA's required_action, due_date, short_description and notes_urls, verbatim; ${REMEDIATION_CISA}), fixed_branches (each affected package with fixed_branches: every affected range, introduced and fixed or last_affected, and fixed_version, one range's fix), vendor_remediations (each advisory naming the CVE, with remediation_state, remediation_kinds and items, each with kind, source_category, text and url), fix_references (references NVD or the CNA tagged Patch or Mitigation), patches, coverage and failed_sections. kind is the vendor's own category (vendor_fix, workaround, mitigation, no_fix_planned, none_available or other), or may be no_fix_planned if Cisco's summary says none will be released. remediation_state is parsed, none_in_source (none listed for this CVE), not_parsed (that vendor's remediation is not read) or withdrawn. ecosystem, package and version (all three or none, sent in request headers, never in the URL) add installed, the verdict at that version, and fixed_in, the lowest unaffected version above it, or null with fixed_in_reason. A section the API could not read is named in failed_sections, not relayed as empty. A REJECTED CVE answers not_assessed. ${TEXT_BUDGET_DESCRIPTION} Cut, vendor texts are shortened first; kinds, states and URLs are kept.`;
 
 // ── outputSchema ──
 // Built on first use: index.ts imports this file, so its exports are not initialised while this
@@ -115,6 +115,8 @@ function schemas() {
     vendor_text_withheld: opt(z.boolean()).describe(
       "true: the vendor's remediation text is not served (Microsoft's): each item's text is empty; its kind, source_category, url, fixed_build and product_ids are served.",
     ),
+    // #3694 review fix 9: a national authority's row (NCSC-NL) carries its credit, kept by every cut.
+    source_attribution: opt(SourceAttributionSchema),
   });
   const data = z.looseObject({
     cve_id: opt(z.string()),
@@ -259,6 +261,8 @@ const schemasOnce = () => (built ??= schemas());
 // vendor_advisory_id, returns that advisory's remediations with their texts, and the same call
 // with full: true returns this data whole; the prompts send the model there when it is cut.
 const ADVISORY_FIELDS = ["vendor", "vendor_display_name", "vendor_advisory_id", "vendor_published_at", "withdrawn", "remediation_state", "remediation_kinds", "items_total"] as const;
+// #3694 review fix 9: a national authority's row (NCSC-NL) keeps its credit, source_attribution,
+// whole at every cut level, text and structured (vendor_advisories.ts SOURCE_ATTRIBUTION_FIELD).
 const ITEM_TEXT_ELSEWHERE =
   "No item in data keeps its text, the vendor's own wording of the step (a workaround or mitigation among them): get_vendor_advisory, given an advisory's vendor and its vendor_advisory_id as advisory_id, returns it among that advisory's remediations, whole in its structuredContent.data with full: true.";
 const FIXED_BRANCHES_THIN: RowKeep = ["ecosystem", "package_name", "version_range", "fixed_version", ["fixed_branches", ["introduced", "fixed", "last_affected"]]];
@@ -283,8 +287,8 @@ const CVE_REMEDIATION_DATA: DataCut = {
     {
       lists: ["vendor_remediations"],
       thin: [
-        [...ADVISORY_FIELDS, ["items", ["kind", "source_category", "source_subcategory", "text", "text_truncated", "text_chars", "url", "fixed_build", "product_count"]]],
-        [...ADVISORY_FIELDS, ["items", ["kind", "source_category", "url", "fixed_build"]]],
+        [...ADVISORY_FIELDS, "source_attribution", ["items", ["kind", "source_category", "source_subcategory", "text", "text_truncated", "text_chars", "url", "fixed_build", "product_count"]]],
+        [...ADVISORY_FIELDS, "source_attribution", ["items", ["kind", "source_category", "url", "fixed_build"]]],
       ],
       keepAll: true,
     },
@@ -355,8 +359,8 @@ const advisoriesElsewhere = (n: number, of: string): string =>
 const CUT: TextCut = {
   rows: "vendor_remediations",
   levels: [
-    { keep: ["vendor", "vendor_advisory_id", "withdrawn", "remediation_state", "remediation_kinds", "items_total", ["items", ["kind", "source_category", "text", "url", "fixed_build"]]], clip: 400, cap: 16 },
-    { keep: ["vendor", "vendor_advisory_id", "remediation_state", "remediation_kinds", ["items", ["kind", "url"]]], clip: 2048, cap: 8 },
+    { keep: ["vendor", "vendor_advisory_id", "withdrawn", "remediation_state", "remediation_kinds", "items_total", "source_attribution", ["items", ["kind", "source_category", "text", "url", "fixed_build"]]], clip: 400, cap: 16 },
+    { keep: ["vendor", "vendor_advisory_id", "remediation_state", "remediation_kinds", "source_attribution", ["items", ["kind", "url"]]], clip: 2048, cap: 8 },
   ],
   sides: [
     {
@@ -410,6 +414,19 @@ function vendorSentences(cve: string, rows: unknown[]): string[] {
     // Cisco advisory lists one, and only there (vendor_advisories.ts CISCO_NO_FIX_NOTE).
     const noFix = rows.some(ciscoListsNoFix) ? CISCO_NO_FIX_NOTE : "";
     out.push(`Vendor remediation for ${cve}, by the vendor's own category${noFix}: ${kinds.map((k) => `${k} from ${few(byKind.get(k)!)}`).join("; ")}. Each is the vendor's text as stated; EchelonGraph has not tested it.`);
+  }
+  // #3694 review fix 9: a national authority's row (NCSC-NL) is not a vendor's: said so, with its credit.
+  const credited = new Map<string, string[]>();
+  for (const r of rows) {
+    const credit = strAt(field(r, "source_attribution"), "text");
+    if (credit?.startsWith("Source: ")) {
+      if (!credited.has(credit)) credited.set(credit, []);
+      credited.get(credit)!.push(`${strAt(r, "vendor") ?? "?"} ${strAt(r, "vendor_advisory_id") ?? "?"}`);
+    }
+  }
+  for (const [credit, who] of credited) {
+    const one = who.length === 1;
+    out.push(`${few(who)} ${one ? "is" : "are"} a national authority's advisor${one ? "y" : "ies"}, not a vendor's (${credit}): ${one ? "its" : "their"} text is as the authority published it, never translated; quote it with that credit.`);
   }
   if (states.none_in_source) out.push(`${few(states.none_in_source)} ${states.none_in_source.length === 1 ? "lists" : "list"} no remediation for ${cve} (none_in_source), which is not a finding that no fix exists.`);
   if (states.not_parsed) out.push(`EchelonGraph does not read the remediation of ${few(states.not_parsed)} (not_parsed): read ${states.not_parsed.length === 1 ? "it" : "each"} with get_vendor_advisory; not_parsed is not "no remediation".`);
