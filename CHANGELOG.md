@@ -6,6 +6,28 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.7 — 2026-11-23
+
+JVN iPedia (IPA), Japan's vulnerability database, in `get_cve` (#3496). Since 2026-11-23 EchelonGraph
+displays JVN iPedia's records, with IPA's written permission, each credited "Source: JVN iPedia (IPA)".
+
+- **`get_cve` accepts a JVN iPedia id** (`JVNDB-2026-000172`) while EchelonGraph displays JVN iPedia's
+  data, and resolves it to its CVE through EchelonGraph's alias table (source `jvn_ipedia`); the note
+  that says how it was resolved carries IPA's credit. An id that names more than one CVE
+  (JVNDB-2026-000174 names four) is not resolved: ask for one of its CVEs by its CVE id. While the
+  display is off, the API answers such an id 404 `ALIAS_NOT_FOUND`.
+- **Two new optional keys in `get_cve`'s record, each described in its outputSchema.**
+  `authority_records` holds a national authority's own records of the CVE: for JVN iPedia, the record's
+  id, url, title, description (or the summary EchelonGraph derived from its structured fields), products,
+  CVSS, references (each its address only) and dates, in IPA's English and never translated, shown only
+  as EchelonGraph's closed templates and checks leave them (the field's description states the rules).
+  `stated_affected` holds the products and versions as the authority's record states them, with
+  `echelongraph_assertion` false: the authority's statement, not EchelonGraph's finding.
+- **`aliases` lists JVNDB- ids** (source `jvn_ipedia`), each with attribution, Source: JVN iPedia (IPA),
+  only while EchelonGraph displays JVN iPedia's data.
+
+No tool is added, removed or renamed; the new keys are optional.
+
 ## 3.2.6 — 2026-11-23
 
 `cve_intel` relays EchelonGraph's labels of the GitHub repositories it lists (#3672). Since 2026-11-22

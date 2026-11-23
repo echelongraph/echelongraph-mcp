@@ -107,6 +107,62 @@ attribution begins with it. Each sentence of the note that names ENISA's data en
 attribution, and says it even where an older API answer carries no `attribution` field. GitHub's and
 OSV's values carry none.
 
+While EchelonGraph displays JVN iPedia's data, the record's `authority_records` holds IPA's JVN
+iPedia records of the CVE and `stated_affected` the products they state. JVN iPedia (IPA) records
+carry their own attribution, "Source: JVN iPedia (IPA)", and are shown in IPA's English, not
+translated. IPA's title, and each sentence or list line of IPA's description, is shown
+only when it matches, in full, one of a closed list of templates written from
+IPA's own records: fixed wording, with slots that hold only the record's own
+product and vendor names as its CPE product data states them, a version, a
+CVE, CWE or JVN identifier, a number, or one entry of a closed list of
+weakness and impact phrases (or MITRE's name for one of the record's CWE ids).
+Every other word of IPA's text is left out, and nothing is cut from a sentence
+or a title to make it match. A description that lost any of IPA's text ends
+“[sentences omitted]”; when nothing of it matches, or none of its sentences
+that say what is vulnerable does, EchelonGraph shows a summary, and in place
+of a title a title, derived from the record's structured fields, with a link
+to IPA's text. The structured fields are shown only inside closed grammars
+(the CVSS version, severity, type, vector and score; the CPE name and its
+version), and a value outside them is not shown. IPA's product data (each
+product's vendor and product names and every part of its CPE name) is shown
+only when it passes one closed check, which a value fails when it holds a
+character outside ASCII (a no-break or other non-ASCII space included) or a
+control character other than white space (tab, line feed, carriage return,
+vertical tab, form feed are collapsed), an at-sign (“@”, “%40”, “(at)”, “[at]”
+and other written forms, or “at” followed by “dot”), an address or a host name
+(a scheme such as “https:”, “mailto:” or “skype:”, a double slash, “www.”, a
+dot written in brackets such as “[.]” or “(dot)”, or as “-dot-” or “_dot_” in
+lower case or capitals, an IP address outside a CPE name's version and update,
+or a host on a public suffix or a special-use top-level name, wherever it
+stands and whether its dots are written plainly, in any of those spellings, as
+“ dot ” or “ DOT ”, or with a space beside them (an abbreviation's full stop
+such as “Co. ” is no host's dot before a capitalised word when the abbreviation stands at the value's start or after a space, “(”, an ampersand, “,”, a quote or “/”, and no dot joins it to the word before it); a vendor's name may be a domain alone whose
+name is its CPE vendor name, or that CPE vendor name followed by organisation
+words such as “Foundation”), an e-mail address or a
+telephone number in a shape the rule reads, or a credit cue on a closed list
+(“reported by”, “thanks to”, “h/t” and others), or, for a part of a CPE name,
+anything outside the CPE 2.2 grammar. A name that fails is replaced by its CPE
+name's part, a CPE name with a part that fails is not shown, a record with a
+vendor or a product no name of which passes is not shown at all, and products
+shown otherwise than IPA published them are labelled so. The record's CPE
+vendor and CPE product names are shown as IPA's structured product data names
+them when they pass that check, even where one is a person's name, and a name
+read from IPA's free text is never shown. A reference is shown as its address
+only, and only when it is an authority's address on a closed list (cve.org,
+nvd.nist.gov, jvn.jp, ipa.go.jp and others) in one of that authority's fixed
+forms, whose only free part is an identifier, a number or a word of the
+record's own product data; every other address is left out. This was measured
+on IPA's feeds with every person's name replaced by an invented one, and on
+four of IPA's year feeds held out of the build (counts only). A withheld description is absent and `summary`
+carries the derived text (`description_withheld` true); a withheld title is the derived one
+(`title_withheld`). `description_excerpted` and `title_excerpted` say whether the field served
+differs from IPA's in any way, and a reference is its URL alone — IPA's source label, free-text
+identifier and title are never served. A JVNDB ID in `aliases` carries the same attribution. A JVNDB ID
+(JVNDB-2026-000172) may be passed as `get_cve`'s `cve_id` only while EchelonGraph displays JVN
+iPedia's data; the record's `resolved_from` then names source `jvn_ipedia` with the same
+attribution, and get_cve's note carries it too. A stated product is IPA's statement
+(`echelongraph_assertion` false), never matched against an inventory.
+
 ## What `patch_available` says
 
 `patch_available` is `true` when EchelonGraph holds, or once held, evidence of a fix for the CVE,

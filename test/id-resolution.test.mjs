@@ -71,6 +71,8 @@ const NAMESPACES = [
   ["RUSTSEC", /\bRUSTSEC\b|\bRust\b/i, "osv"],
   ["GSD", /\bGSD\b/i, "osv"],
   ["MAL", /\bMAL-/i, "osv"],
+  // #3496: JVN iPedia's record ids, accepted while EchelonGraph displays JVN iPedia's data; never said to resolve.
+  ["JVNDB", /\bJVNDB-/i, "jvn_ipedia"],
 ];
 const OSV_FAMILY = NAMESPACES.filter(([, , source]) => source === "osv").map(([ns]) => ns);
 const SOURCE_OF = Object.fromEntries(NAMESPACES.map(([ns, , source]) => [ns, source]));
@@ -99,7 +101,9 @@ const SOURCE_NAMES = /\(source [a-z][a-z0-9_]*\)|\b(?:enisa_euvd|github|osv|gcve
 const KNOWN_TOKENS = new Set(["CVE", "ENISA", "GCVE", "ID", "API", ...NAMESPACES.map(([ns]) => ns)]);
 const TOKEN = /\b[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)*/g;
 const prefixOf = (t) => t.replace(/-(?:\d{4}|YYYY)(?:-[0-9A-Za-z]+)*$/, "");
-const unknownTokens = (s) => (s.match(TOKEN) ?? []).map(prefixOf).filter((t) => !KNOWN_TOKENS.has(t));
+// #3496: "JVN iPedia" is the name of IPA's database, whose JVNDB ids are accepted; JVN's own ids (jvn.jp's
+// JVN#, JVNVU#) are not, so "JVN" alone stays unknown.
+const unknownTokens = (s) => (s.replace(/\bJVN iPedia\b/g, "").match(TOKEN) ?? []).map(prefixOf).filter((t) => !KNOWN_TOKENS.has(t));
 
 const flat = (s) => String(s).replace(/`/g, "").replace(/\s+/g, " ").trim();
 const sentencesOf = (text) => flat(text).split(/(?<=[.!?]["”]?)\s+(?=["“(]?[A-Z0-9])/);
@@ -297,7 +301,7 @@ export function stripGoComments(src) {
   return out;
 }
 // Each namespace's pattern in vulnid.go, by its variable's name.
-const PATTERN_VAR = { EUVD: "euvdPattern", "GCVE-0": "gcvePattern", GHSA: "ghsaPattern", PYSEC: "pysecPattern", GO: "goPattern", RUSTSEC: "rustsecPattern", GSD: "gsdPattern", MAL: "malPattern" };
+const PATTERN_VAR = { EUVD: "euvdPattern", "GCVE-0": "gcvePattern", GHSA: "ghsaPattern", PYSEC: "pysecPattern", GO: "goPattern", RUSTSEC: "rustsecPattern", GSD: "gsdPattern", MAL: "malPattern", JVNDB: "jvndbPattern" };
 /** The problems of core-backend's sources (read without their comments) against the namespaces named and the example IDs given. */
 export function backendProblems(sources, names, examples) {
   const vulnid = stripGoComments(sources.vulnid);

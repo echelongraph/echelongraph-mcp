@@ -1161,8 +1161,12 @@ async function searchCVEs(a: SearchArgs): Promise<ToolResult> {
 // names ENISA's data is followed by the founder's wording itself (EUVD_ATTRIBUTION), whatever the
 // API sent: an answer missing its attribution field (an API older than it) is never relayed
 // without it, and the longer attribution the API sends in data (the EU KEV listing's) is not
-// repeated in the note (#2531's repeat share).
+// repeated in the note (#2531's repeat share). #3496: a JVNDB id resolved through JVN iPedia's
+// mapping (source jvn_ipedia, IPA's data) is followed by IPA's credit the same way
+// (JVN_IPEDIA_ATTRIBUTION, core-backend vulnalias.JVNAttribution), whatever the API sent.
 const EUVD_ATTRIBUTION = "Source: ENISA EUVD.";
+const JVN_IPEDIA_ATTRIBUTION = "Source: JVN iPedia (IPA).";
+const RESOLVED_ATTRIBUTION: Record<string, string> = { enisa_euvd: EUVD_ATTRIBUTION, jvn_ipedia: JVN_IPEDIA_ATTRIBUTION };
 function resolvedVia(rf: unknown): { id: string; how: string; attribution: string } | null {
   const id = strAt(rf, "id");
   const ns = strAt(rf, "namespace");
@@ -1172,7 +1176,7 @@ function resolvedVia(rf: unknown): { id: string; how: string; attribution: strin
   return {
     id: `${id} (${ns})`,
     how: `through EchelonGraph's alias table (source ${source})`,
-    attribution: source === "enisa_euvd" ? ` ${EUVD_ATTRIBUTION}` : "",
+    attribution: Object.prototype.hasOwnProperty.call(RESOLVED_ATTRIBUTION, source) ? ` ${RESOLVED_ATTRIBUTION[source]}` : "",
   };
 }
 function resolvedNote(cve: string, rec: object): string {
@@ -3193,14 +3197,26 @@ const EG_PRIORITY_FIELD =
 // #2868: the record's identity, as GET /cves/:id serves it (core-backend cve/vuln_ids.go). One
 // constant string each, like the others here.
 const ALIASES_FIELD =
-  "The CVE's other identifiers that EchelonGraph holds, by namespace then id: GitHub GHSA ids (source github), OSV ids such as PYSEC- and GO- (source osv) and ENISA EUVD ids (source enisa_euvd), each with first_seen_at and, where the source dates it, source_updated_at. An ENISA EUVD id carries attribution, Source: ENISA EUVD; no other id does. EUVD ids are listed only while EchelonGraph displays ENISA's data. A GCVE-0 id is never listed: it is the CVE id itself. Absent where the alias table could not be read, and from an API older than the field.";
+  "The CVE's other identifiers that EchelonGraph holds, by namespace then id: GitHub GHSA ids (source github), OSV ids such as PYSEC- and GO- (source osv), ENISA EUVD ids (source enisa_euvd) and JVN iPedia JVNDB- ids (source jvn_ipedia), each with first_seen_at and, where the source dates it, source_updated_at. An ENISA EUVD id carries attribution, Source: ENISA EUVD, and a JVNDB id Source: JVN iPedia (IPA); no other id does. EUVD and JVNDB ids are listed only while EchelonGraph displays that source's data. A GCVE-0 id is never listed: it is the CVE id itself. Absent where the alias table could not be read, and from an API older than the field.";
 const RESOLVED_FROM_FIELD =
-  "Present when the identifier asked for was not the CVE id: id and namespace are what was asked for (an EUVD, GHSA, OSV or GCVE-0 id), and source what mapped it to this CVE: enisa_euvd, github or osv through EchelonGraph's alias table, or gcve_gna0, the GCVE specification, under which GCVE-0-YYYY-N is CVE-YYYY-N. With source enisa_euvd it carries attribution, Source: ENISA EUVD.";
+  "Present when the identifier asked for was not the CVE id: id and namespace are what was asked for (an EUVD, GHSA, OSV or GCVE-0 id, or a JVN iPedia JVNDB- id while EchelonGraph displays JVN iPedia's data), and source what mapped it to this CVE: enisa_euvd, github, osv or jvn_ipedia through EchelonGraph's alias table, or gcve_gna0, the GCVE specification, under which GCVE-0-YYYY-N is CVE-YYYY-N. With source enisa_euvd it carries attribution, Source: ENISA EUVD; with source jvn_ipedia, Source: JVN iPedia (IPA).";
 const EU_KEV_FIELD =
   "The CVE's listing on ENISA's EU Known Exploited Vulnerabilities catalogue: date_added (ENISA's own date for it), reported_by (the reporting source as ENISA records it), euvd_id, vendor_project, product and first_seen_at, with source enisa_euvd and attribution, ENISA's acknowledgement beginning Source: ENISA EUVD, on every listing. It is ENISA's data, not EchelonGraph's or CISA's; kev_listed is CISA's catalog. Absent where ENISA's catalogue does not list the CVE, while EchelonGraph does not display ENISA's data, and from an API older than the field.";
+// #3496: JVN iPedia's records of the CVE and the products they state, as GET /cves/:id serves them
+// (core-backend cve/apacadv jvn_read.go). IPA's text is IPA's, in English and never translated, served
+// as core-backend's closed templates leave it (jvn_template.go), and each record and statement carries
+// its own attribution. Relayed, never read here.
+const JVN_IPEDIA_NOTE =
+  "JVN iPedia (IPA) records carry their own attribution, Source: JVN iPedia (IPA), and are shown in IPA's English, not translated. " +
+  "IPA's title, and each sentence or list line of IPA's description, is shown only when it matches, in full, one of a closed list of templates written from IPA's own records: fixed wording, with slots that hold only the record's own product and vendor names as its CPE product data states them, a version, a CVE, CWE or JVN identifier, a number, or one entry of a closed list of weakness and impact phrases (or MITRE's name for one of the record's CWE ids). Every other word of IPA's text is left out, and nothing is cut from a sentence or a title to make it match. A description that lost any of IPA's text ends “[sentences omitted]”; when nothing of it matches, or none of its sentences that say what is vulnerable does, EchelonGraph shows a summary, and in place of a title a title, derived from the record's structured fields, with a link to IPA's text. The structured fields are shown only inside closed grammars (the CVSS version, severity, type, vector and score; the CPE name and its version), and a value outside them is not shown. IPA's product data (each product's vendor and product names and every part of its CPE name) is shown only when it passes one closed check, which a value fails when it holds a character outside ASCII (a no-break or other non-ASCII space included) or a control character other than white space (tab, line feed, carriage return, vertical tab, form feed are collapsed), an at-sign (“@”, “%40”, “(at)”, “[at]” and other written forms, or “at” followed by “dot”), an address or a host name (a scheme such as “https:”, “mailto:” or “skype:”, a double slash, “www.”, a dot written in brackets such as “[.]” or “(dot)”, or as “-dot-” or “_dot_” in lower case or capitals, an IP address outside a CPE name's version and update, or a host on a public suffix or a special-use top-level name, wherever it stands and whether its dots are written plainly, in any of those spellings, as “ dot ” or “ DOT ”, or with a space beside them (an abbreviation's full stop such as “Co. ” is no host's dot before a capitalised word when the abbreviation stands at the value's start or after a space, “(”, an ampersand, “,”, a quote or “/”, and no dot joins it to the word before it); a vendor's name may be a domain alone whose name is its CPE vendor name, or that CPE vendor name followed by organisation words such as “Foundation”), an e-mail address or a telephone number in a shape the rule reads, or a credit cue on a closed list (“reported by”, “thanks to”, “h/t” and others), or, for a part of a CPE name, anything outside the CPE 2.2 grammar. A name that fails is replaced by its CPE name's part, a CPE name with a part that fails is not shown, a record with a vendor or a product no name of which passes is not shown at all, and products shown otherwise than IPA published them are labelled so. The record's CPE vendor and CPE product names are shown as IPA's structured product data names them when they pass that check, even where one is a person's name, and a name read from IPA's free text is never shown. A reference is shown as its address only, and only when it is an authority's address on a closed list (cve.org, nvd.nist.gov, jvn.jp, ipa.go.jp and others) in one of that authority's fixed forms, whose only free part is an identifier, a number or a word of the record's own product data; every other address is left out. This was measured on IPA's feeds with every person's name replaced by an invented one, and on four of IPA's year feeds held out of the build (counts only)." + " " +
+  "A withheld description is absent and summary carries the derived text (description_withheld true), and a served description of which no main statement is served (only list lines, CVE lines or auxiliary sentences) carries the summary beside it; a withheld title is the derived one (title_withheld). description_excerpted and title_excerpted say whether the field differs from IPA's in any way.";
+const AUTHORITY_RECORDS_FIELD =
+  `A national vulnerability authority's own records of the CVE, each with authority and authority_name: JVN iPedia's (authority jvn_ipedia): id (JVNDB-), url, title, description, summary, description_excerpted, title_excerpted, description_withheld, title_withheld, products, cvss, references (each its url ALONE: IPA's source label, free-text id and title are never served), issued_at and modified_at. ${JVN_IPEDIA_NOTE} language is en and translated false; provenance.fields names each field's derivation (agency_published, agency_published_excerpt, agency_published_transformed, agency_products_transformed, derived_from_agency_record, derived_by_echelongraph). It is the authority's text, not EchelonGraph's claim. Absent where no authority's record of the CVE is held, while EchelonGraph does not display the authority's data, and from an API older than the field.`;
+const STATED_AFFECTED_FIELD =
+  "Products and versions as an authority's record states them (provenance_class stated_by_jvn_ipedia, stated_by, source_record_id, range_state parsed, unparsed or not_stated, rendered), each with attribution and echelongraph_assertion false: the authority's statement, never matched against an inventory and not EchelonGraph's finding. Absent where none is held, while EchelonGraph does not display the authority's data, and from an API older than the field.";
 // The sources an alias names (core-backend vulnalias): a source the API adds later is admitted,
 // never a failed call, as patch_evidence's labels are.
-const ALIAS_SOURCES = ["enisa_euvd", "github", "osv"] as const;
+const ALIAS_SOURCES = ["enisa_euvd", "github", "osv", "jvn_ipedia"] as const;
 const aliasSource = z.union([z.enum(ALIAS_SOURCES), z.string()]);
 const resolvedFrom = z.looseObject({
   id: opt(z.string()),
@@ -3265,6 +3281,44 @@ const CVERecord = z.looseObject({
       attribution: opt(z.string()),
     }),
   ).describe(EU_KEV_FIELD),
+  authority_records: opt(
+    z.array(
+      z.looseObject({
+        authority: opt(z.string()),
+        authority_name: opt(z.string()),
+        id: opt(z.string()),
+        url: opt(z.string()),
+        title: opt(z.string()),
+        description: opt(z.string()),
+        // summary is the text EchelonGraph derived from the record's
+        // structured fields, in a withheld description's place, or beside a
+        // served one of which no main statement is served.
+        summary: opt(z.string()),
+        description_excerpted: opt(z.boolean()),
+        title_excerpted: opt(z.boolean()),
+        description_withheld: opt(z.boolean()),
+        title_withheld: opt(z.boolean()),
+        language: opt(z.string()),
+        translated: opt(z.boolean()),
+        issued_at: opt(z.string()),
+        modified_at: opt(z.string()),
+        attribution: opt(z.string()),
+      }),
+    ),
+  ).describe(AUTHORITY_RECORDS_FIELD),
+  stated_affected: opt(
+    z.array(
+      z.looseObject({
+        provenance_class: opt(z.string()),
+        stated_by: opt(z.string()),
+        source_record_id: opt(z.string()),
+        range_state: opt(z.string()),
+        rendered: opt(z.string()),
+        echelongraph_assertion: opt(z.boolean()),
+        attribution: opt(z.string()),
+      }),
+    ),
+  ).describe(STATED_AFFECTED_FIELD),
   description: opt(z.string()),
   severity: opt(z.string()),
   cvss_v3_score: opt(z.number()),
@@ -3651,10 +3705,13 @@ const CVE_ID_ARG = z.string().describe("a CVE ID, e.g. CVE-2023-44487");
 // #2868: get_cve's alone; every other CVE tool takes a CVE ID (CVE_ID_ARG, shared). #3448: through
 // 3.2.0 it said EchelonGraph resolves every one of these to its CVE; it now lists what is accepted,
 // then what resolves in the limits' words (ID_RESOLUTION), and when an OSV id does (OSV_RESOLUTION).
+// #3496: a JVNDB id is accepted only while EchelonGraph displays JVN iPedia's data (core-backend
+// vuln_ids.go resolveID answers 404 ALIAS_NOT_FOUND for one while JVN_DISPLAY_ENABLED is off).
+const JVNDB_ARG = "A JVN iPedia ID (JVNDB-2026-000172) is accepted only while EchelonGraph displays JVN iPedia's data.";
 const VULN_ID_ARG = z
   .string()
   .describe(
-    `a CVE ID, e.g. CVE-2023-44487, or an ENISA EUVD (EUVD-2026-90503), GCVE-0 (GCVE-0-2024-3094), GitHub GHSA or OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) ID. ${ID_RESOLUTION} ${OSV_RESOLUTION}`,
+    `a CVE ID, e.g. CVE-2023-44487, or an ENISA EUVD (EUVD-2026-90503), GCVE-0 (GCVE-0-2024-3094), GitHub GHSA or OSV (PYSEC-, GO-, RUSTSEC-, GSD-, MAL-) ID. ${ID_RESOLUTION} ${OSV_RESOLUTION} ${JVNDB_ARG}`,
   );
 
 // What each description says about its structured result, naming only fields its schema holds.
