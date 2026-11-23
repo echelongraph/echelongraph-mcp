@@ -830,7 +830,11 @@ export const wholePage = (n: number): string =>
 // A tool's cut of its structured result's data: the steps, in the order they are cut, and, for a
 // tool that pages or names where a thinned entry's fields are, the sentence that says how to read
 // what the cut leaves out.
-export type DataCut = { steps: readonly DataCutStep[]; page?: (truncated: Truncated, data: object, at: PageAt) => string };
+// #3672's review: `maps` names the maps at the top level of data that a step may cut as it cuts a
+// list (cve_intel's github_repo_classifications, keyed by source_url): each is cut as the list of
+// its entries in its key order, one key and its value each, its first ones kept, and is written back
+// a map of those it keeps; truncated and the DATA CUT sentence name it by its key, as a list's.
+export type DataCut = { steps: readonly DataCutStep[]; page?: (truncated: Truncated, data: object, at: PageAt) => string; maps?: readonly string[] };
 // A tool that names no list: only step 2 (every list at the top level of data) cuts its data.
 export const NO_DATA_CUT: DataCut = { steps: [] };
 
@@ -1225,6 +1229,21 @@ export function cutData(
   structured: (data: object | null, truncated: Truncated | undefined, said: string) => object,
 ): { data: object; truncated: Truncated; said: string; structured: object } | undefined {
   if (!isPlainObject(data)) return undefined;
+  // #3672's review (DataCut.maps): each map named is cut as the list of its entries, and every data
+  // the cut sizes, and the one it returns, has it back as a map, so the sizes are the result's own.
+  const maps = (cut.maps ?? []).filter((k) => isPlainObject(data[k]));
+  if (maps.length > 0) {
+    const asMaps = <T extends object | null>(d: T): T => {
+      if (!isPlainObject(d)) return d;
+      const o: Record<string, unknown> = { ...d };
+      for (const k of maps) if (Array.isArray(o[k])) o[k] = Object.fromEntries((o[k] as unknown[]).flatMap((e) => (isPlainObject(e) ? Object.entries(e) : [])));
+      return o as T;
+    };
+    const asLists: Record<string, unknown> = { ...data };
+    for (const k of maps) asLists[k] = Object.entries(data[k] as Record<string, unknown>).map(([key, v]) => ({ [key]: v }));
+    const c = cutData(asLists, { ...cut, maps: undefined }, wholeChars, (d, truncated, said) => structured(asMaps(d), truncated, said));
+    return c && { ...c, data: asMaps(c.data) };
+  }
   const named = new Set(cut.steps.flatMap((s) => s.lists));
   const steps: readonly DataCutStep[] = [...cut.steps, { lists: Object.keys(data).filter((k) => !named.has(k)) }];
   // Each list cut so far, in the order cut, at the level it was thinned to, how many entries it

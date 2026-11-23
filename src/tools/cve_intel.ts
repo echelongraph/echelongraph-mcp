@@ -6,11 +6,11 @@
 // (core-backend cve/handler.go GetBlastRadius), and this server makes no request but a read.
 //
 // The relay is a cut, like exposure_radar's. /enrichment also serves vendor_advisories, patches,
-// ai (generated summaries), trending and historical_incidents; this tool relays only the sections
-// it can label — cwes, exploits with their counts, affected_packages, fixed_versions and timeline —
-// and the note names what it left out. Within those, nothing is rewritten: each relayed section is
-// the API's own value, except timeline, cut to its TIMELINE_RELAYED newest rows (the API's are
-// newest first) with the cut in coverage.
+// ai (generated summaries), trending, historical_incidents and, while it is on, source_timeline;
+// this tool relays only the sections it can label — cwes, exploits with their counts,
+// affected_packages, fixed_versions and timeline — and the note names what it left out. Within
+// those, nothing is rewritten: each relayed section is the API's own value, except timeline, cut
+// to its TIMELINE_RELAYED newest rows (the API's are newest first) with the cut in coverage.
 //
 // An empty section is not "none" unless the answer says it was read. /enrichment fills a section
 // that failed or ran out of its time budget with its empty value. Since #2720 it names each such
@@ -39,6 +39,21 @@
 // cve/fixed_branches.go, from the version_intervals the matcher evaluates): this tool relays it as
 // sent, its description says how to pick the range for an installed version, and the note counts
 // the rows where fixed_version is not the whole answer.
+//
+// Repository labels (#3672). Since 2026-11-22 /enrichment serves, beside exploits and never inside
+// a row, github_repo_classifications (the label of each listed GitHub repository row that has one,
+// keyed by the row's source_url: core-backend cve/aienrich PublicClassification) and
+// github_repo_kind_counts (of the CVE's GitHub repository rows on record, how many carry one, by
+// label: aienrich RepoKindCounts). Until this release no release of this server relayed either key,
+// and core-backend kept them out of every exploit row so that no installed release relayed one
+// undescribed (TestAIClassificationsAreNotInsideTheRowsTheMCPServerRelays). This tool now relays
+// both as sent, each field described in the outputSchema, with the method saying in fixed words
+// what a label is and rests on, and the note counting them. A label never changes a row's kind, and
+// the note's exploit counts stay by kind. A model's label is AI-assisted; a no_code label (basis
+// rules_tree) is decided by rules from the file list with no model (aienrich RulesTreeDecision), so
+// no text here calls every label AI-assisted (#3672's review). The data cut (CVE_INTEL_DATA) cuts
+// the labels, a map, as a list of its entries (DataCut.maps), after the timeline and before the
+// package lists, so long labels leave before any package row does (#3672's review).
 import * as z from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
@@ -70,10 +85,15 @@ const TOOL = "cve_intel";
 // The sections relayed, in the answer's order, and the keys each failed_sections name covers.
 const LISTS = ["cwes", "exploits", "affected_packages", "fixed_versions", "timeline"] as const;
 type ListName = (typeof LISTS)[number];
+// #3672: the labels are read after the exploit rows and their counts, on the same read
+// (core-backend handler_enrichment.go), so a failed exploits or exploits_total read serves none,
+// and exploit_classifications names a failed read of the labels alone.
+const LABEL_KEYS = ["github_repo_classifications", "github_repo_kind_counts"] as const;
 const SECTION_KEYS: Record<string, readonly string[]> = {
   cwes: ["cwes"],
-  exploits: ["exploits"],
-  exploits_total: ["exploits_total", "exploits_capped", "exploits_by_kind", "exploits_by_status"],
+  exploits: ["exploits", ...LABEL_KEYS],
+  exploits_total: ["exploits_total", "exploits_capped", "exploits_by_kind", "exploits_by_status", ...LABEL_KEYS],
+  exploit_classifications: LABEL_KEYS,
   affected_packages: ["affected_packages"],
   fixed_versions: ["fixed_versions"],
   timeline: ["timeline"],
@@ -86,6 +106,8 @@ const RELAYED_KEYS = [
   "exploits_capped",
   "exploits_by_kind",
   "exploits_by_status",
+  "github_repo_classifications",
+  "github_repo_kind_counts",
   "affected_packages",
   "fixed_versions",
   "timeline",
@@ -93,8 +115,15 @@ const RELAYED_KEYS = [
   "timeline_count_7d",
   "timeline_count_30d",
 ] as const;
-// The /enrichment sections this tool does not relay, named in every note.
-const LEFT_OUT = ["vendor_advisories", "patches", "ai", "trending", "historical_incidents"] as const;
+// The /enrichment sections this tool does not relay, named in the note and in
+// coverage.sections_left_out. source_timeline (#3672 item d) is served by /enrichment and not
+// described by this tool's schema yet.
+const LEFT_OUT = ["vendor_advisories", "patches", "ai", "trending", "historical_incidents", "source_timeline"] as const;
+// The sections of LEFT_OUT an answer may not carry, named only when it does. The other five are in
+// every /enrichment answer (core-backend cve/handler_enrichment.go serves them without omitempty);
+// source_timeline is absent while SOURCE_TIMELINE_ENABLED is off and when its read failed
+// (failed_sections then names it), and a section the answer did not send is not "not relayed".
+const LEFT_OUT_WHEN_CARRIED: ReadonlySet<string> = new Set(["source_timeline"]);
 // Per-CVE row limits of the API (core-backend cve/enrichment_store.go): a list this long may be cut.
 const API_ROW_LIMIT: Partial<Record<ListName, number>> = { exploits: 10, affected_packages: 50, fixed_versions: 200, timeline: 100 };
 const TIMELINE_RELAYED = 20;
@@ -140,7 +169,25 @@ const DETECTION_NOUN_METHOD: Record<DetectionKind, string> = {
   github_checker: "GitHub checker repositories (github_checker: GitHub repositories named or described as a checker or scanner)",
 };
 const UNCLASSIFIED_KIND = "A kind on neither list is one this server does not classify: the note counts it as neither.";
-const CVE_INTEL_METHOD = `EchelonGraph's per-CVE enrichment (GET /api/v1/public/cves/:id/enrichment). cwes: CWE classifications stored from NVD, GitHub (GHSA) and CVE.org records, each with the source that gave it, named from the MITRE CWE catalog EchelonGraph embeds. exploits: EchelonGraph's cve_exploits records, whose data model holds public exploit code, namely ${andList(EXPLOIT_CODE_KINDS.map((k) => `${CODE_NOUN[k]} (${k})`))}, and detection checks, namely ${andList(DETECTION_KINDS.map((k) => DETECTION_NOUN_METHOD[k]))}, which check whether a system is affected and are not necessarily exploit code, filled by a curated seed and by one poller per automated source, each run only where it is enabled, so which sources are current depends on the deployment. ${UNCLASSIFIED_KIND} affected_packages and fixed_versions: package-ecosystem advisory data, each row naming its source. timeline: EchelonGraph's enrichment history for the CVE, newest first.`;
+// #3672: the repository labels core-backend serves (aienrich.Label: every value Decide,
+// DecideGeminiOnly or RulesTreeDecision can verify; unclear never is), each with the words /pulse's
+// chip gives it (marketing-site lib/pocClassification.ts POC_LABELS), and the bases a served label
+// rests on (aienrich.Basis but none). test/cve_intel.test.mjs holds both lists to core-backend's source.
+const REPO_LABELS = {
+  exploit: "exploit code",
+  detector: "a detection tool",
+  scanner_bundle: "a scanner bundle of many CVEs",
+  lab_or_test_app: "a lab or test app",
+  writeup: "a write-up",
+  no_code: "no code files in the default branch",
+} as const;
+const MODEL_BASES = ["two_models", "two_of_three", "three_models"] as const;
+// The method's fixed words on the labels: what a label is, what it rests on, that it is dated, and
+// that a row or an answer may carry none. #3672's review: "label", never "AI-assisted label", for
+// every label: no_code is decided with no model. aienrich.Display also serves a label of status
+// human_verified (provenanceComplete) with no model check; no code writes one yet.
+const LABELS_METHOD = `github_repo_classifications: EchelonGraph's label of each listed GitHub repository row (github_poc or github_checker) that has one, keyed by its source_url, beside the rows and never inside one, saying what the repository holds (label). A model's label is AI-assisted: Gemini on Google Cloud Vertex AI and Claude by Anthropic read the repository's name, description, README (its first 6,000 bytes) and file list (up to 200 paths), and a label is shown only when at least two models gave it (basis ${orList(MODEL_BASES)}) or, while Claude cannot be asked, Gemini alone gave it under a stricter rule (basis gemini_only), and every quote and file path it rests on is found in the repository, or when an EchelonGraph reviewer checked it (status human_verified); readers and attribution name the models. The no_code label ("No code files in the default branch", basis rules_tree) is decided by rules from the repository's complete file list, with no model. Each label is dated: source_checked_at is when the repository was last read for it. github_repo_kind_counts counts the CVE's GitHub repository rows and those labelled. A label does not change a row's kind. A row or an answer may carry no label (a repository not read yet, not decided, or its label withheld), which is not a finding about the repository.`;
+const CVE_INTEL_METHOD = `EchelonGraph's per-CVE enrichment (GET /api/v1/public/cves/:id/enrichment). cwes: CWE classifications stored from NVD, GitHub (GHSA) and CVE.org records, each with the source that gave it, named from the MITRE CWE catalog EchelonGraph embeds. exploits: EchelonGraph's cve_exploits records, whose data model holds public exploit code, namely ${andList(EXPLOIT_CODE_KINDS.map((k) => `${CODE_NOUN[k]} (${k})`))}, and detection checks, namely ${andList(DETECTION_KINDS.map((k) => DETECTION_NOUN_METHOD[k]))}, which check whether a system is affected and are not necessarily exploit code, filled by a curated seed and by one poller per automated source, each run only where it is enabled, so which sources are current depends on the deployment. ${UNCLASSIFIED_KIND} ${LABELS_METHOD} affected_packages and fixed_versions: package-ecosystem advisory data, each row naming its source. timeline: EchelonGraph's enrichment history for the CVE, newest first.`;
 
 // #3221: the kinds, split as egkev.ExploitCodeKinds splits them (#3038, #3040) and /pulse shows
 // them: exploit code, and the two detection kinds. Until #3221 the field listed nuclei_template
@@ -169,7 +216,7 @@ const FIXED_BRANCHES_DESCRIPTION =
 // #3221: "detection checks", /pulse's word for Nuclei templates and GitHub checker repositories
 // together (ExploitWatch.tsx DETECTION_CHECKS_HEADING), where the head said "detection templates",
 // which a checker repository is not; 3 characters shorter. The kinds are the outputSchema's.
-export const CVE_INTEL_DESCRIPTION = `Weakness, exploit code, detection checks, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (each cwe_id with name and source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind and exploits_by_status, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each fixed version with the vulnerable_range it fixes) and timeline (newest enrichment-history rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; its coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
+export const CVE_INTEL_DESCRIPTION = `Weakness, exploit code, detection checks, affected packages and fixed versions for one CVE, from EchelonGraph's per-CVE enrichment. Returns cwes (cwe_id, name, source), exploits (each with kind, source_name, source_url, source_published_at (the source's date, null if none), eg_first_seen_at (when EchelonGraph recorded it) and verified_status; at most 10, verified first) with exploits_total, exploits_capped, exploits_by_kind, exploits_by_status, github_repo_classifications and github_repo_kind_counts, affected_packages (ecosystem, package_name, version_range, fixed_version, fixed_branches), fixed_versions (each with the vulnerable_range it fixes) and timeline (newest rows, with timeline_total). fixed_branches lists each affected range on record (from introduced ("0" is the first version) to below fixed, or through last_affected, with advisory_id (its OSV record) and source); in the ecosystem's version order, an affected version's fix is the first fixed above it that no range of its row holds (none past a range with no fixed). fixed_version is one range's fix, kept for compatibility, not the fix for every affected range. fixed_branches [] is not a finding that no fix exists. verified_status is the source's label, not a guarantee the exploit works on a given system. An empty exploits list is not evidence that no public exploit exists: it covers only the sources EchelonGraph ingests, and which are polled depends on the deployment. A section the API could not read is named in coverage.sections_failed and left out of data, never relayed as an empty list. Its structured result carries notes, with data, which the first text block holds whole up to 30,000 characters; coverage names the sections relayed, failed and left out. ${TEXT_BUDGET_DESCRIPTION}`;
 
 // ── outputSchema ──
 const Rows = (shape: Record<string, z.ZodType>) => z.array(z.looseObject(shape));
@@ -177,6 +224,53 @@ const CountMap = z.record(z.string(), z.number());
 const ListCount = z.strictObject({
   returned: z.number().int().nullable().describe("Rows the API returned; null when the section was not read."),
   api_row_limit: z.number().int().describe("The most rows the API returns for this list per CVE: a list this long may be cut."),
+});
+
+// #3672: one served label (core-backend aienrich.PublicClassification), open to fields it does not
+// name. Built inside schemas(), as the rest: opt is index.ts's.
+const repoLabel = () => z.looseObject({
+  label: opt(z.string()).describe(`What the repository holds: ${Object.entries(REPO_LABELS).map(([k, v]) => `${k} (${v})`).join(", ")}.`),
+  basis: opt(z.string()).describe(
+    `What the label rests on: ${MODEL_BASES[0]} (the two models asked both gave it), ${MODEL_BASES[1]} (two of the three models asked gave it), ${MODEL_BASES[2]} (all three models asked gave it), gemini_only (Gemini alone, while Claude could not be asked, under a stricter rule), or rules_tree (no_code, from the repository's complete file list; no model).`,
+  ),
+  rule_kind: opt(z.string()).describe("The kind EchelonGraph's own rule shows the row as (github_poc or github_checker), from the repository's name and description and the CVE's description."),
+  rule_agrees: opt(z.boolean()).describe("true where the label means what rule_kind means (exploit code, a detection check, or neither)."),
+  evidence: z
+    .array(
+      z.looseObject({
+        field: opt(z.string()).describe("The repository's field the quote is from: name or description."),
+        quote: opt(z.string()).describe("The repository's own words, as found in that field."),
+        start: opt(z.number().int()).describe("Where the quote starts, in bytes, in the field's text with each run of whitespace folded to one space and its ends trimmed."),
+        end: opt(z.number().int()).describe("Where the quote ends, in bytes, in the same folded text."),
+      }),
+    )
+    .nullable()
+    .optional()
+    .describe("The quotes the label rests on from the repository's name and description, each found in that field; README quotes are counted in readme_quotes, not served."),
+  readme_quotes: opt(z.number().int()).describe("How many quotes from the README the label also rests on, each found in the README."),
+  readers: z
+    .array(
+      z.looseObject({
+        role: opt(z.string()).describe("primary, second or tie_break: the order the models were asked in."),
+        provider: opt(z.string()).describe("vertex (Gemini on Google Cloud Vertex AI) or anthropic (Claude by Anthropic)."),
+        model_id: opt(z.string()),
+        model_version: opt(z.string()).describe("The model version that answered."),
+        answer: opt(z.string()).describe("The label it gave, with the check it failed in parentheses where it failed one, or an error code: never text a model wrote."),
+        agreed: opt(z.boolean()).describe("true where it gave the label with every check passing."),
+      }),
+    )
+    .nullable()
+    .optional()
+    .describe("Every model asked, in order; [] for a rules_tree label."),
+  prompt_version: opt(z.string()),
+  verifier: opt(z.string()).describe("The rule every quote and file path was checked under (poc-kind-verifier-vN)."),
+  status: opt(z.string()).describe("verified (decided on its basis, every check passing) or human_verified (checked by an EchelonGraph reviewer)."),
+  verified_at: opt(z.string()).describe("When the label was decided, as a UTC timestamp."),
+  source_url: opt(z.string()).describe("The repository read."),
+  source_sha256: opt(z.string()).describe("The SHA-256 of what was read."),
+  source_fetched_at: opt(z.string()).describe("When the repository was read for the reading the label was decided on, as a UTC timestamp."),
+  source_checked_at: opt(z.string()).describe("When the repository was last read for the label, as a UTC timestamp: the label is a reading on that day."),
+  attribution: opt(z.string()).describe("Who and what the label rests on, in EchelonGraph's fixed words, crediting the repository's authors with its content."),
 });
 
 function schemas() {
@@ -201,6 +295,20 @@ function schemas() {
     exploits_capped: z.boolean().optional().describe("true: exploits lists fewer references than exploits_total."),
     exploits_by_kind: CountMap.optional().describe(EXPLOITS_BY_KIND_DESCRIPTION),
     exploits_by_status: CountMap.optional(),
+    github_repo_classifications: z
+      .record(z.string(), repoLabel())
+      .optional()
+      .describe(
+        "The label of each GitHub repository listed in exploits that has one, keyed by that row's source_url (see method). Absent where no listed row has one, while labels are not served, and where the API could not read them (coverage.sections_failed). A DATA CUT keeps its first entries (truncated), cut after timeline and before affected_packages and fixed_versions. A label does not change the row's kind.",
+      ),
+    github_repo_kind_counts: z
+      .looseObject({
+        total: z.number().int().optional().describe("The CVE's GitHub repository rows on record (github_poc and github_checker), listed in exploits or not."),
+        classified: z.number().int().optional().describe("Of those, the rows with a label, listed in exploits or not: github_repo_classifications holds the listed ones' labels."),
+        by_label: CountMap.optional().describe("classified, counted by label."),
+      })
+      .optional()
+      .describe("How many of the CVE's GitHub repository rows carry a label (see method). Absent while labels are not served, and where the API could not read them."),
     affected_packages: Rows({
       ecosystem: opt(z.string()),
       package_name: opt(z.string()),
@@ -430,6 +538,47 @@ function exploitSentences(cve: string, d: object, rows: unknown[]): string[] {
   return [`EchelonGraph holds ${plural(total, "reference", "references")} for ${cve} (exploits_total)${v}: ${listed(classParts(counts))}; ${classNotes(counts)}.${cut}`];
 }
 
+// #3672: what the answer's repository labels count, by github_repo_kind_counts, in fixed words and
+// the API's numbers. Nothing a model wrote and no label text is repeated: a label is named only when
+// it reads as one (KIND_TOKEN). Said only where the counts are served; the method says the rest.
+function labelSentences(cve: string, d: object): string[] {
+  const counts = field(d, "github_repo_kind_counts");
+  if (counts === null || typeof counts !== "object" || Array.isArray(counts)) return [];
+  const total = numAt(counts, "total");
+  const classified = numAt(counts, "classified");
+  if (total === undefined || classified === undefined || !Number.isInteger(total) || !Number.isInteger(classified) || total <= 0) return [];
+  const labels = field(d, "github_repo_classifications");
+  const shown = labels !== null && typeof labels === "object" && !Array.isArray(labels) ? Object.keys(labels).length : 0;
+  const repos = plural(total, "GitHub repository row", "GitHub repository rows");
+  if (classified <= 0) {
+    return [
+      `None of the ${repos} on record for ${cve} carries a label (github_repo_kind_counts): a row may carry none (not read yet, not decided, or withheld), which is not a finding about the repository.`,
+    ];
+  }
+  const byLabel = field(counts, "by_label");
+  const parts =
+    byLabel !== null && typeof byLabel === "object" && !Array.isArray(byLabel)
+      ? Object.keys(byLabel)
+          .filter((k) => KIND_TOKEN.test(k) && Number.isInteger(numAt(counts, "by_label", k)) && (numAt(counts, "by_label", k) ?? 0) > 0)
+          .sort()
+          .map((k) => `${k} ${numAt(counts, "by_label", k)}`)
+      : [];
+  const by = parts.length ? `, by label: ${listed(parts)}` : "";
+  // #3672's review: the labels of rows past the 10 listed are counted and not served (core-backend
+  // exploitClassifications keeps the listed rows' only), so where none is listed data has no map:
+  // production's CVE-2021-44228, 2 of 10 labelled, neither among the 10 listed (2026-11-22).
+  const dated = "with the day its repository was last read (source_checked_at) and what it rests on (basis, attribution)";
+  const where =
+    shown === 0
+      ? `${classified === 1 ? "the labelled row is not listed" : "none of the labelled rows is listed"} in exploits, so data carries no github_repo_classifications`
+      : shown === classified
+        ? `github_repo_classifications holds ${classified === 1 ? "it" : "each"}, keyed by its row's source_url, ${dated}`
+        : `github_repo_classifications holds those of the rows listed in exploits (${shown}), each keyed by its row's source_url, ${dated}`;
+  return [
+    `${classified} of the ${repos} on record for ${cve} ${classified === 1 ? "carries" : "carry"} a label (github_repo_kind_counts${by}); ${where}. A label does not change a row's kind, and the counts above are by kind.`,
+  ];
+}
+
 function listSentence(name: "affected_packages" | "fixed_versions", rows: unknown[]): string {
   const limit = API_ROW_LIMIT[name] ?? 0;
   if (rows.length === 0) return `${name} is empty: EchelonGraph holds no ${name === "affected_packages" ? "affected package" : "fixed version"} row for this CVE, which is not a finding that no package is affected or fixed.`;
@@ -543,6 +692,7 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
     if (cwes) said.push(cweSentence(cve, cwes));
     const exploits = rows("exploits");
     if (exploits) said.push(...exploitSentences(cve, data, exploits));
+    said.push(...labelSentences(cve, data));
     for (const k of ["affected_packages", "fixed_versions"] as const) {
       const xs = rows(k);
       if (xs) said.push(listSentence(k, xs));
@@ -565,7 +715,8 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
     } else if (sectionsFailed.length) {
       said.push(`The API could not read ${listed(sectionsFailed)} (failed_sections): ${sectionsFailed.length === 1 ? "it is" : "they are"} left out of data, and the absence is not a finding of none.`);
     }
-    said.push(`Not relayed from the answer: ${listed(LEFT_OUT)}.`);
+    const leftOut = LEFT_OUT.filter((k) => !LEFT_OUT_WHEN_CARRIED.has(k) || field(d, k) !== undefined);
+    said.push(`Not relayed from the answer: ${listed(leftOut)}.`);
 
     const count = (k: ListName) => {
       const v = field(d, k);
@@ -574,7 +725,7 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
     const coverage = {
       sections_relayed: relayed,
       sections_failed: sectionsFailed,
-      sections_left_out: [...LEFT_OUT],
+      sections_left_out: leftOut,
       exploits: { returned: count("exploits"), api_row_limit: API_ROW_LIMIT.exploits as number },
       affected_packages: { returned: count("affected_packages"), api_row_limit: API_ROW_LIMIT.affected_packages as number },
       fixed_versions: { returned: count("fixed_versions"), api_row_limit: API_ROW_LIMIT.fixed_versions as number },
@@ -599,7 +750,15 @@ export async function cveIntel(cve_id: string): Promise<ToolResult> {
 // #3013: the structured result's cut. CVE-2021-44228's is 12,877 characters, within the budget; past
 // it the newest enrichment-history rows go first, then the affected packages and fixed versions,
 // each to at most the same number of its first entries, then any other list at the top of data.
-const CVE_INTEL_DATA: DataCut = { steps: [{ lists: ["timeline"] }, { lists: ["affected_packages", "fixed_versions"] }] };
+// #3672's review: the repository labels, a map (one per listed row, each up to ~2,000 characters
+// with three readers and quotes), are cut as a list of their entries after the timeline and before
+// the package lists. Through the first 3.2.6 build the cut never thinned them: Log4Shell's answer
+// with its 10 listed rows labelled so kept every label and emptied affected_packages and
+// fixed_versions, which the production synthetic's cve_intel probe reads.
+const CVE_INTEL_DATA: DataCut = {
+  maps: ["github_repo_classifications"],
+  steps: [{ lists: ["timeline"] }, { lists: ["github_repo_classifications"] }, { lists: ["affected_packages", "fixed_versions"] }],
+};
 
 export function registerCveIntel(server: McpServer): void {
   const { output } = schemasOnce();

@@ -6,6 +6,45 @@ with a provenance attestation by the release workflow of
 [github.com/echelongraph/echelongraph-mcp](https://github.com/echelongraph/echelongraph-mcp),
 from the commit tagged `v<version>`.
 
+## 3.2.6 — 2026-11-23
+
+`cve_intel` relays EchelonGraph's labels of the GitHub repositories it lists (#3672). Since 2026-11-22
+EchelonGraph's per-CVE enrichment serves, beside the exploit rows and never inside one, a label for some
+GitHub proof-of-concept and checker repositories saying what each holds: exploit code, a detection tool,
+a scanner bundle of many CVEs, a lab or test app, a write-up, or no code files in the default branch.
+
+- **Two new keys in `cve_intel`'s data (#3672).** `github_repo_classifications` holds the label of each
+  listed GitHub repository row that has one, keyed by that row's `source_url`, as the API serves it: the
+  label, its basis, the quotes from the repository's name and description it rests on (`evidence`; README
+  quotes are counted in `readme_quotes`), every model asked (`readers`, each with its provider, model and
+  model version, its answer and whether it agreed), the rule its quotes and file paths were checked under
+  (`verifier`), its status, the repository read (`source_url`, `source_sha256`), when it was read for
+  the decision and when last (`source_fetched_at`, `source_checked_at`) and its `attribution`. `github_repo_kind_counts`
+  says how many of the CVE's GitHub repository rows on record carry a label (`total`, `classified`,
+  `by_label`). The outputSchema describes each field, and the tool description names both keys.
+  `github_repo_classifications` is absent where no listed row has a label; both keys are absent while
+  labels are not served or could not be read.
+- **The method says what a label is and rests on.** A model's label is AI-assisted: Gemini on Google
+  Cloud Vertex AI and Claude by Anthropic read the repository, and a label is shown only when at least two
+  models gave it (or, while Claude cannot be asked, Gemini alone under a stricter rule, basis
+  `gemini_only`) and every quote and file path it rests on is found in the repository, or when an
+  EchelonGraph reviewer checked it (status `human_verified`). The "No code files in the default branch"
+  label is decided by rules from the repository's complete file list, with no model. Each label is dated
+  by `source_checked_at`, and a row or an answer may carry no label (a repository not read yet, not
+  decided, or its label withheld), which is not a finding about the repository.
+- **The note counts the labels**, from `github_repo_kind_counts`, and repeats no quote or attribution.
+  Where every labelled row is past the rows listed (`exploits` lists at most 10), it says that data
+  carries no `github_repo_classifications`. A label does not change a row's `kind`: the note's exploit
+  counts stay by kind, as before. A failed read of the labels (`exploit_classifications` in the API's
+  `failed_sections`) is named in `coverage.sections_failed`, and the keys are left out of data.
+- **The data cut thins the labels.** Past 30,000 characters of structured result, a `DATA CUT` that
+  does not fit once `timeline` is cut keeps only the first entries of `github_repo_classifications`
+  (still a map), before it cuts `affected_packages` or `fixed_versions`; `truncated` names it.
+  `full: true` returns every label.
+- **Listings.** The public repository's `listings/README.md` carries the status table of the listing
+  check run after 3.2.5 (2026-11-15), and `listings/docker/server.yaml` the Docker catalog pin of v3.2.5
+  (`6b9395ebb230`), both recorded after that release.
+
 ## 3.2.5 — 2026-11-15
 
 National-authority advisories keep their credit (#3694). Since 2026-11-14 EchelonGraph serves the CSAF

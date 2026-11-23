@@ -743,8 +743,10 @@ export const SHAPED = [
   // once the method names GitHub checker repositories (github_checker) beside Nuclei templates as
   // detection checks (17,812 and 13,119 before). #3267's review: +92 and +92 once the method says
   // what a kind on neither list is ("A kind on neither list is one this server does not classify:
-  // the note counts it as neither.", 17,950 and 13,257 before).
-  { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 18_042, structured: 13_349 },
+  // the note counts it as neither.", 17,950 and 13,257 before). #3672 (3.2.6): +1,326 and +1,326 once
+  // the method says what the repository labels are and rest on (18,042 and 13,349 before); this
+  // answer carries no label, so the note and data are as before.
+  { label: "cve_intel, CVE-2021-44228", tool: "cve_intel", page: "default", args: { cve_id: "CVE-2021-44228" }, fixture: "cve_intel", answers: ["CVE-2021-44228"], repeat: { timeline: 100 }, size: 19_368, structured: 14_675 },
   // #2817: the same rows once the OSV backfill (BACKFILL_OSV_PACKAGES_FORCE, pending) has filled
   // each range's record: the ranges of GHSA-jfh8-c2jp-5v3q (api.osv.dev, 2026-10-05) with
   // advisory_id and source, log4j-core's three in the record's order, pax-logging-log4j2's four,
@@ -768,8 +770,9 @@ export const SHAPED = [
     // hosted endpoint's own text, as for the case above.
     // #3074: 17,539 before the overlapping-range wording (+199, as above); #3039: +204 and +231, as above.
     // #3221: +138 and +138, as above (17,996 and 13,303 before). #3267's review: +92 and +92, as
-    // above (18,134 and 13,441 before).
-    size: 18_226, structured: 13_533,
+    // above (18,134 and 13,441 before). #3672 (3.2.6): +1,326 and +1,326, as above (18,226 and
+    // 13,533 before).
+    size: 19_552, structured: 14_859,
   },
   // #2841: cve_remediation for Log4Shell on production's data (prod-shaped/cve_remediation.json,
   // assembled 2026-10-05 from the stored advisories by the parsers, before the route is live): 20
